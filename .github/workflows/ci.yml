@@ -1,0 +1,30 @@
+# Typecheck, unit + acceptance tests and a build on every push.
+# Wall-clock performance budgets (perf.test.ts, alloc.test.ts) are left out: they depend on
+# the machine and are run locally with `npm test`.
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:ci
+      - run: npm run build
