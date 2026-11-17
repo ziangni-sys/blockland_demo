@@ -113,12 +113,29 @@ export class HelmInstrument {
   }
 
   update(raw: HelmView | null): void {
-    // Sanitize before the memo so a NaN field (0/0 upstream) does not defeat it every frame.
-    const v = raw ? { throttle: finite(raw.throttle), rudder: finite(raw.rudder), speed: finite(raw.speed), sails: finite(raw.sails) } : null;
-    if (helmEq(v, this.last)) return;
-    this.last = v;
-    setHidden(this.el, !v);
-    if (!v) return;
+    // Compare sanitized values (a NaN field from a 0/0 upstream would defeat the memo every
+    // frame) against the memo, which is updated in place: no allocation per call.
+    const m = this.memo;
+    if (!raw) {
+      if (!this.shown) return;
+      this.shown = false;
+      setHidden(this.el, true);
+      return;
+    }
+    const throttle = finite(raw.throttle);
+    const rudder = finite(raw.rudder);
+    const speed = finite(raw.speed);
+    const sails = finite(raw.sails);
+    if (this.shown && throttle === m.throttle && rudder === m.rudder && speed === m.speed && sails === m.sails) return;
+    m.throttle = throttle;
+    m.rudder = rudder;
+    m.speed = speed;
+    m.sails = sails;
+    if (!this.shown) {
+      this.shown = true;
+      setHidden(this.el, false);
+    }
+    const v = m;
 
     const pos = throttleLever(v.throttle);
     if (pos !== this.leverPos) {

@@ -350,6 +350,57 @@ export class Simulation {
     for (let i = 0; i < ticks; i++) this.tick();
   }
 
+  /** The cell the player looks at right now (with the held item's ray rules), or null. */
+  targetCell(): (GridCell & { face: Dir }) | null {
+    const h = this.interaction.raycast();
+    return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face };
+  }
+
+  /**
+   * Aim at a cell (see lookAtCell), right-click once and run one tick. Returns false — and
+   * clicks nothing — when that cell is not what the ray hits (out of reach, hidden behind
+   * something), so a scripted scene fails loudly instead of clicking the wrong block.
+   */
+  useOn(x: number, y: number, z: number, face?: Dir, gridId = 0): boolean {
+    if (!this.aimAt(x, y, z, face, gridId)) return false;
+    this.use();
+    this.tick();
+    return true;
+  }
+
+  /**
+   * Aim at a cell and hold the attack button until it is gone (survival mining takes the
+   * block's hardness in seconds; creative breaks it at once), at most `maxTicks`. Returns true
+   * when the cell was mined; false when it could not be aimed at or did not break in time.
+   */
+  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxTicks = 400): boolean {
+    if (!this.aimAt(x, y, z, face, gridId)) return false;
+    const input = this.player.input;
+    const grid = this.structures.gridById(gridId)!;
+    const before = grid.getCell(x, y, z);
+    this.attack();
+    input.attack = true;
+    try {
+      for (let i = 0; i < maxTicks; i++) {
+        this.tick();
+        const g = this.structures.gridById(gridId);
+        if (g === undefined || g.getCell(x, y, z) !== before) return true;
+        // Keep aiming at the cell: a carrier may have turned the player.
+        if (!this.aimAt(x, y, z, face, gridId)) return false;
+      }
+      return false;
+    } finally {
+      input.attack = false;
+    }
+  }
+
+  /** lookAtCell + check that the ray hits exactly that cell. */
+  private aimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number): boolean {
+    if (!this.lookAtCell(x, y, z, face, gridId)) return false;
+    const t = this.targetCell();
+    return t !== null && t.gridId === gridId && t.x === x && t.y === y && t.z === z && (face === undefined || t.face === face);
+  }
+
   // ------------------------------------------------------------------ tick
 
   tick(): void {
