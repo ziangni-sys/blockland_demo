@@ -1,9 +1,23 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { B } from '../../src/blocks/defs';
+import { SOLID } from '../../src/blocks/registry';
 import { NZ, PX } from '../../src/core/dirs';
 import { analyzeHull } from '../../src/structures/hull';
+import { StructureManager } from '../../src/structures/manager';
 import { Ship } from '../../src/structures/structure';
-import { c, cellMap, facing, fill, log, scene, snapshotBox, WATER, worldCentre } from './helpers';
+import { Chunk } from '../../src/voxel/chunk';
+import { StructureGrid } from '../../src/voxel/sgrid';
+import { World } from '../../src/voxel/world';
+import { c, cellMap, facing, FakeHost, fill, log, scene, snapshotBox, WATER, windmill, worldCentre } from './helpers';
+
+/** Every water source in a world box, as [x, y, z]. */
+function sourcesIn(world: World, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): Array<[number, number, number]> {
+  const out: Array<[number, number, number]> = [];
+  for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+    if (world.getCell(x, y, z) === WATER) out.push([x, y, z]);
+  }
+  return out;
+}
 
 /** Raft of planks on dry ground plus a cobble pier, a torch, sand, a flower and a glued log. */
 function raftScene(dynamics = false) {
@@ -123,13 +137,43 @@ describe('assembleShip (ACCEPTANCE 6, 9)', () => {
   it('refuses non-helms, oversized ships and ships touching unloaded chunks', () => {
     const { world, mgr } = raftScene();
     expect(mgr.assembleShip(0, 60, 0)).toEqual({ ok: false, reason: 'not_a_helm' });
-    // A raft reaching the last loaded column (x = 31; chunk x = 2 is not loaded).
+    // A raft reaching the last loaded column (x = 31; chunk x = 2 is not loaded): collect's
+    // own 'unloaded' (a face neighbour is unloaded) is the verdict, exactly like the preview's.
     fill(world, 27, 60, 10, 31, 60, 12, c(B.PLANKS_OAK));
     world.setCell(28, 61, 11, facing(B.HELM, NZ));
     const before = snapshotBox(world, 26, 59, 9, 31, 62, 13);
+    expect(mgr.previewShip(28, 61, 11).reason).toBe('unloaded');
     expect(mgr.assembleShip(28, 61, 11)).toEqual({ ok: false, reason: 'unloaded' });
     expect(snapshotBox(world, 26, 59, 9, 31, 62, 13)).toEqual(before);
     expect(mgr.all().length).toBe(0);
+  });
+
+  it('refuses a ship of more than SHIP_MAX_CELLS cells and changes nothing', () => {
+    const { world, mgr } = scene();
+    fill(world, -32, 60, -32, 31, 60, 30, c(B.PLANKS_OAK)); // 64 x 63 = 4032 planks
+    world.setCell(0, 61, 0, facing(B.HELM, NZ));
+    expect(mgr.previewShip(0, 61, 0).reason).toBe('too_big');
+    expect(mgr.assembleShip(0, 61, 0)).toEqual({ ok: false, reason: 'too_big' });
+    expect(world.getCell(0, 61, 0)).toBe(facing(B.HELM, NZ));
+    expect(world.getCell(-32, 60, -32)).toBe(c(B.PLANKS_OAK));
+    expect(mgr.all().length).toBe(0);
+  });
+
+  it('assembles whenever the preview says ok: an unloaded chunk touching the raft only diagonally does not matter', () => {
+    const world = new World(1);
+    world.addChunk(new Chunk(0, 0));
+    world.addChunk(new Chunk(1, 0));
+    world.addChunk(new Chunk(1, -1));
+    // Chunk (0,-1) is NOT loaded; it touches the raft (x 16..20, z 0..3) only at a corner,
+    // so collect never needs a cell of it.
+    const mgr = new StructureManager(new FakeHost(world));
+    fill(world, 16, 60, 0, 20, 60, 3, c(B.PLANKS_OAK));
+    world.setCell(18, 61, 2, facing(B.HELM, NZ));
+    const preview = mgr.previewShip(18, 61, 2);
+    expect(preview.ok).toBe(true);
+    expect(preview.count).toBe(21);
+    const res = mgr.assembleShip(18, 61, 2);
+    expect(res.ok ? res.structure.grid.count : res.reason).toBe(21);
   });
 });
 
@@ -169,6 +213,29 @@ describe('assembleShip water refill (DESIGN 水的处理)', () => {
     expect(world.getCell(0, 47, 0)).toBe(0);
   });
 
+  it('a raft moored against a pier wall at sea still closes over its whole footprint', () => {
+    const { world, mgr } = scene();
+    sea(world);
+    fill(world, 3, 40, -12, 5, 49, 12, c(B.COBBLE)); // quay wall from the sea floor up, east of the raft
+    fill(world, -2, 47, -2, 2, 47, 2, c(B.PLANKS_OAK));
+    world.setCell(0, 48, 0, facing(B.HELM, NZ));
+    expect(mgr.assembleShip(0, 48, 0).ok).toBe(true);
+    for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) expect(world.getCell(x, 47, z)).toBe(WATER);
+  });
+
+  it('one bucket of water on a deck in a dry dock is not multiplied (no water duplication)', () => {
+    const { world, host, mgr } = scene();
+    fill(world, -6, 59, -6, 10, 59, 8, c(B.STONE)); // dry ground
+    fill(world, 0, 60, 0, 4, 60, 3, c(B.PLANKS_OAK)); // raft 5 x 4 lying on it
+    world.setCell(2, 61, 1, facing(B.HELM, NZ));
+    world.setCell(0, 61, 3, WATER); // a puddle poured on the deck
+    expect(mgr.assembleShip(2, 61, 1).ok).toBe(true);
+    // The deck left from under the puddle: nothing is created; the puddle itself stays a
+    // single source and flows down through the block update its vacated base cell gets.
+    expect(sourcesIn(world, -6, 59, -6, 10, 63, 8)).toEqual([[0, 61, 3]]);
+    expect(host.updateKeys().has('0,60,3')).toBe(true);
+  });
+
   /** Open boat (or closed box when `lid`) at sea: floor y=44, walls y=44..48, interior air. */
   function boat(lid: boolean) {
     const s = scene();
@@ -205,16 +272,34 @@ describe('assembleShip water refill (DESIGN 水的处理)', () => {
 });
 
 describe('assembleShip keeps attached soft blocks', () => {
-  it('a torch on the deck is copied before its base is cleared', () => {
+  it('every cell is copied into the ship before the first one leaves the world (a torch never loses its base first)', () => {
     const { world, mgr } = raftScene();
-    const removedOrder: string[] = [];
+    // One ordered log of ship-grid writes and world removals.
+    const events: string[] = [];
     world.onCellChange((x, y, z, _o, n) => {
-      if (n === 0) removedOrder.push(`${x},${y},${z}`);
+      if (n === 0) events.push(`clear ${x},${y},${z}`);
     });
-    const res = mgr.assembleShip(2, 61, 1);
+    const original = StructureGrid.prototype.setCell;
+    const wrapped = vi.spyOn(StructureGrid.prototype, 'setCell').mockImplementation(function (this: StructureGrid, x, y, z, cell, flags) {
+      events.push(`copy ${x},${y},${z}`);
+      return original.call(this, x, y, z, cell, flags);
+    });
+    let res: ReturnType<StructureManager['assembleShip']>;
+    try {
+      res = mgr.assembleShip(2, 61, 1);
+    } finally {
+      wrapped.mockRestore();
+    }
     if (!res.ok) throw new Error(res.reason);
+    const copies = events.filter((e) => e.startsWith('copy'));
+    const clears = events.filter((e) => e.startsWith('clear'));
+    expect(copies.length).toBe(23);
+    expect(clears.length).toBe(23);
+    const lastCopy = events.lastIndexOf(copies[copies.length - 1]!);
+    const firstClear = events.indexOf(clears[0]!);
+    expect(lastCopy).toBeLessThan(firstClear);
+    expect(events.indexOf('copy 0,61,0')).toBeLessThan(events.indexOf('clear 0,60,0')); // torch before its base
     expect(res.structure.grid.getCell(0, 61, 0)).toBe(c(B.TORCH));
-    expect(removedOrder.length).toBe(23);
     expect(world.getCell(0, 61, 0)).toBe(0);
     expect(res.structure.grid.getCell(2, 61, 1)).toBe(facing(B.HELM, NZ));
   });
