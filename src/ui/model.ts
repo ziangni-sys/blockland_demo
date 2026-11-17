@@ -87,6 +87,8 @@ export interface UiState {
   selected: number;
   /** INVENTORY_SIZE entries (backpack). */
   inventory: Array<SlotView | null>;
+  /** The off-hand slot (a placement modifier such as glue; DESIGN 副手). */
+  offhand: SlotView | null;
   /** Stack currently held by the mouse cursor inside the inventory screen. */
   cursor: SlotView | null;
   health: number;
@@ -144,8 +146,11 @@ export interface UiActions {
 
   // ---- inventory
   selectHotbar(index: number): void;
-  /** Click on a hotbar or backpack slot while the inventory screen is open. button 0 left, 2 right. */
-  slotClick(area: 'hotbar' | 'inventory', index: number, button: 0 | 2, shift: boolean): void;
+  /**
+   * Click on a hotbar, backpack or off-hand slot while the inventory screen is open (the
+   * off-hand is the one slot of its area: index 0). button 0 left, 2 right.
+   */
+  slotClick(area: 'hotbar' | 'inventory' | 'offhand', index: number, button: 0 | 2, shift: boolean): void;
   /** Click on an item in the creative palette: puts a stack on the cursor (shift = straight to hotbar). */
   creativePick(item: number, shift: boolean): void;
   /** Click outside any slot while holding a stack: throw it away / drop it. */

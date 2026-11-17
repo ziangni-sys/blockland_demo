@@ -22,6 +22,16 @@
  * ORDER. forEach / facesInBox visit faces in an unspecified but deterministic order (the same
  * history of operations gives the same order). toArray() is canonical: two stores holding
  * the same faces serialise identically, whatever order the faces were added in.
+ *
+ * LIFETIME. The store does not know cells. The rule "a glued face stays while at least one
+ * side is a glueable block" (DESIGN 强力胶) is applied by the grids' change hooks through
+ * pruneGlueAt (stick.ts), on the world's faces around a chunk when it is added (pruneGlueInBox),
+ * and by the structure moves (moveTo, then the destination's rules: assembly.ts, which also
+ * removes every face a blockify or dock would turn into a joint no player made).
+ *
+ * EVENTS. onChange() reports every face that is added or removed, by any method (bulk ones
+ * included: moveTo on both stores, clear, fromArray has no listeners yet), so a mirror kept
+ * only from the events stays identical to the store.
  */
 import type { Axis, Dir } from '../core/dirs';
 
@@ -74,6 +84,12 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/**
+ * Change listener: `added` true when the face (canonical cell + axis) was glued, false when its
+ * glue was removed. Called synchronously after the store changed; it must not modify the store.
+ */
+export type GlueListener = (added: boolean, x: number, y: number, z: number, axis: Axis) => void;
+
 interface Bucket {
   /** World-space origin of the bucket (bucket coordinate * 16). */
   readonly x0: number;
@@ -86,6 +102,8 @@ export class GlueStore {
   private readonly buckets = new Map<number, Bucket>();
   private count = 0;
   private rev = 0;
+  /** Copy-on-write (LESSONS: unsubscribing during dispatch must not skip the next listener). */
+  private listeners: readonly GlueListener[] = [];
 
   /** Number of glued faces. */
   get size(): number {
@@ -99,6 +117,25 @@ export class GlueStore {
    */
   get version(): number {
     return this.rev;
+  }
+
+  // ------------------------------------------------------------ events
+
+  /** Subscribe to face changes (see GlueListener). Returns the unsubscribe function. */
+  onChange(listener: GlueListener): () => void {
+    this.listeners = this.listeners.concat(listener);
+    let live = true;
+    return () => {
+      if (!live) return;
+      live = false;
+      const i = this.listeners.indexOf(listener);
+      if (i >= 0) this.listeners = this.listeners.slice(0, i).concat(this.listeners.slice(i + 1));
+    };
+  }
+
+  private emit(added: boolean, x: number, y: number, z: number, axis: number): void {
+    const ls = this.listeners;
+    for (let i = 0; i < ls.length; i++) ls[i]!(added, x, y, z, axis as Axis);
   }
 
   // ------------------------------------------------------------ single faces
@@ -137,25 +174,6 @@ export class GlueStore {
       else z--;
     }
     return this.removeCanonical(x, y, z, axis);
-  }
-
-  /**
-   * Drop the up-to-6 glued faces touching the cell; returns how many were removed. Call it
-   * whenever the cell is removed or replaced (任一侧方块被移除或替换，胶就消失) — normally from
-   * the grid's onCellChange hook when the block id changes. That hook must skip writes made
-   * with SET_STRUCTURE_MOVE (or the bulk move must be ordered as moveTo() describes), or it
-   * deletes the glue that is supposed to travel with an assembled / blockified structure.
-   */
-  removeAllAt(x: number, y: number, z: number): number {
-    let n = 0;
-    // Faces towards +x/+y/+z are keyed on this cell; towards -x/-y/-z on the neighbour.
-    if (this.removeCanonical(x, y, z, 0)) n++;
-    if (this.removeCanonical(x, y, z, 1)) n++;
-    if (this.removeCanonical(x, y, z, 2)) n++;
-    if (this.removeCanonical(x - 1, y, z, 0)) n++;
-    if (this.removeCanonical(x, y - 1, z, 1)) n++;
-    if (this.removeCanonical(x, y, z - 1, 2)) n++;
-    return n;
   }
 
   /** Bit mask of the glued faces of one cell: bit `d` set when the face towards Dir d is glued. */
@@ -330,8 +348,17 @@ export class GlueStore {
     return s;
   }
 
+  /** Remove every face (each one is reported to the listeners). */
   clear(): void {
     if (this.count === 0) return;
+    if (this.listeners.length > 0) {
+      const all = this.toArray();
+      this.buckets.clear();
+      this.count = 0;
+      this.rev++;
+      for (let i = 0; i < all.length; i += 4) this.emit(false, all[i]!, all[i + 1]!, all[i + 2]!, all[i + 3]!);
+      return;
+    }
     this.buckets.clear();
     this.count = 0;
     this.rev++;
@@ -340,33 +367,33 @@ export class GlueStore {
   // ------------------------------------------------------------ structure moves
 
   /**
-   * Move glue along with cells that change grid (assembly, blockify, docking, re-gridding).
+   * Move glue along with cells that change grid (assembly, blockify, docking, rotor start / stop).
    *
-   * Every glued face whose BOTH end cells satisfy `inSet` leaves this store and is added to
-   * `target`, keyed again from the two MAPPED end cells: `map` may translate and rotate by
-   * multiples of 90 degrees, so the face axis can change and the canonical end can swap
-   * (LESSONS: 移动或旋转时，要按映射后的两个端点重新计算键). Faces with exactly one end in
-   * the set are deleted (that neighbour left or stays behind). Other faces are untouched.
+   * A glued face with BOTH end cells in `inSet` leaves this store and is added to `target`,
+   * keyed again from the two MAPPED end cells: `map` may translate and rotate by multiples of
+   * 90 degrees, so the face axis can change and the canonical end can swap (LESSONS: 移动或旋转时，
+   * 要按映射后的两个端点重新计算键). A face with exactly ONE end in the set stays here when
+   * `stays(other end)` is true (the end left behind is a glueable block that remains in this
+   * grid: the glue keeps holding on to it and is not duplicated), and otherwise moves like the
+   * others (DESIGN 强力胶: glue lives on while one side is glueable). Faces with no end in the
+   * set are untouched. A moved face landing on a face `target` already holds merges with it.
    *
    * `map` may return the same object on every call. `target` may be this store (in-place
    * remap). The operation is atomic: if `map` breaks adjacency or leaves the key range, an
-   * Error is thrown before anything is modified. Returns the number of faces moved (a moved
-   * face that `target` already held counts, but is of course stored once).
+   * Error is thrown before anything is modified. Returns the number of faces moved.
    *
-   * ORDER RELATIVE TO THE CELL WRITES. Glue is not tied to cell contents; the grids' change
-   * hooks delete it (removeAllAt) when a block changes. A bulk move therefore needs ONE of:
-   *  - the hooks ignore writes flagged SET_STRUCTURE_MOVE (StructureManager's hooks do), and
-   *    the mover itself calls removeAllAt on any destination cell whose block it overwrites; or
-   *  - the order: write the destination cells, THEN moveTo, THEN clear the source cells.
-   * Calling moveTo before writing the destination lets the destination hook delete every face
-   * just moved in (a docked ship would come back without glue: acceptance 8); clearing the
-   * source first deletes the faces before they can move. Likewise, an `inSet` that reads the
-   * source grid (e.g. "cell is not air") must run while the source cells are still there.
+   * ORDER RELATIVE TO THE CELL WRITES. The grids' change hooks apply the lifetime rule on every
+   * write, bulk moves included, so a mover writes the destination cells, THEN calls moveTo,
+   * THEN clears the source cells (clearing first would leave faces between two moved cells with
+   * no glueable side, and the hook would delete them), and finally applies the destination's
+   * glue rules to the destination cells (assembly.ts), since faces arrive there after the cells did.
+   * `inSet` and `stays` read the source grid while its cells are still there.
    */
   moveTo(
     target: GlueStore,
     inSet: (x: number, y: number, z: number) => boolean,
     map: (x: number, y: number, z: number) => { x: number; y: number; z: number },
+    stays: (x: number, y: number, z: number) => boolean,
   ): number {
     const drop: number[] = []; // canonical faces leaving this store: x, y, z, axis
     const put: number[] = []; // canonical mapped faces for the target
@@ -377,8 +404,9 @@ export class GlueStore {
       const inA = inSet(x, y, z);
       const inB = inSet(x1, y1, z1);
       if (!inA && !inB) return;
+      if (!inA && stays(x, y, z)) return;
+      if (!inB && stays(x1, y1, z1)) return;
       drop.push(x, y, z, axis);
-      if (!inA || !inB) return;
       const pa = map(x, y, z);
       const ax = pa.x; // copy before the second call: map may reuse its result object
       const ay = pa.y;
@@ -432,11 +460,11 @@ export class GlueStore {
     b.faces.add(lk);
     this.count++;
     this.rev++;
+    if (this.listeners.length > 0) this.emit(true, x, y, z, axis);
     return true;
   }
 
   private removeCanonical(x: number, y: number, z: number, axis: number): boolean {
-    // removeAllAt runs on every world cell change, usually with no glue around.
     if (this.count === 0 || !inRange(x, y, z)) return false;
     const key = bucketKey(x >> BUCKET_SHIFT, y >> BUCKET_SHIFT, z >> BUCKET_SHIFT);
     const b = this.buckets.get(key);
@@ -445,6 +473,7 @@ export class GlueStore {
     this.rev++;
     // Empty buckets are dropped so iteration and box queries only see live data.
     if (b.faces.size === 0) this.buckets.delete(key);
+    if (this.listeners.length > 0) this.emit(false, x, y, z, axis);
     return true;
   }
 }

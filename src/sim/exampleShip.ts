@@ -281,7 +281,7 @@ function build(sim: Simulation, site: Site): { x: number; y: number; z: number }
     if (cell === B.HELM || cell === B.BEARING) cell = makeCell(cell, facingState(f.bow));
     w.setCell(colX(f, ox, p.u, p.v), p.y, colZ(f, oz, p.u, p.v), cell);
   }
-  // Glue after the blocks: writing a cell removes the glue on its faces.
+  // Glue after the blocks: a glued face needs a glueable block on one side to stay.
   const mx = colX(f, ox, 0, MAST_V);
   const mz = colZ(f, oz, 0, MAST_V);
   sim.worldGlue.add(mx, DECK_Y, mz, NY); // mast foot <-> floor plank

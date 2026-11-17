@@ -4,7 +4,8 @@
  *
  * Held keys and buttons are plain state. Short presses that may start and end between two
  * ticks are counted (jumpPresses / attackPresses / usePresses) and handed to the simulation,
- * which consumes them (src/entities/input.ts).
+ * which consumes them (src/entities/input.ts). So is the off-hand swap key (SWAP_KEY): a
+ * one-shot command (swapPresses) that the simulation carries out in its tick.
  *
  * Key names are KeyboardEvent.code values (physical positions), so WASD stays WASD on
  * AZERTY and other layouts.
@@ -39,6 +40,8 @@ const FORWARD_KEYS = ['KeyW', 'ArrowUp'];
 const BACK_KEYS = ['KeyS', 'ArrowDown'];
 const LEFT_KEYS = ['KeyA', 'ArrowLeft'];
 const RIGHT_KEYS = ['KeyD', 'ArrowRight'];
+/** Swaps the selected hotbar stack with the off-hand stack (DESIGN 副手). */
+export const SWAP_KEY = 'KeyF';
 
 /** Keys whose browser default (scrolling, find bar, ...) must be suppressed during play. */
 const GAME_KEYS = new Set([
@@ -52,6 +55,7 @@ const GAME_KEYS = new Set([
   'ControlLeft',
   'ControlRight',
   'KeyE',
+  SWAP_KEY,
   'Escape',
   'F3',
   'F5',
@@ -110,6 +114,7 @@ export class InputState {
   private attackPresses = 0;
   private usePresses = 0;
   private jumpPresses = 0;
+  private swapPresses = 0;
   private lastForwardTap = -Infinity;
   private sprintLatch = false;
   private wheelAcc = 0;
@@ -140,6 +145,7 @@ export class InputState {
     }
     if (!repeat) {
       if (code === 'Space') this.jumpPresses++;
+      if (code === SWAP_KEY) this.swapPresses++;
       if (code === 'KeyW' || code === 'ArrowUp') {
         // Double-tap forward sprints until the key is released.
         if (now - this.lastForwardTap <= SPRINT_DOUBLE_TAP_MS) this.sprintLatch = true;
@@ -243,6 +249,7 @@ export class InputState {
     this.attackPresses = 0;
     this.usePresses = 0;
     this.jumpPresses = 0;
+    this.swapPresses = 0;
     this.wheelAcc = 0;
   }
 
@@ -279,9 +286,11 @@ export class InputState {
       input.attackPresses = 0;
       input.usePresses = 0;
       input.jumpPresses = 0;
+      input.swapPresses = 0;
       this.attackPresses = 0;
       this.usePresses = 0;
       this.jumpPresses = 0;
+      this.swapPresses = 0;
       return;
     }
     input.forward = this.forward;
@@ -294,9 +303,11 @@ export class InputState {
     input.attackPresses += this.attackPresses;
     input.usePresses += this.usePresses;
     input.jumpPresses += this.jumpPresses;
+    input.swapPresses += this.swapPresses;
     this.attackPresses = 0;
     this.usePresses = 0;
     this.jumpPresses = 0;
+    this.swapPresses = 0;
   }
 }
 

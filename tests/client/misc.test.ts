@@ -162,6 +162,25 @@ describe('UiStateBuilder', () => {
     const inv = new Inventory();
     inv.hotbar[2] = { item: B.DIRT, count: 0 };
     expect(b.build(inputs(inv)).hotbar[2]).toBeNull();
+    expect(s.offhand).toBeNull();
+  });
+
+  it('carries the off-hand slot, rebuilding only when it changes', () => {
+    const b = new UiStateBuilder();
+    const inv = new Inventory();
+    const toasts: never[] = [];
+    const s1 = b.build(inputs(inv, { toasts }));
+    expect(s1.offhand).toBeNull();
+    inv.offhand = { item: B.SAND, count: 3 };
+    const s2 = b.build(inputs(inv, { toasts }));
+    expect(s2).not.toBe(s1);
+    expect(s2.offhand).toEqual({ item: B.SAND, count: 3 });
+    expect(s2.hotbar).toBe(s1.hotbar);
+    expect(b.build(inputs(inv, { toasts }))).toBe(s2);
+    inv.swapOffhand(); // the selected hotbar slot was empty
+    const s3 = b.build(inputs(inv, { toasts }));
+    expect(s3.offhand).toBeNull();
+    expect(s3.hotbar[0]).toEqual({ item: B.SAND, count: 3 });
   });
 });
 

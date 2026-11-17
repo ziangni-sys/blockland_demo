@@ -1,5 +1,5 @@
 /**
- * Helpers for the acceptance scenarios 1–5 (连接与胶水). Everything the player does goes
+ * Helpers for the acceptance scenarios 1–3 (连接与胶水), also used by 25–29 (g7). Everything the player does goes
  * through the Simulation's scripted controls (look, right/left click, held item, sneak), i.e.
  * the same input path the client writes; internals are only touched to build scenes and to
  * observe results.

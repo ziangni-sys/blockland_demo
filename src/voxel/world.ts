@@ -4,6 +4,8 @@
  *
  * Every mutation of a world cell goes through World.setCell(), which is the single
  * "block changed / removed" hook point (docs/LESSONS.md: 移除方块有好几条路径，要统一挂钩子).
+ * Cells that arrive with a chunk (generated or restored) do not pass through setCell; addChunk
+ * reports the chunk instead (onChunkAdd).
  */
 import { CHUNK_MASK, CHUNK_SHIFT, SECTION_SIZE, SECTIONS_PER_CHUNK, WORLD_HEIGHT } from '../core/constants';
 import { quat, vec3, type Quat, type Vec3 } from '../core/math';
@@ -21,6 +23,9 @@ export type CellChangeListener = (
   newCell: number,
   flags: number,
 ) => void;
+
+/** Called after a chunk was added to the world, its cells in place and readable. */
+export type ChunkAddListener = (chunk: Chunk) => void;
 
 /** A pending block tick. Fires only if the block id at the position still matches. */
 export interface ScheduledTick {
@@ -139,6 +144,7 @@ export class World implements VoxelGrid {
   readonly dirtySections = new Set<number>();
 
   private listeners: CellChangeListener[] = [];
+  private chunkListeners: ChunkAddListener[] = [];
   private lastChunk: Chunk | null = null;
   private readonly chunkCache: Array<Chunk | null> = [null, null, null, null];
   private lastDirtyKey = -1;
@@ -171,7 +177,10 @@ export class World implements VoxelGrid {
   chunkAt(x: number, z: number): Chunk | undefined {
     return this.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
   }
-  /** Insert a chunk and mark it and its neighbours' border sections for meshing. */
+  /**
+   * Insert a chunk, mark it and its neighbours' border sections for meshing, then report it to
+   * the onChunkAdd listeners.
+   */
   addChunk(chunk: Chunk): void {
     this.chunks.set(chunkKey(chunk.cx, chunk.cz), chunk);
     this.lastChunk = chunk;
@@ -185,6 +194,8 @@ export class World implements VoxelGrid {
       }
     }
     this.lastDirtyKey = -1;
+    const ls = this.chunkListeners;
+    for (let k = 0; k < ls.length; k++) ls[k]!(chunk);
   }
   removeChunk(cx: number, cz: number): Chunk | undefined {
     const k = chunkKey(cx, cz);
@@ -256,6 +267,18 @@ export class World implements VoxelGrid {
     this.listeners = [...this.listeners, fn];
     return () => {
       this.listeners = this.listeners.filter((f) => f !== fn);
+    };
+  }
+
+  /**
+   * Subscribe to chunk additions (addChunk). Listeners run synchronously at the end of
+   * addChunk, in subscription order, and may read the new chunk's cells. Copy-on-write like
+   * onCellChange.
+   */
+  onChunkAdd(fn: ChunkAddListener): () => void {
+    this.chunkListeners = [...this.chunkListeners, fn];
+    return () => {
+      this.chunkListeners = this.chunkListeners.filter((f) => f !== fn);
     };
   }
 

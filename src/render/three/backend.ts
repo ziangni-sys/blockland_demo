@@ -11,8 +11,9 @@
  *   sky        far-plane dome drawn after the opaque world
  *
  * Render order: opaque (renderOrder 0, front to back) -> cutout (1) -> sky (50) ->
- * transparent list (water 0, overlays 60+). Every voxel pass culls back faces (mesh
- * contract). Rendering goes straight to the canvas; materials encode sRGB themselves.
+ * transparent list (glue lying on block surfaces < 0, water 0, other overlays 60+). Every
+ * voxel pass culls back faces (mesh contract). Rendering goes straight to the canvas;
+ * materials encode sRGB themselves.
  *
  * Precision: the scene is drawn in a floating RENDER SPACE, world minus an integer origin
  * near the camera (a multiple of WAVE_PERIOD, rebased with hysteresis as the camera
@@ -528,7 +529,7 @@ export class ThreeBackend implements RenderBackend {
     this.entities.group.matrixAutoUpdate = false;
     this.entities.group.matrix.makeTranslation(-this.origin.x, -this.origin.y, -this.origin.z);
     this.scene.add(this.entities.group);
-    this.overlays = new OverlayLayer(u, this.placeholderTiles, this.tileNodes);
+    this.overlays = new OverlayLayer(u, this.objUniform, this.placeholderTiles, this.tileNodes);
   }
 
   /**
@@ -713,6 +714,8 @@ export class ThreeBackend implements RenderBackend {
       dryTex: null,
       dry: null,
     };
+    // Overlays under the group (glue decals) are lit with the structure's light too.
+    group.userData.bl = rec.light;
     this.structures.set(id, rec);
     this.structureList.push(rec);
     this.structuresRoot.add(group);

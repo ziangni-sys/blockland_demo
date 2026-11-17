@@ -13,7 +13,10 @@
  * decoder verify the checksum BEFORE trusting the version byte, so:
  *  - any corruption, including a flipped version byte, is a SaveFormatError ("corrupted");
  *  - an intact blob from a newer build is a SaveVersionError ("update the game"), which the
- *    orchestrator must treat differently: never regenerate or overwrite such data.
+ *    orchestrator must treat differently: never regenerate or overwrite such data;
+ *  - an intact blob from an older build is a SaveFormatError too: there is no backward
+ *    compatibility (docs/DESIGN.md), only SAVE_VERSION itself is read. The client refuses an
+ *    older world before reading any blob (WorldMeta.version, isOlderSave) with its own message.
  * The payload is then parsed strictly and must be consumed exactly. Future codecs
  * (structures, glue, entities, player) should use beginBlob / sealBlob / openBlob with
  * their own magic.
@@ -28,10 +31,12 @@ import { ByteReader, ByteWriter, SaveFormatError, isUint8Array } from './bytes';
 import { crc32 } from './crc32';
 
 /**
- * Save format version written into every blob header and into WorldMeta.version.
- * Bump it when any blob layout changes; decoders keep reading every older version.
+ * Save format version written into every blob header and into WorldMeta.version. Bump it when
+ * any blob layout changes. Only this version is read: worlds saved by an older build cannot be
+ * opened (they stay listed so the player can delete them); there is no migration code.
+ * 2: the player's off-hand slot; glue that outlives one side of its face; no hub-glue flag.
  */
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 /**
  * Intact data written by a newer build of the game (its format version is above
@@ -56,6 +61,14 @@ export class SaveVersionError extends SaveFormatError {
  */
 export function isNewerSave(meta: Pick<WorldMeta, 'version'>): boolean {
   return meta.version > SAVE_VERSION;
+}
+
+/**
+ * True when the world was last saved by an older build (meta.version < SAVE_VERSION). Such a
+ * world can be listed and deleted but not loaded: older formats are not read.
+ */
+export function isOlderSave(meta: Pick<WorldMeta, 'version'>): boolean {
+  return meta.version < SAVE_VERSION;
 }
 
 /**
@@ -109,7 +122,7 @@ export function sealBlob(w: ByteWriter): Uint8Array {
 /** An opened blob: a reader positioned at the payload (it cannot see the CRC). */
 export interface OpenedBlob {
   reader: ByteReader;
-  /** SAVE_VERSION of the writer (1 .. SAVE_VERSION). */
+  /** SAVE_VERSION of the writer (always the current one). */
   version: number;
 }
 
@@ -138,11 +151,11 @@ export function openBlob(bytes: Uint8Array, magic: string, label: string = magic
   const version = reader.varuint();
   if (version > SAVE_VERSION) {
     throw new SaveVersionError(
-      `${label}: saved by a newer version of the game (format ${version}; this build reads 1..${SAVE_VERSION})`,
+      `${label}: saved by a newer version of the game (format ${version}; this build reads ${SAVE_VERSION})`,
       version,
     );
   }
-  if (version < 1) reader.fail(`invalid format version ${version}`);
+  if (version < SAVE_VERSION) reader.fail(`format ${version} is from an older version of the game and is no longer read (this build reads ${SAVE_VERSION})`);
   return { reader, version };
 }
 

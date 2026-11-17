@@ -10,9 +10,12 @@ import {
   cellFunc,
   connected,
   connectedCells,
+  holdsGlue,
   isFunctionalCell,
   isSailCell,
   mountSticks,
+  pruneGlueAt,
+  sticksWithoutGlue,
 } from '../../src/structures/stick';
 import { GlueStore } from '../../src/structures/glue';
 import { World } from '../../src/voxel/world';
@@ -324,5 +327,48 @@ describe('stick: connected() at the edges of the world', () => {
     expect(connected(w, g, 16, 10, 5, NX)).toBe(false);
     w.setCell(0, 10, 5, facing(B.BEARING, PX));
     expect(connected(w, g, 0, 10, 5, NX)).toBe(false); // its back is unloaded
+  });
+});
+
+describe('stick: the glue lifetime rule (pruneGlueAt, holdsGlue)', () => {
+  it('holdsGlue: glueable blocks and the unloaded sentinel; not air, liquids, soft or unbreakable blocks', () => {
+    for (const cell of allCellValues()) {
+      if (cell === CELL_UNLOADED) continue;
+      expect(holdsGlue(cell), `cell ${cell}`).toBe(canGlue(cell));
+    }
+    expect(holdsGlue(CELL_UNLOADED)).toBe(true);
+    expect(canGlue(CELL_UNLOADED)).toBe(false);
+    expect(holdsGlue(c(B.DEEPROCK))).toBe(false);
+    expect(holdsGlue(c(B.TORCH))).toBe(false);
+    expect(holdsGlue(makeCell(B.WATER, liquidState(0, false)))).toBe(false);
+  });
+
+  for (const make of HARNESSES) {
+    it(`[${make().name}] each glued face of a changed cell stays iff that cell or the neighbour across it holds glue`, () => {
+      const h = make();
+      h.set(0, 0, 0, c(B.STONE));
+      h.set(1, 0, 0, c(B.STONE));
+      for (const d of ALL_DIRS) h.glueFace(0, 0, 0, d);
+      const [x, y, z] = h.abs(0, 0, 0);
+      // The cell is still glueable: nothing goes.
+      expect(pruneGlueAt(h.grid, h.glue, x, y, z, h.grid.getCell(x, y, z))).toBe(0);
+      expect(h.glue.size).toBe(6);
+      // The cell becomes air: only the face towards the stone at +X stays.
+      h.grid.setCell(x, y, z, 0);
+      expect(pruneGlueAt(h.grid, h.glue, x, y, z, 0)).toBe(5);
+      expect(h.glue.size).toBe(1);
+      expect(h.glue.has(x, y, z, PX)).toBe(true);
+      // An empty store costs nothing and reports nothing.
+      const empty = new GlueStore();
+      expect(pruneGlueAt(h.grid, empty, x, y, z, 0)).toBe(0);
+    });
+  }
+
+  it('sticksWithoutGlue: auto-stick or mounting, symmetric, never through glue', () => {
+    expect(sticksWithoutGlue(c(B.PLANKS_OAK), c(B.PLANKS_PINE), PX)).toBe(true);
+    expect(sticksWithoutGlue(c(B.STONE), c(B.STONE), PX)).toBe(false);
+    expect(sticksWithoutGlue(c(B.COBBLE), facing(B.HELM, NZ), PY)).toBe(true); // helm on top of the cobble
+    expect(sticksWithoutGlue(facing(B.HELM, NZ), c(B.COBBLE), NY)).toBe(true);
+    expect(sticksWithoutGlue(c(B.STONE), c(B.BRICKS), PY)).toBe(false);
   });
 });

@@ -47,6 +47,7 @@ export const CONTROLS: readonly ControlSection[] = [
       { keys: [RC], desc: 'ctl.place' },
       { keys: [k('1–9'), OR, k('key.wheel')], desc: 'ctl.select' },
       { keys: [k('key.middleClick')], desc: 'ctl.pick' },
+      { keys: [k('F')], desc: 'ctl.swapHands' },
     ],
   },
   {
@@ -80,8 +81,9 @@ export const CONTROLS: readonly ControlSection[] = [
   {
     title: 'ctl.sec.glue',
     rows: [
-      { keys: [RC, THEN, RC], desc: 'ctl.glueApply' },
+      { keys: [RC], desc: 'ctl.glueApply' },
       { keys: [k('key.shift'), PLUS, RC], desc: 'ctl.glueRemove' },
+      { keys: [k('F')], desc: 'ctl.glueOffhand' },
     ],
   },
 ];
@@ -96,7 +98,8 @@ export const CHEAT_SHEET: readonly ControlRow[] = [
   { keys: [k('Esc')], desc: 'ctl.pause' },
   { keys: [RC, THEN, RC], desc: 'cheat.helm' },
   { keys: [RC, THEN, RC], desc: 'cheat.bearing' },
-  { keys: [RC, THEN, RC], desc: 'cheat.glue' },
+  { keys: [RC], desc: 'cheat.glue' },
+  { keys: [k('F')], desc: 'ctl.swapHands' },
 ];
 
 /** True when a key-cap label is a string-table key rather than a literal. */

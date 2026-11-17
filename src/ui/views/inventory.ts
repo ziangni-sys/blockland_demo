@@ -1,7 +1,7 @@
 /**
- * Inventory: backpack (27) + hotbar (9) slots, the stack held by the cursor following the
- * pointer, item-name tooltips, and in creative mode a searchable, grouped palette of every
- * item.
+ * Inventory: backpack (27) + hotbar (9) slots, the off-hand slot (DESIGN 副手), the stack held
+ * by the cursor following the pointer, item-name tooltips, and in creative mode a searchable,
+ * grouped palette of every item.
  *
  * Slot clicks map to UiActions.slotClick: left click (or Enter/Space) = button 0, right click
  * (or the context-menu key) = button 2, Shift held = shift. Pressing on one slot and releasing
@@ -56,6 +56,7 @@ export class InventoryView implements ScreenView {
   private readonly shiftHint: HTMLElement;
   private readonly bag: SlotWidget[] = [];
   private readonly hot: SlotWidget[] = [];
+  private readonly off: SlotWidget;
   private readonly cursorEl: HTMLElement;
   private readonly cursorCanvas: HTMLCanvasElement;
   private readonly cursorCount: TextSlot;
@@ -135,12 +136,19 @@ export class InventoryView implements ScreenView {
       this.hot.push(s);
       hotGrid.appendChild(s.el);
     }
+    this.off = new SlotWidget(ctx, null, { 'data-area': 'offhand', 'data-index': '0' });
+    const offTitle = ctx.id('off');
+    const offRow = h(d, 'div', 'bl-inv-offhand', { role: 'group', 'aria-labelledby': offTitle }, [
+      this.off.el,
+      h(d, 'span', 'bl-inv-offhand-label', null, [ctx.text(h(d, 'span', null, { id: offTitle }), 'inv.offhand'), h(d, 'kbd', null, null, ['F'])]),
+    ]);
     this.shiftHint = ctx.text(h(d, 'span'), 'inv.shiftHint');
     this.slotsEl = h(d, 'section', 'bl-inv-slots', null, [
       ctx.text(h(d, 'h3', 'bl-subtitle'), 'inv.backpack'),
       bagGrid,
       ctx.text(h(d, 'h3', 'bl-subtitle'), 'inv.hotbar'),
       hotGrid,
+      offRow,
       h(d, 'p', 'bl-inv-hint', null, [ctx.text(h(d, 'span'), 'inv.dropHint'), this.shiftHint]),
     ]);
     this.slotsEl.addEventListener('click', (e) => this.onSlotEvent(e, 0));
@@ -209,6 +217,7 @@ export class InventoryView implements ScreenView {
     }
     for (let i = 0; i < INVENTORY_SIZE; i++) this.bag[i]!.set(s.inventory[i]);
     for (let i = 0; i < HOTBAR_SIZE; i++) this.hot[i]!.set(s.hotbar[i]);
+    this.off.set(s.offhand);
     const sel = Math.min(HOTBAR_SIZE - 1, Math.max(0, s.selected | 0));
     if (sel !== this.selected) {
       if (this.selected >= 0) this.hot[this.selected]!.setSelected(false);
@@ -250,6 +259,7 @@ export class InventoryView implements ScreenView {
     const size = this.ctx.iconSize;
     for (const s of this.bag) s.repaint();
     for (const s of this.hot) s.repaint();
+    this.off.repaint();
     if (this.palette) for (const p of this.palette) this.ctx.icons.paint(p.canvas, p.item, size);
     if (this.cursor) this.ctx.icons.paint(this.cursorCanvas, this.cursor.item, size);
   }
@@ -347,7 +357,7 @@ export class InventoryView implements ScreenView {
   }
 
   private clickSlot(slot: HTMLElement, button: 0 | 2, shift: boolean): void {
-    const area = slot.dataset.area === 'hotbar' ? 'hotbar' : 'inventory';
+    const area = slot.dataset.area === 'hotbar' ? 'hotbar' : slot.dataset.area === 'offhand' ? 'offhand' : 'inventory';
     this.ctx.actions.slotClick(area, Number(slot.dataset.index), button, shift);
   }
 

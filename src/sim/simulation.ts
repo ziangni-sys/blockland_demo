@@ -6,7 +6,7 @@
  *
  * Tick order (docs/ARCHITECTURE.md, docs/LESSONS.md "每个 tick 的顺序"):
  *   0. time++, entity snapshot (prev* for render interpolation), chunk housekeeping
- *   1. player actions (place, mine, use, glue, assemble, steer)
+ *   1. player actions (swap hands, place, mine, use, glue, assemble, steer)
  *   2. scheduled block ticks (liquids, falling blocks ...)
  *   3. structures move (rotors, then ship dynamics)
  *   4. carried entities follow their carriers
@@ -15,7 +15,7 @@
  *   7. lighting catches up; the InteractionView is rebuilt
  * Block updates (falling sand, popping torches) queued by any phase run right after it.
  *
- * Scripted control (tests, tools, the debug console): lookAt / lookAtCell, use / attack,
+ * Scripted control (tests, tools, the debug console): lookAt / lookAtCell, use / attack / swapHands,
  * useOn / mine (aim + click, checked), targetCell / mineTargetCell, hold / emptyHand /
  * giveItem, teleport, advance, setDayTime. They only write what the client would write
  * (input, inventory) or what a command would (teleport), so a scripted session behaves
@@ -341,6 +341,10 @@ export class Simulation {
   /** Queue one left-click (consumed by the next tick). */
   attack(): void {
     this.player.input.attackPresses++;
+  }
+  /** Queue one off-hand swap (the F key; carried out by the next tick). */
+  swapHands(): void {
+    this.player.input.swapPresses++;
   }
 
   /**

@@ -73,7 +73,7 @@ describe('save / load', () => {
     const rotor = sim.structures.rotors()[0]!;
     expect(rotor.parent).toBe(ship);
     expect(rotor.angle).not.toBe(0);
-    expect(rotor.hubGlue).toBe(true);
+    expect(ship.glue.has(2, SEA_TOP + 3, 0, PZ)).toBe(true); // the hub glue, on the ship's bearing
     expect(ship.glue.size).toBeGreaterThan(0);
     sim.setDayTime(0.3);
 
@@ -97,7 +97,6 @@ describe('save / load', () => {
     expect(rotor2.angle).toBe(rotor.angle);
     expect(rotor2.angularSpeed).toBe(rotor.angularSpeed);
     expect(rotor2.sails).toBe(rotor.sails);
-    expect(rotor2.hubGlue).toBe(true);
     expect(sim2.worldGlue.toArray()).toEqual(sim.worldGlue.toArray());
     expect(sim2.worldGlue.size).toBe(1);
     expect(sim2.dayTime).toBeCloseTo(sim.dayTime, 10);
@@ -113,7 +112,7 @@ describe('save / load', () => {
     expect(ship2.grid.position.y).toBeCloseTo(ship.grid.position.y, 3);
     expect(ship2.grid.position.z).toBeCloseTo(ship.grid.position.z, 3);
 
-    // Stopping the loaded windmill restores the hub glue (ACCEPTANCE 14).
+    // The loaded windmill stops with its hub glued to the bearing again (ACCEPTANCE 14).
     sim2.structures.stopRotor(rotor2);
     expect(rotor2.removed).toBe(true);
     expect(ship2.glue.has(2, SEA_TOP + 3, 0, PZ)).toBe(true);
@@ -151,18 +150,35 @@ describe('save / load', () => {
   });
 
   it('what the hands were doing is not saved', () => {
-    const sim = flatSim({ spawn: { x: 0.5, y: T, z: 0.5 } });
+    const sim = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
     sim.world.setCell(0, T + 1, -2, makeCell(B.STONE));
-    sim.hold(I.GLUE);
+    sim.hold(I.GLUE, 5);
     sim.lookAtCell(0, T + 1, -2, PZ);
+    sim.player.input.use = true;
     click(sim);
-    expect(sim.view.glueAnchor).not.toBeNull();
-    const sim2 = flatSim({ spawn: { x: 0.5, y: T, z: 0.5 } });
+    sim.advance(5);
+    expect(sim.view.glueProgress).toBeGreaterThan(0); // a timed glue operation is running
+    const sim2 = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
     importSave(sim2, exportSave(sim));
-    expect(sim2.view.glueAnchor).toBeNull();
-    sim2.tick();
-    expect(sim2.view.glueAnchor).toBeNull();
-    expect(sim2.player.inventory.selectedStack()?.item).toBe(I.GLUE);
+    expect(sim2.view.glueProgress).toBe(0);
+    sim2.player.input.use = true; // still holding the button: nothing resumes
+    sim2.lookAtCell(0, T + 1, -2, PZ);
+    sim2.advance(60);
+    expect(sim2.view.glueProgress).toBe(0);
+    expect(sim2.worldGlue.size).toBe(0);
+    expect(sim2.player.inventory.selectedStack()).toEqual({ item: I.GLUE, count: 5 });
+  });
+
+  it('the off-hand stack is saved with the player', () => {
+    const sim = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
+    sim.hold(I.GLUE, 7);
+    sim.swapHands();
+    sim.tick();
+    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 7 });
+    const sim2 = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
+    importSave(sim2, copyBundle(exportSave(sim)));
+    expect(sim2.player.inventory.offhand).toEqual({ item: I.GLUE, count: 7 });
+    expect(sim2.player.inventory.count(I.GLUE)).toBe(7);
   });
 
   it('a new simulation with the same seed inherits nothing from the previous one (ACCEPTANCE 24)', () => {

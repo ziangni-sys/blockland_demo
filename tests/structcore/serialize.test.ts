@@ -31,7 +31,7 @@ function describeAll(mgr: StructureManager): unknown[] {
     if (s instanceof Rotor) {
       return {
         ...base,
-        rotor: [s.bearingX, s.bearingY, s.bearingZ, s.axis, { ...s.baseRotation }, s.angle, s.angularSpeed, s.sails, s.hubGlue],
+        rotor: [s.bearingX, s.bearingY, s.bearingZ, s.axis, { ...s.baseRotation }, s.angle, s.angularSpeed, s.sails],
       };
     }
     const sh = s as Ship;
@@ -176,7 +176,7 @@ function shipSave(cells: (w: ByteWriter) => void, format = STRUCTURES_FORMAT): U
 
 const P = c(B.PLANKS_OAK);
 
-/** Format 2 cell section: box, then runs of [gap, cells]. */
+/** Cell section: box, then runs of [gap, cells]. */
 function runs(box: [number, number, number, number, number, number], list: Array<[number, number[]]>): (w: ByteWriter) => void {
   return (w) => {
     w.varint(box[0]).varint(box[1]).varint(box[2]).varuint(box[3]).varuint(box[4]).varuint(box[5]);
@@ -199,8 +199,8 @@ describe('structure cells on disk: proportional to the cell count, always readab
     const r = s.mgr.assembleShip(0, 61, 0);
     if (!r.ok) throw new Error(r.reason);
     const g = r.structure.grid;
-    // Plain ship edits (allowed at any time). Tight box 421 x 68 x 601 = 17.2M cells, far
-    // beyond the 2^24-cell box the dense format 1 reader accepted.
+    // Plain ship edits (allowed at any time). Tight box 421 x 68 x 601 = 17.2M cells: a dense
+    // box would take 34 MB.
     g.setCell(-210, 60, -300, P);
     g.setCell(210, 127, 300, c(B.PLANKS_PINE));
     expect(g.count).toBe(28);
@@ -245,12 +245,13 @@ describe('structure cells on disk: proportional to the cell count, always readab
     expect(cells).toEqual(new Map([['7,60,7', P], ['5,60,8', c(B.COBBLE)]]));
   });
 
-  it('format 1 saves (dense boxes) still load', () => {
-    const bytes = shipSave((w) => {
-      w.varint(5).varint(60).varint(7).varuint(2).varuint(1).varuint(2);
-      w.u16Array([P, 0, 0, c(B.COBBLE)]);
-    }, 1);
-    expect(loadedCells(bytes)).toEqual(new Map([['5,60,7', P], ['6,60,8', c(B.COBBLE)]]));
+  it('older formats are not read (no backward compatibility)', () => {
+    for (const format of [1, 2]) {
+      const bytes = shipSave(runs([5, 60, 7, 1, 1, 1], [[0, [P]]]), format);
+      const s = scene();
+      expect(() => s.mgr.deserialize(new ByteReader(bytes))).toThrow(SaveFormatError);
+      expect(s.mgr.all()).toEqual([]);
+    }
   });
 
   it('malformed cell sections throw SaveFormatError', () => {
@@ -265,7 +266,6 @@ describe('structure cells on disk: proportional to the cell count, always readab
       ['cells without a box', shipSave(runs([0, 60, 0, 0, 0, 0], [[0, [P]]]))],
       ['unknown block id', shipSave(runs([0, 60, 0, 1, 1, 1], [[0, [1000]]]))],
       ['absurd box', shipSave(runs([0, 0, 0, 1 << 28, 1 << 28, 1], [[0, [P]]]))],
-      ['format 1 size mismatch', shipSave((w) => w.varint(0).varint(60).varint(0).varuint(2).varuint(1).varuint(1).u16Array([P]), 1)],
     ];
     for (const [what, bytes] of bad) {
       const s = scene();

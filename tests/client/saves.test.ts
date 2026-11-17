@@ -101,4 +101,23 @@ describe('SaveManager', () => {
     await m.delete('c');
     expect((await m.list()).map((w) => w.id)).toEqual(['future']);
   });
+
+  it('refuses a world saved by an older build before reading its data; it stays listed and can be deleted', async () => {
+    const storage = new MemoryStorage();
+    const m = new SaveManager(storage);
+    const bundle = { chunks: [], blobs: [] };
+    await m.save(() => ({ meta: meta('old', { version: SAVE_VERSION - 1 }), bundle }));
+    let blobReads = 0;
+    const getBlob = storage.getBlob.bind(storage);
+    storage.getBlob = async (...args) => {
+      blobReads++;
+      return getBlob(...args);
+    };
+    const res = await m.load('old');
+    expect(res.ok === false && res.reason).toBe('older');
+    expect(blobReads).toBe(0);
+    expect((await m.list()).map((w) => w.id)).toEqual(['old']);
+    await m.delete('old');
+    expect(await m.list()).toEqual([]);
+  });
 });

@@ -78,11 +78,6 @@ export class Rotor extends Structure {
   angularSpeed = 0;
   /** Number of sail cells (wool / canvas). */
   sails = 0;
-  /**
-   * There was glue between the hub and the bearing when the rotor started. The glue is
-   * removed while it spins and restored when it stops (LESSONS "风车停下后…胶没了").
-   */
-  hubGlue = false;
 
   /** Rotating mechanical structures cannot be edited. */
   get editable(): boolean {

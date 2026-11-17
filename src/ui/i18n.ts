@@ -99,6 +99,7 @@ export const STRINGS = {
   'ctl.place': { zh: '放置 / 使用', en: 'Place / use' },
   'ctl.select': { zh: '选择快捷栏格子', en: 'Select hotbar slot' },
   'ctl.pick': { zh: '拿起瞄准的方块（生存模式只从背包里取）', en: 'Pick the block you look at (survival: only from your inventory)' },
+  'ctl.swapHands': { zh: '交换主手与副手的物品', en: 'Swap the items in your main hand and off-hand' },
   'ctl.inventory': { zh: '物品栏', en: 'Inventory' },
   'ctl.pause': { zh: '暂停', en: 'Pause' },
   'ctl.debug': { zh: '调试信息', en: 'Debug overlay' },
@@ -112,18 +113,20 @@ export const STRINGS = {
   'ctl.bearingPreview': { zh: '预览转子', en: 'Preview the rotor' },
   'ctl.bearingStart': { zh: '启动转子', en: 'Start the rotor' },
   'ctl.bearingStop': { zh: '（运转中）停止转子', en: 'Stop a running bearing' },
-  'ctl.glueApply': { zh: '右键方块 A，再右键相邻的 B：涂胶', en: 'Block A, then the adjacent block B: glue' },
-  'ctl.glueRemove': { zh: '第二下按住 Shift：拆胶', en: 'Shift on the second click: remove glue' },
+  'ctl.glueApply': { zh: '手持强力胶右键方块露出的面：给这个面涂胶', en: 'Glue in hand, right-click a face: glue that face' },
+  'ctl.glueRemove': { zh: '去掉露出的面上的胶', en: 'Remove the glue from a face' },
+  'ctl.glueOffhand': { zh: '强力胶放进副手：放出的方块自动粘到点击的面上', en: 'Glue in the off-hand: placed blocks stick to the clicked face' },
 
   // ---- main-menu cheat-sheet (abridged mechanism lines)
   'cheat.helm': { zh: '舵轮：预览 → 组装并掌舵', en: 'Helm: preview → assemble & steer' },
   'cheat.bearing': { zh: '轴承：预览 → 启动转子', en: 'Bearing: preview → start the rotor' },
-  'cheat.glue': { zh: '强力胶：方块 A → 相邻 B', en: 'Glue: block A → adjacent B' },
+  'cheat.glue': { zh: '强力胶：右键给一个面涂胶', en: 'Glue: right-click a face to glue it' },
 
   // ---- inventory
   'inv.title': { zh: '物品栏', en: 'Inventory' },
   'inv.backpack': { zh: '背包', en: 'Backpack' },
   'inv.hotbar': { zh: '快捷栏', en: 'Hotbar' },
+  'inv.offhand': { zh: '副手', en: 'Off-hand' },
   'inv.palette': { zh: '物料库', en: 'Materials' },
   'inv.search': { zh: '搜索物品', en: 'Search items' },
   'inv.searchPlaceholder': { zh: '搜索中文或英文名…', en: 'Search by name…' },
@@ -171,6 +174,7 @@ export const STRINGS = {
   'hud.health': { zh: '生命', en: 'Vitality' },
   'hud.breath': { zh: '气息', en: 'Breath' },
   'hud.hotbar': { zh: '快捷栏', en: 'Hotbar' },
+  'hud.offhand': { zh: '副手（F 交换）', en: 'Off-hand (F to swap)' },
   'hud.notifications': { zh: '通知', en: 'Notifications' },
 
   // ---- helm instrument

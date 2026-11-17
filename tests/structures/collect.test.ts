@@ -106,8 +106,9 @@ for (const make of HARNESSES) {
       h.glueFace(3, -1, 2, PY); // ledge under the raft -> raft
       r = collectShip(h.grid, h.glue, ...h.abs(2, 1, 1));
       expectCells(h, r, [...want, '5,0,1', '6,0,1', '3,-1,2']);
-      // Removing the block's glue (as the world does when it is mined) detaches it again.
-      h.glue.removeAllAt(...h.abs(5, 0, 1));
+      // Removing the glue between the raft and that block detaches the block (and what hangs on it) again.
+      const [gx, gy, gz] = h.abs(4, 0, 1);
+      h.glue.remove(gx, gy, gz, PX);
       r = collectShip(h.grid, h.glue, ...h.abs(2, 1, 1));
       expectCells(h, r, [...want, '3,-1,2']);
     });
