@@ -26,7 +26,7 @@ import { isDryCell } from '../structures/hull';
 import type { VoxelGrid } from '../voxel/grid';
 import { raycastGrids, type CellPredicate } from '../voxel/raycast';
 import type { World } from '../voxel/world';
-import { cameraPose, placeCamera, SELF_HIDE_DISTANCE, type CameraRay, type ViewMode } from './camera';
+import { cameraPose, placeCamera, SELF_HIDE_CLEARANCE, selfModelGap, type CameraRay, type ViewMode } from './camera';
 import { approach, interpolateCarried, lerpAngle, lerpVec, type FramePose } from './interp';
 
 /** Radius (blocks) around the player in which glued faces are drawn while holding glue. */
@@ -88,13 +88,14 @@ export class ViewBuilder {
   private readonly entityPool: EntityRenderState[] = [];
   private readonly entityList: EntityRenderState[] = [];
   private fovScale = 1;
-  /** Third person with the camera clear of the head: the local player is drawn. */
+  /** Third person with the camera clear of the player's model: the local player is drawn. */
   private showSelf = false;
   /** Body yaw of the local player this frame (the interpolated look yaw). */
   private selfYaw = 0;
   private readonly pose = cameraPose();
   private readonly eye: Vec3 = vec3();
   private readonly rayDir: Vec3 = vec3();
+  private readonly rayOrigin: Vec3 = vec3();
   /** Grids the camera ray of the current updateCamera call tests (null outside the call). */
   private rayGrids: VoxelGrid[] | null = null;
   private readonly cameraRay: CameraRay = (o, d, max) => {
@@ -145,9 +146,9 @@ export class ViewBuilder {
   }
 
   /**
-   * The camera for the view mode: first person at the local player's eyes, or third person on
-   * the line through the eyes along the look direction (src/client/camera.ts), pulled in by a
-   * ray against every grid. `yaw`/`pitch` come straight from the input (blended with the
+   * The camera for the view mode: first person at the local player's eyes, or third person
+   * over the shoulder ('back') or in front of the face ('front', src/client/camera.ts), pulled
+   * in by rays against every grid. `yaw`/`pitch` come straight from the input (blended with the
    * carrier's turn). The eye position is interpolated exactly like the player model's.
    */
   updateCamera(sim: Simulation, alpha: number, yaw: number, pitch: number, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
@@ -158,9 +159,9 @@ export class ViewBuilder {
     eye.y = pos.y + p.eyeHeight;
     eye.z = pos.z;
     this.rayGrids = mode === 'first' ? null : sim.grids();
-    const pose = placeCamera(mode, eye, yaw, pitch, this.cameraRay, this.pose, this.rayDir);
+    const pose = placeCamera(mode, eye, yaw, pitch, this.cameraRay, this.pose, this.rayDir, this.rayOrigin);
     this.rayGrids = null;
-    this.showSelf = mode !== 'first' && pose.distance >= SELF_HIDE_DISTANCE && !p.dead;
+    this.showSelf = mode !== 'first' && !p.dead && selfModelGap(pose.x, pose.y, pose.z, eye, yaw, p.eyeHeight) >= SELF_HIDE_CLEARANCE;
     this.selfYaw = yaw;
     const cam = this.camera;
     cam.x = pose.x;
@@ -205,9 +206,9 @@ export class ViewBuilder {
 
   /**
    * Every entity, interpolated and lit. The local player is left out in first person (and when
-   * the third-person camera is pulled into the head); in third person it is drawn at the same
-   * interpolated position as the camera's eye, facing the look yaw of updateCamera — so call
-   * updateCamera first in a frame.
+   * the third-person camera is too close to the model, see selfModelGap); in third person it
+   * is drawn at the same interpolated position as the camera's eye, facing the look yaw of
+   * updateCamera — so call updateCamera first in a frame.
    */
   updateEntities(sim: Simulation, alpha: number): readonly EntityRenderState[] {
     const list = this.entityList;
