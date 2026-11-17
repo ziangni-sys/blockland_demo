@@ -31,8 +31,11 @@ const GAP = 10;
 /** Width / height kept free for the context hint under the crosshair, before --ui-zoom. */
 const HINT_MIN_W = 300;
 const HINT_MIN_H = 34;
-/** Smallest helm scale that keeps its 10 px labels legible, before --ui-zoom. */
-const HELM_MIN_SCALE = 0.7;
+/**
+ * Smallest helm scale, before --ui-zoom: its 30 px speed figure, lever and needle stay easy to
+ * read; only the 10 px notch labels get small. Used only where nothing larger fits.
+ */
+const HELM_MIN_SCALE = 0.62;
 
 function rectOf(el: Element): Rect | null {
   const r = el.getBoundingClientRect();

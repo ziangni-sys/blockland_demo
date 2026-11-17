@@ -142,7 +142,7 @@ describe('World change hook', () => {
   // that unsubscribes itself during dispatch makes the NEXT listener miss that change
   // (splice shifts it into the slot that was just visited). core/events.ts Emitter has the
   // same pattern despite its comment claiming to tolerate it. Remove `.fails` once fixed.
-  it.fails('a listener unsubscribing itself during dispatch does not make the next one miss the event', () => {
+  it('a listener unsubscribing itself during dispatch does not make the next one miss the event', () => {
     const w = emptyWorld();
     const got: string[] = [];
     const off = w.onCellChange(() => {
@@ -268,15 +268,31 @@ describe('TickQueue', () => {
     expect(posKey(-4194303, 127, 4194303)).toBeLessThan(Number.MAX_SAFE_INTEGER);
   });
 
-  // CONTRACT ISSUE (reported): a tick scheduled for a time that has already been drained
-  // never fires, yet it stays in byPos forever, so has() keeps returning true and any later
-  // schedule() of the same block id at that position is ignored (cur.at <= at). One stale
-  // entry silently freezes that cell's liquid / gravity updates for the rest of the session.
-  it.fails('a tick scheduled in the past does not wedge the position', () => {
+  // Formerly a reported contract issue (an overdue entry stayed in byPos for good and blocked
+  // every later schedule of the same block id at that position); fixed in world.ts.
+  it('a tick scheduled in the past does not wedge the position', () => {
     const q = new TickQueue();
     expect(q.takeDue(10)).toEqual([]);
     q.schedule(0, 0, 0, 30, 10); // e.g. restored from a save with an already-due time
     q.schedule(0, 0, 0, 30, 12); // a fresh schedule from the liquid module
+    expect(q.has(0, 0, 0, 30)).toBe(true);
     expect(q.takeDue(11).length + q.takeDue(12).length).toBe(1);
+    expect(q.size).toBe(0);
+  });
+
+  it('after a clock jump the overdue ticks fire on the next call, earliest first', () => {
+    const q = new TickQueue();
+    q.schedule(1, 0, 0, 30, 6);
+    q.schedule(2, 0, 0, 30, 5);
+    q.schedule(3, 0, 0, 30, 5);
+    q.schedule(4, 0, 0, 30, 12);
+    expect(q.takeDue(1)).toEqual([]);
+    expect(q.takeDue(10).map((t) => [t.x, t.at])).toEqual([
+      [2, 5],
+      [3, 5],
+      [1, 6],
+    ]);
+    expect(q.takeDue(11)).toEqual([]);
+    expect(q.takeDue(12).map((t) => t.x)).toEqual([4]);
   });
 });

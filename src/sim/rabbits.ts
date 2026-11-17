@@ -40,13 +40,16 @@ export class RabbitSpawner {
     const p = sim.entities.player;
     if (p === null || p.removed) return;
     let near = 0;
+    const far: Rabbit[] = [];
     for (const e of sim.entities.all()) {
       if (!(e instanceof Rabbit) || e.removed) continue;
       const dx = e.pos.x - p.pos.x;
       const dz = e.pos.z - p.pos.z;
-      if (dx * dx + dz * dz > RABBIT_DESPAWN_DISTANCE * RABBIT_DESPAWN_DISTANCE) sim.entities.remove(e);
+      if (dx * dx + dz * dz > RABBIT_DESPAWN_DISTANCE * RABBIT_DESPAWN_DISTANCE) far.push(e);
       else near++;
     }
+    // Removed after the scan: outside the entity update, remove() splices the live list.
+    for (const e of far) sim.entities.remove(e);
     if (!this.enabled || near >= RABBIT_CAP || p.dead) return;
     const t = sim.dayTime;
     if (t >= 0.5) return; // night: 0.5 sunset .. 1.0 sunrise

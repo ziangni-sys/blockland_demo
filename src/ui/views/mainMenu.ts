@@ -219,8 +219,13 @@ export class MainMenuView implements ScreenView {
     if (on) {
       this.el.dataset.busy = '1';
       // A request the client turned down (it stays on the menu, list unchanged) must not leave
-      // the menu dead: release after a while so the player can try again.
-      if (win) this.busyTimer = win.setTimeout(() => this.setBusy(false), LATCH_MS);
+      // the menu dead: release after a while so the player can try again, form intact.
+      if (win) {
+        this.busyTimer = win.setTimeout(() => {
+          this.clearFormOnHide = false;
+          this.setBusy(false);
+        }, LATCH_MS);
+      }
     } else {
       delete this.el.dataset.busy;
     }

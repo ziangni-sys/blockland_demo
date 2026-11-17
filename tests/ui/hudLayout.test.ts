@@ -21,7 +21,7 @@ interface SceneOpts {
   hintW: number;
 }
 
-/** Boxes as the stylesheet lays them out (helm at its unscaled 300 x 176 size). */
+/** Boxes as the stylesheet lays them out (helm at its measured, unscaled 300 x 163 size). */
 function scene(vw: number, vh: number, o: SceneOpts): HudLayoutInput {
   const slot = clamp(Math.min((vw - 56) / 9, 0.044 * vh + 22), 30, 92);
   const g = clamp(slot * 0.09, 3, 8);
@@ -46,7 +46,7 @@ function scene(vw: number, vh: number, o: SceneOpts): HudLayoutInput {
     cluster,
     center: centerZone(cross, hint, { w: 300, h: 34 }, vw, 5),
     debug: o.debug ? { x: 8, y: 8, w: Math.min(330, vw - 16), h: 95 } : null,
-    helm: { w: 300, h: 176, scale: base, minScale: 0.7, right: margin, top: margin, bottom: margin },
+    helm: { w: 300, h: 163, scale: base, minScale: 0.62, right: margin, top: margin, bottom: margin },
     banner: o.drag ? { x: (vw - bannerW) / 2, y: 14, w: bannerW, h: 52 } : null,
     toasts: { x: vw - 12 - toastW, y: 12, w: toastW, h: o.toasts * 46 },
   };
@@ -77,7 +77,7 @@ describe('layoutHud: the helm instrument', () => {
           expect(inside(helm.rect, vw, vh), JSON.stringify(helm.rect)).toBe(true);
           expect(intersects(helm.rect, inp.cluster!), `cluster ${JSON.stringify(helm)}`).toBe(false);
           expect(intersects(helm.rect, inp.center!), `centre ${JSON.stringify(helm)}`).toBe(false);
-          expect(helm.scale).toBeGreaterThanOrEqual(0.7);
+          expect(helm.scale).toBeGreaterThanOrEqual(0.62);
         });
       }
     }

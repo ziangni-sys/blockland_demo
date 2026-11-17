@@ -1,18 +1,23 @@
 /**
- * Per-tick view of the structures as the entities see them: world bounds, the pose at the
- * start of the tick (prev) and now (cur), and the heading change in between.
+ * Per-tick view of the structures as the entities see them: world bounds, the current pose,
+ * and two earlier poses:
  *
- * Built once per tick after the structures moved (syncCarried / update), so every entity
- * reads the same poses and nothing is recomputed per entity.
+ *  - the VELOCITY base (p0 / q0 / pivot0): the pose at the end of the previous entity tick
+ *    (committed by EntityManager.update()). pointVelocity(), `moved` and `dyaw` measure the
+ *    motion from it, so every query in a tick sees the structure's real velocity over that tick.
+ *  - the CARRY base (c0 / cq0 / cpivot0): the pose at the previous carry (the previous
+ *    syncCarried()). carryPoint() and `carryDyaw` move riders from it to the current pose, so a
+ *    second syncCarried() in the same tick, or one between two ticks (LESSONS 打开界面：把被携带
+ *    的玩家同步到结构体当前位置), carries only motion that really happened since the last carry:
+ *    nothing is carried twice and nothing is lost.
+ *
+ * Both bases are poses THIS CACHE remembered, not the grid's own prevPosition / prevRotation:
+ * riders then follow exactly the motion that happened between two entity ticks even if some
+ * structure skipped snapshotPose() (a sleeping ship), entity ticks were skipped, or a pose was
+ * nudged with setPoseImmediate(). A structure seen for the first time uses renderPose(0).
  *
  * Pose convention (StructureGrid.renderPose): world = p + rotate(q, local - pivot), with p / q
- * the composed WORLD pose (parents included). cur = renderPose(1).
- *
- * prev is the pose THIS CACHE saw at the end of the previous entity tick, not the grid's own
- * prevPosition / prevRotation: riders then follow exactly the motion that happened between two
- * entity ticks even if some structure skipped snapshotPose() (a sleeping ship), entity ticks
- * were skipped, or a pose was nudged with setPoseImmediate(). A structure seen for the first
- * time uses renderPose(0).
+ * the composed WORLD pose (parents included). The current pose is renderPose(1).
  */
 import { TICK_DT } from '../core/constants';
 import { qconj, qmul, qrotate, qrotateInv, quat, vec3, wrapAngle, type AABB, type Quat, type Vec3 } from '../core/math';
@@ -36,32 +41,45 @@ export class StructRec {
   maxX = 0;
   maxY = 0;
   maxZ = 0;
-  /** World pose at the previous entity tick (with its pivot) / now. */
+  /** Velocity base: world pose (with its pivot) at the end of the previous entity tick. */
   readonly p0: Vec3 = vec3();
   readonly q0: Quat = quat();
   readonly pivot0: Vec3 = vec3();
+  /** Carry base: world pose (with its pivot) at the previous carry. */
+  readonly c0: Vec3 = vec3();
+  readonly cq0: Quat = quat();
+  readonly cpivot0: Vec3 = vec3();
+  /** Current world pose. */
   readonly p1: Vec3 = vec3();
   readonly q1: Quat = quat();
   readonly pivot: Vec3 = vec3();
-  /** The pose changed this tick. */
+  /** The pose changed since the velocity base (it moves this tick). */
   moved = false;
-  /** Heading change this tick about world +Y (twist of q1 * q0^-1), radians, CCW from above. */
+  /** Heading change since the velocity base, about world +Y, radians, CCW from above. */
   dyaw = 0;
+  /** The pose changed since the carry base (riders must be carried). */
+  carryMoved = false;
+  /** Heading change since the carry base (riders turn by it). */
+  carryDyaw = 0;
+  /** World direction of the structure's local +X projected on the horizontal plane, normalised
+   *  (its heading; falls back to world +X for a structure standing on its side). */
+  headX = 1;
+  headZ = 0;
 }
 
-/** World point -> local point at the previous pose. `out` may alias `p`. */
-export function prevToLocal(r: StructRec, p: Vec3, out: Vec3): Vec3 {
-  out.x = p.x - r.p0.x;
-  out.y = p.y - r.p0.y;
-  out.z = p.z - r.p0.z;
-  qrotateInv(r.q0, out, out);
-  out.x += r.pivot0.x;
-  out.y += r.pivot0.y;
-  out.z += r.pivot0.z;
+/** World point -> local point at the carry base. `out` may alias `p`. */
+function carryBaseToLocal(r: StructRec, p: Vec3, out: Vec3): Vec3 {
+  out.x = p.x - r.c0.x;
+  out.y = p.y - r.c0.y;
+  out.z = p.z - r.c0.z;
+  qrotateInv(r.cq0, out, out);
+  out.x += r.cpivot0.x;
+  out.y += r.cpivot0.y;
+  out.z += r.cpivot0.z;
   return out;
 }
-/** Local point -> world point at the previous pose. */
-export function prevToWorld(r: StructRec, l: Vec3, out: Vec3): Vec3 {
+/** Local point -> world point at the velocity base. `out` may alias `l`. */
+function velBaseToWorld(r: StructRec, l: Vec3, out: Vec3): Vec3 {
   out.x = l.x - r.pivot0.x;
   out.y = l.y - r.pivot0.y;
   out.z = l.z - r.pivot0.z;
@@ -71,7 +89,7 @@ export function prevToWorld(r: StructRec, l: Vec3, out: Vec3): Vec3 {
   out.z += r.p0.z;
   return out;
 }
-/** World point -> local point at the current pose. */
+/** World point -> local point at the current pose. `out` may alias `p`. */
 export function curToLocal(r: StructRec, p: Vec3, out: Vec3): Vec3 {
   out.x = p.x - r.p1.x;
   out.y = p.y - r.p1.y;
@@ -82,7 +100,7 @@ export function curToLocal(r: StructRec, p: Vec3, out: Vec3): Vec3 {
   out.z += r.pivot.z;
   return out;
 }
-/** Local point -> world point at the current pose. */
+/** Local point -> world point at the current pose. `out` may alias `l`. */
 export function curToWorld(r: StructRec, l: Vec3, out: Vec3): Vec3 {
   out.x = l.x - r.pivot.x;
   out.y = l.y - r.pivot.y;
@@ -93,9 +111,9 @@ export function curToWorld(r: StructRec, l: Vec3, out: Vec3): Vec3 {
   out.z += r.p1.z;
   return out;
 }
-/** Where this tick's motion of the structure takes a world point that moved with it. */
+/** Where the structure's motion since the last carry takes a world point that moved with it. */
 export function carryPoint(r: StructRec, p: Vec3, out: Vec3): Vec3 {
-  return curToWorld(r, prevToLocal(r, p, out), out);
+  return curToWorld(r, carryBaseToLocal(r, p, out), out);
 }
 /** World velocity (blocks/s) over this tick of the structure's material now at world point p. */
 export function pointVelocity(r: StructRec, p: Vec3, out: Vec3): Vec3 {
@@ -105,7 +123,7 @@ export function pointVelocity(r: StructRec, p: Vec3, out: Vec3): Vec3 {
     out.z = 0;
     return out;
   }
-  prevToWorld(r, curToLocal(r, p, out), out);
+  velBaseToWorld(r, curToLocal(r, p, out), out);
   out.x = (p.x - out.x) / TICK_DT;
   out.y = (p.y - out.y) / TICK_DT;
   out.z = (p.z - out.z) / TICK_DT;
@@ -123,6 +141,20 @@ function copy4(out: Quat, q: Quat): void {
   out.z = q.z;
   out.w = q.w;
 }
+function samePose(pa: Vec3, qa: Quat, va: Vec3, pb: Vec3, qb: Quat, vb: Vec3): boolean {
+  return (
+    qa.x === qb.x &&
+    qa.y === qb.y &&
+    qa.z === qb.z &&
+    qa.w === qb.w &&
+    pa.x === pb.x &&
+    pa.y === pb.y &&
+    pa.z === pb.z &&
+    va.x === vb.x &&
+    va.y === vb.y &&
+    va.z === vb.z
+  );
+}
 
 /** Strict AABB overlap of a box (grown by `margin`) with a record's world bounds. */
 export function boxNearRec(b: AABB, r: StructRec, margin: number): boolean {
@@ -136,11 +168,19 @@ export function boxNearRec(b: AABB, r: StructRec, margin: number): boolean {
   );
 }
 
-/** A structure's world pose as last seen by the cache. */
-class PoseSnap {
+/** A remembered world pose. */
+class Pose {
   readonly p: Vec3 = vec3();
   readonly q: Quat = quat();
   readonly pivot: Vec3 = vec3();
+}
+
+/** What the cache remembers about one structure between rebuilds. */
+class PoseSnap {
+  /** Pose at the last carry (rebuild). */
+  readonly carry = new Pose();
+  /** Pose at the last commit (end of an entity tick). */
+  readonly vel = new Pose();
   /** rebuild() generation that last saw the structure. */
   seen = 0;
 }
@@ -150,7 +190,7 @@ export class StructureCache {
   readonly recs: StructRec[] = [];
   private readonly byId = new Map<number, StructRec>();
   private readonly pool: StructRec[] = [];
-  /** Pose of every structure at the end of the previous rebuild (see the file comment). */
+  /** Remembered poses of every structure (see the file comment). */
   private readonly last = new Map<number, PoseSnap>();
   private generation = 0;
   private readonly tmp: Vec3 = vec3();
@@ -160,7 +200,7 @@ export class StructureCache {
     return this.byId.get(id);
   }
 
-  /** Forget the remembered pose of a structure (it was re-gridded: its riders were released). */
+  /** Forget the remembered poses of a structure (it was re-gridded: its riders were released). */
   forget(id: number): void {
     this.last.delete(id);
   }
@@ -172,6 +212,10 @@ export class StructureCache {
     this.byId.clear();
   }
 
+  /**
+   * Read every structure's current pose. The carry base becomes the pose of the previous
+   * rebuild; the velocity base stays at the last commit().
+   */
   rebuild(structures: readonly Structure[]): void {
     const recs = this.recs;
     recs.length = 0;
@@ -198,41 +242,46 @@ export class StructureCache {
       for (let p = s.parent; p !== null && depth < 8; p = p.parent) depth++;
       r.depth = depth;
       s.grid.renderPose(1, r.p1, r.q1);
-      r.pivot.x = s.grid.pivot.x;
-      r.pivot.y = s.grid.pivot.y;
-      r.pivot.z = s.grid.pivot.z;
+      copy3(r.pivot, s.grid.pivot);
       let snap = this.last.get(r.id);
-      if (snap !== undefined) {
-        copy3(r.p0, snap.p);
-        copy4(r.q0, snap.q);
-        copy3(r.pivot0, snap.pivot);
-      } else {
-        s.grid.renderPose(0, r.p0, r.q0);
-        copy3(r.pivot0, r.pivot);
+      if (snap === undefined) {
         snap = new PoseSnap();
+        s.grid.renderPose(0, snap.carry.p, snap.carry.q);
+        copy3(snap.carry.pivot, r.pivot);
+        copy3(snap.vel.p, snap.carry.p);
+        copy4(snap.vel.q, snap.carry.q);
+        copy3(snap.vel.pivot, r.pivot);
         this.last.set(r.id, snap);
       }
-      copy3(snap.p, r.p1);
-      copy4(snap.q, r.q1);
-      copy3(snap.pivot, r.pivot);
+      copy3(r.p0, snap.vel.p);
+      copy4(r.q0, snap.vel.q);
+      copy3(r.pivot0, snap.vel.pivot);
+      copy3(r.c0, snap.carry.p);
+      copy4(r.cq0, snap.carry.q);
+      copy3(r.cpivot0, snap.carry.pivot);
+      copy3(snap.carry.p, r.p1);
+      copy4(snap.carry.q, r.q1);
+      copy3(snap.carry.pivot, r.pivot);
       snap.seen = gen;
       // Conservative: a pivot move (centre of mass changed) also counts, although no cell moved;
-      // the carry transform itself is exact either way.
-      r.moved =
-        r.q0.x !== r.q1.x ||
-        r.q0.y !== r.q1.y ||
-        r.q0.z !== r.q1.z ||
-        r.q0.w !== r.q1.w ||
-        r.p0.x !== r.p1.x ||
-        r.p0.y !== r.p1.y ||
-        r.p0.z !== r.p1.z ||
-        r.pivot0.x !== r.pivot.x ||
-        r.pivot0.y !== r.pivot.y ||
-        r.pivot0.z !== r.pivot.z;
-      // Twist about world Y of the rotation delta (swing-twist decomposition). Unlike the
-      // heading of local -Z it stays ~0 for a windmill turning about a horizontal axis.
-      const dq = qmul(r.q1, qconj(r.q0, this.tmpQ), this.tmpQ);
-      r.dyaw = r.moved ? wrapAngle(2 * Math.atan2(dq.y, dq.w)) : 0;
+      // the transforms themselves are exact either way.
+      r.moved = !samePose(r.p0, r.q0, r.pivot0, r.p1, r.q1, r.pivot);
+      r.carryMoved = !samePose(r.c0, r.cq0, r.cpivot0, r.p1, r.q1, r.pivot);
+      r.dyaw = r.moved ? this.twist(r.q1, r.q0) : 0;
+      r.carryDyaw = r.carryMoved ? this.twist(r.q1, r.cq0) : 0;
+      const hx = this.tmp;
+      hx.x = 1;
+      hx.y = 0;
+      hx.z = 0;
+      qrotate(r.q1, hx, hx);
+      const hl = Math.sqrt(hx.x * hx.x + hx.z * hx.z);
+      if (hl > 1e-6) {
+        r.headX = hx.x / hl;
+        r.headZ = hx.z / hl;
+      } else {
+        r.headX = 1;
+        r.headZ = 0;
+      }
       this.bounds(r, b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ);
       recs.push(r);
       this.byId.set(r.id, r);
@@ -247,6 +296,26 @@ export class StructureCache {
     if (this.last.size > recs.length) {
       for (const [id, snap] of this.last) if (snap.seen !== gen) this.last.delete(id);
     }
+  }
+
+  /** End of an entity tick: the current poses become the velocity base of the next tick. */
+  commit(): void {
+    const recs = this.recs;
+    for (let i = 0; i < recs.length; i++) {
+      const r = recs[i]!;
+      const snap = this.last.get(r.id);
+      if (snap === undefined) continue; // forgotten (released) during the tick
+      copy3(snap.vel.p, r.p1);
+      copy4(snap.vel.q, r.q1);
+      copy3(snap.vel.pivot, r.pivot);
+    }
+  }
+
+  /** Twist about world Y of q1 * q0^-1 (swing-twist decomposition). Unlike the heading of local
+   *  -Z it stays ~0 for a windmill turning about a horizontal axis. */
+  private twist(q1: Quat, q0: Quat): number {
+    const dq = qmul(q1, qconj(q0, this.tmpQ), this.tmpQ);
+    return wrapAngle(2 * Math.atan2(dq.y, dq.w));
   }
 
   private bounds(r: StructRec, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {

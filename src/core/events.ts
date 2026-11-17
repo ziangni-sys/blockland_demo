@@ -4,17 +4,17 @@ export class Emitter<T> {
 
   /** Subscribe; returns an unsubscribe function. */
   on(fn: (e: T) => void): () => void {
-    this.handlers.push(fn);
+    // Copy-on-write: an emit in progress keeps iterating the array it started with.
+    this.handlers = [...this.handlers, fn];
     return () => {
-      const i = this.handlers.indexOf(fn);
-      if (i >= 0) this.handlers.splice(i, 1);
+      this.handlers = this.handlers.filter((f) => f !== fn);
     };
   }
   emit(e: T): void {
-    // Copy-free iteration that tolerates unsubscription during emit.
-    for (let i = 0; i < this.handlers.length; i++) this.handlers[i]!(e);
+    const hs = this.handlers;
+    for (let i = 0; i < hs.length; i++) hs[i]!(e);
   }
   clear(): void {
-    this.handlers.length = 0;
+    this.handlers = [];
   }
 }

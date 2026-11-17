@@ -1,28 +1,34 @@
 /**
  * Moving one entity body through the world and around structures (steps b–d of the entity
- * pipeline). Every query goes through the voxel query module (voxel/shape.ts) with the one
- * body box (Entity.box()); see constants.ts for the probe definitions.
+ * pipeline). Every collision query goes through the voxel query module (voxel/shape.ts) with
+ * the one body box (Entity.box()); see constants.ts for the probe definitions.
  *
  * Priorities (docs/DESIGN.md 对象模型): hard blocks > structures > entities.
  *  - The entity's OWN motion is swept exactly against the world: it can never walk into a
- *    world block, whatever its carrier does (LESSONS 在船上贴墙走被判挤伤).
+ *    world block, whatever its carrier does (LESSONS 在船上贴墙走被判挤伤). A body on the
+ *    ground steps up onto a world ledge of at most STEP_HEIGHT (a deck floating a little below
+ *    a pier).
  *  - Structures then push the body out of their solid cells, one axis at a time; an axis that
  *    would put the body NEWLY into the world or into ANOTHER structure is not applied
- *    (LESSONS 被风车沿船舷推时误判挤伤).
+ *    (LESSONS 被风车沿船舷推时误判挤伤) — except that dipping into another structure's FLOOR
+ *    (a deck that rolls a little) lifts the body onto it instead.
  *  - If a structure still overlaps the body and the body did not overlap it before its own
  *    motion, the body walked into it by itself: that motion is taken back axis by axis.
  *    Only an overlap that remains although the body did not move into it is a crush.
  *
  * All scratch state lives on the instance (no module-level temporaries).
  */
-import { aabb, vec3, type AABB, type Vec3 } from '../core/math';
-import { boxOverlapsSolid, deepestPenetration, hasSupportBelow, sweepAxis, type PushOptions } from '../voxel/shape';
+import { SOLID } from '../blocks/registry';
+import { ID_MASK } from '../blocks/cell';
+import { aabb, qrotateInv, vec3, type AABB, type Vec3 } from '../core/math';
+import { boxOverlapsSolid, CONTACT_EPS, deepestPenetration, hasSupportBelow, sweepAxis, type PushOptions } from '../voxel/shape';
 import type { World } from '../voxel/world';
 import {
   ATTACH_INSET,
   ATTACH_INSET_MAX_FRACTION,
   GROUND_NORMAL_Y,
   MAX_PUSH_ITERATIONS,
+  MAX_PUSH_LIFT,
   MAX_SUBSTEP,
   MAX_SUBSTEPS,
   MIN_PUSH_PROJECTION_SQ,
@@ -30,11 +36,14 @@ import {
   PREFER_MIN_SPEED,
   PREFER_WEIGHT,
   PUSH_SKIN,
+  SNEAK_DISK_MARGIN,
+  SNEAK_LADDER_STEP,
   SNEAK_PROBE_DEPTH,
   SNEAK_STEP,
+  STEP_HEIGHT,
 } from './constants';
 import type { Entity } from './entity';
-import { boxNearRec, pointVelocity, type StructRec } from './structs';
+import { boxNearRec, curToLocal, pointVelocity, type StructRec } from './structs';
 
 /** Footprint inset of the attach / column probes for this body (always > 0, < half width). */
 export function attachInset(e: Entity): number {
@@ -79,18 +88,43 @@ function copyBox(src: AABB, out: AABB): AABB {
 
 const AXIS_BIT = [1, 2, 4] as const;
 
+/**
+ * Sneak-guard disk: point probes as fractions of the disk radius, interleaved (x, z) pairs.
+ * The centre first, then the rim (where an edge is found first), then two inner rings so a
+ * thin support (a one-cell rail) inside the disk is not missed. Immutable lookup table.
+ */
+const DISK_PATTERN: readonly number[] = Object.freeze(
+  (() => {
+    const out: number[] = [0, 0];
+    const rings: Array<[number, number, number]> = [
+      [1, 16, 0],
+      [2 / 3, 12, 0.5],
+      [1 / 3, 6, 0.25],
+    ];
+    for (const [f, n, phase] of rings) {
+      for (let i = 0; i < n; i++) {
+        const a = ((i + phase) * 2 * Math.PI) / n;
+        out.push(f * Math.cos(a), f * Math.sin(a));
+      }
+    }
+    return out;
+  })(),
+);
+/** Vertical sample spacing of a point probe through a structure's cells. */
+const POINT_PROBE_STEP = 0.1;
+
 export class Mover {
   /** Structures near the current entity, innermost first. Filled by the manager before move(). */
   readonly near: StructRec[] = [];
 
   // ---- results of the last move()
-  /** A downward world sweep was stopped: standing on a world block. */
+  /** A downward world sweep was stopped (or a step-up landed): standing on a world block. */
   onWorldGround = false;
   /** Innermost structure that gave ground support (a push with normal.y > GROUND_NORMAL_Y), or null. */
   groundRec: StructRec | null = null;
   /** A horizontal move was stopped by the world. */
   collidedH = false;
-  /** Horizontal contact normal (world walls and structure sides), 0,0 = none. */
+  /** Horizontal contact normal of the WORLD walls that stopped the body (0,0 = none). */
   contactNx = 0;
   contactNz = 0;
   /** The structure pushes of this move were blocked somewhere (diagnostics / tests). */
@@ -106,9 +140,13 @@ export class Mover {
   private movedZ = 0;
   private groundStep = false;
   private ceilingStep = false;
+  /** The body may step up onto world ledges in this move (it walks and stood on something). */
+  private canStep = false;
   /** overlapRec holds the overlap state of the body as it is now (set by revertOwnMotion). */
   private overlapValid = false;
   private overlapRec: StructRec | null = null;
+  /** Structure whose floor the last applyPush() lifted the body onto, or null. */
+  private liftRec: StructRec | null = null;
   // sneak guard output
   private clipX = 0;
   private clipZ = 0;
@@ -116,10 +154,13 @@ export class Mover {
   private readonly box: AABB = aabb();
   private readonly box0: AABB = aabb();
   private readonly tb: AABB = aabb();
+  private readonly sb: AABB = aabb();
   private readonly cand: AABB = aabb();
   private readonly startBox: AABB = aabb();
   private readonly v: Vec3 = vec3();
   private readonly c: Vec3 = vec3();
+  private readonly lp: Vec3 = vec3();
+  private readonly ld: Vec3 = vec3();
   private readonly prefer: Vec3 = vec3();
   private readonly opts: PushOptions = { prefer: this.prefer, preferWeight: PREFER_WEIGHT };
   /** Per near index: did the body overlap it before the current push / at the sub-step start? -1 unknown. */
@@ -133,9 +174,10 @@ export class Mover {
   /**
    * Move `e` by its own displacement (dx, dy, dz) this tick. `rel` is its velocity relative to
    * its carrier (world axes); blocked components are cancelled in it. With `sneakGuard` the
-   * horizontal displacement is first shortened so the body keeps support below.
+   * horizontal displacement is first shortened so the body keeps standing. With `walker` a body
+   * that stands on something steps up onto world ledges of at most STEP_HEIGHT.
    */
-  move(e: Entity, rel: Vec3, dx: number, dy: number, dz: number, sneakGuard: boolean): void {
+  move(e: Entity, rel: Vec3, dx: number, dy: number, dz: number, sneakGuard: boolean, walker: boolean): void {
     this.onWorldGround = false;
     this.groundRec = null;
     this.collidedH = false;
@@ -153,6 +195,7 @@ export class Mover {
       dx = this.clipX;
       dz = this.clipZ;
     }
+    const wasOnGround = e.onGround;
     const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
     let steps = len > MAX_SUBSTEP ? Math.ceil(len / MAX_SUBSTEP) : 1;
     if (steps > MAX_SUBSTEPS) steps = MAX_SUBSTEPS;
@@ -173,6 +216,8 @@ export class Mover {
       // turn into a wall for those few hundredths of a block.
       const resolvedY = n !== 0 && this.movedY !== 0;
       if (resolvedY) this.resolveStructures(e, rel);
+      // Only a body that stands on something steps up (never a falling or rising one).
+      this.canStep = walker && (wasOnGround || this.onWorldGround || this.groundStep) && rel.y <= 0;
       this.sweepWorldXZ(e, rel, sx, sz);
       if (this.blockedX) sx = 0;
       if (this.blockedY) sy = 0;
@@ -223,6 +268,18 @@ export class Mover {
     return false;
   }
 
+  /** Is the box supported (probe of `depth`, `inset`) by a near STRUCTURE (the world is not asked)? */
+  supportedByStructure(b: AABB, depth: number, inset: number): boolean {
+    const near = this.near;
+    for (let k = 0; k < near.length; k++) {
+      const r = near[k]!;
+      if (b.minX < r.maxX && b.maxX > r.minX && b.minZ < r.maxZ && b.maxZ > r.minZ && b.minY - depth < r.maxY && b.minY > r.minY) {
+        if (hasSupportBelow(r.grid, b, depth, inset)) return true;
+      }
+    }
+    return false;
+  }
+
   // ------------------------------------------------------------ b. world
 
   private sweepWorldY(e: Entity, rel: Vec3, dy: number): void {
@@ -241,11 +298,10 @@ export class Mover {
     this.movedY = m;
   }
 
-  private sweepWorldXZ(e: Entity, rel: Vec3, dx: number, dz: number): void {
+  /** Horizontal world sweeps of `b` (larger component first). Returns a bit mask of the blocked axes (1 x, 4 z). */
+  private sweepXZ(b: AABB, dx: number, dz: number): number {
     const world = this.world;
-    const b = e.box(this.box);
-    this.blockedX = false;
-    this.blockedZ = false;
+    let blocked = 0;
     this.movedX = 0;
     this.movedZ = 0;
     // Larger horizontal component first: moving the minor axis first is what snags corners.
@@ -255,27 +311,81 @@ export class Mover {
       const d = axis === 0 ? dx : dz;
       if (d === 0) continue;
       const m = sweepAxis(world, b, axis as 0 | 2, d);
-      if (m !== d) {
-        this.collidedH = true;
-        if (axis === 0) {
-          this.blockedX = true;
-          this.contactNx = d > 0 ? -1 : 1;
-          rel.x = -e.carrierVel.x;
-        } else {
-          this.blockedZ = true;
-          this.contactNz = d > 0 ? -1 : 1;
-          rel.z = -e.carrierVel.z;
-        }
-      }
+      if (m !== d) blocked |= AXIS_BIT[axis as 0 | 2];
       translateAxis(b, axis, m);
-      if (axis === 0) {
-        e.pos.x += m;
-        this.movedX = m;
-      } else {
-        e.pos.z += m;
-        this.movedZ = m;
+      if (axis === 0) this.movedX = m;
+      else this.movedZ = m;
+    }
+    return blocked;
+  }
+
+  private sweepWorldXZ(e: Entity, rel: Vec3, dx: number, dz: number): void {
+    this.blockedX = false;
+    this.blockedZ = false;
+    if (dx === 0 && dz === 0) {
+      this.movedX = 0;
+      this.movedZ = 0;
+      return;
+    }
+    const b = e.box(this.box);
+    let blocked = this.sweepXZ(b, dx, dz);
+    if (blocked !== 0 && this.canStep) blocked = this.tryStepUp(e, rel, dx, dz, blocked);
+    else {
+      e.pos.x += this.movedX;
+      e.pos.z += this.movedZ;
+    }
+    if (blocked & 1) {
+      this.collidedH = true;
+      this.blockedX = true;
+      this.contactNx = dx > 0 ? -1 : 1;
+      rel.x = -e.carrierVel.x;
+    }
+    if (blocked & 4) {
+      this.collidedH = true;
+      this.blockedZ = true;
+      this.contactNz = dz > 0 ? -1 : 1;
+      rel.z = -e.carrierVel.z;
+    }
+  }
+
+  /**
+   * The plain horizontal sweep (movedX / movedZ, `blocked`) was stopped: retry it lifted by up
+   * to STEP_HEIGHT and settle back down. The stepped move wins when it gets farther; landing on
+   * a world block then counts as standing on the world (a deck walked off onto a pier detaches).
+   * Applies the chosen move to e.pos and returns its blocked axes.
+   */
+  private tryStepUp(e: Entity, rel: Vec3, dx: number, dz: number, blocked: number): number {
+    const plainX = this.movedX;
+    const plainZ = this.movedZ;
+    const world = this.world;
+    const tb = e.box(this.tb);
+    const up = sweepAxis(world, tb, 1, STEP_HEIGHT);
+    if (up > 1e-6) {
+      translateAxis(tb, 1, up);
+      const stepBlocked = this.sweepXZ(tb, dx, dz);
+      const sx = this.movedX;
+      const sz = this.movedZ;
+      if (sx * sx + sz * sz > plainX * plainX + plainZ * plainZ + 1e-12) {
+        const down = sweepAxis(world, tb, 1, -up);
+        translateAxis(tb, 1, down);
+        e.pos.x += sx;
+        e.pos.z += sz;
+        // The box's own minY: exactly the ledge top when it landed (no accumulated rounding).
+        const dyStep = tb.minY - e.pos.y;
+        e.pos.y = tb.minY;
+        this.movedY += dyStep;
+        if (down !== -up) {
+          this.onWorldGround = true;
+          rel.y = -e.carrierVel.y;
+        }
+        return stepBlocked;
       }
     }
+    this.movedX = plainX;
+    this.movedZ = plainZ;
+    e.pos.x += plainX;
+    e.pos.z += plainZ;
+    return blocked;
   }
 
   // ------------------------------------------------------------ c. structures
@@ -329,11 +439,13 @@ export class Mover {
             this.ceilingStep = true;
           } else {
             this.cancelInto(e, rel, r, nx, ny, nz);
-            const h = Math.sqrt(nx * nx + nz * nz);
-            if (h > 0.5) {
-              this.contactNx = nx / h;
-              this.contactNz = nz / h;
-            }
+          }
+          const lr = this.liftRec;
+          if (lr !== null) {
+            // The push lifted the body onto another structure's floor: it stands on it.
+            this.cancelInto(e, rel, lr, 0, 1, 0);
+            this.groundStep = true;
+            if (this.groundRec === null) this.groundRec = lr;
           }
         }
       }
@@ -346,9 +458,11 @@ export class Mover {
    * rescaled so the face is still cleared (an axis that is refused does not shrink the push
    * into an endless series of ever smaller steps). Axes are tried largest first; one that
    * would put the body newly into the world or another structure is dropped and the push is
-   * recomputed without it. Returns false when no admissible push remains.
+   * recomputed without it. Returns false when no admissible push remains. Sets liftRec when the
+   * push also lifted the body onto another structure's floor (see admitOthers).
    */
   private applyPush(e: Entity, r: StructRec, nx: number, ny: number, nz: number, depth: number, mask: number): boolean {
+    this.liftRec = null;
     const b0 = e.box(this.box0);
     this.beforeOverlap.fill(-1, 0, this.near.length);
     const world = this.world;
@@ -400,6 +514,8 @@ export class Mover {
         }
       }
       let failed = -1;
+      let lift = 0;
+      this.liftRec = null;
       for (let i = 0; i < 3; i++) {
         const a = i === 0 ? a0 : i === 1 ? a1 : a2;
         const t = a === 0 ? tx : a === 1 ? ty : tz;
@@ -410,24 +526,54 @@ export class Mover {
           break;
         }
         translateAxis(tb, a, t);
-        if (this.newlyOverlapsOther(tb, b0, r)) {
+        const l = this.admitOthers(tb, b0, r);
+        if (l < 0) {
           failed = a;
           break;
         }
+        lift += l;
       }
       if (failed < 0) {
         e.pos.x += tx;
-        e.pos.y += ty;
+        e.pos.y += ty + lift;
         e.pos.z += tz;
         return true;
       }
       mask &= ~AXIS_BIT[failed as 0 | 1 | 2];
-      if (mask === 0) return false;
+      if (mask === 0) break;
     }
+    this.liftRec = null;
     return false;
   }
 
-  private newlyOverlapsOther(tb: AABB, b0: AABB, r: StructRec): boolean {
+  /**
+   * The trial box `tb` of a push by structure r: does it newly overlap ANOTHER structure
+   * (overlaps that existed before the push, in b0, do not count)? A shallow dip into another
+   * structure's floor — the push slides the body along a deck that rolls or pitches a little —
+   * is not a wall: tb is lifted onto that floor (a ground push, at most MAX_PUSH_LIFT, never into
+   * the world). Returns the lift applied to tb (>= 0), or -1 when the box would newly enter
+   * another structure. Without this a blade pushing a rider uphill along a gently rolling deck
+   * was refused and judged a crush (review finding; DESIGN 实体被挤: only 推不动 is a crush).
+   */
+  private admitOthers(tb: AABB, b0: AABB, r: StructRec): number {
+    let lift = 0;
+    for (let guard = 0; guard < 3; guard++) {
+      const o = this.newOverlap(tb, b0, r);
+      if (o === null) return lift;
+      const pen = deepestPenetration(o.grid, tb);
+      if (pen === null || !(pen.ny > GROUND_NORMAL_Y)) return -1;
+      const l = pen.depth / pen.ny + PUSH_SKIN;
+      if (!(lift + l <= MAX_PUSH_LIFT)) return -1;
+      if (sweepAxis(this.world, tb, 1, l) !== l) return -1;
+      translateAxis(tb, 1, l);
+      lift += l;
+      if (this.liftRec === null) this.liftRec = o;
+    }
+    return this.newOverlap(tb, b0, r) === null ? lift : -1;
+  }
+
+  /** First structure other than r that tb overlaps although b0 did not, or null. */
+  private newOverlap(tb: AABB, b0: AABB, r: StructRec): StructRec | null {
     const near = this.near;
     for (let j = 0; j < near.length; j++) {
       const o = near[j]!;
@@ -439,9 +585,9 @@ export class Mover {
         this.beforeOverlap[j] = before;
       }
       // An overlap that already existed before the push does not count.
-      if (before === 0) return true;
+      if (before === 0) return o;
     }
-    return false;
+    return null;
   }
 
   /** Remove the part of the velocity relative to structure r that points into the surface (normal n). */
@@ -589,41 +735,115 @@ export class Mover {
   // ------------------------------------------------------------ sneak guard
 
   /**
-   * Shorten a horizontal step so the body keeps support (world or any structure) within
-   * SNEAK_PROBE_DEPTH under its inset footprint. Uses the ATTACH inset on purpose: a sneaking
-   * player stopped at a deck edge is always still attachable to that deck (LESSONS 潜行走到
-   * 甲板边缘掉下去). Only engages when the body is supported now.
+   * Shorten a horizontal step so a sneaking body keeps standing (LESSONS 潜行走到甲板边缘掉
+   * 下去, ACCEPTANCE 19). Engaged whenever the body sneaks on the ground — it never switches
+   * itself off.
+   *
+   * The probe is the guard disk (radius half width - SNEAK_DISK_MARGIN, see constants.ts),
+   * sampled in every support's own heading, so its verdict does not change while a deck yaws
+   * under the body. A step is accepted when the disk stays supported after it. A body that
+   * already stands outside its guard disk (it walked to the edge, then started sneaking) may
+   * still move, but never farther from its support: its disk radius is the smallest of a
+   * ladder of larger disks that is supported now, and its box must keep standing.
    */
   private clipSneak(e: Entity, dx: number, dz: number): void {
     this.clipX = dx;
     this.clipZ = dz;
-    const inset = attachInset(e);
-    const b = e.box(this.box);
-    if (!this.supported(b, SNEAK_PROBE_DEPTH, inset)) return;
-    const tb = this.tb;
+    const cx = e.pos.x;
+    const cy = e.pos.y;
+    const cz = e.pos.z;
+    let rad = e.halfWidth - SNEAK_DISK_MARGIN;
+    if (!(rad > 0)) rad = e.halfWidth * 0.5;
+    let band = false;
+    if (!this.diskSupported(cx, cy, cz, rad)) {
+      band = true;
+      const maxR = e.halfWidth * Math.SQRT2 + SNEAK_LADDER_STEP;
+      let found = -1;
+      for (let k = 1; rad + k * SNEAK_LADDER_STEP <= maxR + 1e-9; k++) {
+        const r2 = rad + k * SNEAK_LADDER_STEP;
+        if (this.diskSupported(cx, cy, cz, r2)) {
+          found = r2;
+          break;
+        }
+      }
+      if (found < 0) return; // nothing under the body within the probe: nothing to keep it on
+      rad = found;
+    }
     const step = SNEAK_STEP;
     let guard = 0;
     while (dx !== 0 && guard++ < 200) {
-      copyBox(b, tb);
-      translateAxis(tb, 0, dx);
-      if (this.supported(tb, SNEAK_PROBE_DEPTH, inset)) break;
+      if (this.stepKeepsSupport(e, dx, 0, rad, band)) break;
       dx = Math.abs(dx) <= step ? 0 : dx - Math.sign(dx) * step;
     }
     while (dz !== 0 && guard++ < 400) {
-      copyBox(b, tb);
-      translateAxis(tb, 2, dz);
-      if (this.supported(tb, SNEAK_PROBE_DEPTH, inset)) break;
+      if (this.stepKeepsSupport(e, 0, dz, rad, band)) break;
       dz = Math.abs(dz) <= step ? 0 : dz - Math.sign(dz) * step;
     }
     while (dx !== 0 && dz !== 0 && guard++ < 600) {
-      copyBox(b, tb);
-      translateAxis(tb, 0, dx);
-      translateAxis(tb, 2, dz);
-      if (this.supported(tb, SNEAK_PROBE_DEPTH, inset)) break;
+      if (this.stepKeepsSupport(e, dx, dz, rad, band)) break;
       dx = Math.abs(dx) <= step ? 0 : dx - Math.sign(dx) * step;
       dz = Math.abs(dz) <= step ? 0 : dz - Math.sign(dz) * step;
     }
     this.clipX = dx;
     this.clipZ = dz;
+  }
+
+  private stepKeepsSupport(e: Entity, dx: number, dz: number, rad: number, band: boolean): boolean {
+    const x = e.pos.x + dx;
+    const z = e.pos.z + dz;
+    if (!this.diskSupported(x, e.pos.y, z, rad)) return false;
+    // Outside the guard disk the ladder disk can reach past the footprint: the box itself must
+    // keep standing too.
+    return !band || this.supported(boxAt(e, x, e.pos.y, z, this.sb), SNEAK_PROBE_DEPTH, 0);
+  }
+
+  /**
+   * Does any point of the disk of radius `rad` centred at the feet (x, y, z) have a solid cell
+   * of the world or of a near structure within SNEAK_PROBE_DEPTH below it? The disk points are
+   * laid out in each grid's own heading (see DISK_PATTERN), so the answer does not depend on
+   * how far a yawing structure has turned.
+   */
+  private diskSupported(x: number, y: number, z: number, rad: number): boolean {
+    const depth = SNEAK_PROBE_DEPTH;
+    const pat = DISK_PATTERN;
+    const world = this.world;
+    // World: the point probe is a column of cells.
+    const kTop = Math.ceil(y - CONTACT_EPS) - 1;
+    const kBot = Math.floor(y - depth + CONTACT_EPS);
+    for (let i = 0; i < pat.length; i += 2) {
+      const ix = Math.floor(x + pat[i]! * rad);
+      const iz = Math.floor(z + pat[i + 1]! * rad);
+      for (let k = kTop; k >= kBot; k--) if (SOLID[world.getCell(ix, k, iz) & ID_MASK] === 1) return true;
+    }
+    const near = this.near;
+    for (let j = 0; j < near.length; j++) {
+      const r = near[j]!;
+      if (x - rad >= r.maxX || x + rad <= r.minX || z - rad >= r.maxZ || z + rad <= r.minZ || y - depth >= r.maxY || y <= r.minY) continue;
+      // World down in the structure's local frame.
+      const ld = this.ld;
+      ld.x = 0;
+      ld.y = -1;
+      ld.z = 0;
+      qrotateInv(r.q1, ld, ld);
+      const ux = r.headX;
+      const uz = r.headZ;
+      const grid = r.grid;
+      const lp = this.lp;
+      for (let i = 0; i < pat.length; i += 2) {
+        const fx = pat[i]! * rad;
+        const fz = pat[i + 1]! * rad;
+        lp.x = x + fx * ux - fz * uz;
+        lp.y = y;
+        lp.z = z + fx * uz + fz * ux;
+        curToLocal(r, lp, lp);
+        for (let t = 0; ; t += POINT_PROBE_STEP) {
+          if (t > depth) t = depth;
+          const cell = grid.getCell(Math.floor(lp.x + ld.x * t), Math.floor(lp.y + ld.y * t), Math.floor(lp.z + ld.z * t));
+          if (SOLID[cell & ID_MASK] === 1) return true;
+          if (t >= depth) break;
+        }
+      }
+    }
+    return false;
   }
 }

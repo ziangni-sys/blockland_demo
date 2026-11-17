@@ -73,7 +73,11 @@ export class WorldSession {
     });
   }
 
-  /** Streaming + meshing for one frame within `budgetMs` (from `frameStart`). */
+  /**
+   * Streaming + meshing for one frame within `budgetMs` (from `frameStart`). `yaw` = view
+   * direction for meshing priority; NaN = no preferred direction (loading: everything around
+   * the player is needed before play starts).
+   */
   work(frameStart: number, budgetMs: number, camX: number, camY: number, camZ: number, yaw: number): void {
     // Chunks first (they unblock meshing), but never more than about half the budget.
     try {
@@ -82,7 +86,8 @@ export class WorldSession {
       this.deps.onError('chunk streaming', e);
     }
     try {
-      this.mesher.update(frameStart, budgetMs, camX, camY, camZ, -Math.sin(yaw), -Math.cos(yaw));
+      const facing = Number.isFinite(yaw);
+      this.mesher.update(frameStart, budgetMs, camX, camY, camZ, facing ? -Math.sin(yaw) : 0, facing ? -Math.cos(yaw) : 0);
     } catch (e) {
       this.deps.onError('meshing', e);
     }

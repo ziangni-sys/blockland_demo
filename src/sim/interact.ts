@@ -38,7 +38,7 @@ import { I, isBlockItem } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID, type BlockDef } from '../blocks/registry';
 import { TICK_DT, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, dirAxis, nearestDir, type Dir } from '../core/dirs';
-import { aabb, clamp, quat, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
+import { aabb, clamp, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
 import { Player } from '../entities/entity';
 import type { EntityEvent } from '../entities/host';
 import { axisValue, finiteAngle } from '../entities/input';
@@ -51,7 +51,7 @@ import type { StructureGrid } from '../voxel/sgrid';
 import { spawnBlockDrop } from './drops';
 import { failMessage, msg, type MessageKey } from './messages';
 import type { Simulation } from './simulation';
-import { emptyView, type GridCell, type InteractionView, type Message } from './view';
+import { emptyView, type InteractionView, type Message } from './view';
 
 /** Reach of the player's hands, in blocks from the eye. */
 export const REACH = 5;
@@ -217,8 +217,6 @@ function gridVersionOf(grid: VoxelGrid): number {
 export class Interaction {
   /** What the player pointed at during this tick's actions. */
   private hit: GridHit | null = null;
-  /** Hit used for the published view (re-cast after everything moved this tick). */
-  private viewHit: GridHit | null = null;
   private lastSlot = -1;
 
   // ---- mining
@@ -247,7 +245,6 @@ export class Interaction {
   private readonly eye: Vec3 = vec3();
   private readonly dir: Vec3 = vec3();
   private readonly tmp: Vec3 = vec3();
-  private readonly tmpQ: Quat = quat();
 
   constructor(private readonly sim: Simulation) {}
 
@@ -273,7 +270,6 @@ export class Interaction {
   /** Forget every pending action (death, loading a save). */
   reset(): void {
     this.hit = null;
-    this.viewHit = null;
     this.resetMining();
     this.breakCooldown = 0;
     this.preview = null;
@@ -334,13 +330,11 @@ export class Interaction {
     const sim = this.sim;
     const v = emptyView();
     const p = sim.entities.player;
-    if (p === null || p.dead || p.removed) {
-      this.viewHit = null;
-      return v;
-    }
+    if (p === null || p.dead || p.removed) return v;
     const held = this.heldItem(p);
+    // Cast again: structures and the player moved since the actions ran, and the outline and
+    // hint must match what is on screen now.
     const h = this.castRay(p, isBucket(held));
-    this.viewHit = h;
     this.validate();
     if (h !== null) {
       v.target = { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face };
@@ -702,6 +696,8 @@ export class Interaction {
       cell = layers >= 8 ? makeCell(B.SNOW_BLOCK) : makeCell(B.SNOW_LAYER, layersState(layers));
     } else {
       if (grid.isWorld ? REPLACEABLE[cur & ID_MASK] !== 1 : cur !== AIR) return;
+      // A torch or a flower put into water would be washed away on the spot.
+      if (!def.solid && LIQUID[cur & ID_MASK] !== 0) return;
       cell = makeCell(item, this.placementState(def, hit, p));
     }
     if (!supportOk(def, grid.getCell(x, y - 1, z))) {
@@ -1105,9 +1101,4 @@ export class Interaction {
     }
     return msg('hint.glue.move');
   }
-}
-
-/** A GridCell of the current target (exported for tests and tools). */
-export function gridCellOf(hit: GridHit): GridCell {
-  return { gridId: hit.grid.gridId, x: hit.x, y: hit.y, z: hit.z };
 }

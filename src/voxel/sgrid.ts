@@ -122,10 +122,10 @@ export class StructureGrid implements VoxelGrid {
   }
 
   onCellChange(fn: StructureCellListener): () => void {
-    this.listeners.push(fn);
+    // Copy-on-write so (un)subscribing from inside a listener never skips or repeats one.
+    this.listeners = [...this.listeners, fn];
     return () => {
-      const i = this.listeners.indexOf(fn);
-      if (i >= 0) this.listeners.splice(i, 1);
+      this.listeners = this.listeners.filter((f) => f !== fn);
     };
   }
 
@@ -168,30 +168,39 @@ export class StructureGrid implements VoxelGrid {
     return this.boundsCache;
   }
 
-  /** Reallocate storage so that cell (x,y,z) is inside it (with a small margin). */
+  /**
+   * Reallocate storage so that cell (x,y,z) is inside it. The box grows geometrically
+   * (by half its size, at least GROW_MARGIN) on each side that has to move, so building a
+   * structure cell by cell costs amortised O(1) per cell instead of a full copy each time.
+   */
   private grow(x: number, y: number, z: number): void {
-    let nx0: number;
-    let ny0: number;
-    let nz0: number;
-    let nx1: number;
-    let ny1: number;
-    let nz1: number;
     if (this.cells.length === 0) {
-      nx0 = x - GROW_MARGIN;
-      ny0 = y - GROW_MARGIN;
-      nz0 = z - GROW_MARGIN;
-      nx1 = x + 1 + GROW_MARGIN;
-      ny1 = y + 1 + GROW_MARGIN;
-      nz1 = z + 1 + GROW_MARGIN;
-    } else {
-      nx0 = Math.min(this.ox, x - GROW_MARGIN);
-      ny0 = Math.min(this.oy, y - GROW_MARGIN);
-      nz0 = Math.min(this.oz, z - GROW_MARGIN);
-      nx1 = Math.max(this.ox + this.sx, x + 1 + GROW_MARGIN);
-      ny1 = Math.max(this.oy + this.sy, y + 1 + GROW_MARGIN);
-      nz1 = Math.max(this.oz + this.sz, z + 1 + GROW_MARGIN);
+      this.resize(
+        x - GROW_MARGIN,
+        y - GROW_MARGIN,
+        z - GROW_MARGIN,
+        1 + 2 * GROW_MARGIN,
+        1 + 2 * GROW_MARGIN,
+        1 + 2 * GROW_MARGIN,
+      );
+      return;
     }
-    this.resize(nx0, ny0, nz0, nx1 - nx0, ny1 - ny0, nz1 - nz0);
+    const padX = Math.max(GROW_MARGIN, this.sx >> 1);
+    const padY = Math.max(GROW_MARGIN, this.sy >> 1);
+    const padZ = Math.max(GROW_MARGIN, this.sz >> 1);
+    let x0 = this.ox;
+    let y0 = this.oy;
+    let z0 = this.oz;
+    let x1 = this.ox + this.sx;
+    let y1 = this.oy + this.sy;
+    let z1 = this.oz + this.sz;
+    if (x < x0) x0 = Math.min(x - GROW_MARGIN, x0 - padX);
+    else if (x >= x1) x1 = Math.max(x + 1 + GROW_MARGIN, x1 + padX);
+    if (y < y0) y0 = Math.min(y - GROW_MARGIN, y0 - padY);
+    else if (y >= y1) y1 = Math.max(y + 1 + GROW_MARGIN, y1 + padY);
+    if (z < z0) z0 = Math.min(z - GROW_MARGIN, z0 - padZ);
+    else if (z >= z1) z1 = Math.max(z + 1 + GROW_MARGIN, z1 + padZ);
+    this.resize(x0, y0, z0, x1 - x0, y1 - y0, z1 - z0);
   }
 
   /** Reallocate storage to the given box, keeping existing cells that fit. */
@@ -305,8 +314,8 @@ export class StructureGrid implements VoxelGrid {
   }
   worldRotation(out: Quat = quat()): Quat {
     if (this.parent.isWorld) return qcopy(out, this.rotation);
-    const pr = this.parent.worldRotation();
-    return qmul(pr, this.rotation, out);
+    this.parent.worldRotation(out);
+    return qmul(out, this.rotation, out);
   }
 
   /**

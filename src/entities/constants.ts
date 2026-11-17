@@ -49,6 +49,25 @@ export const COLUMN_DEPTH = 16;
 /** After being swept into its carrier's parent, a rider may not re-attach for this many ticks. */
 export const NO_ATTACH_TICKS = 10;
 
+// ====================================================================== sneak edge guard
+//
+// The guard keeps a sneaking body standing. Its probe is a DISK of point probes around the feet
+// centre, laid out in each grid's own heading (world grid: world axes; a structure: its yaw), so
+// the probe is fixed relative to every support while the world-aligned body box turns relative
+// to a yawing deck (LESSONS 潜行走到甲板边缘掉下去; review: the old square attach-inset probe
+// changed its reach with the relative angle and switched the guard off). Every disk point lies
+// within SNEAK_DISK_RADIUS < half width of the centre, i.e. inside the body footprint at EVERY
+// relative rotation: guard-supported implies standing-supported (hasSupportBelow, inset 0) for as
+// long as the body does not move, however the deck turns — and a carried body keeps its carrier
+// through the inset-0 hysteresis.
+
+/** The guard disk is the footprint's inscribed circle shrunk by this margin. Larger than the
+ *  per-tick gravity sink (~0.04) so the ground push at a deck edge always wins over the side push. */
+export const SNEAK_DISK_MARGIN = 0.06;
+/** A body that stands outside the guard disk (walked to the edge, then sneaked) may move only
+ *  without getting farther from its support, measured with disks this much larger per step. */
+export const SNEAK_LADDER_STEP = 0.05;
+
 // ====================================================================== pushing
 
 /** A structure push whose normal has y above this is ground (a pure vertical correction). */
@@ -77,10 +96,21 @@ export const PREFER_WEIGHT = 0.3;
  * pick a face many times deeper and fling the body (LESSONS 叶片侧面擦过船时船被猛踢).
  */
 export const PREFER_MIN_DEPTH = 0.2;
+/**
+ * A structure push that would dip the body into ANOTHER structure's floor (pushed along a deck
+ * that rolls or pitches a little) lifts the body onto that floor instead of being refused, when
+ * the needed lift is at most this. A deeper overlap is a wall: the axis is refused.
+ */
+export const MAX_PUSH_LIFT = 0.3;
 /** Free-spot search radius after a crush. */
 export const CRUSH_SEARCH_RADIUS = 3;
 /** Free-spot search radius for a body stuck inside world blocks. */
 export const UNSTUCK_SEARCH_RADIUS = 2;
+/** After a failed free-spot search the next one waits 2^failures ticks, at most this many. */
+export const UNSTUCK_MAX_BACKOFF_TICKS = 64;
+/** A buried passive body (item drop, crate, falling block) with no free spot nearby rises to the
+ *  first free spot at most this many blocks straight above. */
+export const BURIED_RISE_LIMIT = 48;
 /** World velocity a body may keep when it lets go of a carrier. */
 export const MAX_INHERITED_SPEED = 30;
 
@@ -102,6 +132,13 @@ export const AIR_ACCEL = 0.1;
 export const SNEAK_PROBE_DEPTH = 0.6;
 /** Granularity of the sneak edge guard. */
 export const SNEAK_STEP = 0.05;
+/**
+ * A walking body (player, rabbit) on the ground steps up onto a WORLD ledge at most this high
+ * instead of being stopped by it. Ships float at arbitrary heights and bob, so a pier built
+ * "level" with a deck is practically never exactly level (ACCEPTANCE 19 走上码头). World terrain
+ * steps are whole blocks, so this never lets anyone walk up terrain without jumping.
+ */
+export const STEP_HEIGHT = 0.6;
 
 export const SWIM_SPEED = 2.0;
 export const SWIM_SPRINT_SPEED = 2.6;
@@ -117,7 +154,11 @@ export const SWIM_DOWN_ACCEL = 10;
 export const SWIM_MIN_WET = 0.3;
 /** Vertical velocity kept per tick when fully submerged. */
 export const WATER_DRAG = 0.8;
-/** Upward speed given when climbing out of water against a ledge (holding jump + moving into it). */
+/**
+ * Upward speed given when climbing out of water against a WORLD ledge (holding jump + moving
+ * into it). Structure sides never give it: a swimmer next to a hull is never lifted aboard
+ * (ACCEPTANCE 19 船转 45° 时在船角附近游泳，不会被拎上船).
+ */
 export const WATER_EXIT_SPEED = 7.5;
 /** A body this wet and not on the ground is swimming (never kept by a carrier's column). */
 export const SWIMMING_WET = 0.3;

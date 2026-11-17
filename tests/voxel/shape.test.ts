@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aabbClone, aabbTranslate, qfromYaw, qidentity, qmul, vec3, type AABB, type Vec3 } from '../../src/core/math';
+import { aabbClone, aabbTranslate, qfromYaw, qidentity, qmul, vec3, type AABB, type Quat, type Vec3 } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
 import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
@@ -9,7 +9,6 @@ import {
   CONTACT_EPS,
   DEFAULT_PREFER_WEIGHT,
   FREE_OFFSET_STEP,
-  MAX_FREE_RADIUS,
   MAX_RESOLVE_ITERATIONS,
   boxOverlapsSolid,
   columnHasSolidBelow,
@@ -478,6 +477,17 @@ describe('deepestPenetration — prefer bias, embedding, iteration cap', () => {
     expect([r.resolved, r.iterations, r.dx, r.dy, r.dz]).toEqual([false, 0, 0, 0, 0]);
   });
 
+  it('fully embedded in a rotated structure: null push, resolve reports failure', () => {
+    const world = new World();
+    const s = structure(world, 1, vec3(10.2, 40, -3.7), qfromYaw(0.4), vec3(1.5, 1.5, 1.5));
+    fill(s, 0, 0, 0, 3, 3, 3);
+    const inner = boxAround(s.toWorld(vec3(1.5, 1.5, 1.5)), 0.15, 0.15, 0.15);
+    expect(boxOverlapsSolid(s, inner)).toBe(true);
+    expect(deepestPenetration(s, inner)).toBeNull();
+    const r = resolvePenetration(s, inner);
+    expect([r.resolved, r.iterations, r.dx, r.dy, r.dz]).toEqual([false, 0, 0, 0, 0]);
+  });
+
   it('free box: null push, resolved without moving', () => {
     const r = resolvePenetration(w, box(3, 3, 3, 4, 4, 4));
     expect([r.resolved, r.iterations, r.dx, r.dy, r.dz, r.nx, r.ny, r.nz]).toEqual([true, 0, 0, 0, 0, 0, 0, 0]);
@@ -823,6 +833,25 @@ describe('nearestFreeOffset', () => {
     expect([r1.x, r1.y, r1.z]).toEqual([0.5, 0, 0]);
   });
 
+  it('a structure the box only touches before the move is still avoided', () => {
+    // Structures out of reach are skipped up front; "in reach" must mean within maxRadius of
+    // the box, not "already overlapping".
+    const world = emptyWorld();
+    fill(world, -5, 0, -5, 5, 1, 5); // floor top y = 1
+    const lid = structure(world, 1, vec3(0, 0, 0), qidentity());
+    fill(lid, -1, 2, -1, 1, 3, 1); // slab directly above the box, occupying y in [2, 3)
+    const b = box(-0.3, 0.7, -0.3, 0.3, 2.0, 0.3); // sunk 0.3 into the floor, head touching the slab
+    expect(boxOverlapsSolid(lid, b)).toBe(false);
+    const r = nearestFreeOffset([world, lid], b, 3)!;
+    const moved = aabbTranslate(b, r.x, r.y, r.z);
+    expect(boxOverlapsSolid(world, moved)).toBe(false);
+    expect(boxOverlapsSolid(lid, moved)).toBe(false);
+    // Lifting 0.5 clears the floor but would hit the slab, so the box must also leave the
+    // slab's footprint (|x| or |z| >= 1.3): the nearest lattice answer is 1.5 sideways.
+    expect(r.y).toBe(0.5);
+    expect(Math.max(Math.abs(r.x), Math.abs(r.z))).toBe(1.5);
+  });
+
   it('considers every grid and the extra test; null when nothing within reach', () => {
     const world = emptyWorld();
     fill(world, -5, 0, -5, 5, 1, 5); // floor
@@ -906,5 +935,97 @@ describe('world fast path, aligned structure path and SAT path agree', () => {
       expectVec({ x: ri.dx, y: ri.dy, z: ri.dz }, vec3(rw.dx, rw.dy, rw.dz), 9);
     }
     expect(compared).toBeGreaterThan(500);
+  });
+});
+
+// ====================================================================== world scans vs getCell
+
+/**
+ * A world grid that is not a World instance: shape.ts can then only read it through getCell,
+ * which makes it an independent reference for the World fast paths (they index chunk arrays
+ * directly and re-implement getCell's rules for deeprock, unloaded chunks and the build limit).
+ */
+class ProxyWorld implements VoxelGrid {
+  readonly gridId = 0;
+  readonly parent = null;
+  readonly isWorld = true;
+  constructor(private readonly w: World) {}
+  getCell(x: number, y: number, z: number): number {
+    return this.w.getCell(x, y, z);
+  }
+  setCell(x: number, y: number, z: number, cell: number, flags?: number): boolean {
+    return this.w.setCell(x, y, z, cell, flags);
+  }
+  toWorld(p: Vec3, out?: Vec3): Vec3 {
+    return this.w.toWorld(p, out);
+  }
+  toLocal(p: Vec3, out?: Vec3): Vec3 {
+    return this.w.toLocal(p, out);
+  }
+  dirToWorld(d: Vec3, out?: Vec3): Vec3 {
+    return this.w.dirToWorld(d, out);
+  }
+  dirToLocal(d: Vec3, out?: Vec3): Vec3 {
+    return this.w.dirToLocal(d, out);
+  }
+  velocityAt(p: Vec3, out?: Vec3): Vec3 {
+    return this.w.velocityAt(p, out);
+  }
+  worldRotation(out?: Quat): Quat {
+    return this.w.worldRotation(out);
+  }
+  cellBounds(): null {
+    return null;
+  }
+}
+
+describe('World direct chunk scans agree with getCell semantics', () => {
+  it('random boxes and sweeps across chunk borders, into unloaded chunks, deeprock and the build limit', () => {
+    const rng = new Rng(9001);
+    const w = emptyWorld(-1, 0); // x, z in [-16, 16); every other column is unloaded (solid)
+    for (let i = 0; i < 1500; i++) w.setCell(rng.int(-16, 15), rng.int(0, 127), rng.int(-16, 15), STONE);
+    for (let i = 0; i < 700; i++) w.setCell(rng.int(-16, 15), rng.int(0, 4), rng.int(-16, 15), STONE);
+    for (let i = 0; i < 700; i++) w.setCell(rng.int(-16, 15), rng.int(123, 127), rng.int(-16, 15), STONE);
+    const p = new ProxyWorld(w);
+    let overlaps = 0;
+    let blocked = 0;
+    for (let i = 0; i < 2500; i++) {
+      const band = i % 3;
+      const cy = band === 0 ? rng.range(-2, 7) : band === 1 ? rng.range(121, 131) : rng.range(0, 128);
+      const c = vec3(rng.range(-19, 19), cy, rng.range(-19, 19));
+      const b = boxAround(c, rng.range(0.05, 1.4), rng.range(0.05, 1.4), rng.range(0.05, 1.4));
+      const o = boxOverlapsSolid(w, b);
+      expect(o).toBe(boxOverlapsSolid(p, b));
+      expect(o).toBe(visited(w, b).size > 0); // forEachSolidCellOverlapping reads via getCell
+      if (o) overlaps++;
+      const gap = rng.range(0.01, 3);
+      const inset = rng.range(0, 0.4);
+      expect(hasSupportBelow(w, b, gap, inset)).toBe(hasSupportBelow(p, b, gap, inset));
+      expect(columnHasSolidBelow(w, b, gap * 3, inset)).toBe(columnHasSolidBelow(p, b, gap * 3, inset));
+      const axis = rng.int(0, 2) as 0 | 1 | 2;
+      const delta = rng.range(-40, 40);
+      const r = sweepAxis(w, b, axis, delta);
+      expect(r).toBe(sweepAxis(p, b, axis, delta));
+      // Independent swept-volume check through getCell: no NEW solid cell is entered.
+      const off = (v: number): [number, number, number] => (axis === 0 ? [v, 0, 0] : axis === 1 ? [0, v, 0] : [0, 0, v]);
+      const before = visited(w, b);
+      const end = aabbTranslate(b, ...off(r));
+      const swept = box(
+        Math.min(b.minX, end.minX),
+        Math.min(b.minY, end.minY),
+        Math.min(b.minZ, end.minZ),
+        Math.max(b.maxX, end.maxX),
+        Math.max(b.maxY, end.maxY),
+        Math.max(b.maxZ, end.maxZ),
+      );
+      for (const k of visited(w, swept)) expect(before.has(k)).toBe(true);
+      if (Math.abs(r) < Math.abs(delta)) {
+        blocked++;
+        const further = visited(w, aabbTranslate(b, ...off(r + Math.sign(delta) * 1e-7)));
+        expect([...further].some((k) => !before.has(k))).toBe(true);
+      }
+    }
+    expect(overlaps).toBeGreaterThan(300);
+    expect(blocked).toBeGreaterThan(1000);
   });
 });

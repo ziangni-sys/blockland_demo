@@ -7,7 +7,8 @@
  *   worlds=<n>  icons=placeholder  panel=1  cursor=<itemId>  from=pause|mainMenu  progress=<0..1>
  *   animate=1 (helm / debug values change every frame, like a running game)
  *   clamp=1   (the fake client caps FOV at 100, to test that the UI shows what the client kept)
- *   refuse=1  (the fake client ignores invertY / showDebug / language changes entirely)
+ *   refuse=1  (the fake client turns down invertY / showDebug / language changes, mode changes,
+ *             new worlds and loads: it records the call and sends no new state)
  *   async=<ms> (world actions switch screens / update the list after a delay, like IndexedDB)
  *   newest=1  (toasts are kept newest-first)
  *   icons=art (real procedural icons from src/art; icons=placeholder: no provider)
@@ -168,11 +169,11 @@ function startLoading(): void {
 const actions: UiActions = {
   newWorld(opts) {
     record('newWorld', [opts]);
-    later(startLoading);
+    if (!flag('refuse')) later(startLoading);
   },
   loadWorld(id) {
     record('loadWorld', [id]);
-    later(startLoading);
+    if (!flag('refuse')) later(startLoading);
   },
   deleteWorld(id) {
     record('deleteWorld', [id]);
@@ -210,7 +211,7 @@ const actions: UiActions = {
   },
   setMode(mode) {
     record('setMode', [mode]);
-    set({ mode });
+    if (!flag('refuse')) set({ mode });
   },
   selectHotbar(index) {
     record('selectHotbar', [index]);

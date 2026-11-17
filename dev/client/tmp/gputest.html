@@ -1,0 +1,21 @@
+<!doctype html><html><body style="margin:0"><canvas id="c" width="400" height="300"></canvas>
+<script type="module">
+import * as THREE from 'three/webgpu';
+let n = 0;
+const canvas = document.getElementById('c');
+if (location.search.includes('probe')) { const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' }); console.log('probe adapter', !!a, a && a.info && a.info.vendor); }
+const r = new THREE.WebGPURenderer({ canvas, antialias: true });
+await r.init();
+r.backend.device.lost.then((i) => console.log('LOST', i.reason, i.message, 'frame', n, performance.now().toFixed(0)));
+r.backend.device.addEventListener('uncapturederror', (e) => console.log('GPUERR', e.error.message));
+console.log('backend', r.backend.isWebGPUBackend ? 'webgpu' : 'webgl');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x336699);
+const cam = new THREE.PerspectiveCamera(60, 4/3, 0.1, 100); cam.position.set(0, 0, 3);
+const m = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshBasicNodeMaterial({ color: 0xff8800 }));
+m.rotation.set(0.5, 0.6, 0);
+scene.add(m);
+
+function f() { r.render(scene, cam); n++; if (n < 300) requestAnimationFrame(f); else console.log('draws', r.info.render.drawCalls, 'calls', r.info.render.calls); }
+f();
+</script></body></html>

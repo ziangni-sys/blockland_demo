@@ -282,7 +282,7 @@ export function qslerp(a: Quat, b: Quat, t: number, out: Quat = quat()): Quat {
 export function qintegrate(q: Quat, w: Vec3, dt: number, out: Quat = quat()): Quat {
   const wl = Math.sqrt(w.x * w.x + w.y * w.y + w.z * w.z);
   const angle = wl * dt;
-  if (angle < 1e-12) return qcopy(out, q);
+  if (Math.abs(angle) < 1e-12) return qcopy(out, q);
   const s = Math.sin(angle * 0.5) / wl;
   const dq: Quat = { x: w.x * s, y: w.y * s, z: w.z * s, w: Math.cos(angle * 0.5) };
   return qnormalize(qmul(dq, q, out), out);

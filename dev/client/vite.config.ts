@@ -13,6 +13,8 @@ export default defineConfig({
   cacheDir: 'node_modules/.vite-client',
   define: { __ARTIFACT__: 'false' },
   worker: { format: 'es' as const },
-  server: { host: '127.0.0.1', port: 5183, strictPort: true },
+  // No HMR: other modules in this checkout are edited while the game runs, and a full page
+  // reload in the middle of a scripted play-through only gets in the way. Reload by hand.
+  server: { host: '127.0.0.1', port: 5183, strictPort: true, hmr: false },
   logLevel: 'info',
 });

@@ -79,6 +79,7 @@ export class UiRoot implements UiHandle {
     if (blocksRepeatActivation(e.key, e.repeat, e.isComposing, keyTargetKind(e.target))) e.preventDefault();
   };
   private dprQuery: MediaQueryList | null = null;
+  private dpr = 0;
   private readonly onDprChange = (): void => this.watchPixelRatio();
   private last: UiState | null = null;
   private screen: Screen | null = null;
@@ -140,6 +141,11 @@ export class UiRoot implements UiHandle {
   update(s: UiState): void {
     if (this.disposed || s === this.last) return;
     this.last = s;
+    this.ctx.icons.beginFrame();
+    // Fallback for hosts whose resolution media query never reports a change (seen with
+    // emulated pixel ratios): a property read per changed snapshot.
+    const win = this.doc.defaultView;
+    if (win && win.devicePixelRatio !== this.dpr) this.watchPixelRatio();
 
     const lang = s.settings.language === 'en' ? 'en' : 'zh';
     if (lang !== this.ctx.lang) {
@@ -219,12 +225,14 @@ export class UiRoot implements UiHandle {
    */
   private watchPixelRatio(): void {
     const win = this.doc.defaultView;
-    if (!win || typeof win.matchMedia !== 'function') return;
-    this.dprQuery?.removeEventListener('change', this.onDprChange);
-    const dpr = win.devicePixelRatio || 1;
-    this.dprQuery = win.matchMedia(`(resolution: ${dpr}dppx)`);
-    this.dprQuery.addEventListener('change', this.onDprChange);
-    const size = iconSizeFor(dpr);
+    if (!win) return;
+    this.dpr = win.devicePixelRatio;
+    if (typeof win.matchMedia === 'function') {
+      this.dprQuery?.removeEventListener('change', this.onDprChange);
+      this.dprQuery = win.matchMedia(`(resolution: ${this.dpr || 1}dppx)`);
+      this.dprQuery.addEventListener('change', this.onDprChange);
+    }
+    const size = iconSizeFor(this.dpr);
     if (size === this.ctx.iconSize) return;
     this.ctx.iconSize = size;
     this.hud.repaintIcons();

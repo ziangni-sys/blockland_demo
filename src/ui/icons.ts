@@ -4,11 +4,13 @@
  * blitted into each slot's own <canvas>. Missing provider / null result / bad buffer ->
  * a deterministic placeholder tile with the item's initials.
  *
- * The provider is expensive (several ms per icon for procedural art), so rendering is
- * budgeted and never allowed to stall a frame: paint() renders synchronously only while the
- * current ~frame's budget lasts, otherwise the slot stays blank and is filled from a
- * requestAnimationFrame queue a frame or two later. prewarm() renders icons ahead of need in
- * idle time (the client is on the main menu long before the first creative palette opens).
+ * The provider is expensive (one to several ms per icon for procedural art, more on a cold
+ * page), so rendering is budgeted and never allowed to stall a frame: within one UI update
+ * paint() renders synchronously only until SYNC_BUDGET_MS of provider time is spent (the
+ * root calls beginFrame() at the start of each update); after that the slot stays blank and
+ * is filled from a requestAnimationFrame queue a frame or two later. prewarm() renders icons
+ * ahead of need in idle time (the client sits on the main menu long before the first
+ * creative palette opens), so in practice paints are plain blits.
  */
 import { itemInitials, placeholderHue } from './palette';
 
@@ -16,10 +18,10 @@ export type IconProvider = (itemId: number, size: number) => Uint8ClampedArray |
 
 /** Largest icon edge we will ever request; keeps the numeric cache key collision-free. */
 const MAX_ICON_SIZE = 512;
-/** Provider time allowed per ~frame (sync paints and the deferred queue together). */
-const FRAME_BUDGET_MS = 5;
-/** Length of the window the budget applies to (one 60 Hz frame). */
-const FRAME_WINDOW_MS = 16;
+/** Provider time one UI update may spend rendering icons synchronously. */
+const SYNC_BUDGET_MS = 3;
+/** Provider time one animation frame of the deferred queue may spend. */
+const FLUSH_BUDGET_MS = 4;
 /** Longest stretch of one idle-time prewarm slice. */
 const IDLE_SLICE_MS = 8;
 
@@ -38,7 +40,7 @@ export class IconCache {
   /** Keys to render ahead of need, in order. */
   private readonly warmQueue: number[] = [];
   private readonly win: (Window & typeof globalThis) | null;
-  private windowStart = -Infinity;
+  /** Provider time spent synchronously since the last beginFrame(). */
   private spent = 0;
   private rafId = 0;
   private idleId = 0;
@@ -52,13 +54,22 @@ export class IconCache {
     this.win = doc.defaultView;
   }
 
-  /** Paint an item into `target` (resizing its backing store to `size`), now or within a few frames. */
-  paint(target: HTMLCanvasElement, item: number, size: number): void {
+  /** Start a new synchronous budget (called at the start of every UI update). */
+  beginFrame(): void {
+    this.spent = 0;
+  }
+
+  /**
+   * Paint an item into `target` (resizing its backing store to `size`): now if the icon is
+   * cached or the update's budget allows rendering it, otherwise within a few frames.
+   * `deferOnly` never renders synchronously (for work done ahead of need, in idle time).
+   */
+  paint(target: HTMLCanvasElement, item: number, size: number, deferOnly = false): void {
     const s = sizeOf(size);
     const key = keyOf(item, s);
     this.waiting.delete(target);
     let src = this.cache.get(key);
-    if (!src && this.hasBudget()) src = this.renderTimed(key);
+    if (!src && !deferOnly && this.spent < SYNC_BUDGET_MS) src = this.renderTimed(key);
     if (src) {
       blit(target, src);
       return;
@@ -109,15 +120,6 @@ export class IconCache {
     return this.win ? this.win.performance.now() : 0;
   }
 
-  private hasBudget(): boolean {
-    const t = this.now();
-    if (t - this.windowStart > FRAME_WINDOW_MS) {
-      this.windowStart = t;
-      this.spent = 0;
-    }
-    return this.spent < FRAME_BUDGET_MS;
-  }
-
   private renderTimed(key: number): HTMLCanvasElement {
     const t0 = this.now();
     const c = this.render(key);
@@ -141,11 +143,12 @@ export class IconCache {
   };
 
   private flushWaiting(): void {
+    const start = this.now();
     for (const [target, key] of this.waiting) {
       let src = this.cache.get(key);
       if (!src) {
-        if (!this.hasBudget()) break;
-        src = this.renderTimed(key);
+        if (this.now() - start >= FLUSH_BUDGET_MS) break;
+        src = this.render(key);
       }
       this.waiting.delete(target);
       blit(target, src);

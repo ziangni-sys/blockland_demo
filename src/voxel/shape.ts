@@ -347,10 +347,10 @@ function structureObb(
 // number. The world paths therefore only pass integer cell coordinates (small integers are
 // never boxed) or objects across function boundaries; box coordinates are read where used.
 //
-// CACHE NOTE: World.getCell keeps a single-entry chunk cache, and a miss costs a Map lookup
-// with a heap-allocated numeric key. Boolean world scans therefore walk column-major (y
-// innermost) so a box straddling a chunk border switches chunks once per column, not once
-// per cell.
+// CACHE NOTE: World keeps a single-entry chunk cache, and a miss costs a Map lookup with a
+// heap-allocated numeric key. Boolean world scans therefore walk column-major (y innermost)
+// and fetch each column's chunk once, so a box straddling a chunk border switches chunks
+// once per column, not once per cell.
 
 /**
  * Any solid world cell in the inclusive cell range (integer arguments only, see above)?

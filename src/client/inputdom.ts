@@ -41,6 +41,8 @@ export class InputBinder {
   engaged = false;
   private everLocked = false;
   private expectUnlock = false;
+  /** Drop the first movement after locking (see onMouseMove). */
+  private skipNextMove = false;
   private pendingSince = -1;
   private readonly cleanups: Array<() => void> = [];
 
@@ -171,7 +173,15 @@ export class InputBinder {
 
   private onMouseMove(e: MouseEvent): void {
     if (this.locked) {
-      if (this.host.isPlaying()) this.host.input.look(e.movementX, e.movementY, this.host.lookSettings());
+      if (!this.host.isPlaying()) return;
+      // Chrome sometimes reports a bogus jump right after locking (or after a focus change):
+      // the distance from the last cursor position to a window corner. No real flick moves
+      // half a window in one coalesced event (that would be thousands of degrees per second).
+      if (this.skipNextMove || Math.abs(e.movementX) > this.win.innerWidth * 0.45 || Math.abs(e.movementY) > this.win.innerHeight * 0.45) {
+        this.skipNextMove = false;
+        return;
+      }
+      this.host.input.look(e.movementX, e.movementY, this.host.lookSettings());
       return;
     }
     if (this.dragLook && this.gesture.state !== 'idle') {
@@ -212,6 +222,7 @@ export class InputBinder {
     if (locked) {
       this.everLocked = true;
       this.engaged = true;
+      this.skipNextMove = true;
     } else {
       this.host.input.releaseAll();
       const expected = this.expectUnlock;

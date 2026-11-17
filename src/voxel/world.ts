@@ -140,6 +140,7 @@ export class World implements VoxelGrid {
 
   private listeners: CellChangeListener[] = [];
   private lastChunk: Chunk | null = null;
+  private readonly chunkCache: Array<Chunk | null> = [null, null, null, null];
   private lastDirtyKey = -1;
 
   constructor(seed = 0) {
@@ -151,8 +152,19 @@ export class World implements VoxelGrid {
   getChunk(cx: number, cz: number): Chunk | undefined {
     const lc = this.lastChunk;
     if (lc && lc.cx === cx && lc.cz === cz) return lc;
+    // 4-entry direct-mapped cache: queries that straddle a chunk border alternate between
+    // neighbouring chunks, and a Map lookup with a non-small-integer key allocates.
+    const slot = (cx & 1) | ((cz & 1) << 1);
+    const cached = this.chunkCache[slot];
+    if (cached && cached.cx === cx && cached.cz === cz) {
+      this.lastChunk = cached;
+      return cached;
+    }
     const c = this.chunks.get(chunkKey(cx, cz));
-    if (c) this.lastChunk = c;
+    if (c) {
+      this.lastChunk = c;
+      this.chunkCache[slot] = c;
+    }
     return c;
   }
   /** Chunk containing world column (x,z), if loaded. */
@@ -163,6 +175,7 @@ export class World implements VoxelGrid {
   addChunk(chunk: Chunk): void {
     this.chunks.set(chunkKey(chunk.cx, chunk.cz), chunk);
     this.lastChunk = chunk;
+    this.chunkCache.fill(null);
     for (let dx = -1; dx <= 1; dx++) {
       for (let dz = -1; dz <= 1; dz++) {
         if (!this.getChunk(chunk.cx + dx, chunk.cz + dz)) continue;
@@ -179,6 +192,7 @@ export class World implements VoxelGrid {
     if (!c) return undefined;
     this.chunks.delete(k);
     if (this.lastChunk === c) this.lastChunk = null;
+    this.chunkCache.fill(null);
     return c;
   }
   isLoaded(x: number, z: number): boolean {
@@ -237,10 +251,11 @@ export class World implements VoxelGrid {
 
   /** Subscribe to cell changes. Listeners run synchronously inside setCell, in subscription order. */
   onCellChange(fn: CellChangeListener): () => void {
-    this.listeners.push(fn);
+    // Copy-on-write: a dispatch in progress keeps iterating the array it started with, so
+    // subscribing or unsubscribing from inside a listener never skips or repeats one.
+    this.listeners = [...this.listeners, fn];
     return () => {
-      const i = this.listeners.indexOf(fn);
-      if (i >= 0) this.listeners.splice(i, 1);
+      this.listeners = this.listeners.filter((f) => f !== fn);
     };
   }
 

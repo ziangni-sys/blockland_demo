@@ -16,6 +16,8 @@
  * assembly preview, mining progress, highlighted docking conflicts) — a reload starts with
  * empty hands.
  */
+import { DAY_TICKS } from '../core/constants';
+import { mod } from '../core/math';
 import { ByteReader, ByteWriter } from '../save/bytes';
 import { decodeTicks, encodeTicks } from '../save/codec';
 import { GlueStore } from '../structures/glue';
@@ -39,7 +41,7 @@ export function exportSave(sim: Simulation): SaveBundle {
   w.varuint(SIM_BLOB_VERSION);
   w.varuint(sim.world.time);
   w.u32(sim.rng.state);
-  w.varuint(Math.max(0, Math.floor(sim.dayOffset)));
+  w.varuint(Number.isFinite(sim.dayOffset) ? mod(Math.floor(sim.dayOffset), DAY_TICKS) : 0);
   blobs.push(['sim', w.finish()]);
 
   blobs.push(['ticks', encodeTicks(sim.world.ticks.all(), sim.world.time)]);
@@ -77,7 +79,7 @@ export function importSave(sim: Simulation, bundle: SaveBundle): void {
     if (version < 1 || version > SIM_BLOB_VERSION) r.fail(`unsupported sim blob version ${version}`);
     sim.world.time = r.varuint();
     sim.rng.state = r.u32();
-    sim.dayOffset = version >= 2 ? r.varuint() : 0;
+    sim.dayOffset = version >= 2 ? mod(r.varuint(), DAY_TICKS) : 0;
   }
 
   sim.world.ticks.clear();

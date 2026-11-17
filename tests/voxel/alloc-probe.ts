@@ -17,8 +17,10 @@ import type { AABB } from '../../src/core/math';
 import { boxOverlapsSolid, columnHasSolidBelow, hasSupportBelow, sweepAxis } from '../../src/voxel/shape';
 import { box, emptyWorld, fill } from './helpers';
 
-const CALLS = 100_000;
+const CALLS = 200_000;
 const ROUNDS = 6;
+/** Stop retrying once a round is this clean (the profiler's own plumbing costs a few KB). */
+const CLEAN = 0.05;
 
 const world = emptyWorld();
 fill(world, -10, 0, -10, 10, 5, 10); // ground, top at y = 5
@@ -100,20 +102,20 @@ function totalBytes(n: ProfileNode): number {
   return t;
 }
 
+const SAMPLING = { samplingInterval: 64, includeObjectsCollectedByMinorGC: true, includeObjectsCollectedByMajorGC: true };
 const session = new Session();
 session.connect();
 await session.post('HeapProfiler.enable');
+// A throwaway session first: the profiler's first start allocates internal structures.
+await session.post('HeapProfiler.startSampling', SAMPLING as never);
+await session.post('HeapProfiler.stopSampling');
 const out: Record<string, number> = {};
 let sink = 0;
 for (const [name, run] of Object.entries(cases)) {
   let best = Infinity;
-  for (let r = 0; r < ROUNDS && best > 0.25; r++) {
+  for (let r = 0; r < ROUNDS && best > CLEAN; r++) {
     sink += run(CALLS * 2); // warm up; gives the optimising compiler time to install code
-    await session.post('HeapProfiler.startSampling', {
-      samplingInterval: 64,
-      includeObjectsCollectedByMinorGC: true,
-      includeObjectsCollectedByMajorGC: true,
-    } as never);
+    await session.post('HeapProfiler.startSampling', SAMPLING as never);
     sink += run(CALLS);
     const { profile } = (await session.post('HeapProfiler.stopSampling')) as unknown as { profile: { head: ProfileNode } };
     best = Math.min(best, totalBytes(profile.head) / CALLS);

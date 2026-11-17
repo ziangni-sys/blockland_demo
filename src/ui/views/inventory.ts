@@ -37,6 +37,8 @@ const KEEP_STACK = '.bl-slot, .bl-slotgrid, .bl-pitem, .bl-pgrid, button, input,
 /** A press that may turn into a slot-to-slot drag or a drop. */
 interface Press {
   target: Element;
+  /** Where the matching release happened (null until then: contextmenu may fire on press). */
+  release: Element | null;
   slot: HTMLElement | null;
   button: number;
   /** The cursor was empty at the press (a drag then moves the pressed stack). */
@@ -63,6 +65,9 @@ export class InventoryView implements ScreenView {
 
   private palette: PaletteEntry[] | null = null;
   private groups: HTMLElement[] = [];
+  /** Pending idle callback that builds the palette ahead of the first creative open. */
+  private idleBuild = 0;
+  private idleBuildIsTimeout = false;
   private query = '';
   private creative: boolean | null = null;
   private selected = -1;
@@ -94,7 +99,7 @@ export class InventoryView implements ScreenView {
     const d = ctx.doc;
     const a = ctx.actions;
 
-    // ---- palette (contents built lazily the first time creative mode is shown)
+    // ---- palette (contents built in idle time, or on the first creative show if that comes first)
     this.search = h(d, 'input', 'bl-input', { type: 'search', autocomplete: 'off', spellcheck: 'false', enterkeyhint: 'search' });
     ctx.attr(this.search, 'placeholder', 'inv.searchPlaceholder');
     ctx.attr(this.search, 'aria-label', 'inv.search');
@@ -177,6 +182,21 @@ export class InventoryView implements ScreenView {
     this.tipAlt = h(d, 'div', 'bl-tooltip-alt');
     this.tip = h(d, 'div', 'bl-tooltip', { hidden: true, role: 'tooltip' }, [this.tipName, this.tipAlt]);
     overlayHost.append(this.tip, this.cursorEl);
+
+    // Build the palette (every item, ~50 buttons) in idle time so the first creative open only
+    // pays for layout; update() still builds it on demand if that open comes first.
+    const win = d.defaultView;
+    if (win) {
+      const run = (): void => {
+        this.idleBuild = 0;
+        if (!this.palette) this.buildPalette(true);
+      };
+      if (typeof win.requestIdleCallback === 'function') this.idleBuild = win.requestIdleCallback(run, { timeout: 4000 });
+      else {
+        this.idleBuildIsTimeout = true;
+        this.idleBuild = win.setTimeout(run, 500);
+      }
+    }
   }
 
   update(s: UiState): void {
@@ -235,6 +255,12 @@ export class InventoryView implements ScreenView {
   }
 
   dispose(): void {
+    const win = this.ctx.doc.defaultView;
+    if (win && this.idleBuild) {
+      if (this.idleBuildIsTimeout) win.clearTimeout(this.idleBuild);
+      else win.cancelIdleCallback(this.idleBuild);
+    }
+    this.idleBuild = 0;
     this.ctx.doc.removeEventListener('pointermove', this.onPointerMove);
     this.tip.remove();
     this.cursorEl.remove();
@@ -243,7 +269,8 @@ export class InventoryView implements ScreenView {
 
   // ------------------------------------------------------------------ palette
 
-  private buildPalette(): void {
+  /** @param deferIcons render no icon synchronously (idle-time prebuild). */
+  private buildPalette(deferIcons = false): void {
     const ctx = this.ctx;
     const d = ctx.doc;
     const entries: PaletteEntry[] = [];
@@ -256,7 +283,7 @@ export class InventoryView implements ScreenView {
         const canvas = h(d, 'canvas', null, { width: ctx.iconSize, height: ctx.iconSize, 'aria-hidden': 'true' });
         // Budgeted: icons not rendered yet (prewarm still running) arrive over the next frames
         // instead of stalling this one for every item at once.
-        ctx.icons.paint(canvas, it.id, ctx.iconSize);
+        ctx.icons.paint(canvas, it.id, ctx.iconSize, deferIcons);
         const btn = h(d, 'button', 'bl-pitem', { type: 'button', 'data-item': String(it.id), 'aria-label': itemName(it.id, ctx.lang) }, [canvas]);
         grid.appendChild(btn);
         entries.push({ btn, canvas, item: it.id, haystack: searchText(it), group: section });
@@ -327,7 +354,7 @@ export class InventoryView implements ScreenView {
   private onPress(e: PointerEvent): void {
     const target = e.target as Element;
     const slot = target.closest<HTMLElement>('.bl-slot');
-    this.press = { target, slot: slot && this.slotsEl.contains(slot) ? slot : null, button: e.button, emptyCursor: !this.cursor };
+    this.press = { target, release: null, slot: slot && this.slotsEl.contains(slot) ? slot : null, button: e.button, emptyCursor: !this.cursor };
   }
 
   /**
@@ -336,6 +363,7 @@ export class InventoryView implements ScreenView {
    */
   private onRelease(e: PointerEvent): void {
     const p = this.press;
+    if (p) p.release = e.target as Element;
     if (!p || !p.slot || p.button !== 0 || e.button !== 0 || !p.emptyCursor) return;
     const to = (e.target as Element).closest<HTMLElement>('.bl-slot');
     if (!to || to === p.slot || !this.slotsEl.contains(to) || p.slot.dataset.empty === '1') return;
@@ -350,9 +378,14 @@ export class InventoryView implements ScreenView {
     if (!this.cursor) return;
     const target = e.target as Element;
     if (!this.isDropTarget(target)) return;
-    // Pointer clicks: the press must also have been outside the slots (a press on a slot that
-    // ends on the backdrop is a slipped drag, not a throw). Keyboard clicks have no press.
-    if (p && (p.button !== (e.type === 'click' ? 0 : 2) || !this.isDropTarget(p.target))) return;
+    // Pointer clicks: the press and the release must both have been outside the slots too (a
+    // press on a slot that ends on the backdrop is a slipped drag, not a throw, and the click
+    // of a press-outside / release-on-slot lands on their common ancestor). Keyboard clicks
+    // have no press.
+    if (p) {
+      if (p.button !== (e.type === 'click' ? 0 : 2) || !this.isDropTarget(p.target)) return;
+      if (p.release && !this.isDropTarget(p.release)) return;
+    }
     // A click on an element's own scrollbar (the scrolling screen or palette) is not a drop.
     if (target instanceof HTMLElement && e.offsetX >= target.clientWidth && target.scrollHeight > target.clientHeight) return;
     this.ctx.actions.dropCursor();

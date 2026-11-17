@@ -56,8 +56,8 @@ export interface VoxelGrid {
   worldRotation(out?: Quat): Quat;
 
   /**
-   * Tight integer bounds of all non-air cells in local space, or null when the grid is
-   * empty or unbounded (the world returns null).
+   * Tight integer bounds of all non-air cells in local space.
+   * null means: UNBOUNDED for the world grid (isWorld), EMPTY for any other grid.
    */
   cellBounds(): CellBounds | null;
 }

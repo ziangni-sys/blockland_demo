@@ -57,7 +57,7 @@ const PLAY_WORK_BUDGET_MS = 4;
 const LOADING_WORK_BUDGET_MS = 14;
 /** How often frames are drawn while nothing moves (pause, death) or the loading screen covers them. */
 const IDLE_RENDER_MS = 250;
-const LOADING_RENDER_MS = 120;
+const LOADING_RENDER_MS = 1000;
 /** IndexedDB is given this long to open before the game falls back to memory storage. */
 const STORAGE_TIMEOUT_MS = 5000;
 /** A teleport longer than this (respawn far away) goes through the loading screen again. */
@@ -789,7 +789,7 @@ export class Game implements InputHost {
   private loadingFrame(s: WorldSession, now: number, dt: number): boolean {
     const p = s.sim.player;
     const w0 = this.win.performance.now();
-    s.work(now, LOADING_WORK_BUDGET_MS, p.pos.x, p.pos.y + p.eyeHeight, p.pos.z, this.input.yaw);
+    s.work(now, LOADING_WORK_BUDGET_MS, p.pos.x, p.pos.y + p.eyeHeight, p.pos.z, Number.NaN);
     this.stats.workMs = this.win.performance.now() - w0;
     const prog = s.loadingProgress();
     const lang = this.settings.language;
