@@ -5,8 +5,8 @@
  * Shape of the world (the game is about ships and windmills):
  *  - "Continentalness" `cont` (domain-warped noise; regions alternate between larger
  *    landmasses and fine archipelagos) decides land vs sea; its zero contour is the
- *    coastline. Roughly half of all columns end up under water, in every region, as
- *    islands, larger landmasses, bays and straits.
+ *    coastline. A measured correction (balance.ts) keeps every 512-block window roughly
+ *    half under water, as islands, larger landmasses, bays and straits.
  *  - Under water, depth grows with -cont (shallow shelves near coasts, deep straits).
  *  - On land, height grows with cont, plus rolling hills, terraced cliff bands, ridged
  *    mountains in a few regions, and sea-level lake basins in the lowlands.

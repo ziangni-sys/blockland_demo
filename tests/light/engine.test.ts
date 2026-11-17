@@ -147,17 +147,24 @@ describe('LightEngine basics', () => {
     expectMatchesReference(world);
   });
 
-  it('marks every section World.markDirty would mark for each changed light byte', () => {
+  it('once the light is consistent, every section World.markDirty would mark for a changed light byte is marked', () => {
     const { world, engine } = buildWorld(grid(-1, 1, -1, 0), terrain);
     // A second world, used only to evaluate World.markDirty's rule for the changed cells.
     const oracle = new World(1);
     const rng = new Rng(9);
-    for (let k = 0; k < 150; k++) {
-      const before = lightSnapshot(world);
+    // Marks are handed over when the engine has nothing pending (an intermediate state of a
+    // budgeted removal must not be meshed), so compare light between consistent states.
+    let before = lightSnapshot(world);
+    let marked = new Set<number>();
+    world.takeDirtySections();
+    let checks = 0;
+    for (let k = 0; k < 200; k++) {
       const [x, y, z] = randomPos(rng, -16, 31, -16, 15);
       world.setCell(x, y, z, EDIT_CELLS[rng.int(0, EDIT_CELLS.length - 1)]!);
-      engine.update(rng.chance(0.5) ? Infinity : rng.int(0, 200));
-      const marked = new Set(world.takeDirtySections());
+      const done = engine.update(rng.chance(0.5) ? Infinity : rng.int(0, 200));
+      for (const key of world.takeDirtySections()) marked.add(key);
+      if (!done) continue;
+      checks++;
       oracle.takeDirtySections();
       for (const c of world.chunks.values()) {
         const old = before.get(chunkKey(c.cx, c.cz))!;
@@ -166,7 +173,10 @@ describe('LightEngine basics', () => {
         }
       }
       for (const key of oracle.takeDirtySections()) expect(marked.has(key), `edit ${k}: section ${key} not marked`).toBe(true);
+      before = lightSnapshot(world);
+      marked = new Set();
     }
+    expect(checks).toBeGreaterThan(60);
   });
 
   it('marks the sections of changed light dirty, including across a chunk border', () => {

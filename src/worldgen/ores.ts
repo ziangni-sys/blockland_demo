@@ -13,7 +13,7 @@ import { latticeHash3 } from './noise';
 
 interface OreDef {
   cell: number;
-  /** Range of blob centre heights (inclusive). */
+  /** Range of ore cell heights (inclusive); blob centres are drawn in [minY, maxY + 1). */
   minY: number;
   maxY: number;
   /** Blobs per chunk column. */
@@ -75,19 +75,23 @@ export class OreStamper {
             // Skip blobs that cannot reach this chunk.
             if (bx + ORE_REACH < x0 || bx - ORE_REACH >= x0 + CHUNK_SIZE) continue;
             if (bz + ORE_REACH < z0 || bz - ORE_REACH >= z0 + CHUNK_SIZE) continue;
-            this.blob(cells, x0, z0, ore.cell, bx, by, bz, dx, dy, dz, r, salt);
+            this.blob(cells, x0, z0, ore, bx, by, bz, dx, dy, dz, r, salt);
           }
         }
       }
     }
   }
 
-  /** Capsule from (c - d) to (c + d) with radius r; ragged surface from a per-cell hash. */
+  /**
+   * Capsule from (c - d) to (c + d) with radius r; ragged surface from a per-cell hash.
+   * Cells outside the ore's y range are cut off: centres near the range ends would
+   * otherwise leak up to ORE_REACH cells past it (iron down to just above deeprock).
+   */
   private blob(
     cells: Uint16Array,
     x0: number,
     z0: number,
-    cell: number,
+    ore: OreDef,
     cx: number,
     cy: number,
     cz: number,
@@ -110,8 +114,9 @@ export class OreStamper {
     const xb = Math.min(x0 + CHUNK_SIZE - 1, Math.floor(cx) + ext);
     const za = Math.max(z0, Math.floor(cz) - ext);
     const zb = Math.min(z0 + CHUNK_SIZE - 1, Math.floor(cz) + ext);
-    const ya = Math.max(1, Math.floor(cy) - ext);
-    const yb = Math.min(126, Math.floor(cy) + ext);
+    const ya = Math.max(ore.minY, Math.floor(cy) - ext);
+    const yb = Math.min(ore.maxY, Math.floor(cy) + ext);
+    const cell = ore.cell;
     for (let y = ya; y <= yb; y++) {
       for (let z = za; z <= zb; z++) {
         for (let x = xa; x <= xb; x++) {
