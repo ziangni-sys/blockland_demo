@@ -102,14 +102,14 @@ function occludes(cells: Uint16Array, q: number): boolean {
  * its cell but faces the open space above, and must not be darkened by the liquid's own
  * light opacity. `p` is the liquid cell, s1 / s2 the in-layer offsets toward the corner.
  *
- * Every rule here is defined on the fixed 2x2x2 block of cells around the vertex, never
- * relative to the quad asking (no "base" cell, no fallback to an opaque one), because
- * neighbouring coplanar quads must compute the same light at a shared corner or the
- * surface shows a crease; a quad's own above-cell can be opaque while its face is drawn.
- * Occluders are skipped. The diagonal cell is skipped only when both side cells are walls
- * in BOTH layers — a column sealed off by two diagonal pillars, whose light cannot reach
- * the vertex. That never happens between two quads sharing an edge (each is the other's
- * non-opaque side), so edge-adjacent quads always average exactly the same cells.
+ * Neighbouring coplanar quads must compute the same light at a shared corner, or the
+ * surface shows a crease. A quad's own above-cell can be opaque while its face is drawn, so
+ * sampleVertex's base-relative rules (diagonal exclusion judged from the base, fallback to
+ * an opaque base) would light neighbours differently. Here occluders are simply skipped,
+ * with no fallback, and the diagonal cell is skipped only when both side cells are walls in
+ * BOTH layers — a column sealed off by two diagonal pillars, whose light cannot reach the
+ * vertex. That condition never holds between two quads sharing an edge (each is the other's
+ * non-opaque own-layer side), so edge-adjacent quads always average exactly the same cells.
  */
 function raiseFromLayerAbove(ctx: MeshContext, k: number, p: number, up: number, s1: number, s2: number): void {
   const cells = ctx.cells;

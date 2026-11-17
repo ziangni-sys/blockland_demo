@@ -37,8 +37,11 @@
  *              sky, block  smooth light, level 0..15 scaled by 17 (0..255). Per vertex the
  *                          average of the up-to-4 non-opaque cells touching the vertex in
  *                          the layer just outside the face; the diagonal cell is ignored
- *                          when both side cells are opaque. MeshInput.light === null
- *                          (structures): sky 255, block 0.
+ *                          when both side cells are opaque. Liquid top surfaces take, per
+ *                          channel, the brighter of their own layer and the layer above,
+ *                          by rules that give coplanar neighbours identical light at shared
+ *                          corners (no creases). MeshInput.light === null (structures):
+ *                          sky 255, block 0.
  *              ao          LINEAR openness: 255 / 170 / 85 / 0 for 0 / 1 / 2 / 3-or-both-sides
  *                          occluders (classic side1 + side2 + corner rule; only OPAQUE cubes
  *                          occlude). No brightness curve is applied here: the renderer maps

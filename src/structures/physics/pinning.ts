@@ -101,7 +101,8 @@ export class PinDetector {
     let covX = false;
     let covY = false;
     let covZ = false;
-    // Check one support normal; returns true when it alone opposes d (the LESSONS rule).
+    // A single loaded normal opposing d settles it (the LESSONS rule); otherwise collect which
+    // significant axes of d are covered, for the corner case.
     const tf = ter.f;
     for (let i = A.terStart; i < A.terEnd; i++) {
       const c = i * STRIDE;

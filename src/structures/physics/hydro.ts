@@ -1,7 +1,8 @@
 /**
  * Water resistance and helm control, as velocity changes per sub-step. Everything is per unit
- * mass so that ships of every size share the same handling (a 4000-cell galleon reaches the
- * same top speed as a raft with the same sails, only its turning radius grows with length).
+ * mass (and per unit inertia for the rudder) so that ships of every size share the same handling:
+ * a 4000-cell galleon reaches the same top speed and turn rate as a raft with the same sails.
+ * Size shows in how a hull floats, rolls and collides, not in how it answers the helm.
  *
  * LESSONS 船纵倾、横倾过大: translational drag acts at the centre of mass (no pitching moment
  * from forward drag or thrust); rotation has its own damping; a keel term strongly resists

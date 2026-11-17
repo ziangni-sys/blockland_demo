@@ -695,8 +695,8 @@ export class LightEngine {
    * Process queued incremental work. budget = max cells to visit this call (default:
    * unlimited). Returns true when nothing is pending.
    *
-   * Per channel, removals run before additions so stale light is not spread first (this is
-   * an efficiency choice; correctness does not depend on it). A visit is one queue entry.
+   * Per channel, removals run before additions so stale light is not spread first (an
+   * efficiency choice; correctness does not depend on it). A visit is one queue entry.
    */
   update(budget: number = Infinity): boolean {
     this.syncChunks();
@@ -714,9 +714,13 @@ export class LightEngine {
   // ================================================================== BFS kernels
 
   /**
-   * Flood-fill increases from the queue, highest level first. An entry whose cell no longer
-   * holds the entry's level is stale and skipped: a raise always pushes a fresh entry, and a
-   * removal that lowered the cell re-seeds whatever must refill it.
+   * Flood-fill increases from the queue, highest level first. An entry (cell, level L):
+   *  - cell holds L: offer L - cost to every neighbour;
+   *  - cell holds more: stale (the raise that overtook it pushed its own entry), skip;
+   *  - cell holds less: a refill request queued by runRemove at the level it expected (or an
+   *    entry overtaken by a removal). Pull what the neighbours give the cell now; if that
+   *    raises it, write it and offer it on (now if it reached L, else from a lower bucket).
+   *    Pulling is always safe: the value is supported by the neighbour it came from.
    * Writes into `quiet` (the chunk being initialised) skip dirty marking.
    * Returns the number of entries visited.
    */
@@ -745,8 +749,21 @@ export class LightEngine {
       const lx = x & EDGE;
       const lz = z & EDGE;
       const i = lx | (lz << 4) | (y * DY);
-      const l = (c.light[i]! >> shift) & 15;
-      if (l !== level) continue;
+      let l = (c.light[i]! >> shift) & 15;
+      if (l !== level) {
+        if (l > level) continue;
+        const p = this.pull(c, i, x, y, z, LIGHT_OPACITY[c.cells[i]! & ID_MASK]!, sky);
+        if (p <= l) continue;
+        const lb = c.light[i]!;
+        c.light[i] = sky ? (lb & 0x0f) | (p << 4) : (lb & 0xf0) | p;
+        if (c !== quiet) this.touch(c, i);
+        if (p !== level) {
+          if (p > 1 || sky) q.push(p, x, y, z);
+          if (q.top > level) level = q.top;
+          continue;
+        }
+        l = p;
+      }
 
       if (y > 0) this.offer(c, i - DY, x, y - 1, z, l, sky, true, q, quiet);
       if (y < TOP_Y) this.offer(c, i + DY, x, y + 1, z, l, sky, false, q, quiet);
@@ -807,13 +824,19 @@ export class LightEngine {
   }
 
   /**
-   * Removal BFS, highest old level first. Entry = (cell, bucket = the level it had before it
+   * Removal BFS, highest old level first. Entry = (cell r, bucket = the level r had before it
    * was reset). A lit neighbour that level could have supported (see SUPPORT) and that is
-   * above its own source is reset to the source and removed in turn. Every other lit
-   * neighbour is independent of the removed light and becomes a seed for re-propagation.
+   * above its own source is reset to the source and removed in turn.
+   *
+   * Refilling: instead of re-seeding every neighbour that keeps its light (one push per reset
+   * neighbour, most of them wasted), r itself is queued once as a refill request (see runAdd)
+   * at the level the best such neighbour would give it. That covers every pair (lit cell,
+   * reset cell), because every reset cell gets an entry here and looks at all its neighbours,
+   * and keeps refills in the same level order as the additions.
    * Returns the number of entries visited.
    */
   private runRemove(rem: LevelQueue, add: LevelQueue, sky: boolean, budget: number): number {
+    const shift = sky ? 4 : 0;
     const buckets = rem.buckets;
     let visits = 0;
     let level = rem.top;
@@ -839,27 +862,48 @@ export class LightEngine {
       const i = lx | (lz << 4) | (y * DY);
       const o = level;
 
-      if (y > 0) this.unlight(c, i - DY, x, y - 1, z, o, sky, true, rem, add);
-      if (y < TOP_Y) this.unlight(c, i + DY, x, y + 1, z, o, sky, false, rem, add);
-      if (lx > 0) this.unlight(c, i - 1, x - 1, y, z, o, sky, false, rem, add);
+      // Each unlight() returns the neighbour's level after the visit; `side` collects the
+      // ones that reach r with a normal step, `above` may fall into r for free.
+      let side = 0;
+      let above = 0;
+      let v: number;
+      if (y > 0) {
+        v = this.unlight(c, i - DY, x, y - 1, z, o, sky, true, rem);
+        if (v > side) side = v;
+      }
+      if (y < TOP_Y) above = this.unlight(c, i + DY, x, y + 1, z, o, sky, false, rem);
+      if (lx > 0) v = this.unlight(c, i - 1, x - 1, y, z, o, sky, false, rem);
       else {
         const n = this.chunkAt(cx - 1, cz);
-        if (n) this.unlight(n, i + WRAP_X, x - 1, y, z, o, sky, false, rem, add);
+        v = n ? this.unlight(n, i + WRAP_X, x - 1, y, z, o, sky, false, rem) : 0;
       }
-      if (lx < EDGE) this.unlight(c, i + 1, x + 1, y, z, o, sky, false, rem, add);
+      if (v > side) side = v;
+      if (lx < EDGE) v = this.unlight(c, i + 1, x + 1, y, z, o, sky, false, rem);
       else {
         const n = this.chunkAt(cx + 1, cz);
-        if (n) this.unlight(n, i - WRAP_X, x + 1, y, z, o, sky, false, rem, add);
+        v = n ? this.unlight(n, i - WRAP_X, x + 1, y, z, o, sky, false, rem) : 0;
       }
-      if (lz > 0) this.unlight(c, i - DZ, x, y, z - 1, o, sky, false, rem, add);
+      if (v > side) side = v;
+      if (lz > 0) v = this.unlight(c, i - DZ, x, y, z - 1, o, sky, false, rem);
       else {
         const n = this.chunkAt(cx, cz - 1);
-        if (n) this.unlight(n, i + WRAP_Z, x, y, z - 1, o, sky, false, rem, add);
+        v = n ? this.unlight(n, i + WRAP_Z, x, y, z - 1, o, sky, false, rem) : 0;
       }
-      if (lz < EDGE) this.unlight(c, i + DZ, x, y, z + 1, o, sky, false, rem, add);
+      if (v > side) side = v;
+      if (lz < EDGE) v = this.unlight(c, i + DZ, x, y, z + 1, o, sky, false, rem);
       else {
         const n = this.chunkAt(cx, cz + 1);
-        if (n) this.unlight(n, i - WRAP_Z, x, y, z + 1, o, sky, false, rem, add);
+        v = n ? this.unlight(n, i - WRAP_Z, x, y, z + 1, o, sky, false, rem) : 0;
+      }
+      if (v > side) side = v;
+
+      const op = LIGHT_OPACITY[c.cells[i]! & ID_MASK]!;
+      if (op < OPAQUE_LEVEL) {
+        const cost = stepCost(op);
+        let best = side - cost;
+        const fromAbove = sky && op === 0 ? above : above - cost;
+        if (fromAbove > best) best = fromAbove;
+        if (best > ((c.light[i]! >> shift) & 15)) add.push(best, x, y, z);
       }
       // Pushes never exceed the level being processed (a dependent neighbour is at most as
       // bright), but stay safe if that ever changes.
@@ -868,35 +912,27 @@ export class LightEngine {
     return visits;
   }
 
-  private unlight(
-    c: Chunk,
-    idx: number,
-    x: number,
-    y: number,
-    z: number,
-    o: number,
-    sky: boolean,
-    down: boolean,
-    rem: LevelQueue,
-    add: LevelQueue,
-  ): void {
+  /**
+   * Visit neighbour `idx` of a removed cell that held level `o`; `down` = the neighbour is
+   * below it. Resets the neighbour if `o` could have supported it. Returns its level after.
+   */
+  private unlight(c: Chunk, idx: number, x: number, y: number, z: number, o: number, sky: boolean, down: boolean, rem: LevelQueue): number {
     const lb = c.light[idx]!;
     const nl = sky ? lb >> 4 : lb & 15;
-    if (nl === 0) return;
+    if (nl === 0) return 0;
     const id = c.cells[idx]! & ID_MASK;
     const op = LIGHT_OPACITY[id]!;
     const src = sky ? skySource(y, c.heightmap[idx & (COLUMNS - 1)]!, op) : EMIT[id]!;
+    if (nl <= src) return nl;
     // Could the removed level have supported this cell? An opaque cell receives nothing, so
     // any light it holds above its source is unsupported anyway.
-    const dependent = op >= OPAQUE_LEVEL || (down && sky && op === 0 ? nl <= o : nl <= o - stepCost(op));
-    if (dependent && nl > src) {
-      c.light[idx] = sky ? (lb & 0x0f) | (src << 4) : (lb & 0xf0) | src;
-      this.touch(c, idx);
-      rem.push(nl, x, y, z);
-      if (src > 1 || (sky && src > 0)) add.push(src, x, y, z);
-    } else if (nl > 1 || sky) {
-      add.push(nl, x, y, z);
-    }
+    if (op < OPAQUE_LEVEL && (down && sky && op === 0 ? nl > o : nl > o - stepCost(op))) return nl;
+    if (this.pull(c, idx, x, y, z, op, sky) >= nl) return nl;
+    c.light[idx] = sky ? (lb & 0x0f) | (src << 4) : (lb & 0xf0) | src;
+    this.touch(c, idx);
+    rem.push(nl, x, y, z);
+    if (src > 1 || (sky && src > 0)) (sky ? this.skyAdd : this.blockAdd).push(src, x, y, z);
+    return src;
   }
 
   // ================================================================== helpers

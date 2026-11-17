@@ -22,7 +22,7 @@ export interface RawContSource {
 }
 
 /** Lattice spacing of the correction (blocks). */
-const CELL = 256;
+const CELL = 128;
 /** Side of the square each node measures (blocks); twice CELL, so node squares overlap. */
 const WINDOW = 512;
 /** Sample spacing inside a node's square (blocks). */
@@ -35,7 +35,7 @@ const SAMPLES = PER_SIDE * PER_SIDE;
  */
 const SEA_TARGET = 0.49;
 /** Regions drift around the target by up to about this much (very low-frequency noise). */
-const SEA_SWING = 0.05;
+const SEA_SWING = 0;
 /** Nodes kept in the cache (each covers CELL x CELL blocks: 4096 nodes = 16k x 16k blocks). */
 const MAX_NODES = 4096;
 const KEY_BIAS = 1 << 16;
