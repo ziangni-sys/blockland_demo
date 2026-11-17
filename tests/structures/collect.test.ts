@@ -141,7 +141,7 @@ for (const make of HARNESSES) {
     it('rejects a start cell that is not a helm', () => {
       const h = make();
       raftScene(h);
-      for (const p of [[0, 0, 0], [5, 1, 0], [20, 20, 20]] as const) {
+      for (const p of [[0, 0, 0], [5, 1, 0], [20, 20, 20]] as Array<[number, number, number]>) {
         const r = collectShip(h.grid, h.glue, ...h.abs(...p));
         expect(r).toEqual({ ok: false, reason: 'not_a_helm', cells: new Int32Array(0), count: 0, sails: 0, bounds: null });
       }
@@ -263,7 +263,7 @@ for (const make of HARNESSES) {
     it('reports not_a_bearing and no_hub', () => {
       const h = make();
       windmill(h, PZ);
-      for (const p of [[0, 0, 1], [0, 0, -1], [5, 5, 5]] as const) {
+      for (const p of [[0, 0, 1], [0, 0, -1], [5, 5, 5]] as Array<[number, number, number]>) {
         expect(collectRotor(h.grid, h.glue, ...h.abs(...p)).reason).toBe('not_a_bearing');
       }
       h.set(0, 5, 1, HELM_N);

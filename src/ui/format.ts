@@ -6,7 +6,7 @@ import { t } from './i18n';
 import type { Language } from './model';
 
 /** U+2212 MINUS SIGN: same width as digits in most fonts, unlike the hyphen. */
-const MINUS = '−';
+const MINUS = String.fromCharCode(0x2212);
 
 export function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;

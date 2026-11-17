@@ -20,6 +20,9 @@ export const SURF_SNOW = 4; // packed snow cap over stone
 export const SURF_CLAY = 5; // clay (lake and shallow sea floors)
 export type SurfaceKind = 0 | 1 | 2 | 3 | 4 | 5;
 
+/** Lowest y that can carry a packed-snow cap. */
+const SNOW_CAP_MIN_Y = 90;
+
 const S_DITHER = 101;
 const S_GRAVEL = 102;
 const S_CLAY = 103;
@@ -80,7 +83,9 @@ export function classifySurface(r: ColumnRegion, i: number, x: number, z: number
   const slope = columnSlope(r, i);
   const biome = r.biome[i]!;
   if (slope >= 4 + (jit < 0.5 ? 0 : 1)) return SURF_STONE; // cliff faces
-  if (top >= r.snowLine[i]! + 3 && slope <= 2) return SURF_SNOW;
+  // Packed snow caps only on high, bare summits; snowy lowlands keep turf (with snow cover
+  // and conifers) so cold regions read as snowy forest rather than flat white sheets.
+  if (top >= r.snowLine[i]! + 3 && top >= SNOW_CAP_MIN_Y && slope <= 2) return SURF_SNOW;
   if (r.rock[i]! > 0.42 + 0.4 * jit) return SURF_STONE;
   if (r.dry[i]! > 0.3 + 0.35 * jit) return SURF_SAND;
   if (biome === BIOME.SHORE) {

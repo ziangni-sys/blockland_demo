@@ -78,7 +78,7 @@ export const CONTROLS: readonly ControlSection[] = [
   {
     title: 'ctl.sec.glue',
     rows: [
-      { keys: [RC, { word: 'key.blockA' }, THEN, RC, { word: 'key.blockB' }], desc: 'ctl.glueApply' },
+      { keys: [RC, THEN, RC], desc: 'ctl.glueApply' },
       { keys: [k('key.shift'), PLUS, RC], desc: 'ctl.glueRemove' },
     ],
   },

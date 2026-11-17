@@ -1,0 +1,398 @@
+/**
+ * Node materials (TSL) for the voxel world: one shared material per draw group, plus the
+ * shared per-frame uniforms they read. The light model mirrors lighting.ts exactly.
+ *
+ * Per-object data. Sections, structures and renderer-drawn entities all share the same three
+ * voxel materials; what differs per object lives in ONE per-object vec4 uniform (objectGroup,
+ * so three keeps a separate small uniform buffer per render object):
+ *   x = skylight scale   (1 for world sections; StructurePose.sky / 15 for structures)
+ *   y = minimum block light (0 for sections; pose.block / 15 for structures and entities)
+ *   z = white flash 0..1 (blast crates)
+ *   w = 1 when the object is a WORLD section (only world water is cut by dry volumes)
+ * Every mesh using these materials must carry a THREE.Vector4 in `userData.bl`.
+ *
+ * Everything that is the same for all objects sits in the renderGroup (one shared buffer,
+ * updated once per render call) so thousands of sections do not each re-upload it.
+ */
+import * as THREE from 'three/webgpu';
+import {
+  abs,
+  attribute,
+  cameraPosition,
+  clamp,
+  dFdx,
+  dFdy,
+  Discard,
+  dot,
+  float,
+  floor,
+  Fn,
+  If,
+  int,
+  length,
+  log2,
+  max,
+  mix,
+  modelWorldMatrix,
+  normalize,
+  positionLocal,
+  positionWorld,
+  pow,
+  reflect,
+  renderGroup,
+  select,
+  sin,
+  cos,
+  smoothstep,
+  texture,
+  texture3D,
+  uniform,
+  uv,
+  vec3,
+  vec4,
+  vertexStage,
+} from 'three/tsl';
+import type { Node } from 'three/webgpu';
+import { AMBIENT_FLOOR, FACE_BOTTOM, FACE_TOP, FACE_X, FACE_Z, LIGHT_CURVE_K, type FogParams, type SkyState } from './lighting';
+
+/** Number of structures whose dry volumes cut world water at the same time. */
+export const DRY_SLOTS = 4;
+
+type N<T> = Node<T>;
+
+/** Shared uniforms (renderGroup). One instance per backend. */
+export class SharedUniforms {
+  readonly time = uniform(0).setGroup(renderGroup);
+  readonly dayLight = uniform(1).setGroup(renderGroup);
+  readonly skyTint = uniform(new THREE.Vector3(1, 1, 1)).setGroup(renderGroup);
+  readonly blockTint = uniform(new THREE.Vector3(1, 0.8, 0.6)).setGroup(renderGroup);
+  readonly zenith = uniform(new THREE.Vector3(0.1, 0.3, 0.8)).setGroup(renderGroup);
+  readonly horizon = uniform(new THREE.Vector3(0.5, 0.7, 0.9)).setGroup(renderGroup);
+  readonly sunGlow = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
+  readonly sunDir = uniform(new THREE.Vector3(0, 1, 0)).setGroup(renderGroup);
+  readonly moonDir = uniform(new THREE.Vector3(0, -1, 0)).setGroup(renderGroup);
+  readonly sunColor = uniform(new THREE.Vector3(1, 1, 1)).setGroup(renderGroup);
+  readonly moonColor = uniform(new THREE.Vector3(1, 1, 1)).setGroup(renderGroup);
+  readonly cloudColor = uniform(new THREE.Vector3(1, 1, 1)).setGroup(renderGroup);
+  readonly stars = uniform(0).setGroup(renderGroup);
+  readonly night = uniform(0).setGroup(renderGroup);
+  /** Rotates view directions into the frame of the turning star sphere. */
+  readonly starRotation = uniform(new THREE.Matrix3()).setGroup(renderGroup);
+  readonly fogStart = uniform(64).setGroup(renderGroup);
+  readonly fogEnd = uniform(128).setGroup(renderGroup);
+  readonly fogColor = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
+  readonly fogFixed = uniform(0).setGroup(renderGroup);
+  /** Tile layers of world water (still, flow): only those fragments are cut by dry volumes. */
+  readonly waterLayers = uniform(new THREE.Vector2(-1, -1)).setGroup(renderGroup);
+  readonly dryCount = uniform(0).setGroup(renderGroup);
+  readonly dryMatrices: THREE.UniformNode<"mat4", THREE.Matrix4>[] = [];
+
+  constructor() {
+    for (let i = 0; i < DRY_SLOTS; i++) this.dryMatrices.push(uniform(new THREE.Matrix4()).setGroup(renderGroup));
+  }
+
+  applySky(s: SkyState, starAngle: number, tilt: number): void {
+    this.dayLight.value = s.dayLight;
+    this.skyTint.value.set(s.skyTint.r, s.skyTint.g, s.skyTint.b);
+    this.blockTint.value.set(s.blockTint.r, s.blockTint.g, s.blockTint.b);
+    this.zenith.value.set(s.zenith.r, s.zenith.g, s.zenith.b);
+    this.horizon.value.set(s.horizon.r, s.horizon.g, s.horizon.b);
+    this.sunGlow.value.set(s.sunGlow.r, s.sunGlow.g, s.sunGlow.b);
+    this.sunDir.value.set(s.sunDir.x, s.sunDir.y, s.sunDir.z);
+    this.moonDir.value.set(s.moonDir.x, s.moonDir.y, s.moonDir.z);
+    this.sunColor.value.set(s.sunColor.r, s.sunColor.g, s.sunColor.b);
+    this.moonColor.value.set(s.moonColor.r, s.moonColor.g, s.moonColor.b);
+    this.cloudColor.value.set(s.cloudColor.r, s.cloudColor.g, s.cloudColor.b);
+    this.stars.value = s.stars;
+    this.night.value = s.night;
+    // Stars turn with the sun around the axis of the (tilted) sun path, which is
+    // a = (0, -sin(tilt), cos(tilt)). Rotation by -starAngle about a (Rodrigues).
+    const ax = 0;
+    const ay = -Math.sin(tilt);
+    const az = Math.cos(tilt);
+    const c = Math.cos(-starAngle);
+    const sn = Math.sin(-starAngle);
+    const t = 1 - c;
+    this.starRotation.value.set(
+      t * ax * ax + c,
+      t * ax * ay - sn * az,
+      t * ax * az + sn * ay,
+      t * ax * ay + sn * az,
+      t * ay * ay + c,
+      t * ay * az - sn * ax,
+      t * ax * az - sn * ay,
+      t * ay * az + sn * ax,
+      t * az * az + c,
+    );
+  }
+
+  applyFog(f: FogParams): void {
+    this.fogStart.value = f.start;
+    this.fogEnd.value = Math.max(f.end, f.start + 0.01);
+    this.fogColor.value.set(f.color.r, f.color.g, f.color.b);
+    this.fogFixed.value = f.fixedColor;
+  }
+}
+
+// ------------------------------------------------------------------ shared graph pieces
+
+/** l / (K - (K-1) l): the brightness curve of lighting.ts. */
+export function lightCurveNode(l: N<'float'>): N<'float'> {
+  const x = clamp(l, 0, 1);
+  return x.div(float(LIGHT_CURVE_K).sub(x.mul(LIGHT_CURVE_K - 1)));
+}
+
+/** Same as lighting.faceShade for a unit normal. */
+export function faceShadeNode(n: N<'vec3'>): N<'float'> {
+  const vy = select(n.y.greaterThan(0), float(FACE_TOP), float(FACE_BOTTOM));
+  return n.x.mul(n.x).mul(FACE_X).add(n.y.mul(n.y).mul(vy)).add(n.z.mul(n.z).mul(FACE_Z));
+}
+
+/**
+ * Sky gradient + sun glow for a unit direction (no discs, stars or clouds). It is also the
+ * distance-fog colour, so far terrain melts exactly into the sky behind it. Below the
+ * horizon the colour stays at the (slightly darkened) horizon colour.
+ */
+export function skyGradientNode(u: SharedUniforms, dir: N<'vec3'>): N<'vec3'> {
+  const h = dir.y;
+  const up = clamp(h, 0, 1);
+  // sqrt-ish falloff keeps a broad bright band at the horizon and a deep zenith.
+  const t = pow(up, 0.55);
+  const below = clamp(h.negate().mul(3), 0, 1);
+  const base = mix(u.horizon, u.zenith, t).mul(float(1).sub(below.mul(0.25)));
+  const toSun = max(dot(dir, u.sunDir), 0);
+  const nearHorizon = float(1).sub(up).mul(float(1).sub(below));
+  const glow = u.sunGlow.mul(pow(toSun, 5).mul(0.9).add(pow(toSun, 32).mul(0.6))).mul(nearHorizon);
+  return base.add(glow);
+}
+
+/** Fog blend factor 0..1 and colour for a world position. */
+export function applyFogNode(u: SharedUniforms, color: N<'vec3'>, worldPos: N<'vec3'>): N<'vec3'> {
+  const toFrag = worldPos.sub(cameraPosition);
+  const dist = length(toFrag);
+  const f = smoothstep(u.fogStart, u.fogEnd, dist);
+  const dir = toFrag.div(max(dist, 1e-4));
+  const fogCol = mix(skyGradientNode(u, dir), u.fogColor, u.fogFixed);
+  return mix(color, fogCol, f);
+}
+
+/** Decoded per-vertex light inputs (vertex stage values; they become varyings when read in the fragment). */
+interface VertexLight {
+  sky: N<'float'>;
+  block: N<'float'>;
+  ao: N<'float'>;
+  emissive: N<'float'>;
+  liquid: N<'float'>;
+  plant: N<'float'>;
+}
+
+function decodeVertexLight(obj: N<'vec4'>): VertexLight {
+  const l = attribute('vlight', 'vec4');
+  const flags = floor(l.w.mul(255).add(0.5));
+  const emissive = flags.mod(2);
+  const liquid = floor(flags.div(2)).mod(2);
+  const plant = floor(flags.div(4)).mod(2);
+  return {
+    sky: vertexStage(l.x.mul(obj.x)),
+    block: vertexStage(max(l.y, obj.y)),
+    ao: vertexStage(l.z),
+    emissive: vertexStage(emissive),
+    liquid,
+    plant,
+  };
+}
+
+/** Wave height used for liquid-surface bobbing; depends only on WORLD xz so sections never crack. */
+function waveHeight(u: SharedUniforms, xz: N<'vec2'>): N<'float'> {
+  const t = u.time;
+  const a = sin(xz.x.mul(0.61).add(xz.y.mul(0.27)).add(t.mul(1.3)));
+  const b = sin(xz.y.mul(0.83).sub(xz.x.mul(0.19)).add(t.mul(1.7)));
+  const c = sin(xz.x.add(xz.y).mul(1.37).add(t.mul(2.3)));
+  return a.mul(0.022).add(b.mul(0.018)).add(c.mul(0.009)).sub(0.035);
+}
+
+/**
+ * Local-space vertex position with liquid bobbing and plant sway. Plants sway with uv.v as
+ * the weight: the mesher's uv v = 0 is the bottom of the tile, so plant roots stay planted
+ * no matter which vertices carry the plant flag.
+ */
+function animatedPosition(u: SharedUniforms, vl: VertexLight): N<'vec3'> {
+  const p = positionLocal;
+  const w = modelWorldMatrix.mul(vec4(p, 1)).xyz;
+  const bob = waveHeight(u, w.xz).mul(vl.liquid);
+  const t = u.time;
+  const phase = w.x.mul(0.7).add(w.z.mul(0.43));
+  const swayW = uv().y.mul(vl.plant).mul(0.055);
+  const sx = sin(t.mul(1.9).add(phase)).add(sin(t.mul(3.1).add(phase.mul(1.7))).mul(0.35));
+  const sz = cos(t.mul(1.6).add(phase.mul(1.3)));
+  return p.add(vec3(sx.mul(swayW), bob, sz.mul(swayW).mul(0.7)));
+}
+
+/** World-space normal of the (possibly rotated) object, computed per vertex. */
+export function worldNormal(): N<'vec3'> {
+  const n = attribute('normal', 'vec3');
+  return vertexStage(normalize(modelWorldMatrix.mul(vec4(n, 0)).xyz));
+}
+
+/** Terrain light colour (before albedo) — lighting.ts shadedBrightness, tinted, with AO and face term. */
+function lightColor(u: SharedUniforms, vl: VertexLight, n: N<'vec3'>): N<'vec3'> {
+  const s = lightCurveNode(vl.sky.mul(u.dayLight));
+  const b = lightCurveNode(vl.block);
+  const tinted = max(u.skyTint.mul(s), u.blockTint.mul(b));
+  const floored = tinted.mul(1 - AMBIENT_FLOOR).add(AMBIENT_FLOOR);
+  const ao = mix(float(0.45), float(1), vl.ao);
+  const lit = floored.mul(ao).mul(faceShadeNode(n));
+  // Emissive faces ignore darkness; keep a whisper of the face term so a glowing cube still reads as a cube.
+  const emissiveLight = vec3(mix(float(0.86), float(1), faceShadeNode(n)));
+  return mix(lit, emissiveLight, vl.emissive);
+}
+
+/**
+ * Light colour for renderer-drawn models (rabbits, players) that have no per-vertex light:
+ * sky / block come from the per-object uniform (x = sky 0..1, y = block 0..1).
+ */
+export function modelLightNode(u: SharedUniforms, obj: N<'vec4'>, n: N<'vec3'>): N<'vec3'> {
+  const s = lightCurveNode(obj.x.mul(u.dayLight));
+  const b = lightCurveNode(obj.y);
+  const tinted = max(u.skyTint.mul(s), u.blockTint.mul(b));
+  return tinted.mul(1 - AMBIENT_FLOOR).add(AMBIENT_FLOOR).mul(faceShadeNode(n));
+}
+
+/**
+ * Mip level the hardware will pick for this fragment (tile texels per pixel), used to keep
+ * alpha-tested foliage from thinning out in the distance: the box-filtered mips average
+ * alpha down, so alpha is boosted by the mip level before the test (coverage-preserving
+ * cutout, after Ben Golus).
+ */
+function mipLevel(uvTex: N<'vec2'>): N<'float'> {
+  const dx = dFdx(uvTex);
+  const dy = dFdy(uvTex);
+  const d = max(dot(dx, dx), dot(dy, dy));
+  return max(log2(max(d, 1e-8)).mul(0.5), 0);
+}
+
+export type VoxelPass = 'opaque' | 'cutout' | 'translucent';
+
+export interface VoxelMaterials {
+  opaque: THREE.NodeMaterial;
+  cutout: THREE.NodeMaterial;
+  translucent: THREE.NodeMaterial;
+}
+
+/**
+ * Builds the three voxel materials. `tileNodes` receives every TextureNode that samples the
+ * tile array so setTiles() can swap the texture without rebuilding any program.
+ */
+export function createVoxelMaterials(
+  u: SharedUniforms,
+  objUniform: N<'vec4'>,
+  placeholder: THREE.DataArrayTexture,
+  tileSize: N<'float'>,
+  dryTextures: readonly THREE.Data3DTexture[],
+  tileNodes: THREE.TextureNode[],
+  dryNodes: THREE.TextureNode[],
+): VoxelMaterials {
+  const make = (pass: VoxelPass): THREE.NodeMaterial => {
+    const m = new THREE.NodeMaterial();
+    m.name = `voxel-${pass}`;
+    m.lights = false;
+    m.fog = false;
+    const vl = decodeVertexLight(objUniform);
+    m.positionNode = animatedPosition(u, vl);
+    const nW = worldNormal();
+    const layer = attribute('layer', 'uint');
+    const uvs = uv();
+    const tex = texture(placeholder, uvs).depth(int(layer));
+    tileNodes.push(tex);
+    const worldPos = positionWorld;
+
+    if (pass === 'translucent') {
+      const dry = dryVolumeFactor(u, worldPos, dryTextures, dryNodes);
+      const li = float(layer);
+      const isWater = li.equal(u.waterLayers.x).or(li.equal(u.waterLayers.y));
+      const cut = objUniform.w.greaterThan(0.5).and(isWater).and(dry.greaterThan(0.5));
+      m.transparent = true;
+      m.depthWrite = false;
+      m.side = THREE.DoubleSide;
+      // Single pass: three otherwise draws double-sided transparent objects twice (back, front).
+      m.forceSinglePass = true;
+      m.colorNode = Fn(() => {
+        If(cut, () => {
+          Discard();
+        });
+        const albedo = tex;
+        const light = lightColor(u, vl, nW);
+        const viewVec = cameraPosition.sub(worldPos);
+        const V = normalize(viewVec);
+        // Ripple normal for upward faces (analytic derivative of a few travelling waves).
+        const up = smoothstep(0.5, 0.9, nW.y);
+        const t = u.time;
+        const p = worldPos.xz;
+        const k1 = p.x.mul(1.9).add(p.y.mul(0.7)).add(t.mul(2.1));
+        const k2 = p.y.mul(2.3).sub(p.x.mul(0.9)).add(t.mul(2.7));
+        const k3 = p.x.mul(4.1).add(p.y.mul(3.3)).sub(t.mul(3.9));
+        const dhx = cos(k1).mul(1.9 * 0.012).sub(cos(k2).mul(0.9 * 0.01)).add(cos(k3).mul(4.1 * 0.004));
+        const dhz = cos(k1).mul(0.7 * 0.012).add(cos(k2).mul(2.3 * 0.01)).add(cos(k3).mul(3.3 * 0.004));
+        const rippleN = normalize(vec3(dhx.negate(), 1, dhz.negate()));
+        const N = normalize(mix(nW, rippleN, up));
+        const ndv = abs(dot(N, V));
+        const fres = float(0.02).add(pow(float(1).sub(ndv), 5).mul(0.98));
+        const R = reflect(V.negate(), N);
+        const skyVis = lightCurveNode(vl.sky);
+        const reflCol = skyGradientNode(u, vec3(R.x, abs(R.y), R.z)).mul(skyVis.mul(0.85).add(0.15));
+        // Gentle moving shimmer: two interfering wave fields brighten crests a little.
+        const shimmer = pow(sin(k1.mul(0.5)).mul(sin(k2.mul(0.5))).mul(0.5).add(0.5), 6).mul(0.12).mul(up);
+        const body = albedo.rgb.mul(light).mul(float(1).add(shimmer));
+        const sunAmt = pow(max(dot(R, u.sunDir), 0), 180).mul(smoothstep(-0.05, 0.1, u.sunDir.y));
+        const moonAmt = pow(max(dot(R, u.moonDir), 0), 300).mul(smoothstep(-0.05, 0.1, u.moonDir.y)).mul(0.35);
+        const spec = u.sunColor.mul(sunAmt).add(u.moonColor.mul(moonAmt)).mul(skyVis).mul(up).mul(2.5);
+        const color = mix(body, reflCol, fres.mul(0.85)).add(spec);
+        // Clearer looking straight down, more opaque (and sky coloured) at grazing angles.
+        const alpha = clamp(mix(albedo.a.mul(0.78), float(0.96), fres).add(spec.x.mul(0.5)), 0, 1);
+        return vec4(applyFogNode(u, color, worldPos), alpha);
+      })();
+    } else {
+      if (pass === 'cutout') m.side = THREE.DoubleSide;
+      m.colorNode = Fn(() => {
+        const albedo = tex;
+        if (pass === 'cutout') {
+          const lod = mipLevel(uvs.mul(tileSize));
+          const a = albedo.a.mul(lod.mul(0.3).add(1));
+          Discard(a.lessThan(0.5));
+        }
+        const light = lightColor(u, vl, nW);
+        const lit = mix(albedo.rgb.mul(light), vec3(1, 1, 1), objUniform.z);
+        return vec4(applyFogNode(u, lit, worldPos), 1);
+      })();
+    }
+    return m;
+  };
+  return { opaque: make('opaque'), cutout: make('cutout'), translucent: make('translucent') };
+}
+
+/**
+ * Dry-volume test (docs/LESSONS.md "船舱里冒出水面": the water stays in the world, the renderer
+ * cuts it). Returns > 0.5 where the fragment lies inside the dry mask of one of the nearest
+ * structures. Built eagerly (outside any Fn) so the four texture nodes exist exactly once and
+ * the backend can retarget them every frame. Texture fetches are unconditional (uniform
+ * control flow); only the results are selected per slot.
+ */
+function dryVolumeFactor(
+  u: SharedUniforms,
+  worldPos: N<'vec3'>,
+  dryTextures: readonly THREE.Data3DTexture[],
+  dryNodes: THREE.TextureNode[],
+): N<'float'> {
+  let dry: N<'float'> = float(0);
+  for (let i = 0; i < DRY_SLOTS; i++) {
+    const p = u.dryMatrices[i]!.mul(vec4(worldPos, 1)).xyz;
+    const inside = p.x.greaterThanEqual(0).and(p.x.lessThan(1))
+      .and(p.y.greaterThanEqual(0)).and(p.y.lessThan(1))
+      .and(p.z.greaterThanEqual(0)).and(p.z.lessThan(1))
+      .and(u.dryCount.greaterThan(i));
+    const tn = texture3D(dryTextures[i]!, clamp(p, 0, 1), 0);
+    dryNodes.push(tn);
+    dry = max(dry, select(inside, tn.r, float(0)));
+  }
+  return dry;
+}

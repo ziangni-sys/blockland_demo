@@ -341,7 +341,6 @@ describe('ByteReader rejects malformed input', () => {
     expect(bad([0x82, 0x00])).toThrow(/non-canonical/);
     // zigzag 2^54 - 1 would be -(2^53): outside the safe range
     expect(bad([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f])).toThrow(SaveFormatError);
-    expect(bad([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f])).toThrow(SaveFormatError);
     expect(bad(refVarint(-MAX))()).toBe(-MAX);
     expect(bad(refVarint(MAX))()).toBe(MAX);
   });

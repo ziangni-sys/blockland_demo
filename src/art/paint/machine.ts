@@ -45,35 +45,56 @@ const paintHelmBase: Painter = (c, seed) => {
   }
 };
 
+/**
+ * Ship's wheel, 15 px across, centred on pixel (7, 7) so spokes are exact pixel lines:
+ * a 1-px rim of radius 5, eight spokes, handles sticking out past the rim, brass hub.
+ */
 const paintHelmWheel: Painter = (c) => {
   c.clear();
   const wood = M.HELM_WOOD;
-  for (let y = 0; y < S; y++) {
-    for (let x = 0; x < S; x++) {
-      const [ox, oy] = centreOffset(x, y);
-      const r = Math.sqrt(ox * ox + oy * oy);
-      const light = -(ox + oy) / Math.max(r, 0.001); // +1 toward the top-left
-      // Distance to the nearest of 8 spokes (every 45 degrees).
-      const a = Math.atan2(oy, ox);
-      const k = Math.round(a / (Math.PI / 4));
-      const da = a - k * (Math.PI / 4);
-      const spokeDist = Math.abs(Math.sin(da)) * r;
-      if (r <= 1.9) {
-        c.set(x, y, M.BRASS[r < 0.8 ? 4 : light > 0.3 ? 3 : 1]!);
-      } else if (r >= 4.4 && r <= 6.2) {
-        // Rim: rounded section (lit inner-top-left, dark outer-bottom-right).
-        let t = 2 + light * 0.9;
-        if (r > 5.6) t -= 0.7;
-        if (r < 4.9) t += 0.4;
-        c.set(x, y, tone(wood, t));
-      } else if (spokeDist < 0.72 && r < 7.6) {
-        const handle = r > 6.2;
-        let t = handle ? 2.4 + light * 0.9 : 3;
-        if (handle && r > 7.1) t -= 1;
-        c.set(x, y, tone(wood, t));
-      }
+  const cx = 7;
+  const cy = 7;
+  // Spokes and handles: axis spokes reach radius 7, diagonal ones 5 steps (about 7.1).
+  const dirs: ReadonlyArray<readonly [number, number, number]> = [
+    [1, 0, 7],
+    [-1, 0, 7],
+    [0, 1, 7],
+    [0, -1, 7],
+    [1, 1, 5],
+    [-1, 1, 5],
+    [1, -1, 5],
+    [-1, -1, 5],
+  ];
+  for (const [dx, dy, n] of dirs) {
+    for (let k = 2; k <= n; k++) {
+      const r = Math.hypot(dx * k, dy * k);
+      const handle = r > 5.5;
+      // Handles are lit on their top-left facing side; the outermost pixel is a dark knob end.
+      let t = handle ? 3 : 2.2;
+      if (k === n) t = 1.2;
+      if (handle && dx + dy > 0) t -= 0.6;
+      c.set(cx + dx * k, cy + dy * k, wood[toneIndex(t, wood.length)]!);
     }
   }
+  // Rim: pixels whose centre lies within half a pixel of radius 5.
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const ox = x - cx;
+      const oy = y - cy;
+      const r = Math.sqrt(ox * ox + oy * oy);
+      if (Math.abs(r - 5) > 0.55) continue;
+      const light = -(ox + oy) / r; // +1 toward the top-left
+      c.set(x, y, wood[toneIndex(2.2 + light * 1.3, wood.length)]!);
+    }
+  }
+  // Brass hub.
+  for (let y = cy - 1; y <= cy + 1; y++) {
+    for (let x = cx - 1; x <= cx + 1; x++) {
+      const t = x - cx + y - cy;
+      c.set(x, y, M.BRASS[t < 0 ? 4 : t > 0 ? 1 : 3]!);
+    }
+  }
+  c.set(cx, cy, M.BRASS[2]!);
 };
 
 // ---------------------------------------------------------------- bearing
@@ -216,19 +237,31 @@ const paintPropellerHub: Painter = (c, seed) => {
 /** One blade, root at the bottom centre, tip at the top, on a transparent background. */
 const paintPropellerBlade: Painter = (c) => {
   c.clear();
-  for (let y = 0; y < S; y++) {
+  const inside = (x: number, y: number): boolean => {
+    if (y < 0 || y >= S) return false;
     const s = (S - (y + 0.5)) / S; // 0 at the root .. 1 at the tip
     let w = 1.05 + 2.6 * Math.min(1, s / 0.62) * (2 - Math.min(1, s / 0.62));
     if (s > 0.8) w *= Math.sqrt(Math.max(0, 1 - ((s - 0.8) / 0.2) ** 2));
     const xc = 8 + s * 0.9 - 0.4; // slight sweep
+    return Math.abs(x + 0.5 - xc) <= w;
+  };
+  for (let y = 0; y < S; y++) {
+    let left = -1;
+    let right = -1;
     for (let x = 0; x < S; x++) {
-      const d = x + 0.5 - xc;
-      if (Math.abs(d) > w) continue;
-      // Leading edge (left) catches the light; trailing edge is shaded; a ridge runs along the middle.
-      const u = d / w; // -1 leading .. 1 trailing
-      let t = 2.5 - u * 1.3;
-      if (Math.abs(d) <= 0.5) t += 0.4;
-      if (u > 0.7 || Math.abs(d) > w - 0.7) t -= 0.9;
+      if (!inside(x, y)) continue;
+      if (left < 0) left = x;
+      right = x;
+    }
+    if (left < 0) continue;
+    for (let x = left; x <= right; x++) {
+      // Leading edge (left) catches the light, a ridge runs down the middle, the trailing
+      // edge and the tip are outlined dark so the blade reads against the sky.
+      const u = right > left ? (x - left) / (right - left) : 0.5;
+      let t = 2.7 - u * 2;
+      if (Math.abs(u - 0.45) < 0.2) t += 0.3;
+      if (x === right || !inside(x, y - 1)) t = 0.2;
+      else if (x === left) t = 3.4;
       c.set(x, y, tone(M.BRASS, t));
     }
   }

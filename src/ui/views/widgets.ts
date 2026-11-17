@@ -200,14 +200,40 @@ export class Switch {
 
 // ------------------------------------------------------------------ key-cap tables
 
+/**
+ * Mouse buttons are drawn as a tiny mouse with the button lit, not spelled out: the same
+ * compact cap in both languages ("Right click" would otherwise be the widest key in every
+ * table). The caption stays available to screen readers and as a tooltip.
+ */
+const MOUSE_CAPS: Readonly<Record<string, 'l' | 'r' | 'w'>> = { 'key.leftClick': 'l', 'key.rightClick': 'r', 'key.wheel': 'w' };
+
+function mouseGlyph(which: 'l' | 'r' | 'w'): string {
+  const on = (b: 'l' | 'r' | 'w'): string => (b === which ? ' is-on' : '');
+  return `<svg viewBox="0 0 14 18">
+    <path class="bl-m-btn${on('l')}" d="M7 2v5.5H2V7a5 5 0 0 1 5-5z"/>
+    <path class="bl-m-btn${on('r')}" d="M7 2v5.5h5V7a5 5 0 0 0-5-5z"/>
+    <rect class="bl-m-body" x="2" y="2" width="10" height="14" rx="5"/>
+    <path class="bl-m-body" d="M7 2v5.5M2 7.5h10"/>
+    ${which === 'w' ? '<rect class="bl-m-wheel" x="5.6" y="3" width="2.8" height="4" rx="1.4"/>' : ''}
+  </svg>`;
+}
+
 function keyTokens(ctx: UiContext, tokens: readonly KeyToken[]): HTMLElement {
   const d = ctx.doc;
   const dt = h(d, 'dt');
   for (const tok of tokens) {
     if ('k' in tok) {
-      const kbd = h(d, 'kbd');
-      if (isKeyRef(tok.k)) ctx.text(kbd, tok.k);
-      else kbd.textContent = tok.k;
+      const mouse = MOUSE_CAPS[tok.k];
+      const kbd = h(d, 'kbd', mouse ? 'bl-kbd-mouse' : null);
+      if (mouse && isKeyRef(tok.k)) {
+        kbd.appendChild(svg(d, mouseGlyph(mouse)));
+        kbd.appendChild(ctx.text(h(d, 'span', 'bl-sr'), tok.k));
+        ctx.attr(kbd, 'title', tok.k);
+      } else if (isKeyRef(tok.k)) {
+        ctx.text(kbd, tok.k);
+      } else {
+        kbd.textContent = tok.k;
+      }
       dt.appendChild(kbd);
     } else if ('sep' in tok) {
       dt.appendChild(h(d, 'span', 'bl-key-sep', { 'aria-hidden': 'true' }, [tok.sep]));

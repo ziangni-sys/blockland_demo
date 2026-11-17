@@ -6,7 +6,10 @@
  *                       water shaded by depth, spawn marked with a red cross;
  *   biome_<seed>.png    biome labels (from biomeAt) over the same area;
  *   section_<seed>.png  vertical cross-section (x along the map's middle row, y 0..127,
- *                       2 px per block vertically) showing caves, ores, lava and water.
+ *                       2 px per block vertically) showing caves (black), ores, lava, water;
+ *   zoom_<seed>.png     160 x 160 blocks around the spawn at 4 px per block;
+ *   peak_<seed>.png     the same around the highest land column of the map;
+ *   relief_<seed>.png   grey-scale height with a contour line every 8 blocks.
  *
  * Run (env-guarded vitest entry, see map-preview.test.ts):
  *   WORLDGEN_PREVIEW=1 WORLDGEN_OUT=/some/dir WORLDGEN_SEEDS=1,2,3 npx vitest run tests/worldgen/tools
@@ -33,7 +36,7 @@ const BLOCK_COLOR = new Map<number, RGB>([
   [B.LOG_PINE, [74, 54, 34]],
   [B.LEAVES_OAK, [56, 122, 40]],
   [B.LEAVES_PINE, [36, 88, 58]],
-  [B.COAL_ORE, [30, 30, 30]],
+  [B.COAL_ORE, [70, 64, 60]],
   [B.IRON_ORE, [214, 170, 140]],
   [B.COPPER_ORE, [214, 112, 64]],
   [B.SNOW_BLOCK, [242, 246, 252]],
@@ -166,9 +169,11 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
       map[i * 3 + 2] = clamp255(b);
     }
   }
-  // Spawn marker.
+  // Spawn marker (the zoom view keeps an unmarked copy, with only the spawn cell outlined).
   const sx = Math.floor(spawn.x) - x0;
   const sz = Math.floor(spawn.z) - z0;
+  const mapClean = map.slice();
+  plot(mapClean, size, sx, sz, [255, 0, 0]);
   for (let d = -6; d <= 6; d++) {
     plot(map, size, sx + d, sz, [255, 0, 0]);
     plot(map, size, sx, sz + d, [255, 0, 0]);
@@ -201,7 +206,8 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
   for (let y = 0; y < WORLD_HEIGHT; y++) {
     for (let px = 0; px < size; px++) {
       const id = section[px + y * size]!;
-      const c = id === 0 ? (y < SEA_LEVEL ? ([20, 20, 24] as RGB) : SKY) : colorOf(id);
+      // Air below the surface (caves) is black; open air is sky.
+      const c = id === 0 ? (y <= topY[px + (sectionZ - z0) * size]! ? ([0, 0, 0] as RGB) : SKY) : colorOf(id);
       for (let k = 0; k < 2; k++) {
         const row = sh - 1 - (y * 2 + k);
         const i = (px + row * size) * 3;
@@ -212,10 +218,44 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
     }
   }
 
-  const files = [join(opts.outDir, `map_${seed}.png`), join(opts.outDir, `biome_${seed}.png`), join(opts.outDir, `section_${seed}.png`)];
+  // ---- zooms: 160 x 160 blocks at 4 px per block, around the spawn and the highest summit
+  let peakI = 0;
+  for (let i = 0; i < size * size; i++) if (topId[i] !== B.WATER && topY[i]! > topY[peakI]!) peakI = i;
+  const zoom = zoomAt(mapClean, size, sx, sz);
+  const peakZoom = zoomAt(mapClean, size, peakI % size, Math.floor(peakI / size));
+
+  // ---- relief: terrain height (water columns show their floor), contours every 8 blocks
+  const relief = new Uint8Array(size * size * 3);
+  for (let pz = 0; pz < size; pz++) {
+    for (let px = 0; px < size; px++) {
+      const i = px + pz * size;
+      const h = groundY[i]!;
+      let v = 30 + ((h - 10) / 110) * 225;
+      const band = Math.floor(h / 8);
+      const right = px + 1 < size ? Math.floor(groundY[i + 1]! / 8) : band;
+      const down = pz + 1 < size ? Math.floor(groundY[i + size]! / 8) : band;
+      if (band !== right || band !== down) v *= 0.6;
+      const water = topId[i] === B.WATER;
+      relief[i * 3] = clamp255(water ? v * 0.6 : v);
+      relief[i * 3 + 1] = clamp255(water ? v * 0.75 : v);
+      relief[i * 3 + 2] = clamp255(water ? v * 1.1 : v * 0.9);
+    }
+  }
+
+  const files = [
+    join(opts.outDir, `map_${seed}.png`),
+    join(opts.outDir, `biome_${seed}.png`),
+    join(opts.outDir, `section_${seed}.png`),
+    join(opts.outDir, `zoom_${seed}.png`),
+    join(opts.outDir, `relief_${seed}.png`),
+    join(opts.outDir, `peak_${seed}.png`),
+  ];
   writeFileSync(files[0]!, encodePng(size, size, map));
   writeFileSync(files[1]!, encodePng(size, size, biomeImg));
   writeFileSync(files[2]!, encodePng(size, sh, sec));
+  writeFileSync(files[3]!, encodePng(ZOOM_BLOCKS * ZOOM_SCALE, ZOOM_BLOCKS * ZOOM_SCALE, zoom));
+  writeFileSync(files[4]!, encodePng(size, size, relief));
+  writeFileSync(files[5]!, encodePng(ZOOM_BLOCKS * ZOOM_SCALE, ZOOM_BLOCKS * ZOOM_SCALE, peakZoom));
 
   const biomeFractions: Record<string, number> = {};
   for (const name of BIOME_NAMES) biomeFractions[name] = (biomeCount.get(name) ?? 0) / (size * size);
@@ -228,6 +268,28 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
     msPerChunk: genMs / (chunks * chunks),
     files,
   };
+}
+
+const ZOOM_BLOCKS = 160;
+const ZOOM_SCALE = 4;
+
+/** ZOOM_BLOCKS^2 blocks of `map` centred on (cx, cz), scaled up ZOOM_SCALE times. */
+function zoomAt(map: Uint8Array, size: number, cx: number, cz: number): Uint8Array {
+  const side = ZOOM_BLOCKS * ZOOM_SCALE;
+  const out = new Uint8Array(side * side * 3);
+  for (let zy = 0; zy < side; zy++) {
+    for (let zx = 0; zx < side; zx++) {
+      const mx = cx - (ZOOM_BLOCKS >> 1) + Math.floor(zx / ZOOM_SCALE);
+      const mz = cz - (ZOOM_BLOCKS >> 1) + Math.floor(zy / ZOOM_SCALE);
+      if (mx < 0 || mz < 0 || mx >= size || mz >= size) continue;
+      const si = (mx + mz * size) * 3;
+      const di = (zx + zy * side) * 3;
+      out[di] = map[si]!;
+      out[di + 1] = map[si + 1]!;
+      out[di + 2] = map[si + 2]!;
+    }
+  }
+  return out;
 }
 
 function plot(img: Uint8Array, size: number, x: number, y: number, c: RGB): void {

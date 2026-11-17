@@ -4,7 +4,7 @@
  *   seams_N.png    4x4 tilings of the repeating materials (seam check), x3
  *   distance.png   8x8 tilings at x1 (how calm large surfaces look from afar)
  *   icons_N.png    every item icon at 64, 32 and 16 px on a UI-slot background
- *   scene.png      a small terrain / build mock-up assembled from cube icons
+ *   scene.png      a small z-buffered voxel diorama (materials side by side)
  *
  * Run: ART_SHEET_OUT=<dir> npx vitest run tests/art/tools
  * (vite-node is not installed, so a guarded vitest file drives this module.)
@@ -18,6 +18,7 @@ import { renderItemIcon } from '../../../src/art/icons';
 import { paintTile, tileAlphaMode } from '../../../src/art/tiles';
 import { Image, textWidth } from './image';
 import { encodePng } from './png';
+import { buildDiorama } from './scene';
 
 const T = TILE_SIZE;
 
@@ -126,45 +127,32 @@ function iconSheets(dir: string): string[] {
   });
 }
 
-/** A little iso diorama from cube icons: shows how materials sit next to each other. */
+/** Compound-shape icons at 48 px, magnified x4, to inspect edges and overlaps pixel by pixel. */
+function iconZoomSheet(dir: string): string {
+  const ids = [50, 51, 52, 70, 74, 14, 12, 60, 8, 61];
+  const s = 48;
+  const z = 4;
+  const cols = 5;
+  const cell = s * z + 12;
+  const img = new Image(cols * cell, Math.ceil(ids.length / cols) * (cell + 12), [44, 46, 54]);
+  ids.forEach((id, i) => {
+    const x = (i % cols) * cell + 6;
+    const y = Math.floor(i / cols) * (cell + 12) + 6;
+    img.checker(x, y, s * z, s * z, 16);
+    img.blit(renderItemIcon(id, s), s, s, x, y, z);
+    img.text(String(id), x, y + s * z + 3, 2);
+  });
+  return save(dir, 'icons_zoom.png', img);
+}
+
+/** A z-buffered voxel diorama: how the materials sit next to each other in the world. */
 function sceneSheet(dir: string): string {
-  const s = 64;
-  const img = new Image(16 * 30 + 64, 520, [136, 178, 196]);
-  // Iso grid placement matching the icon projection (cell width = icon cube width).
-  const w = 4 * Math.floor((s - 2 * Math.round(s / 16)) / 4);
-  const hw = w / 2;
-  const ht = w / 4;
-  const h = Math.round((w * 4) / 7);
-  const ox = 230;
-  const oy = 60;
-  // [x, y, z, block id] - painter's order (back to front, bottom to top).
-  const cells: Array<[number, number, number, number]> = [];
-  const ground = [
-    [4, 4, 4, 4, 4, 5, 5],
-    [4, 4, 4, 4, 5, 5, 6],
-    [4, 4, 10, 10, 10, 5, 5],
-    [4, 4, 10, 10, 10, 5, 5],
-    [4, 15, 15, 16, 16, 5, 5],
-    [1, 1, 19, 20, 21, 2, 2],
-  ];
-  ground.forEach((row, z) => row.forEach((id, x) => cells.push([x, 0, z, id])));
-  cells.push([0, 1, 0, 8], [0, 2, 0, 8], [0, 3, 0, 12], [1, 3, 0, 12], [0, 3, 1, 12], [0, 4, 0, 12]);
-  cells.push([2, 1, 2, 40], [3, 1, 2, 48], [4, 1, 2, 44], [2, 1, 3, 51], [3, 1, 3, 14], [4, 1, 3, 22]);
-  cells.push([6, 1, 0, 9], [6, 2, 0, 9], [6, 3, 0, 13], [5, 3, 0, 13], [6, 4, 0, 13], [6, 3, 1, 13]);
-  cells.push([1, 1, 4, 61], [5, 1, 4, 17], [6, 1, 5, 18], [5, 1, 5, 23], [1, 1, 5, 24], [0, 1, 5, 26]);
-  cells.sort((a, b) => a[0] + a[2] - (b[0] + b[2]) || a[1] - b[1]);
-  for (const [x, y, z, id] of cells) {
-    const icon = renderItemIcon(id, s);
-    const sx = Math.round(ox + (x - z) * hw - s / 2);
-    const sy = Math.round(oy + (x + z) * ht - y * h);
-    img.blit(icon, s, s, sx, sy, 1);
-  }
-  img.text('scene mock-up (cube icons on an iso grid)', 8, 8, 2, [20, 24, 30]);
+  const img = buildDiorama().render(48, [150, 190, 206]);
   return save(dir, 'scene.png', img);
 }
 
 /** Writes every sheet into `dir` and returns the file paths. */
 export function writeContactSheets(dir: string): string[] {
   mkdirSync(dir, { recursive: true });
-  return [...tileSheets(dir), ...seamSheets(dir), distanceSheet(dir), ...iconSheets(dir), sceneSheet(dir)];
+  return [...tileSheets(dir), ...seamSheets(dir), distanceSheet(dir), ...iconSheets(dir), iconZoomSheet(dir), sceneSheet(dir)];
 }

@@ -2,20 +2,15 @@
  * Full cubes: plain (one tile per face), logs (stateKind 'axis') and facing cubes
  * (bearing). This is the hot path: most faces of a terrain section come through here.
  */
-import { ID_MASK, STATE_MASK, STATE_SHIFT, stateAxis, stateFacing } from '../../blocks/cell';
+import * as cellBits from '../../blocks/cell';
 import type { MeshContext } from './builder';
-import {
-  BASE_FLAGS,
-  FACE_TILE,
-  FACING_ROT,
-  GROUP,
-  INFO,
-  INFO_SELF_CULL,
-  LOG_ROT,
-  SH_AXIS,
-  SH_BEARING,
-  TILE_SLOT,
-} from './tables';
+import * as tables from './tables';
+
+// Hot-path imports are bound to module-local constants once, at module init. Module
+// runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
+// would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
+const { ID_MASK, STATE_MASK, STATE_SHIFT, stateAxis, stateFacing } = cellBits;
+const { BASE_FLAGS, FACE_TILE, FACING_ROT, GROUP, INFO, INFO_SELF_CULL, LOG_ROT, SH_AXIS, SH_BEARING, TILE_SLOT } = tables;
 
 /**
  * Emit the visible faces of a full cube. A face is skipped when the neighbour covers it

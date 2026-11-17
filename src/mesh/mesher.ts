@@ -22,6 +22,15 @@
  *            runs along the log axis; bearings turn their side tile so its top points to
  *            the front face.
  * Layers     Texture-array layer = BlockDef.tileIds entry for that face / part.
+ * Tile art   What the shapes expect from the painted tiles (image rows counted from the top):
+ *              torch            the post is columns 7..8 and the bottom 10 rows (6..15); the
+ *                               top cap samples rows 6..7 (the head), the bottom cap 14..15.
+ *              propeller_blade  ONE blade, root at the bottom edge, tip at the top edge; each
+ *                               of the four blades maps the whole tile.
+ *              helm_wheel       the whole wheel, centred, on a transparent background.
+ *              log side         grain runs vertically in the image.
+ *              bearing side     image "up" points toward the bearing's front face.
+ *              cross plants     the whole plant, standing on the bottom edge.
  * Light      4 bytes per vertex [sky, block, ao, flags]:
  *              sky, block  smooth light, level 0..15 scaled by 17 (0..255). Per vertex the
  *                          average of the up-to-4 non-opaque cells touching the vertex in
@@ -50,13 +59,22 @@
  * box border are tested against the margin cells. Shapes that only partly fill their cell
  * are culled per part: a part's face is tested only when it lies on the cell boundary.
  */
-import { ID_MASK } from '../blocks/cell';
+import * as cellBits from '../blocks/cell';
 import type { MeshData, MeshInput } from './types';
 import { MeshContext } from './shapes/builder';
-import { emitCube } from './shapes/cube';
-import { LiquidScratch, emitLiquid } from './shapes/liquid';
-import { emitCactus, emitCross, emitHelm, emitLayers, emitPropeller, emitTorch } from './shapes/models';
-import {
+import * as cubeShapes from './shapes/cube';
+import * as liquidShapes from './shapes/liquid';
+import * as models from './shapes/models';
+import * as tables from './shapes/tables';
+
+// Hot-path imports are bound to module-local constants once, at module init. Module
+// runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
+// would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
+const { ID_MASK } = cellBits;
+const { emitCube } = cubeShapes;
+const { LiquidScratch, emitLiquid } = liquidShapes;
+const { emitCactus, emitCross, emitHelm, emitLayers, emitPropeller, emitTorch } = models;
+const {
   G_CUTOUT,
   G_OPAQUE,
   G_TRANSLUCENT,
@@ -72,7 +90,7 @@ import {
   SH_NONE,
   SH_PROPELLER,
   SH_TORCH,
-} from './shapes/tables';
+} = tables;
 
 export { AO_BYTE } from './shapes/tables';
 export { LIQUID_FULL_HEIGHT } from './shapes/liquid';

@@ -32,8 +32,9 @@
  *    re-propagation. Over-removal is always safe (supporters are re-seeded), under-removal
  *    never happens, which is what makes this robust to budgeted, interleaved processing.
  *  - Raising a column's heightmap removes the open-sky status of every cell between the old
- *    top and the new block; that is expressed as a removal at the new block with level 15,
- *    whose lossless "straight down" chain covers exactly those cells.
+ *    top and the new block; each of those cells is reset and removed explicitly.
+ *    Lowering it needs nothing special: the cell that was removed becomes a 15 source and
+ *    its flood fill falls losslessly down the newly opened clear cells.
  *
  * QUEUES. Additions use a bucket queue keyed by light level, processed from 15 down: the
  * BFS then behaves like Dijkstra and finalises most cells on their first visit even with
@@ -42,19 +43,36 @@
  * no per-cell objects. Chunks are resolved through a small direct-mapped cache, so the inner
  * loops do no Map lookups.
  *
- * DIRTY MARKING. Incremental writes go straight to chunk.light followed by
- * world.markDirty(x,y,z) — exactly what World.setSkyLight/setBlockLight do, minus their
- * chunk lookup. initChunk writes the new chunk's own light without marking (addChunk already
- * marked all of its sections) but marks every cell it changes in neighbouring chunks.
+ * DIRTY MARKING. Light is written straight into chunk.light. Which mesh sections that makes
+ * stale follows World.markDirty exactly (the cell's section, plus the neighbouring sections
+ * when the cell lies on a section border, since meshing reads a 1-cell margin), but instead
+ * of a markDirty call per changed cell the engine ORs a 27-bit "affected neighbour sections"
+ * mask per section and, at the end of every public call, marks each affected section once
+ * through world.markDirty. Per-cell markDirty was about half the cost of placing a lamp.
+ * initChunk writes the new chunk's own light without marking (addChunk already marked all
+ * of its sections) but marks every cell it changes in neighbouring chunks.
  */
-import { CHUNK_SHIFT, CHUNK_SIZE, MAX_LIGHT, WORLD_HEIGHT } from '../core/constants';
-import { ID_MASK } from '../blocks/cell';
-import { EMIT, LIGHT_OPACITY } from '../blocks/registry';
+import * as K from '../core/constants';
+import { ID_MASK as CELL_ID_MASK } from '../blocks/cell';
+import { EMIT as EMIT_TABLE, LIGHT_OPACITY as OPACITY_TABLE } from '../blocks/registry';
 import type { Chunk } from '../voxel/chunk';
 import type { World } from '../voxel/world';
 
+// Module-level copies of everything imported that the per-cell loops touch. Some module
+// runners (vite-node / vitest, i.e. every headless test) turn each use of an imported binding
+// into a namespace getter call; that tripled initChunk's cost. Plain consts are free
+// everywhere. The tables are filled once at startup by the block registry and never change.
+const LIGHT_OPACITY = OPACITY_TABLE;
+const EMIT = EMIT_TABLE;
+const ID_MASK = CELL_ID_MASK;
+const CHUNK_SHIFT = K.CHUNK_SHIFT;
+const CHUNK_SIZE = K.CHUNK_SIZE;
+const MAX_LIGHT = K.MAX_LIGHT;
+const SECTION_SIZE = K.SECTION_SIZE;
+const SECTIONS_PER_CHUNK = K.SECTIONS_PER_CHUNK;
+
 // Chunk cell index = lx | lz << 4 | y << 8 (voxel/chunk.ts). The offsets below follow from it.
-const TOP_Y = WORLD_HEIGHT - 1;
+const TOP_Y = K.WORLD_HEIGHT - 1;
 const COLUMNS = CHUNK_SIZE * CHUNK_SIZE;
 const DY = COLUMNS; // index step for y +/- 1
 const DZ = CHUNK_SIZE; // index step for z +/- 1
@@ -67,10 +85,38 @@ const OPAQUE_LEVEL = 15;
 const REM_LEVEL_SHIFT = 8;
 const REM_Y_MASK = 0xff;
 
-/** Direct-mapped cache of lit chunks: 8 x 8 slots indexed by the low chunk-coordinate bits. */
-const CACHE_BITS = 3;
-const CACHE_MASK = (1 << CACHE_BITS) - 1;
-const CACHE_SLOTS = 1 << (2 * CACHE_BITS);
+/** Direct-mapped tables keyed by chunk: 8 x 8 slots indexed by the low chunk-coordinate bits. */
+const SLOT_BITS = 3;
+const SLOT_MASK = (1 << SLOT_BITS) - 1;
+const SLOTS = 1 << (2 * SLOT_BITS);
+
+// ---- dirty-section masks (immutable lookup tables)
+// A bit b in 0..26 stands for the section at offset (b % 3 - 1, floor(b / 3) % 3 - 1,
+// floor(b / 9) - 1) in (x, y, z) from the section that owns the mask.
+/** Per coordinate within a section (0..15): 0 interior, 1 low border, 2 high border. */
+const BORDER_CLASS = new Uint8Array(SECTION_SIZE);
+BORDER_CLASS[0] = 1;
+BORDER_CLASS[SECTION_SIZE - 1] = 2;
+/** Sections a changed cell affects, by border class x + 3 y + 9 z (same rule as World.markDirty). */
+const CLASS_MASK = new Int32Array(27);
+const BIT_DX = new Int8Array(27);
+const BIT_DY = new Int8Array(27);
+const BIT_DZ = new Int8Array(27);
+for (let b = 0; b < 27; b++) {
+  BIT_DX[b] = (b % 3) - 1;
+  BIT_DY[b] = (Math.floor(b / 3) % 3) - 1;
+  BIT_DZ[b] = Math.floor(b / 9) - 1;
+}
+for (let cls = 0; cls < 27; cls++) {
+  const offsets = (k: number): number[] => (k === 0 ? [0] : k === 1 ? [0, -1] : [0, 1]);
+  let m = 0;
+  for (const dx of offsets(cls % 3)) {
+    for (const dy of offsets(Math.floor(cls / 3) % 3)) {
+      for (const dz of offsets(Math.floor(cls / 9))) m |= 1 << (dx + 1 + 3 * (dy + 1) + 9 * (dz + 1));
+    }
+  }
+  CLASS_MASK[cls] = m;
+}
 
 /** Light lost entering a cell of the given opacity (callers exclude opacity >= 15). */
 function stepCost(op: number): number {
@@ -146,12 +192,19 @@ export class LightEngine {
   /** Per column of the chunk being initialised: highest y whose straight-down sky is 0, or -1. */
   private readonly darkFrom = new Int16Array(COLUMNS);
 
-  private readonly cacheChunk: Array<Chunk | null> = new Array<Chunk | null>(CACHE_SLOTS).fill(null);
-  private readonly cacheCx = new Int32Array(CACHE_SLOTS);
-  private readonly cacheCz = new Int32Array(CACHE_SLOTS);
-  private readonly cacheGen = new Float64Array(CACHE_SLOTS);
+  // Lit-chunk lookup cache.
+  private readonly cacheChunk: Array<Chunk | null> = new Array<Chunk | null>(SLOTS).fill(null);
+  private readonly cacheCx = new Int32Array(SLOTS);
+  private readonly cacheCz = new Int32Array(SLOTS);
+  private readonly cacheGen = new Float64Array(SLOTS);
   /** Bumped whenever chunks may have been added, removed or lit since the last lookup. */
   private gen = 1;
+
+  // Pending dirty-section masks, flushed at the end of every public call.
+  private readonly dirtyOwner: Array<Chunk | null> = new Array<Chunk | null>(SLOTS).fill(null);
+  private readonly dirtyMask = new Int32Array(SLOTS * SECTIONS_PER_CHUNK);
+  private readonly dirtySlots = new Int32Array(SLOTS);
+  private dirtySlotCount = 0;
 
   private detach: (() => void) | null = null;
 
@@ -197,31 +250,40 @@ export class LightEngine {
     const darkFrom = this.darkFrom;
 
     // Pass 1, one top-down walk per column: heightmap, straight-down sky light, emitters.
-    // This overwrites every light byte, so stale data (e.g. from a save) never survives.
+    // Every light byte is rewritten, so stale data (e.g. from a save) never survives.
+    light.fill(0);
     for (let col = 0; col < COLUMNS; col++) {
+      const wx = ox + (col & EDGE);
+      const wz = oz + (col >> 4);
       let level = MAX_LIGHT;
       let height = 0;
-      let dark = -1;
-      for (let y = TOP_Y; y >= 0; y--) {
+      let y = TOP_Y;
+      for (; y >= 0; y--) {
         const i = col | (y * DY);
         const id = cells[i]! & ID_MASK;
         const op = LIGHT_OPACITY[id]!;
         if (op !== 0) {
           if (height === 0) height = y + 1;
-          if (level !== 0) {
-            level = op >= OPAQUE_LEVEL ? 0 : level - stepCost(op);
-            if (level <= 0) {
-              level = 0;
-              dark = y;
-            }
-          }
+          level = op >= OPAQUE_LEVEL ? 0 : level - stepCost(op);
+          if (level < 0) level = 0;
         }
         const e = EMIT[id]!;
         light[i] = (level << 4) | e;
-        if (e > 1) blockQ.push(e, ox + (col & EDGE), y, oz + (col >> 4));
+        if (e > 1) blockQ.push(e, wx, y, wz);
+        if (level === 0) break;
       }
+      // The first opacity > 0 cell is at or above the point where the sky ran out.
       hm[col] = height;
-      darkFrom[col] = dark;
+      darkFrom[col] = y;
+      // Below that the straight-down sky is 0: only emitters remain to be found.
+      for (y--; y >= 0; y--) {
+        const i = col | (y * DY);
+        const e = EMIT[cells[i]! & ID_MASK]!;
+        if (e !== 0) {
+          light[i] = e;
+          if (e > 1) blockQ.push(e, wx, y, wz);
+        }
+      }
     }
 
     // Pass 2, sideways seeds. After pass 1 the column values never increase going down, so
@@ -260,6 +322,7 @@ export class LightEngine {
     // their first visit. It may cross into lit neighbours (marking them dirty).
     this.runAdd(skyQ, true, Infinity, chunk);
     this.runAdd(blockQ, false, Infinity, chunk);
+    this.flushDirty();
   }
 
   /**
@@ -278,7 +341,6 @@ export class LightEngine {
     const boz = b.cz << CHUNK_SHIFT;
     const skyQ = this.initSky;
     const blockQ = this.initBlock;
-    const world = this.world;
     for (let t = 0; t < CHUNK_SIZE; t++) {
       const colA = baseA + t * stride;
       const colB = baseB + t * stride;
@@ -305,9 +367,7 @@ export class LightEngine {
           const vs = sb - cost;
           const vb = bb - cost;
           if (vs > sa || vb > ba) {
-            const ns = vs > sa ? vs : sa;
-            const nb = vb > ba ? vb : ba;
-            aLight[ia] = (ns << 4) | nb;
+            aLight[ia] = ((vs > sa ? vs : sa) << 4) | (vb > ba ? vb : ba);
             if (vs > sa) skyQ.push(vs, ax, y, az);
             if (vb > ba && vb > 1) blockQ.push(vb, ax, y, az);
           }
@@ -321,10 +381,8 @@ export class LightEngine {
           const vs = sa - cost;
           const vb = ba - cost;
           if (vs > sb || vb > bb) {
-            const ns = vs > sb ? vs : sb;
-            const nb = vb > bb ? vb : bb;
-            bLight[ib] = (ns << 4) | nb;
-            world.markDirty(bx, y, bz);
+            bLight[ib] = ((vs > sb ? vs : sb) << 4) | (vb > bb ? vb : bb);
+            this.touch(b, ib);
             if (vs > sb) skyQ.push(vs, bx, y, bz);
             if (vb > bb && vb > 1) blockQ.push(vb, bx, y, bz);
           }
@@ -368,24 +426,27 @@ export class LightEngine {
     c.heightmap[col] = hNew;
 
     // ---- sky
+    if (hNew > hOld) {
+      // The cell became its column's top: every (clear) cell between the old top and here
+      // lost open sky. Reset each one explicitly instead of relying on the removal chain
+      // from this cell to reach them, which would assume they currently hold exactly what
+      // the chain expects; with budgeted processing they may still be mid-propagation.
+      for (let yy = y - 1; yy >= hOld; yy--) {
+        const k = col | (yy * DY);
+        const l = c.light[k]! >> 4;
+        if (l === 0) continue;
+        this.writeSky(c, k, 0);
+        this.skyRem.push(x, z, yy | (l << REM_LEVEL_SHIFT));
+      }
+    }
     const oldSky = c.light[i]! >> 4;
     const skySrc = skySource(y, hNew, opNew);
-    if (hNew > hOld) {
-      // The cell became its column's top: everything from the old top up to here lost open
-      // sky. Removing with level 15 makes the lossless straight-down chain reach all of
-      // those cells, whatever their current (possibly still propagating) values are.
-      this.writeSky(c, i, x, y, z, skySrc);
-      this.skyRem.push(x, z, y | (MAX_LIGHT << REM_LEVEL_SHIFT));
-      if (skySrc > 0) this.skyAdd.push(skySrc, x, y, z);
-    } else {
-      const v = Math.max(skySrc, this.pull(c, i, x, y, z, opNew, true));
-      this.settle(c, i, x, y, z, oldSky, v, skySrc, true);
-    }
+    this.settle(c, i, x, y, z, oldSky, Math.max(skySrc, this.pull(c, i, x, y, z, opNew, true)), skySrc, true);
 
     // ---- block
     const oldBlock = c.light[i]! & 15;
-    const v = Math.max(eNew, this.pull(c, i, x, y, z, opNew, false));
-    this.settle(c, i, x, y, z, oldBlock, v, eNew, false);
+    this.settle(c, i, x, y, z, oldBlock, Math.max(eNew, this.pull(c, i, x, y, z, opNew, false)), eNew, false);
+    this.flushDirty();
   }
 
   /**
@@ -411,14 +472,14 @@ export class LightEngine {
   ): void {
     if (target >= old) {
       if (target > old) {
-        if (sky) this.writeSky(c, i, x, y, z, target);
-        else this.writeBlock(c, i, x, y, z, target);
+        if (sky) this.writeSky(c, i, target);
+        else this.writeBlock(c, i, target);
         (sky ? this.skyAdd : this.blockAdd).push(target, x, y, z);
       }
       return;
     }
-    if (sky) this.writeSky(c, i, x, y, z, source);
-    else this.writeBlock(c, i, x, y, z, source);
+    if (sky) this.writeSky(c, i, source);
+    else this.writeBlock(c, i, source);
     (sky ? this.skyRem : this.blockRem).push(x, z, y | (old << REM_LEVEL_SHIFT));
     if (source > 0) (sky ? this.skyAdd : this.blockAdd).push(source, x, y, z);
   }
@@ -491,6 +552,7 @@ export class LightEngine {
     if (left > 0 && this.blockRem.size === 0 && this.blockAdd.total > 0) {
       left -= this.runAdd(this.blockAdd, false, left, null);
     }
+    this.flushDirty();
     return this.pending === 0;
   }
 
@@ -584,7 +646,7 @@ export class LightEngine {
       if (cand <= (lb & 15)) return;
       c.light[idx] = (lb & 0xf0) | cand;
     }
-    if (c !== quiet) this.world.markDirty(x, y, z);
+    if (c !== quiet) this.touch(c, idx);
     // Level-1 block light cannot travel; level-1 sky light still falls through clear cells.
     if (cand > 1 || sky) q.push(cand, x, y, z);
   }
@@ -663,7 +725,7 @@ export class LightEngine {
     const dependent = nl < o || (down && sky && nl === o && op === 0);
     if (dependent && nl > src) {
       c.light[idx] = sky ? (lb & 0x0f) | (src << 4) : (lb & 0xf0) | src;
-      this.world.markDirty(x, y, z);
+      this.touch(c, idx);
       rem.push(x, z, y | (nl << REM_LEVEL_SHIFT));
       if (src > 1 || (sky && src > 0)) add.push(src, x, y, z);
     } else if (nl > 1 || sky) {
@@ -673,27 +735,27 @@ export class LightEngine {
 
   // ================================================================== helpers
 
-  private writeSky(c: Chunk, i: number, x: number, y: number, z: number, v: number): void {
+  private writeSky(c: Chunk, i: number, v: number): void {
     const lb = c.light[i]!;
     const next = (lb & 0x0f) | (v << 4);
     if (next !== lb) {
       c.light[i] = next;
-      this.world.markDirty(x, y, z);
+      this.touch(c, i);
     }
   }
 
-  private writeBlock(c: Chunk, i: number, x: number, y: number, z: number, v: number): void {
+  private writeBlock(c: Chunk, i: number, v: number): void {
     const lb = c.light[i]!;
     const next = (lb & 0xf0) | v;
     if (next !== lb) {
       c.light[i] = next;
-      this.world.markDirty(x, y, z);
+      this.touch(c, i);
     }
   }
 
   /** The lit chunk at chunk coordinates, or null when unloaded or not yet lit. */
   private chunkAt(cx: number, cz: number): Chunk | null {
-    const s = (cx & CACHE_MASK) | ((cz & CACHE_MASK) << CACHE_BITS);
+    const s = (cx & SLOT_MASK) | ((cz & SLOT_MASK) << SLOT_BITS);
     if (this.cacheGen[s] === this.gen && this.cacheCx[s] === cx && this.cacheCz[s] === cz) {
       return this.cacheChunk[s] as Chunk | null;
     }
@@ -704,5 +766,54 @@ export class LightEngine {
     this.cacheCz[s] = cz;
     this.cacheGen[s] = this.gen;
     return lit;
+  }
+
+  /** Record that the light of cell `idx` of chunk `c` changed (see DIRTY MARKING). */
+  private touch(c: Chunk, idx: number): void {
+    const s = (c.cx & SLOT_MASK) | ((c.cz & SLOT_MASK) << SLOT_BITS);
+    if (this.dirtyOwner[s] !== c) this.claimDirtySlot(s, c);
+    // Chunks are exactly one section wide, so the chunk-local x/z double as section-local.
+    const y = idx >> 8;
+    this.dirtyMask[s * SECTIONS_PER_CHUNK + ((y / SECTION_SIZE) | 0)] |=
+      CLASS_MASK[BORDER_CLASS[idx & EDGE]! + 3 * BORDER_CLASS[y & (SECTION_SIZE - 1)]! + 9 * BORDER_CLASS[(idx >> 4) & EDGE]!]!;
+  }
+
+  private claimDirtySlot(s: number, c: Chunk): void {
+    const prev = this.dirtyOwner[s];
+    if (prev) this.flushDirtySlot(s, prev);
+    else this.dirtySlots[this.dirtySlotCount++] = s;
+    this.dirtyOwner[s] = c;
+  }
+
+  /** Mark every section recorded for slot `s` (owned by chunk `c`) dirty, and clear the slot's masks. */
+  private flushDirtySlot(s: number, c: Chunk): void {
+    const base = s * SECTIONS_PER_CHUNK;
+    for (let sy = 0; sy < SECTIONS_PER_CHUNK; sy++) {
+      let m = this.dirtyMask[base + sy]!;
+      if (m === 0) continue;
+      this.dirtyMask[base + sy] = 0;
+      while (m !== 0) {
+        const b = 31 - Math.clz32(m & -m);
+        m &= m - 1;
+        const ty = sy + BIT_DY[b]!;
+        if (ty < 0 || ty >= SECTIONS_PER_CHUNK) continue;
+        // An interior cell of the target section marks exactly that section.
+        const half = SECTION_SIZE >> 1;
+        this.world.markDirty(
+          ((c.cx + BIT_DX[b]!) << CHUNK_SHIFT) + half,
+          ty * SECTION_SIZE + half,
+          ((c.cz + BIT_DZ[b]!) << CHUNK_SHIFT) + half,
+        );
+      }
+    }
+  }
+
+  private flushDirty(): void {
+    for (let k = 0; k < this.dirtySlotCount; k++) {
+      const s = this.dirtySlots[k]!;
+      this.flushDirtySlot(s, this.dirtyOwner[s]!);
+      this.dirtyOwner[s] = null;
+    }
+    this.dirtySlotCount = 0;
   }
 }

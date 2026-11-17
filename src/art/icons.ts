@@ -14,7 +14,7 @@
 import { itemDef } from '../blocks/items';
 import { blockDef, type BlockDef } from '../blocks/registry';
 import { TILE_SIZE } from '../core/constants';
-import { shadeColor, type RGB } from './color';
+import { shadeColor } from './color';
 import { paintTile } from './tiles';
 
 const T = TILE_SIZE;
@@ -37,6 +37,12 @@ interface Quad {
   tv0: number;
   tu1: number;
   tv1: number;
+  /**
+   * Drawn in a second pass on top of everything else, with its own dark outline. Only for
+   * parts that are in front of the rest anyway (the helm wheel), where wood-on-wood would
+   * otherwise blend into one blob at hotbar sizes.
+   */
+  overlay?: boolean;
 }
 
 /** Shaded copies of tiles, local to one icon render (keyed by name and shade). */
@@ -146,13 +152,9 @@ function projection(size: number): Projection {
   return { cx: size / 2, top: Math.floor((size - total) / 2), hw: w / 2, ht, h };
 }
 
-/**
- * Ray-casts the quads into a size x size RGBA image. Returns the image and, per pixel, the
- * index of the frontmost opaque-contributing quad (-1 = none) for edge post-processing.
- */
-function rasterize(quads: readonly Quad[], size: number, p: Projection): { img: Uint8ClampedArray; front: Int16Array } {
+/** Ray-casts the quads into a size x size RGBA image (straight alpha). */
+function rasterize(quads: readonly Quad[], size: number, p: Projection): Uint8ClampedArray {
   const img = new Uint8ClampedArray(size * size * 4);
-  const front = new Int16Array(size * size).fill(-1);
   // Screen mapping: sx = cx + (x - z) * hw ; sy = top + (x + z) * ht + (1 - y) * h.
   // Direction toward the viewer is (1, 2*ht/h, 1): depth = x + z + y * 2ht/h (larger = nearer).
   const ky = (2 * p.ht) / p.h;
@@ -229,7 +231,6 @@ function rasterize(quads: readonly Quad[], size: number, p: Projection): { img: 
         const o = hitRGBA[i]!;
         const ta = tex[o + 3]! / 255;
         const wgt = (1 - a) * ta;
-        if (a === 0) front[py * size + px] = hitQuad[i]!;
         r += tex[o]! * wgt;
         g += tex[o + 1]! * wgt;
         b += tex[o + 2]! * wgt;
@@ -243,7 +244,7 @@ function rasterize(quads: readonly Quad[], size: number, p: Projection): { img: 
       img[o + 3] = a * 255;
     }
   }
-  return { img, front };
+  return img;
 }
 
 /** Darkens the silhouette's border pixels: a crisp 1-px outline inside the icon bounds. */
@@ -263,6 +264,48 @@ function outlineSilhouette(img: Uint8ClampedArray, size: number): void {
     img[o + 1] = c[1];
     img[o + 2] = c[2];
     img[o + 3] = Math.max(img[o + 3]!, 200);
+  }
+}
+
+/** Grows a 1-px dark ring OUTSIDE the silhouette, coloured from the neighbouring pixel. */
+function outlineOutside(img: Uint8ClampedArray, size: number): void {
+  const solid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < size && y < size && img[(y * size + x) * 4 + 3]! > 0;
+  const ring: Array<[number, number]> = [];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (solid(x, y)) continue;
+      for (const [dx, dy] of [
+        [0, -1],
+        [-1, 0],
+        [1, 0],
+        [0, 1],
+      ] as const) {
+        if (solid(x + dx, y + dy)) {
+          ring.push([y * size + x, ((y + dy) * size + x + dx) * 4]);
+          break;
+        }
+      }
+    }
+  }
+  for (const [i, n] of ring) {
+    const c = shadeColor([img[n]!, img[n + 1]!, img[n + 2]!], 0.35);
+    const o = i * 4;
+    img[o] = c[0];
+    img[o + 1] = c[1];
+    img[o + 2] = c[2];
+    img[o + 3] = 255;
+  }
+}
+
+/** Source-over composite of `top` onto `dst` (same size, straight alpha). */
+function composite(dst: Uint8ClampedArray, top: Uint8ClampedArray): void {
+  for (let o = 0; o < dst.length; o += 4) {
+    const ta = top[o + 3]! / 255;
+    if (ta === 0) continue;
+    const da = (dst[o + 3]! / 255) * (1 - ta);
+    const a = ta + da;
+    for (let c = 0; c < 3; c++) dst[o + c] = (top[o + c]! * ta + dst[o + c]! * da) / a;
+    dst[o + 3] = a * 255;
   }
 }
 
@@ -294,7 +337,19 @@ function cubeTiles(def: BlockDef): BoxTiles {
   return { top: any, south: any, east: any };
 }
 
-function blockQuads(def: BlockDef, src: TileSource): Quad[] | null {
+/**
+ * A quad facing the viewer (its plane contains the screen-horizontal direction (1, 0, -1)),
+ * so a round sprite stays round. Centred on cell point (c, y, c) with c = 0.5 + `forward`,
+ * spanning `screenW` x `screenH` pixels for projection `p`.
+ */
+function billboard(p: Projection, y: number, forward: number, screenW: number, screenH: number, tex: Uint8Array): Quad {
+  const a = screenW / (2 * p.hw);
+  const b = screenH / p.h;
+  const c = 0.5 + forward;
+  return { o: [c - a / 2, y + b / 2, c + a / 2], u: [a, 0, -a], v: [0, -b, 0], tex, tu0: 0, tu1: T, tv0: 0, tv1: T };
+}
+
+function blockQuads(def: BlockDef, src: TileSource, p: Projection): Quad[] | null {
   const t = def.tiles;
   switch (def.shape) {
     case 'cross':
@@ -315,9 +370,16 @@ function blockQuads(def: BlockDef, src: TileSource): Quad[] | null {
     }
     case 'helm': {
       const [base, wheel] = [t[0]!, t[1]!];
-      const quads = boxQuads(src, 5 / 16, 0, 5 / 16, 11 / 16, 9 / 16, 11 / 16, { top: base, south: base, east: base });
-      // The wheel stands upright in front of the pedestal, facing the left (+Z) side.
-      quads.push({ o: [0.04, 1.02, 0.74], u: [0.92, 0, 0], v: [0, -0.92, 0], tex: src.get(wheel, 0.92), tu0: 0, tu1: T, tv0: 0, tv1: T });
+      // Pedestal below, the wheel upright in front of it and turned toward the viewer so it
+      // reads as a wheel at hotbar sizes. Its hub (texel 7.5) sits at the pedestal top.
+      // The post must be taller than the wheel's radius below the hub, or it vanishes behind it.
+      const hubY = 0.96;
+      const quads = boxQuads(src, 5 / 16, 0, 5 / 16, 11 / 16, 1, 11 / 16, { top: base, south: base, east: base });
+      const d = p.hw * 2 * 0.62;
+      const q = billboard(p, hubY, 0.25, d, d, src.get(wheel, 1));
+      // Shift so the texel centre (7.5, 7.5) of the 16-px wheel, not the tile centre, is the hub.
+      const off = 0.5 / 16;
+      quads.push({ ...q, overlay: true, o: [q.o[0] + (q.u[0] + q.v[0]) * off, q.o[1] + (q.u[1] + q.v[1]) * off, q.o[2] + (q.u[2] + q.v[2]) * off] });
       return quads;
     }
     case 'propeller': {
@@ -330,8 +392,8 @@ function blockQuads(def: BlockDef, src: TileSource): Quad[] | null {
       const cx = 0.5;
       const cy = 0.5;
       const z = 5 / 16;
-      const L = 0.62;
-      const W = 0.42;
+      const L = 0.7;
+      const W = 0.5;
       const tex = src.get(blade, 0.9);
       for (let k = 0; k < 4; k++) {
         const a = Math.PI / 4 + (k * Math.PI) / 2;
@@ -376,17 +438,20 @@ export function renderItemIcon(itemId: number, size: number): Uint8ClampedArray 
   }
   const def = blockDef(item.block);
   const src = new TileSource();
-  const quads = blockQuads(def, src);
-  if (!quads) return spriteIcon(paintTile(def.tiles[0]!), size);
   const p = projection(size);
-  const { img } = rasterize(quads, size, p);
+  const quads = blockQuads(def, src, p);
+  if (!quads) return spriteIcon(paintTile(def.tiles[0]!), size);
+  const img = rasterize(
+    quads.filter((q) => !q.overlay),
+    size,
+    p,
+  );
   if (size >= 12) outlineSilhouette(img, size);
+  const over = quads.filter((q) => q.overlay);
+  if (over.length) {
+    const top = rasterize(over, size, p);
+    if (size >= 12) outlineOutside(top, size);
+    composite(img, top);
+  }
   return img;
 }
-
-/** Re-exported for tests / tools that want the colour of a shaded face. */
-export function iconFaceShades(): { top: number; left: number; right: number } {
-  return { top: SHADE_TOP, left: SHADE_LEFT, right: SHADE_RIGHT };
-}
-
-export type { RGB };

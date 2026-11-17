@@ -61,15 +61,16 @@ function paintStoneBase(c: Canvas): Field {
 
 export const paintRubble: Painter = (c, seed) => {
   const rng = rngOf(seed);
-  const pts = scatter(rng, 8, 5);
-  const tone = pts.map(() => 1.6 + rng.next() * 1.1);
+  // Few, large stones: rubble must read as rounded rocks, not as gravel.
+  const pts = scatter(rng, 6, 6);
+  const tone = pts.map(() => 1.7 + rng.next() * 0.9);
   const region = regionMap();
   const w = worleyResult();
   // Mortar where two cells meet; the f3 test rounds the stones off at triple junctions.
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
       worley(pts, x, y, w);
-      const gap = w.f2 - w.f1 < 1.15 || w.f3 - w.f1 < 2.3;
+      const gap = w.f2 - w.f1 < 0.85 || w.f3 - w.f1 < 1.9;
       region[y * S + x] = gap ? -1 : w.id;
     }
   }
@@ -77,16 +78,15 @@ export const paintRubble: Painter = (c, seed) => {
     for (let x = 0; x < S; x++) {
       const id = region[y * S + x]!;
       if (id < 0) {
-        // Mortar: darkest, a touch lighter where a stone above casts no shadow.
-        const above = region[wrap(y - 1) * S + x]!;
-        const m = above < 0 && hrand(x, y, seed) > 0.6 ? 1 : 0;
-        c.set(x, y, M.RUBBLE_MORTAR[m]!);
+        // Mortar: in shadow right under / beside a stone, a lighter grout elsewhere.
+        const shaded = region[wrap(y - 1) * S + x]! >= 0 || region[y * S + wrap(x - 1)]! >= 0;
+        c.set(x, y, M.RUBBLE_MORTAR[shaded ? 0 : hrand(x, y, seed) > 0.5 ? 2 : 1]!);
         continue;
       }
       worley(pts, x, y, w);
-      // Dome shading: toward the top-left of each stone is lit.
-      let t = tone[id]! - (w.ox + w.oy) * 0.085 + bevel(region, x, y) * 0.55;
-      t += (hrand(x, y, seed + 5) - 0.5) * 0.5;
+      // Dome shading: the top-left of each stone faces the light.
+      let t = tone[id]! - (w.ox + w.oy) * 0.12 + bevel(region, x, y) * 0.45;
+      t += (hrand(x, y, seed + 5) - 0.5) * 0.4;
       c.set(x, y, M.RUBBLE[toneIndex(t, M.RUBBLE.length)]!);
     }
   }
@@ -135,8 +135,8 @@ export const paintDirt: Painter = (c, seed) => {
 function grassField(seed: number): Field {
   const rng = rngOf(seed, 4);
   const f = new Field();
-  f.each((x, y) => 1.7 + sfbm(x, y, 2, 2, seed + 31) * 0.45 + (hrand(x, y, seed + 32) - 0.5) * 0.5);
-  // Tufts on a jittered 4x4 grid: two or three short blades leaning slightly.
+  f.each((x, y) => 1.75 + sfbm(x, y, 2, 2, seed + 31) * 0.4 + (hrand(x, y, seed + 32) - 0.5) * 0.3);
+  // Tufts on a jittered 4x4 grid: two or three short blades leaning slightly, a shaded foot.
   for (let gy = 0; gy < 4; gy++) {
     for (let gx = 0; gx < 4; gx++) {
       const bx = gx * 4 + rng.int(0, 3);
@@ -148,20 +148,18 @@ function grassField(seed: number): Field {
         const lean = b === 1 ? -1 : b === 2 ? 1 : 0;
         for (let k = 0; k < h; k++) {
           const px = x + (k === h - 1 ? lean : 0);
-          const py = by - k;
-          f.set(px, py, k === h - 1 ? 3.6 : 3);
+          f.set(px, by - k, k === h - 1 ? 3 : 2.6);
         }
-        // Shadow at the blade's foot.
-        f.set(x + 1, by + 1, Math.min(f.get(x + 1, by + 1), 0.9));
+        f.set(x, by + 1, Math.min(f.get(x, by + 1), 0.9));
       }
     }
   }
-  // Scattered pale blades.
-  for (let i = 0; i < 7; i++) {
+  // A few scattered pale blades.
+  for (let i = 0; i < 4; i++) {
     const x = rng.int(0, S - 1);
     const y = rng.int(0, S - 1);
-    f.set(x, y, 4);
-    if (rng.chance(0.5)) f.set(x, y + 1, 3.2);
+    f.set(x, y, 3.6);
+    f.set(x, y + 1, 2.6);
   }
   return f;
 }
@@ -247,21 +245,28 @@ export const paintDeeprock: Painter = (c, seed) => {
   const nx = pts.map(() => rng.next() * 2 - 1);
   const ny = pts.map(() => rng.next() * 2 - 1);
   const base = pts.map(() => 1.5 + rng.next() * 1.1);
-  const veinPairs = new Set<number>();
-  for (let i = 0; i < pts.length; i++) if (rng.chance(0.35)) veinPairs.add(i);
   const w = worleyResult();
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
       worley(pts, x, y, w);
-      const edge = w.f2 - w.f1;
-      if (edge < 0.9 && (veinPairs.has(w.id) || veinPairs.has(w.id2)) && (w.id + w.id2) % 2 === 0) {
-        const lit = hrand(x, y, seed + 3) > 0.75;
-        c.set(x, y, M.DEEPROCK_VEIN[lit ? 2 : edge < 0.45 ? 1 : 0]!);
-        continue;
-      }
       let t = base[w.id]! + (nx[w.id]! * w.ox + ny[w.id]! * w.oy) * 0.32;
-      if (edge < 0.8) t = Math.min(t, 0.7);
+      if (w.f2 - w.f1 < 0.8) t = Math.min(t, 0.7); // dark crevices between facets
       c.set(x, y, M.DEEPROCK[toneIndex(t, M.DEEPROCK.length)]!);
+    }
+  }
+  // Faint violet veins: meandering 4-connected lines that wrap around the tile edges, with
+  // a few brighter crystals along them. Strong turning keeps tiled floors from showing stripes.
+  for (let v = 0; v < 2; v++) {
+    let x = rng.int(0, S - 1);
+    let y = rng.int(0, S - 1);
+    let a = rng.next() * Math.PI * 2;
+    const len = v === 0 ? 12 : 6;
+    for (let k = 0; k < len; k++) {
+      const h = hrand(x, y, seed + 3 + v);
+      c.set(x, y, M.DEEPROCK_VEIN[h > 0.9 ? 2 : h > 0.45 ? 1 : 0]!);
+      a += (rng.next() - 0.5) * 1.6;
+      if (Math.abs(Math.cos(a)) > Math.abs(Math.sin(a))) x += Math.cos(a) > 0 ? 1 : -1;
+      else y += Math.sin(a) > 0 ? 1 : -1;
     }
   }
 };
@@ -282,19 +287,20 @@ export const paintObsidian: Painter = (c, seed) => {
       const t = base[w.id]! + (nx[w.id]! * w.ox + ny[w.id]! * w.oy) * 0.28;
       c.set(x, y, M.OBSIDIAN[toneIndex(t, M.OBSIDIAN.length)]!);
       // Glassy rim light on the side of a facet edge that faces the top-left light.
-      if (edge < 1.0 && w.ox + w.oy < 0) {
-        const g = edge < 0.5 ? 1 : 0;
-        c.set(x, y, M.OBSIDIAN_GLOSS[g]!);
+      if (edge < 0.6 && w.ox + w.oy < -0.8 && vnoise(x, y, 4, 4, seed + 4) > 0.45) {
+        c.set(x, y, M.OBSIDIAN_GLOSS[edge < 0.3 ? 1 : 0]!);
+      } else if (edge < 0.7) {
+        c.set(x, y, M.OBSIDIAN[0]!);
       }
     }
   }
-  // A few bright glints at facet corners.
-  for (let i = 0; i < 4; i++) {
+  // A few bright glints near facet centres (offset toward the light).
+  for (let i = 0; i < 3; i++) {
     const p = pts[i]!;
     const x = Math.floor(p.x) - 1;
     const y = Math.floor(p.y) - 1;
     c.set(x, y, M.OBSIDIAN_GLOSS[i === 0 ? 3 : 2]!);
-    if (i < 2) c.set(x + 1, y, M.OBSIDIAN_GLOSS[1]!);
+    c.set(x + 1, y, M.OBSIDIAN_GLOSS[1]!);
   }
 };
 
@@ -329,44 +335,43 @@ function paintOre(c: Canvas, seed: number, style: OreStyle): void {
         // Embed shadow: stone just below / right of a nugget darkens.
         const up = region[wrap(y - 1) * S + x]!;
         const left = region[y * S + wrap(x - 1)]!;
-        if (up >= 0 || left >= 0) c.set(x, y, M.STONE[Math.max(0, toneIndex(stone.get(x, y), 5) - 2)]!);
+        if (up >= 0 || left >= 0) c.set(x, y, M.STONE[Math.max(0, toneIndex(stone.get(x, y), M.STONE.length) - 2)]!);
         continue;
       }
       const b = bevel(region, x, y);
-      let t = 1.4 + b * 0.75 + (hrand(x, y, seed + 9) - 0.5) * 0.4;
+      const t = 1.4 + b * 0.75 + (hrand(x, y, seed + 9) - 0.5) * 0.4;
       if (style.accent && b < 0 && hrand(x, y, seed + 10) > 0.35) {
         c.set(x, y, style.accent[b < -1 ? 0 : 1]!);
         continue;
       }
-      t = Math.max(0, t);
       c.set(x, y, style.ramp[toneIndex(t, style.ramp.length)]!);
     }
   }
 }
 
 export const paintCoalOre: Painter = (c, seed) =>
-  paintOre(c, seed, { ramp: M.COAL, count: 4, cells: [5, 7], compact: 1.6, stretch: 1.3, minDist: 5.5 });
+  paintOre(c, seed, { ramp: M.COAL, count: 3, cells: [7, 10], compact: 1.5, stretch: 1.3, minDist: 6.5 });
 export const paintIronOre: Painter = (c, seed) =>
-  paintOre(c, seed, { ramp: M.IRON_NUGGET, count: 5, cells: [3, 5], compact: 2.4, stretch: 1, minDist: 4.8 });
+  paintOre(c, seed, { ramp: M.IRON_NUGGET, count: 4, cells: [5, 7], compact: 2.6, stretch: 1, minDist: 5.6 });
 export const paintCopperOre: Painter = (c, seed) =>
-  paintOre(c, seed, { ramp: M.COPPER_NUGGET, count: 4, cells: [4, 6], compact: 0.6, stretch: 2, minDist: 5.2, accent: M.PATINA });
+  paintOre(c, seed, { ramp: M.COPPER_NUGGET, count: 4, cells: [6, 8], compact: 0.7, stretch: 2.2, minDist: 6, accent: M.PATINA });
 
 // ---------------------------------------------------------------- snow, ice, clay
 
 export const paintSnow: Painter = (c, seed) => {
   const f = new Field();
   f.each((x, y) => {
-    let t = 3 + sfbm(x, y, 2, 3, seed + 61) * 0.9;
+    let t = 3.1 + sfbm(x, y, 2, 3, seed + 61) * 0.6;
     const h = hrand(x, y, seed + 62);
-    if (h > 0.95) t = 4.2; // sparkle
+    if (h > 0.97) t = 4.2; // sparkle
     return t;
   });
   // Soft drift shadows: lower-right side of the large-scale bumps.
   f.each((x, y, t) => {
     const slope = fbm(x - 1, y - 1, 2, 2, seed + 61) - fbm(x + 1, y + 1, 2, 2, seed + 61);
-    return t + slope * 3;
+    return t + slope * 2.2;
   });
-  paintField(c, f, M.SNOW, { dither: 0.5 });
+  paintField(c, f, M.SNOW, { dither: 0.15 });
 };
 
 export const paintIce: Painter = (c, seed) => {
@@ -409,7 +414,7 @@ export const paintClay: Painter = (c, seed) => {
   paintField(c, f, M.CLAY, { dither: 0.4 });
 };
 
-/** Exposed for the turf-side fringe test and contact sheets. */
+/** This module's painters by tile name. */
 export const TERRAIN_PAINTERS: Readonly<Record<string, Painter>> = Object.freeze({
   stone: paintStone,
   cobble: paintRubble,

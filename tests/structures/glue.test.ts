@@ -211,10 +211,12 @@ describe('GlueStore: iteration and box queries', () => {
     expect(seen.sort()).toEqual(['2,3,3,0', '3,2,3,1', '3,3,3,2']);
   });
 
-  it('facesInBox returns every face with at least one end in the inclusive box', () => {
-    const rng = new Rng(99);
+  // Dense stores take the "walk the buckets of the box" path, sparse ones the "walk the
+  // stored buckets" path; both must give the brute-force answer.
+  for (const faces of [3000, 25]) it(`facesInBox returns every face with at least one end in the inclusive box (${faces} faces)`, () => {
+    const rng = new Rng(99 + faces);
     const s = new GlueStore();
-    for (let i = 0; i < 3000; i++) s.add(rng.int(-40, 40), rng.int(-40, 40), rng.int(-40, 40), rng.int(0, 5) as Dir);
+    for (let i = 0; i < faces; i++) s.add(rng.int(-40, 40), rng.int(-40, 40), rng.int(-40, 40), rng.int(0, 5) as Dir);
     const all: GlueFace[] = [];
     s.forEach((x, y, z, axis) => all.push({ x, y, z, axis }));
     const inBox = (x: number, y: number, z: number, b: number[]): boolean =>
@@ -450,5 +452,34 @@ describe('GlueStore: moveTo', () => {
     const n0 = s.size;
     expect(s.moveTo(new GlueStore(), () => false, (x, y, z) => ({ x, y, z }))).toBe(0);
     expect(s.size).toBe(n0);
+  });
+});
+
+describe('GlueStore: version', () => {
+  it('increases on every effective change and only then', () => {
+    const s = new GlueStore();
+    const v0 = s.version;
+    s.has(0, 0, 0, PX);
+    s.remove(0, 0, 0, PX);
+    s.removeAllAt(0, 0, 0);
+    s.clear();
+    expect(s.version).toBe(v0);
+    s.add(0, 0, 0, PX);
+    const v1 = s.version;
+    expect(v1).toBeGreaterThan(v0);
+    s.add(1, 0, 0, NX); // duplicate
+    expect(s.version).toBe(v1);
+    s.add(0, 0, 0, PY);
+    expect(s.version).toBeGreaterThan(v1);
+    const v2 = s.version;
+    const t = new GlueStore();
+    const tv = t.version;
+    s.moveTo(t, () => true, (x, y, z) => ({ x: x + 1, y, z }));
+    expect(s.version).toBeGreaterThan(v2);
+    expect(t.version).toBeGreaterThan(tv);
+    const v3 = t.version;
+    t.removeAllAt(1, 0, 0);
+    expect(t.version).toBeGreaterThan(v3);
+    expect(t.size).toBe(0);
   });
 });

@@ -5,9 +5,15 @@
  * Shape emitters fill the quad scratch (positions, uvs, light) and call commit(); nothing
  * allocates per face. All state lives on instances — one MeshContext per Mesher.
  */
-import { ID_MASK } from '../../blocks/cell';
+import * as cellBits from '../../blocks/cell';
 import type { GeometryData, MeshInput } from '../types';
-import {
+import * as tables from './tables';
+
+// Hot-path imports are bound to module-local constants once, at module init. Module
+// runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
+// would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
+const { ID_MASK } = cellBits;
+const {
   AO_BYTE,
   AVG_LIGHT,
   CORNER_U,
@@ -22,9 +28,9 @@ import {
   FACE_U_SIGN,
   INFO,
   INFO_OCCLUDER,
-} from './tables';
+} = tables;
 
-/** Pick the triangulation diagonal from AO, then light (see MeshContext.commit). */
+/** Pick the triangulation diagonal from AO, then light (see MeshContext.autoDiagonal). */
 export const DIAG_AUTO = 0;
 /** Triangles (0,1,2) (0,2,3). */
 export const DIAG_02 = 1;
@@ -193,11 +199,6 @@ export class MeshContext {
     r[2] = u1;
     r[3] = v1;
     this.useUvRect = true;
-  }
-
-  /** True when the cell at padded index p casts AO (an OPAQUE cube). */
-  isOccluder(p: number): boolean {
-    return (INFO[this.cells[p]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
   }
 
   /**

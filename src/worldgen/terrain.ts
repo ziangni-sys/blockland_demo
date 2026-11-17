@@ -17,10 +17,12 @@
  */
 import { CHUNK_SIZE, SEA_LEVEL } from '../core/constants';
 import { BIOME, type BiomeId } from './biome';
-import { deriveSeed, fbm2, ridged2, simplex2, smoothstep } from './noise';
+import { deriveSeed, fbm2, latticeHash2, ridged2, simplex2, smoothstep } from './noise';
 
 /** The highest surface the height function can produce (asymptote of the peak compression). */
 export const MAX_TERRAIN_Y = 117;
+/** Height above which peaks are compressed towards MAX_TERRAIN_Y. */
+const CAP_START = 103;
 /** The lowest sea floor the height function can produce. */
 export const MIN_TERRAIN_Y = 12;
 
@@ -136,9 +138,13 @@ export class TerrainSampler {
 
   /** Continentalness at a column (the land/sea field; also used by the spawn search). */
   continentalness(x: number, z: number): number {
-    // Domain warp bends the coastlines into bays, spits and straits.
     const wx = x + 70 * fbm2(this.sWarpX, x / 320, z / 320, 3);
     const wz = z + 70 * fbm2(this.sWarpZ, x / 320, z / 320, 3);
+    return this.contWarped(wx, wz, x, z);
+  }
+
+  /** Continentalness from already-warped coordinates (wx, wz) of column (x, z). */
+  private contWarped(wx: number, wz: number, x: number, z: number): number {
     // Large scale = landmass vs open-sea regions; mid = individual islands; small = coast detail.
     // The large weight is kept modest so any ~500-block window stays roughly half sea.
     return (
@@ -151,7 +157,10 @@ export class TerrainSampler {
 
   /** Fill `out` with the column at integer world coordinates (x, z). */
   sample(x: number, z: number, out: ColumnSample): ColumnSample {
-    const e = this.continentalness(x, z);
+    // Domain warp bends coastlines into bays, spits and straits; lakes and ridges share it.
+    const wx = x + 70 * fbm2(this.sWarpX, x / 320, z / 320, 3);
+    const wz = z + 70 * fbm2(this.sWarpZ, x / 320, z / 320, 3);
+    const e = this.contWarped(wx, wz, x, z);
 
     // Coastal cliffs: where this is high the land jumps up right at the waterline.
     const cliff = smoothstep(0.12, 0.42, fbm2(this.sCliff, x / 260, z / 260, 2));
@@ -176,15 +185,18 @@ export class TerrainSampler {
         rug = smoothstep(-0.25, 0.45, fbm2(this.sRug, x / 450, z / 450, 2));
         // Rolling hills; valleys are shallower than crests so the land stays above the sea.
         const hn = fbm2(this.sHill, x / 120, z / 120, 3);
-        const hillAmp = 5 + 22 * rug;
+        const hillAmp = 6 + 24 * rug;
         h += (hn > 0 ? hn : 0.55 * hn) * hillAmp * inland + 0.25 * hillAmp * inland;
 
         // Mountain regions: a low-frequency mask, favouring the interiors of landmasses.
-        const mn = fbm2(this.sMtn, x / 650, z / 650, 2) + 0.6 * (e - 0.15);
-        mtn = smoothstep(0.06, 0.36, mn) * smoothstep(0.04, 0.22, e);
+        // Weakly tied to continentalness so islands get peaks too, not only deep interiors.
+        const mn = fbm2(this.sMtn, x / 520, z / 520, 2) + 0.35 * (e - 0.1);
+        mtn = smoothstep(0.04, 0.3, mn) * smoothstep(0.03, 0.15, e);
         if (mtn > 0) {
-          const r = ridged2(this.sRidge, x / 230, z / 230, 5);
-          h += mtn * (8 + 74 * r * r);
+          // Cubing the ridge field keeps valleys between the ridges (the field averages ~0.6,
+          // so a softer curve would lift whole regions into flat-topped massifs).
+          const r = ridged2(this.sRidge, wx / 230, wz / 230, 5);
+          h += mtn * (6 + 64 * r * r * r);
         }
 
         // Terrace bands: hillsides broken into flat steps and short cliff walls.
@@ -204,29 +216,37 @@ export class TerrainSampler {
     // Lake basins: only in lowlands away from mountains; they fill with water up to sea level.
     let lake = 0;
     if (e > 0.05 && h < 70 && mtn < 1) {
-      const ln = fbm2(this.sLake, x / 170, z / 170, 2);
-      lake = smoothstep(0.28, 0.46, ln) * smoothstep(0.05, 0.15, e) * (1 - smoothstep(56, 70, h)) * (1 - mtn);
+      const ln = fbm2(this.sLake, wx / 150, wz / 150, 3);
+      lake = smoothstep(0.3, 0.46, ln) * smoothstep(0.05, 0.15, e) * (1 - smoothstep(56, 70, h)) * (1 - mtn);
       if (lake > 0) {
         const floor = SEA - 3 - 7 * smoothstep(0.32, 0.6, ln);
         h += (floor - h) * lake;
       }
     }
 
-    // Soft cap: peaks approach MAX_TERRAIN_Y asymptotically, leaving room for trees and snow.
-    if (h > 96) {
-      const over = h - 96;
-      h = 96 + (MAX_TERRAIN_Y - 96) * (over / (over + (MAX_TERRAIN_Y - 96)));
+    // Soft cap: the rare tallest peaks approach MAX_TERRAIN_Y asymptotically, leaving room
+    // for trees and snow. It starts high so ordinary summits keep their shape (no plateaus).
+    if (h > CAP_START) {
+      const over = h - CAP_START;
+      h = CAP_START + (MAX_TERRAIN_Y - CAP_START) * (over / (over + (MAX_TERRAIN_Y - CAP_START)));
     }
     let top = Math.floor(h);
     if (top < MIN_TERRAIN_Y) top = MIN_TERRAIN_Y;
 
     // ---- climate
     const tempBase = 1.3 * fbm2(this.sTemp, x / 1000, z / 1000, 2) + 0.12;
-    const temp = tempBase - (top > 62 ? (top - 62) / 40 : 0);
+    // Altitude lapse: conifers take over the upper slopes.
+    const temp = tempBase - (top > 62 ? (top - 62) / 55 : 0);
     const humid = 1.3 * fbm2(this.sHumid, x / 700, z / 700, 2);
     const cold = smoothstep(-0.05, -0.38, temp);
     const dry = smoothstep(0.18, 0.42, tempBase) * smoothstep(0.02, -0.25, humid);
-    const snowLine = 100 + 5 * simplex2(this.sSnow, x / 90, z / 90) - 42 * cold;
+    // Snow line from the regional (sea-level) climate: high in warm regions, lower in cold
+    // ones. A per-column dither of +-1.5 blocks frays the snow edge.
+    const snowLine =
+      105 +
+      7 * simplex2(this.sSnow, x / 70, z / 70) -
+      32 * smoothstep(0.0, -0.45, tempBase) +
+      (latticeHash2(this.sSnow, x, z) / 4294967296 - 0.5) * 3;
     const rock =
       smoothstep(84, 100, top) * 0.8 + smoothstep(0.5, 0.8, fbm2(this.sRock, x / 40, z / 40, 2)) * rug * 0.9;
 
@@ -243,10 +263,10 @@ export class TerrainSampler {
       biome = BIOME.CONIFER;
     } else if (dry >= 0.5) {
       biome = BIOME.SCRUB;
-    } else if (humid > 0.08) {
-      biome = BIOME.BROADLEAF;
-    } else if (rug > 0.55 && top > SEA + 12) {
+    } else if (rug > 0.6 && top > SEA + 14) {
       biome = BIOME.HIGHLAND;
+    } else if (humid > 0.15) {
+      biome = BIOME.BROADLEAF;
     } else {
       biome = BIOME.MEADOW;
     }
@@ -254,8 +274,8 @@ export class TerrainSampler {
     // ---- tree density (probability per tree-grid cell); continuous so forests thin out at edges
     let forest = 0;
     if (!water && top >= SEA) {
-      const broad = 0.04 + 0.8 * smoothstep(-0.02, 0.3, humid);
-      const conif = 0.12 + 0.6 * smoothstep(-0.25, 0.2, humid);
+      const broad = 0.03 + 0.8 * smoothstep(0.05, 0.38, humid);
+      const conif = 0.3 + 0.5 * smoothstep(-0.3, 0.15, humid);
       // Meadows get the occasional grove.
       const grove = smoothstep(0.35, 0.7, simplex2(this.sGrove, x / 70, z / 70)) * 0.45;
       forest = broad + (conif - broad) * cold;
@@ -263,6 +283,8 @@ export class TerrainSampler {
       forest *= 1 - dry; // no trees in dry scrub
       forest *= 1 - smoothstep(90, 97, top); // tree line
       forest *= 1 - 0.6 * rock;
+      // Highlands: open grassy hills with scattered trees.
+      forest *= 1 - 0.65 * (1 - 0.6 * cold) * smoothstep(0.5, 0.75, rug) * smoothstep(SEA + 8, SEA + 18, top);
       forest *= smoothstep(SEA + 1, SEA + 4, top); // keep beaches and lake shores open
     }
 

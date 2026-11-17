@@ -16,7 +16,7 @@
  */
 import { WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
-import { EPS, aabb, qtoMat3, quat, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
+import { EPS, aabb, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
 import { ID_MASK } from '../blocks/cell';
 // Side-effect import: registering the block table is what fills SOLID (including the
 // deeprock / unloaded sentinels the world returns), so queries never see an empty table.
@@ -44,17 +44,26 @@ function isSolid(cell: number): boolean {
 /**
  * A world AABB expressed in a structure grid's local space. Built once per query (and then
  * translated cheaply for iterative queries) so the rotation is only fetched once.
+ *
+ * Cost model: building is a handful of multiplies and one small allocation; the SAT axes are
+ * only derived when a SOLID candidate cell actually needs the exact test, so queries that
+ * miss the structure (the common case: every entity against every nearby structure) stay
+ * cheap. Plain arrays rather than typed arrays: allocating an ArrayBuffer per query costs
+ * more than the whole early-out.
  */
 class LocalObb {
   /**
    * Row-major local->world rotation. Row i is world axis i expressed in local coordinates
    * (the box's own axes, seen from the grid); column j is local axis j in world coordinates.
-   * Entries 9.. hold the SAT axes: per axis [Lx, Ly, Lz, rA + rB].
    */
-  readonly m = new Float64Array(9 + 12 * 4);
-  satCount = 0;
+  readonly m: number[] = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  /** SAT axes beyond the cell axes, per axis [Lx, Ly, Lz, rA + rB]; built lazily. */
+  private sat: number[] | null = null;
+  private satCount = 0;
   /** True when the rotation is a signed axis permutation: the box is an AABB in local space. */
   aligned = true;
+  /** The structure's cell bounds (non-null: empty structures never get an OBB). */
+  bounds: CellBounds;
   /** Box centre in local space. */
   cx = 0;
   cy = 0;
@@ -78,12 +87,27 @@ class LocalObb {
   y1 = -1;
   z0 = 0;
   z1 = -1;
-  private readonly q: Quat = quat();
-  private readonly p: Vec3 = vec3();
+  private readonly q: Quat = { x: 0, y: 0, z: 0, w: 1 };
+  private readonly p: Vec3 = { x: 0, y: 0, z: 0 };
+
+  constructor(bounds: CellBounds) {
+    this.bounds = bounds;
+  }
 
   build(grid: VoxelGrid, minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number): void {
     const m = this.m;
-    qtoMat3(grid.worldRotation(this.q), m);
+    const q = grid.worldRotation(this.q);
+    // Same formula as core/math qtoMat3, written into a plain array.
+    const { x, y, z, w } = q;
+    m[0] = 1 - 2 * (y * y + z * z);
+    m[1] = 2 * (x * y - w * z);
+    m[2] = 2 * (x * z + w * y);
+    m[3] = 2 * (x * y + w * z);
+    m[4] = 1 - 2 * (x * x + z * z);
+    m[5] = 2 * (y * z - w * x);
+    m[6] = 2 * (x * z - w * y);
+    m[7] = 2 * (y * z + w * x);
+    m[8] = 1 - 2 * (x * x + y * y);
     let aligned = true;
     for (let i = 0; i < 9; i++) {
       const a = Math.abs(m[i]!);
@@ -114,8 +138,7 @@ class LocalObb {
     this.ex = hx * Math.abs(m[0]!) + hy * Math.abs(m[3]!) + hz * Math.abs(m[6]!);
     this.ey = hx * Math.abs(m[1]!) + hy * Math.abs(m[4]!) + hz * Math.abs(m[7]!);
     this.ez = hx * Math.abs(m[2]!) + hy * Math.abs(m[5]!) + hz * Math.abs(m[8]!);
-    this.satCount = 0;
-    if (!aligned) this.buildSatAxes();
+    this.satCount = -1; // not built yet
   }
 
   /**
@@ -129,6 +152,7 @@ class LocalObb {
    */
   private buildSatAxes(): void {
     const m = this.m;
+    const sat = (this.sat ??= new Array<number>(12 * 4).fill(0));
     const { hx, hy, hz } = this;
     let n = 0;
     for (let i = 0; i < 3; i++) {
@@ -136,11 +160,11 @@ class LocalObb {
       const ay = m[i * 3 + 1]!;
       const az = m[i * 3 + 2]!;
       const h = i === 0 ? hx : i === 1 ? hy : hz;
-      const o = 9 + n * 4;
-      m[o] = ax;
-      m[o + 1] = ay;
-      m[o + 2] = az;
-      m[o + 3] = h + 0.5 * (Math.abs(ax) + Math.abs(ay) + Math.abs(az));
+      const o = n * 4;
+      sat[o] = ax;
+      sat[o + 1] = ay;
+      sat[o + 2] = az;
+      sat[o + 3] = h + 0.5 * (Math.abs(ax) + Math.abs(ay) + Math.abs(az));
       n++;
     }
     for (let j = 0; j < 3; j++) {
@@ -176,11 +200,11 @@ class LocalObb {
           hy * Math.abs(m[3]! * lx + m[4]! * ly + m[5]! * lz) +
           hz * Math.abs(m[6]! * lx + m[7]! * ly + m[8]! * lz);
         const rB = 0.5 * (Math.abs(lx) + Math.abs(ly) + Math.abs(lz));
-        const o = 9 + n * 4;
-        m[o] = lx;
-        m[o + 1] = ly;
-        m[o + 2] = lz;
-        m[o + 3] = rA + rB;
+        const o = n * 4;
+        sat[o] = lx;
+        sat[o + 1] = ly;
+        sat[o + 2] = lz;
+        sat[o + 3] = rA + rB;
         n++;
       }
     }
@@ -200,7 +224,8 @@ class LocalObb {
    * every local axis (this IS the SAT test on the three cell axes), clipped to `b` and
    * grown by `margin` on every side. Returns false when the range is empty.
    */
-  range(b: CellBounds, margin = 0): boolean {
+  range(margin = 0): boolean {
+    const b = this.bounds;
     let x0 = Math.floor(this.cx - this.ex - margin + CONTACT_EPS);
     let x1 = Math.ceil(this.cx + this.ex + margin - CONTACT_EPS) - 1;
     let y0 = Math.floor(this.cy - this.ey - margin + CONTACT_EPS);
@@ -227,16 +252,17 @@ class LocalObb {
    * (so the three cell axes already overlap). Strict: touching is not overlapping.
    */
   overlapsCell(x: number, y: number, z: number): boolean {
+    if (this.aligned) return true;
+    if (this.satCount < 0) this.buildSatAxes();
     const n = this.satCount;
-    if (n === 0) return true;
-    const m = this.m;
+    const sat = this.sat!;
     // Relative position first: keeps the dot products small and accurate.
     const tx = x + 0.5 - this.cx;
     const ty = y + 0.5 - this.cy;
     const tz = z + 0.5 - this.cz;
-    for (let k = 0, o = 9; k < n; k++, o += 4) {
-      const d = tx * m[o]! + ty * m[o + 1]! + tz * m[o + 2]!;
-      if ((d < 0 ? -d : d) >= m[o + 3]! - CONTACT_EPS) return false;
+    for (let k = 0, o = 0; k < n; k++, o += 4) {
+      const d = tx * sat[o]! + ty * sat[o + 1]! + tz * sat[o + 2]!;
+      if ((d < 0 ? -d : d) >= sat[o + 3]! - CONTACT_EPS) return false;
     }
     return true;
   }
@@ -264,12 +290,12 @@ function structureObb(
   maxX: number,
   maxY: number,
   maxZ: number,
-): { obb: LocalObb; bounds: CellBounds } | null {
+): LocalObb | null {
   const bounds = grid.cellBounds();
   if (bounds === null) return null; // empty structure (only the world is unbounded)
-  const obb = new LocalObb();
+  const obb = new LocalObb(bounds);
   obb.build(grid, minX, minY, minZ, maxX, maxY, maxZ);
-  return { obb, bounds };
+  return obb;
 }
 
 // ====================================================================== world fast path
@@ -315,9 +341,8 @@ function overlapsSolid(
   // Inverted (or NaN) boxes overlap nothing.
   if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return false;
   if (grid.isWorld) return worldHasSolid(grid, minX, minY, minZ, maxX, maxY, maxZ);
-  const s = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
-  if (s === null || !s.obb.range(s.bounds)) return false;
-  return s.obb.hasSolid(grid);
+  const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  return obb !== null && obb.range() && obb.hasSolid(grid);
 }
 
 // ====================================================================== overlap
@@ -352,10 +377,8 @@ export function forEachSolidCellOverlapping(
     }
     return;
   }
-  const s = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
-  if (s === null) return;
-  const obb = s.obb;
-  if (!obb.range(s.bounds)) return;
+  const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  if (obb === null || !obb.range()) return;
   for (let y = obb.y0; y <= obb.y1; y++) {
     for (let z = obb.z0; z <= obb.z1; z++) {
       for (let x = obb.x0; x <= obb.x1; x++) {
@@ -545,14 +568,13 @@ function worldPenetration(
 function obbPenetration(
   grid: VoxelGrid,
   obb: LocalObb,
-  bounds: CellBounds,
   px: number,
   py: number,
   pz: number,
   w: number,
   out: Penetration,
 ): boolean {
-  if (!obb.range(bounds)) return false;
+  if (!obb.range()) return false;
   return findPenetration(
     grid,
     obb,
@@ -601,9 +623,9 @@ export function deepestPenetration(grid: VoxelGrid, box: AABB, opts?: PushOption
   if (grid.isWorld) {
     return worldPenetration(grid, minX, minY, minZ, maxX, maxY, maxZ, px, py, pz, w, out) ? out : null;
   }
-  const s = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
-  if (s === null) return null;
-  return obbPenetration(grid, s.obb, s.bounds, px, py, pz, w, out) ? out : null;
+  const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  if (obb === null) return null;
+  return obbPenetration(grid, obb, px, py, pz, w, out) ? out : null;
 }
 
 export interface PenetrationResolution {
@@ -665,13 +687,12 @@ export function resolvePenetration(
       it++;
     }
   } else {
-    const s = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
-    if (s !== null) {
-      const { obb, bounds } = s;
+    const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
+    if (obb !== null) {
       for (;;) {
         obb.setWorldOffset(dx, dy, dz);
-        if (!obbPenetration(grid, obb, bounds, px, py, pz, w, pen)) {
-          res.resolved = !(obb.range(bounds) && obb.hasSolid(grid));
+        if (!obbPenetration(grid, obb, px, py, pz, w, pen)) {
+          res.resolved = !(obb.range() && obb.hasSolid(grid));
           break;
         }
         if (it >= maxIterations) {
@@ -859,7 +880,6 @@ export function nearestFreeOffset(
   // Per structure: the local OBB is built once and only translated per candidate. Structures
   // the box cannot reach within maxRadius are dropped up front.
   const obbs: Array<LocalObb | null> = [];
-  const bounds: Array<CellBounds | null> = [];
   const list: VoxelGrid[] = [];
   const radius = maxRadius > 0 ? maxRadius : 0;
   for (let i = 0; i < n; i++) {
@@ -867,14 +887,12 @@ export function nearestFreeOffset(
     if (g.isWorld) {
       list.push(g);
       obbs.push(null);
-      bounds.push(null);
       continue;
     }
-    const s = structureObb(g, minX, minY, minZ, maxX, maxY, maxZ);
-    if (s === null || !s.obb.range(s.bounds, radius)) continue;
+    const obb = structureObb(g, minX, minY, minZ, maxX, maxY, maxZ);
+    if (obb === null || !obb.range(radius)) continue;
     list.push(g);
-    obbs.push(s.obb);
-    bounds.push(s.bounds);
+    obbs.push(obb);
   }
   const cand = aabb();
   const isFree = (ox: number, oy: number, oz: number): boolean => {
@@ -890,7 +908,7 @@ export function nearestFreeOffset(
         if (worldHasSolid(list[i]!, x0, y0, z0, x1, y1, z1)) return false;
       } else {
         obb.setWorldOffset(ox, oy, oz);
-        if (obb.range(bounds[i]!) && obb.hasSolid(list[i]!)) return false;
+        if (obb.range() && obb.hasSolid(list[i]!)) return false;
       }
     }
     if (extraTest !== undefined) {

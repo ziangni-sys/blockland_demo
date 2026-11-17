@@ -9,6 +9,7 @@
  */
 import '../../blocks/defs';
 import { MAX_BLOCK_ID } from '../../blocks/cell';
+import { NY } from '../../core/dirs';
 import { BLOCKS, type RenderLayer } from '../../blocks/registry';
 import { VFLAG_EMISSIVE, VFLAG_PLANT } from '../types';
 
@@ -112,7 +113,7 @@ function fillTables(): void {
       info = COVER_ALL | INFO_OCCLUDER;
     } else {
       // A snow-like slab rendered in the opaque pass hides the face below it completely.
-      if (shape === SH_LAYERS && def.layer === 'opaque') info |= 1 << 3; // NY
+      if (shape === SH_LAYERS && def.layer === 'opaque') info |= 1 << NY;
       if (shape === SH_CUBE || shape === SH_AXIS || shape === SH_BEARING) info |= INFO_SELF_CULL;
     }
     INFO[id] = info;

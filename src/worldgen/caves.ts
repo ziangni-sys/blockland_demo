@@ -38,6 +38,8 @@ const LAVA = makeCell(B.LAVA, 0);
 
 const S_TUNNEL_A = 201;
 const S_TUNNEL_B = 202;
+const S_TUNNEL_C = 207;
+const S_TUNNEL_D = 208;
 const S_CHAMBER = 203;
 const S_WIDTH = 204;
 const S_ENTRANCE = 205;
@@ -46,6 +48,8 @@ const S_LAVA = 206;
 export class CaveCarver {
   private readonly sA: number;
   private readonly sB: number;
+  private readonly sC: number;
+  private readonly sD: number;
   private readonly sChamber: number;
   private readonly sWidth: number;
   private readonly sEntrance: number;
@@ -58,6 +62,8 @@ export class CaveCarver {
   constructor(seed: number) {
     this.sA = deriveSeed(seed, S_TUNNEL_A);
     this.sB = deriveSeed(seed, S_TUNNEL_B);
+    this.sC = deriveSeed(seed, S_TUNNEL_C);
+    this.sD = deriveSeed(seed, S_TUNNEL_D);
     this.sChamber = deriveSeed(seed, S_CHAMBER);
     this.sWidth = deriveSeed(seed, S_WIDTH);
     this.sEntrance = deriveSeed(seed, S_ENTRANCE);
@@ -69,16 +75,21 @@ export class CaveCarver {
    * exposed for tests. Evaluated only at lattice points during generation.
    */
   density(x: number, y: number, z: number): number {
-    // Tunnels: two fields squashed vertically (tunnels run mostly horizontally).
-    const a = simplex3(this.sA, x / 60, y / 30, z / 60);
-    const b = simplex3(this.sB, x / 60, y / 30, z / 60);
+    // Two tunnel systems at different scales (fine winding passages + long galleries), each
+    // from a pair of fields squashed vertically so tunnels run mostly horizontally.
     // Tunnel width breathes slowly along the tunnel.
-    const w = 0.085 + 0.035 * simplex3(this.sWidth, x / 90, y / 60, z / 90);
-    const tunnel = a * a + b * b - w * w;
+    const w = 0.1 + 0.04 * simplex3(this.sWidth, x / 90, y / 60, z / 90);
+    const a = simplex3(this.sA, x / 46, y / 24, z / 46);
+    const b = simplex3(this.sB, x / 46, y / 24, z / 46);
+    let tunnel = a * a + b * b - w * w;
+    const c = simplex3(this.sC, x / 80, y / 34, z / 80);
+    const d = simplex3(this.sD, x / 80, y / 34, z / 80);
+    const t2 = c * c + d * d - w * w * 0.8;
+    if (t2 < tunnel) tunnel = t2;
     // Chambers: rare, wide and flat, mostly in the middle depths.
-    const c = fbm3(this.sChamber, x / 80, y / 34, z / 80, 2);
+    const ch = fbm3(this.sChamber, x / 80, y / 34, z / 80, 2);
     const depthBias = smoothstep(14, 8, y) * 0.25 + smoothstep(40, 58, y) * 0.35;
-    const chamber = (0.5 + depthBias - c) * 0.12;
+    const chamber = (0.5 + depthBias - ch) * 0.12;
     return tunnel < chamber ? tunnel : chamber;
   }
 

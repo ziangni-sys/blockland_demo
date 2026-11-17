@@ -136,26 +136,57 @@ export function checkInvariants(m: MeshData): void {
     expect(g.layers.length).toBe(g.vertexCount);
     expect(g.light.length).toBe(g.vertexCount * 4);
     expect(g.indices.length).toBe(g.indexCount);
+    // Raw-array loops with plain throws: this runs on thousands of meshes per test file.
+    const P = g.positions;
+    const N = g.normals;
     for (let i = 0; i < g.indexCount; i++) {
       const v = g.indices[i]!;
-      if (v >= g.vertexCount) throw new Error(`index ${v} >= vertexCount ${g.vertexCount}`);
+      if (v >= g.vertexCount) throw new Error(`${name}: index ${v} >= vertexCount ${g.vertexCount}`);
+      if (v >> 2 !== Math.floor(i / 6)) throw new Error(`${name}: quad ${Math.floor(i / 6)} uses vertex ${v} of another quad`);
     }
-    for (let i = 0; i < g.positions.length; i++) if (!Number.isFinite(g.positions[i]!)) throw new Error('non-finite position');
+    for (let i = 0; i < P.length; i++) if (!Number.isFinite(P[i]!)) throw new Error(`${name}: non-finite position`);
     for (let i = 0; i < g.uvs.length; i++) {
       const u = g.uvs[i]!;
-      if (u < -1e-6 || u > 1 + 1e-6) throw new Error(`uv out of range: ${u}`);
+      if (!(u >= -1e-6 && u <= 1 + 1e-6)) throw new Error(`${name}: uv out of range: ${u}`);
     }
-    for (const q of quadsOf(g, name)) {
-      for (const r of q.idx) if (r < 0 || r > 3) throw new Error(`quad index escapes its quad: ${r}`);
-      const nl = len(q.n);
-      if (Math.abs(nl - 1) > 0.02) throw new Error(`normal not unit: ${nl}`);
-      for (let t = 0; t < 2; t++) {
-        const a = q.p[q.idx[t * 3]!]!;
-        const b = q.p[q.idx[t * 3 + 1]!]!;
-        const c = q.p[q.idx[t * 3 + 2]!]!;
-        const area = dot(cross(sub(b, a), sub(c, a)), q.n);
-        if (!(area > 0)) throw new Error(`triangle not CCW around its normal (area ${area})`);
+    for (let v = 0; v < g.vertexCount; v++) {
+      const nx = N[v * 3]! / 127;
+      const ny = N[v * 3 + 1]! / 127;
+      const nz = N[v * 3 + 2]! / 127;
+      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (Math.abs(nl - 1) > 0.02) throw new Error(`${name}: normal not unit: ${nl}`);
+      if (N[v * 3] !== N[(v & ~3) * 3] || N[v * 3 + 1] !== N[(v & ~3) * 3 + 1] || N[v * 3 + 2] !== N[(v & ~3) * 3 + 2]) {
+        throw new Error(`${name}: corners of one quad disagree on the normal`);
       }
+      if (g.layers[v] !== g.layers[v & ~3]) throw new Error(`${name}: corners of one quad disagree on the tile`);
+    }
+    for (let t = 0; t < g.indexCount; t += 3) {
+      const a = g.indices[t]! * 3;
+      const b = g.indices[t + 1]! * 3;
+      const c = g.indices[t + 2]! * 3;
+      const e1x = P[b]! - P[a]!;
+      const e1y = P[b + 1]! - P[a + 1]!;
+      const e1z = P[b + 2]! - P[a + 2]!;
+      const e2x = P[c]! - P[a]!;
+      const e2y = P[c + 1]! - P[a + 1]!;
+      const e2z = P[c + 2]! - P[a + 2]!;
+      const cx = e1y * e2z - e1z * e2y;
+      const cy = e1z * e2x - e1x * e2z;
+      const cz = e1x * e2y - e1y * e2x;
+      const area = cx * N[a]! + cy * N[a + 1]! + cz * N[a + 2]!;
+      if (!(area > 0)) throw new Error(`${name}: triangle ${t / 3} not CCW around its normal (area ${area})`);
+    }
+  }
+}
+
+/** Throw unless every vertex lies inside [lo, hi]^3. */
+export function checkInsideBox(m: MeshData, lo: number, hi: number): void {
+  for (const name of GROUPS) {
+    const g = m[name];
+    if (!g) continue;
+    for (let i = 0; i < g.positions.length; i++) {
+      const c = g.positions[i]!;
+      if (!(c >= lo && c <= hi)) throw new Error(`${name}: vertex coordinate ${c} outside [${lo}, ${hi}]`);
     }
   }
 }

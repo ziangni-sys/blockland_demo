@@ -3,7 +3,7 @@
  */
 import { TILE_SIZE } from '../../core/constants';
 import { hashString, Rng } from '../../core/rng';
-import { Canvas, wrap } from '../canvas';
+import { type Canvas, wrap } from '../canvas';
 
 /** Paints one tile into a cleared canvas. `seed` is derived from the tile name. */
 export type Painter = (c: Canvas, seed: number) => void;
@@ -37,20 +37,10 @@ export function bevel(region: Int16Array, x: number, y: number, size: number = S
   return b;
 }
 
-/** True when the pixel lies on the boundary of its region (any 4-neighbour differs). */
-export function isRim(region: Int16Array, x: number, y: number, size: number = S): boolean {
-  const id = region[wrap(y, size) * size + wrap(x, size)];
-  return (
-    region[wrap(y - 1, size) * size + wrap(x, size)] !== id ||
-    region[wrap(y + 1, size) * size + wrap(x, size)] !== id ||
-    region[wrap(y, size) * size + wrap(x - 1, size)] !== id ||
-    region[wrap(y, size) * size + wrap(x + 1, size)] !== id
-  );
-}
-
 /**
  * Grows a connected blob of `cells` pixels from the origin by random 4-neighbour accretion.
- * `compact` in 0..1 biases growth toward the blob's centre (1 = round, 0 = stringy).
+ * `compact` (>= 0) weighs distance to the centroid against noise: larger = rounder,
+ * 0 = stringy. `stretchX` > 1 elongates the blob horizontally.
  * Returns pixel offsets relative to the origin.
  */
 export function growBlob(rng: Rng, cells: number, compact: number, stretchX = 1): Array<[number, number]> {
@@ -95,9 +85,4 @@ export function growBlob(rng: Rng, cells: number, compact: number, stretchX = 1)
 /** Region map (Int16Array, -1 everywhere) sized for a tile. */
 export function regionMap(size: number = S): Int16Array {
   return new Int16Array(size * size).fill(-1);
-}
-
-/** Copies a painted tile into another canvas (both same size). */
-export function copyCanvas(dst: Canvas, src: Canvas): void {
-  dst.data.set(src.data);
 }

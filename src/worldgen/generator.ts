@@ -321,9 +321,14 @@ export class TerrainGenerator implements ChunkGenerator {
       return;
     }
 
-    if (surface === C_SAND && biome === BIOME.SCRUB && roll < 0.012 && this.cactusFits(cells, ri, top, lx, lz)) {
-      const height = 1 + (hash3(wx, top, wz, this.plantSeed) % 3);
-      for (let k = 1; k <= height && top + k < WORLD_HEIGHT; k++) cells[ci | ((top + k) << 8)] = C_CACTUS;
+    if (surface === C_SAND && biome === BIOME.SCRUB) {
+      if (roll < 0.012 && this.cactusFits(cells, ri, top, lx, lz)) {
+        const height = 1 + (hash3(wx, top, wz, this.plantSeed) % 3);
+        for (let k = 1; k <= height && top + k < WORLD_HEIGHT; k++) cells[ci | ((top + k) << 8)] = C_CACTUS;
+      } else if (roll > 0.975) {
+        // Sparse dry tufts break up the sand.
+        cells[ci | ((top + 1) << 8)] = C_TALL_GRASS;
+      }
     }
   }
 

@@ -208,12 +208,14 @@ export class ByteWriter {
 
   /** Byte array with a varuint length prefix. */
   bytes(b: Uint8Array): this {
+    if (!isUint8Array(b)) throw new RangeError(`bytes expects a Uint8Array, got ${describeValue(b)}`);
     this.varuint(b.length);
     return this.raw(b);
   }
 
   /** Raw bytes, no prefix (magic numbers, pre-framed data). */
   raw(b: Uint8Array): this {
+    if (!isUint8Array(b)) throw new RangeError(`raw expects a Uint8Array, got ${describeValue(b)}`);
     const n = b.length;
     if (this.pos + n > this.buf.length) this.grow(n);
     this.buf.set(b, this.pos);
@@ -482,9 +484,10 @@ export class ByteReader {
   count(minBytesEach = 1): number {
     const at = this.pos;
     const n = this.varuint();
-    if (n * minBytesEach > this.end - this.pos) {
+    const left = this.end - this.pos;
+    if (n * minBytesEach > left) {
       this.pos = at;
-      this.fail(`count ${n} (x${minBytesEach} bytes) exceeds the ${this.end - this.pos} remaining bytes`);
+      this.fail(`count ${n} (x${minBytesEach} bytes) exceeds the ${left} remaining bytes`);
     }
     return n;
   }
@@ -632,46 +635,43 @@ function utf8Encode(s: string, out: Uint8Array, pos: number): number {
   return pos;
 }
 
+/** Flush decoded code units to a string every this many units (far below engine arg limits). */
 const FROM_CHAR_CHUNK = 4096;
 
 /**
  * Strict UTF-8 decode of bytes[start, end). Returns the string, or the byte offset of the
  * first invalid sequence (overlong forms, surrogate code points, values above U+10FFFF,
  * stray or missing continuation bytes are all invalid).
+ *
+ * Code units go into a plain array flushed through String.fromCharCode.apply: measured ~3x
+ * faster than a Uint16Array + apply for the short strings saves contain.
  */
 function utf8Decode(bytes: Uint8Array, start: number, end: number): string | number {
   if (start === end) return '';
-  // Code units never outnumber bytes.
-  const units = new Uint16Array(end - start);
-  let u = 0;
+  const units: number[] = [];
+  let out = '';
   let i = start;
   while (i < end) {
     const b0 = bytes[i]!;
     if (b0 < 0x80) {
-      units[u++] = b0;
+      units.push(b0);
       i++;
-      continue;
-    }
-    if (b0 >= 0xc2 && b0 <= 0xdf) {
+    } else if (b0 >= 0xc2 && b0 <= 0xdf) {
       if (i + 1 >= end) return i;
       const b1 = bytes[i + 1]!;
       if ((b1 & 0xc0) !== 0x80) return i;
-      units[u++] = ((b0 & 0x1f) << 6) | (b1 & 0x3f);
+      units.push(((b0 & 0x1f) << 6) | (b1 & 0x3f));
       i += 2;
-      continue;
-    }
-    if (b0 >= 0xe0 && b0 <= 0xef) {
+    } else if (b0 >= 0xe0 && b0 <= 0xef) {
       if (i + 2 >= end) return i;
       const b1 = bytes[i + 1]!;
       const b2 = bytes[i + 2]!;
       if ((b1 & 0xc0) !== 0x80 || (b2 & 0xc0) !== 0x80) return i;
       if (b0 === 0xe0 && b1 < 0xa0) return i; // overlong
       if (b0 === 0xed && b1 > 0x9f) return i; // UTF-16 surrogate code point
-      units[u++] = ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f);
+      units.push(((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f));
       i += 3;
-      continue;
-    }
-    if (b0 >= 0xf0 && b0 <= 0xf4) {
+    } else if (b0 >= 0xf0 && b0 <= 0xf4) {
       if (i + 3 >= end) return i;
       const b1 = bytes[i + 1]!;
       const b2 = bytes[i + 2]!;
@@ -680,18 +680,15 @@ function utf8Decode(bytes: Uint8Array, start: number, end: number): string | num
       if (b0 === 0xf0 && b1 < 0x90) return i; // overlong
       if (b0 === 0xf4 && b1 > 0x8f) return i; // above U+10FFFF
       const cp = (((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f)) - 0x10000;
-      units[u++] = 0xd800 + (cp >> 10);
-      units[u++] = 0xdc00 + (cp & 0x3ff);
+      units.push(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
       i += 4;
-      continue;
+    } else {
+      return i; // 0x80..0xc1 (stray continuation / overlong lead) or 0xf5..0xff
     }
-    return i; // 0x80..0xc1 (stray continuation / overlong lead) or 0xf5..0xff
+    if (units.length >= FROM_CHAR_CHUNK) {
+      out += String.fromCharCode.apply(null, units);
+      units.length = 0;
+    }
   }
-  if (u <= FROM_CHAR_CHUNK) return String.fromCharCode.apply(null, units.subarray(0, u) as unknown as number[]);
-  // Chunked to stay well below engine argument-count limits.
-  let s = '';
-  for (let k = 0; k < u; k += FROM_CHAR_CHUNK) {
-    s += String.fromCharCode.apply(null, units.subarray(k, Math.min(u, k + FROM_CHAR_CHUNK)) as unknown as number[]);
-  }
-  return s;
+  return out + String.fromCharCode.apply(null, units);
 }

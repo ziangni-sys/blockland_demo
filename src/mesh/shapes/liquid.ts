@@ -8,22 +8,18 @@
  * to 1.0 when any of them has the same liquid directly above. Neighbouring cells therefore
  * share their corner heights exactly: the surface is watertight across cells and boxes.
  */
-import { ID_MASK, STATE_MASK, STATE_SHIFT, liquidAmount } from '../../blocks/cell';
-import { LIQUID } from '../../blocks/registry';
+import * as cellBits from '../../blocks/cell';
+import * as registry from '../../blocks/registry';
 import { VFLAG_LIQUID_SURFACE } from '../types';
-import { DIAG_02, DIAG_13, type MeshContext } from './builder';
-import {
-  BASE_FLAGS,
-  FACE_CORNER_HI,
-  FACE_NX,
-  FACE_NY,
-  FACE_NZ,
-  FACE_R_AXIS,
-  FACE_R_SIGN,
-  GROUP,
-  INFO,
-  TILE_SLOT,
-} from './tables';
+import { DIAG_02, DIAG_13, DIAG_AUTO, type MeshContext } from './builder';
+import * as tables from './tables';
+
+// Hot-path imports are bound to module-local constants once, at module init. Module
+// runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
+// would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
+const { ID_MASK, STATE_MASK, STATE_SHIFT, liquidAmount } = cellBits;
+const { LIQUID } = registry;
+const { BASE_FLAGS, FACE_CORNER_HI, FACE_NX, FACE_NY, FACE_NZ, FACE_R_AXIS, FACE_R_SIGN, GROUP, INFO, TILE_SLOT } = tables;
 
 /** Surface height of a full (source or falling) cell with open sky above it. */
 export const LIQUID_FULL_HEIGHT = 14 / 16;
@@ -47,7 +43,7 @@ export class LiquidScratch {
   readonly corner = new Float64Array(4);
 }
 
-/** Height of cell `c` for the neighbourhood table (see file comment). */
+/** Height of the cell at padded index q for the neighbourhood table (see file comment), or a marker. */
 function cellHeight(cells: Uint16Array, q: number, kind: number, up: number): number {
   const c = cells[q]!;
   if (LIQUID[c & ID_MASK] !== kind) return NOT_LIQUID;
@@ -55,16 +51,56 @@ function cellHeight(cells: Uint16Array, q: number, kind: number, up: number): nu
   return (liquidAmount((c >>> STATE_SHIFT) & STATE_MASK) / 8) * LIQUID_FULL_HEIGHT;
 }
 
+/**
+ * Emit a liquid cell: the top surface (double-sided, VFLAG_LIQUID_SURFACE) unless the same
+ * liquid is above; side faces toward cells that are neither the same liquid nor covering,
+ * from the floor up to the edge's corner heights (flow tile); the bottom face likewise.
+ * No AO: a liquid surface has no contact shadows worth the anisotropy they would add.
+ */
 export function emitLiquid(ctx: MeshContext, ls: LiquidScratch, p: number, x: number, y: number, z: number, id: number): void {
   const cells = ctx.cells;
   const kind = LIQUID[id]!;
   const up = ctx.axisStride[1]!;
+  // Visibility first: most liquid cells (the body of a lake or ocean) show no face at all,
+  // and the corner heights are only needed for the top and side faces.
+  const aboveId = cells[p + up]! & ID_MASK;
+  const aboveSame = LIQUID[aboveId] === kind;
+  let sides = 0;
+  for (let j = 0; j < 4; j++) {
+    const d = HORIZONTAL[j]!;
+    const nid = cells[p + ctx.dirStride[d]!]! & ID_MASK;
+    if (LIQUID[nid] !== kind && (INFO[nid]! & (1 << (d ^ 1))) === 0) sides |= 1 << j;
+  }
+  if (!aboveSame || sides !== 0) emitSurfaceAndSides(ctx, ls, p, x, y, z, id, kind, aboveId, aboveSame, sides);
+
+  // ---- bottom
+  const belowId = cells[p - up]! & ID_MASK;
+  if (LIQUID[belowId] !== kind && (INFO[belowId]! & (1 << UP)) === 0) {
+    ctx.setBox(0, 0, 0, 1, 1, 1);
+    ctx.useUvRect = false;
+    ctx.boxFace(ctx.groups[GROUP[id]!]!, p, x, y, z, DOWN, TILE_SLOT[id * 3]!, 0, BASE_FLAGS[id]!, false);
+  }
+}
+
+/** Top surface (unless the same liquid is above) and the side faces flagged in `sides` (bit j = HORIZONTAL[j]). */
+function emitSurfaceAndSides(
+  ctx: MeshContext,
+  ls: LiquidScratch,
+  p: number,
+  x: number,
+  y: number,
+  z: number,
+  id: number,
+  kind: number,
+  aboveId: number,
+  aboveSame: boolean,
+  sides: number,
+): void {
+  const cells = ctx.cells;
+  const up = ctx.axisStride[1]!;
   const rowZ = ctx.axisStride[2]!;
   const g = ctx.groups[GROUP[id]!]!;
   const flags = BASE_FLAGS[id]!;
-  const still = TILE_SLOT[id * 3]!;
-  const flow = TILE_SLOT[id * 3 + 1]!;
-
   const near = ls.near;
   for (let dz = -1; dz <= 1; dz++) {
     for (let dx = -1; dx <= 1; dx++) {
@@ -97,8 +133,6 @@ export function emitLiquid(ctx: MeshContext, ls: LiquidScratch, p: number, x: nu
   }
 
   // ---- top surface
-  const aboveId = cells[p + up]! & ID_MASK;
-  const aboveSame = LIQUID[aboveId] === kind;
   const coveredAbove = allFull && (INFO[aboveId]! & (1 << DOWN)) !== 0;
   if (!aboveSame && !coveredAbove) {
     const qsky = ctx.qsky;
@@ -143,15 +177,15 @@ export function emitLiquid(ctx: MeshContext, ls: LiquidScratch, p: number, x: nu
     const h2 = q[7]!;
     const h3 = q[10]!;
     const diag = Math.abs(h0 - h2) <= Math.abs(h1 - h3) ? DIAG_02 : DIAG_13;
-    ctx.commitDoubleSided(g, nx, ny, nz, still, flags | VFLAG_LIQUID_SURFACE, diag);
+    ctx.commitDoubleSided(g, nx, ny, nz, TILE_SLOT[id * 3]!, flags | VFLAG_LIQUID_SURFACE, diag);
   }
 
   // ---- sides: down to the cell floor, up to the two corner heights of that edge
+  const flow = TILE_SLOT[id * 3 + 1]!;
   for (let j = 0; j < 4; j++) {
+    if ((sides & (1 << j)) === 0) continue;
     const d = HORIZONTAL[j]!;
     const nb = p + ctx.dirStride[d]!;
-    const nid = cells[nb]! & ID_MASK;
-    if (LIQUID[nid] === kind || (INFO[nid]! & (1 << (d ^ 1))) !== 0) continue;
     const ra = FACE_R_AXIS[d]!;
     const rStride = ctx.axisStride[ra]!;
     const rPos = FACE_R_SIGN[d]! > 0;
@@ -165,14 +199,6 @@ export function emitLiquid(ctx: MeshContext, ls: LiquidScratch, p: number, x: nu
       ctx.setCorner(k, x + a, y + h, z + b, rPos ? cr : 1 - cr, h);
       ctx.sampleVertex(k, nb, cr === 1 ? rStride : -rStride, h === 0 ? -up : h === 1 ? up : 0, false);
     }
-    ctx.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, flow, flags, 0, false);
-  }
-
-  // ---- bottom
-  const belowId = cells[p - up]! & ID_MASK;
-  if (LIQUID[belowId] !== kind && (INFO[belowId]! & (1 << UP)) === 0) {
-    ctx.setBox(0, 0, 0, 1, 1, 1);
-    ctx.useUvRect = false;
-    ctx.boxFace(g, p, x, y, z, DOWN, still, 0, flags, false);
+    ctx.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, flow, flags, DIAG_AUTO, false);
   }
 }

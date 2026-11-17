@@ -50,8 +50,13 @@ export class Hud {
   private hintText: string | null | undefined = undefined;
   private veilShown: boolean | null = null;
   private veilDragMode: boolean | null = null;
+  private debugShown: boolean | null = null;
 
-  constructor(private readonly ctx: UiContext) {
+  constructor(
+    private readonly ctx: UiContext,
+    /** The .bl-ui element, for root-level state attributes. */
+    private readonly uiRoot: HTMLElement | null = null,
+  ) {
     const d = ctx.doc;
     this.debug = new DebugOverlay(d);
 
@@ -106,6 +111,12 @@ export class Hud {
   update(s: UiState, inGame: boolean, play: boolean): void {
     if (!inGame) return;
     this.debug.update(s.debug);
+    const debugShown = s.debug !== null && s.debug.length > 0;
+    if (debugShown !== this.debugShown) {
+      this.debugShown = debugShown;
+      // Lets the stylesheet move phone toasts clear of the overlay.
+      this.uiRoot?.setAttribute('data-debug', debugShown ? '1' : '0');
+    }
     if (play !== this.play) {
       this.play = play;
       this.el.dataset.play = play ? '1' : '0';

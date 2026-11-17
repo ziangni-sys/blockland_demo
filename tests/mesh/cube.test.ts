@@ -8,6 +8,7 @@ import type { MeshData, MeshInput } from '../../src/mesh/types';
 import {
   AXIS_NORMALS,
   allQuads,
+  checkInsideBox,
   checkInvariants,
   dirOfQuad,
   idx,
@@ -236,14 +237,7 @@ describe('robustness', () => {
           put(input, 0, -1, 0, makeCell(support)); // margin cell: never meshed itself
           const m = buildMesh(input);
           checkInvariants(m);
-          for (const q of allQuads(m)) {
-            for (const p of q.p) {
-              for (const c of [p.x, p.y, p.z]) {
-                expect(c).toBeGreaterThanOrEqual(0);
-                expect(c).toBeLessThanOrEqual(1);
-              }
-            }
-          }
+          checkInsideBox(m, 0, 1);
         }
       }
     }
@@ -302,8 +296,8 @@ describe('determinism and reuse', () => {
 });
 
 describe('fuzz: emitted cube faces equal a brute-force count of visible faces', () => {
-  const CUBES = [B.STONE, B.DIRT, B.GLASS, B.ICE, B.LEAVES_OAK, B.LEAVES_PINE, B.LOG_PINE, B.BEARING, B.PLANKS_OAK];
-  const NON_CUBES = [B.AIR, B.WATER, B.TALL_GRASS, B.TORCH];
+  const CUBES: readonly number[] = [B.STONE, B.DIRT, B.GLASS, B.ICE, B.LEAVES_OAK, B.LEAVES_PINE, B.LOG_PINE, B.BEARING, B.PLANKS_OAK];
+  const NON_CUBES: readonly number[] = [B.AIR, B.WATER, B.TALL_GRASS, B.TORCH];
   const SELF_CULL = new Set<number>([B.GLASS, B.ICE, B.LEAVES_OAK, B.LEAVES_PINE]);
   const OFFS = [
     [1, 0, 0],

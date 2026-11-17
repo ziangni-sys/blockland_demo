@@ -167,19 +167,24 @@ function stampBroadleafLeaves(cells: Uint16Array, x0: number, z0: number, t: Tre
   const cy = top + 0.35; // crown centre sits just above the top log so it is capped
   crown(cells, x0, z0, t, t.x, cy, t.z, R, Ry);
   // Large trees: two side lobes on short branches, which makes irregular, wider crowns.
-  if (R >= 2.7) {
-    const d0 = (t.hash >>> 16) & 3;
-    const d1 = (d0 + 1 + ((t.hash >>> 18) & 1) * 2) & 3; // perpendicular or opposite
-    for (const d of [d0, d1]) {
-      const lx = t.x + LOBE_DX[d]! * 2;
-      const lz = t.z + LOBE_DZ[d]! * 2;
-      crown(cells, x0, z0, t, lx, top - 1.2, lz, 2.0, 1.6);
+  if (R >= LOBE_MIN_RADIUS) {
+    for (let k = 0; k < 2; k++) {
+      const d = lobeDir(t, k);
+      crown(cells, x0, z0, t, t.x + LOBE_DX[d]! * 2, top - 1.2, t.z + LOBE_DZ[d]! * 2, 2.0, 1.6);
     }
   }
 }
 
-const LOBE_DX = [1, -1, 0, 0];
-const LOBE_DZ = [0, 0, 1, -1];
+/** Broadleaf crowns at least this wide get two side lobes on short branches. */
+const LOBE_MIN_RADIUS = 2.7;
+const LOBE_DX: readonly number[] = [1, -1, 0, 0];
+const LOBE_DZ: readonly number[] = [0, 0, 1, -1];
+
+/** Direction (index into LOBE_DX/DZ) of side lobe k (0 or 1): the second is perpendicular or opposite. */
+function lobeDir(t: TreeSpec, k: number): number {
+  const d0 = (t.hash >>> 16) & 3;
+  return k === 0 ? d0 : (d0 + 1 + ((t.hash >>> 18) & 1) * 2) & 3;
+}
 
 function crown(
   cells: Uint16Array,
@@ -243,12 +248,11 @@ function stampLogs(cells: Uint16Array, x0: number, z0: number, t: TreeSpec): voi
   const conifer = t.kind === TREE_CONIFER;
   const log = conifer ? PINE_LOG : OAK_LOG;
   for (let k = 1; k <= t.trunk; k++) putLog(cells, x0, z0, t.x, t.ground + k, t.z, log);
-  if (!conifer && t.radius >= 2.7) {
+  if (!conifer && t.radius >= LOBE_MIN_RADIUS) {
     // Branches feeding the two side lobes (see stampBroadleafLeaves).
     const top = t.ground + t.trunk;
-    const d0 = (t.hash >>> 16) & 3;
-    const d1 = (d0 + 1 + ((t.hash >>> 18) & 1) * 2) & 3;
-    for (const d of [d0, d1]) {
+    for (let k = 0; k < 2; k++) {
+      const d = lobeDir(t, k);
       const dx = LOBE_DX[d]!;
       const dz = LOBE_DZ[d]!;
       const branch = dx !== 0 ? OAK_LOG_X : OAK_LOG_Z;

@@ -86,10 +86,20 @@ interface Bucket {
 export class GlueStore {
   private readonly buckets = new Map<number, Bucket>();
   private count = 0;
+  private rev = 0;
 
   /** Number of glued faces. */
   get size(): number {
     return this.count;
+  }
+
+  /**
+   * Increases whenever a face is added or removed (by any method, moveTo included, on both
+   * stores). Caches keyed on glue — an assembly preview that must be redone when anything
+   * changed, drawn glue faces — compare it instead of diffing the faces.
+   */
+  get version(): number {
+    return this.rev;
   }
 
   // ------------------------------------------------------------ single faces
@@ -296,8 +306,10 @@ export class GlueStore {
   }
 
   clear(): void {
+    if (this.count === 0) return;
     this.buckets.clear();
     this.count = 0;
+    this.rev++;
   }
 
   // ------------------------------------------------------------ structure moves
@@ -362,7 +374,8 @@ export class GlueStore {
   // ------------------------------------------------------------ canonical-key primitives
 
   private hasCanonical(x: number, y: number, z: number, axis: number): boolean {
-    if (!inRange(x, y, z)) return false;
+    // Most stores (structures, fresh worlds) are empty or tiny: skip the key work entirely.
+    if (this.count === 0 || !inRange(x, y, z)) return false;
     const b = this.buckets.get(bucketKey(x >> BUCKET_SHIFT, y >> BUCKET_SHIFT, z >> BUCKET_SHIFT));
     return b !== undefined && b.faces.has(localKey(x, y, z, axis));
   }
@@ -382,15 +395,18 @@ export class GlueStore {
     if (b.faces.has(lk)) return false;
     b.faces.add(lk);
     this.count++;
+    this.rev++;
     return true;
   }
 
   private removeCanonical(x: number, y: number, z: number, axis: number): boolean {
-    if (!inRange(x, y, z)) return false;
+    // removeAllAt runs on every world cell change, usually with no glue around.
+    if (this.count === 0 || !inRange(x, y, z)) return false;
     const key = bucketKey(x >> BUCKET_SHIFT, y >> BUCKET_SHIFT, z >> BUCKET_SHIFT);
     const b = this.buckets.get(key);
     if (!b || !b.faces.delete(localKey(x, y, z, axis))) return false;
     this.count--;
+    this.rev++;
     // Empty buckets are dropped so iteration and box queries only see live data.
     if (b.faces.size === 0) this.buckets.delete(key);
     return true;

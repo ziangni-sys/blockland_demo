@@ -4,7 +4,6 @@
 import { Canvas, forEllipse, toneIndex } from '../canvas';
 import type { Ramp, RGB } from '../color';
 import * as M from '../materials';
-import { hrand } from '../noise';
 import { rngOf, S, type Painter } from './kit';
 
 /** Adds a 1-px outline OUTSIDE a sprite (transparent pixels touching it become `ink`). */
@@ -129,7 +128,7 @@ const paintGlueFace: Painter = (c, seed) => {
       if (r > edge) continue;
       const lit = ox + oy < -1.6 && r > 1;
       const rim = r > edge - 1;
-      c.set(x, y, M.GLUE[lit ? 4 : rim ? 2 : 3]!, lit ? GLUE_ALPHA + 20 : GLUE_ALPHA);
+      c.set(x, y, M.GLUE[lit ? 3 : rim ? 1 : 2]!, lit ? GLUE_ALPHA + 20 : GLUE_ALPHA);
     }
   }
   for (let i = 0; i < 7; i++) {
@@ -137,7 +136,7 @@ const paintGlueFace: Painter = (c, seed) => {
     const d = 5.2 + rng.next() * 1.8;
     const rr = 0.6 + rng.next() * 0.8;
     forEllipse(8 + Math.cos(a) * d, 8 + Math.sin(a) * d, rr, rr, (x, y) => {
-      if (x >= 0 && y >= 0 && x < S && y < S) c.set(x, y, M.GLUE[2]!, GLUE_ALPHA);
+      if (x >= 0 && y >= 0 && x < S && y < S) c.set(x, y, M.GLUE[1]!, GLUE_ALPHA);
     });
   }
 };
@@ -165,34 +164,34 @@ function crackTimes(): Float32Array {
   const tips: Tip[] = [];
   const mains = 5;
   for (let i = 0; i < mains; i++) {
-    tips.push({ x: 8, y: 8, a: (i / mains) * Math.PI * 2 + rng.next() * 0.7, left: 7 + rng.int(0, 2), t: rng.next() * 1.5 });
+    const a = ((i + 0.2 + rng.next() * 0.6) / mains) * Math.PI * 2;
+    tips.push({ x: 8 + Math.cos(a) * 0.8, y: 8 + Math.sin(a) * 0.8, a, left: 8 + rng.int(0, 2), t: 1 + rng.next() });
   }
   while (tips.length) {
-    const tip = tips.pop()!;
+    const tip = tips.shift()!;
     while (tip.left > 0) {
-      tip.a += (rng.next() - 0.5) * 0.7;
-      tip.x += Math.cos(tip.a);
-      tip.y += Math.sin(tip.a);
-      tip.t += 1;
-      tip.left--;
       const px = Math.floor(tip.x);
       const py = Math.floor(tip.y);
       if (px < 0 || py < 0 || px >= S || py >= S) break;
       const i = py * S + px;
       if (tip.t < time[i]!) time[i] = tip.t;
-      if (tip.left > 2 && rng.chance(0.2)) {
-        tips.push({ x: tip.x, y: tip.y, a: tip.a + (rng.chance(0.5) ? 0.9 : -0.9), left: Math.floor(tip.left * 0.6), t: tip.t + 1.5 });
+      // Branch only away from the centre, so the impact point does not clot into a blob.
+      if (tip.left > 2 && tip.t > 3.5 && rng.chance(0.25)) {
+        tips.push({ x: tip.x, y: tip.y, a: tip.a + (rng.chance(0.5) ? 0.85 : -0.85), left: Math.floor(tip.left * 0.55), t: tip.t + 1 });
       }
+      tip.a += (rng.next() - 0.5) * 0.55;
+      tip.x += Math.cos(tip.a);
+      tip.y += Math.sin(tip.a);
+      tip.t += 1;
+      tip.left--;
     }
   }
   // The impact point itself.
   for (const [x, y] of [
     [7, 7],
     [8, 8],
-    [7, 8],
-    [8, 7],
   ] as const) {
-    time[y * S + x] = Math.min(time[y * S + x]!, 0);
+    time[y * S + x] = 0;
   }
   return time;
 }
@@ -203,20 +202,11 @@ function paintCrack(stage: number): Painter {
     const time = crackTimes();
     let max = 0;
     for (let i = 0; i < S * S; i++) if (time[i]! !== Infinity && time[i]! > max) max = time[i]!;
-    const threshold = 0.5 + (max - 0.5) * Math.pow((stage + 1) / CRACK_STAGES, 1.15);
+    // Stage 0 shows the impact point and the stubs; the last stage shows the whole tree.
+    const threshold = 1.2 + (max - 1.2) * Math.pow(stage / (CRACK_STAGES - 1), 1.1);
     for (let y = 0; y < S; y++) {
       for (let x = 0; x < S; x++) {
         if (time[y * S + x]! <= threshold) c.set(x, y, M.CRACK, CRACK_ALPHA);
-      }
-    }
-    // Late stages: chips flake off next to the oldest cracks.
-    if (stage >= 5) {
-      for (let y = 1; y < S - 1; y++) {
-        for (let x = 1; x < S - 1; x++) {
-          if (c.alpha(x, y) > 0) continue;
-          const t = time[y * S + x - 1]!;
-          if (t <= threshold * 0.45 && hrand(x, y, 77 + stage) > 0.55) c.set(x, y, M.CRACK, CRACK_ALPHA);
-        }
       }
     }
   };

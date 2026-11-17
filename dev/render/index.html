@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blocklands render harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+      #view { display: block; width: 100vw; height: 100vh; }
+      #hud { position: fixed; left: 8px; top: 8px; color: #e8f0ff; font: 12px/1.35 ui-monospace, monospace; white-space: pre; text-shadow: 0 1px 2px #000; pointer-events: none; }
+      body.clean #hud { display: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="hud"></div>
+    <script>
+      if (new URLSearchParams(location.search).get('hud') === '0') document.body.classList.add('clean');
+    </script>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

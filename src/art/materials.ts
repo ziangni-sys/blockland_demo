@@ -14,7 +14,7 @@ export const STONE = ramp('#87857e', { step: 0.062, tint: 0.007 });
 export const RUBBLE = ramp('#8e8a81', { step: 0.072, tint: 0.008 });
 export const RUBBLE_MORTAR = rampOf('#2f2b33', '#403a41', '#4f4a4e');
 export const DIRT = ramp('#7c5a3d', { step: 0.06, hueShift: 6 });
-export const GRASS = ramp('#6a8e42', { step: 0.062, hueShift: 9, satShift: 0.04 });
+export const GRASS = ramp('#688c42', { step: 0.056, hueShift: 6, satShift: 0.05 });
 export const SAND = ramp('#d3bd8b', { step: 0.042, hueShift: 6 });
 export const GRAVEL_GAP: RGB = hex('#3a3434');
 export const GRAVEL_KINDS: readonly Ramp[] = Object.freeze([
@@ -44,7 +44,7 @@ export const LAVA = rampOf('#3a1410', '#6e1f12', '#b23916', '#e46a1e', '#f8a63a'
 
 // ---------------------------------------------------------------- wood
 export const OAK_BARK = ramp('#6c4b31', { step: 0.06, hueShift: 7 });
-export const PINE_BARK = ramp('#5b3127', { step: 0.058, hueShift: 7 });
+export const PINE_BARK = ramp('#66382a', { step: 0.058, hueShift: 7 });
 export const OAK_END = ramp('#b98c57', { baseIndex: 2, step: 0.055, hueShift: 6 });
 export const PINE_END = ramp('#b98458', { baseIndex: 2, step: 0.055, hueShift: 6 });
 export const PLANKS_OAK = ramp('#b6854a', { step: 0.058, hueShift: 7 });
@@ -66,14 +66,14 @@ export const LAMP_FRAME = rampOf('#3e2a1e', '#5f402a', '#86603a');
 
 /** Felt colours, keyed like WOOL_COLORS in blocks/defs.ts. */
 export const WOOL: Readonly<Record<string, Ramp>> = Object.freeze({
-  white: ramp('#e4ded2', { baseIndex: 3, step: 0.05, tint: 0.009 }),
-  red: ramp('#a9403a', { step: 0.06, hueShift: 9 }),
-  orange: ramp('#cf7834', { step: 0.06, hueShift: 8 }),
-  yellow: ramp('#d8b54a', { step: 0.058, hueShift: 7 }),
-  green: ramp('#5b8a3d', { step: 0.06, hueShift: 9 }),
-  blue: ramp('#3e68a6', { step: 0.06, hueShift: 8 }),
-  purple: ramp('#7a4999', { step: 0.06, hueShift: 8 }),
-  black: ramp('#2e2b34', { baseIndex: 1, step: 0.05, tint: 0.01 }),
+  white: ramp('#e4ded2', { baseIndex: 3, step: 0.042, tint: 0.009 }),
+  red: ramp('#a9403a', { step: 0.05, hueShift: 8 }),
+  orange: ramp('#cf7834', { step: 0.05, hueShift: 7 }),
+  yellow: ramp('#d8b54a', { step: 0.048, hueShift: 6 }),
+  green: ramp('#5b8a3d', { step: 0.05, hueShift: 8 }),
+  blue: ramp('#3e68a6', { step: 0.05, hueShift: 7 }),
+  purple: ramp('#7a4999', { step: 0.05, hueShift: 7 }),
+  black: ramp('#2e2b34', { baseIndex: 1, step: 0.045, tint: 0.01 }),
 });
 export const CANVAS_CLOTH = ramp('#dcd1b9', { baseIndex: 3, step: 0.042, tint: 0.007 });
 

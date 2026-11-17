@@ -129,7 +129,7 @@ export function openBlob(bytes: Uint8Array, magic: string, label: string = magic
 // Packing the palette index into the run token makes short runs (ore specks, tree trunks,
 // cave walls) cost one byte instead of two, and is never larger than a separate index +
 // length pair. The encoder computes the exact RLE size and falls back to raw whenever RLE
-// would not be smaller, so an incompressible chunk costs 64 KB + 13 bytes at worst.
+// would not be smaller, so an incompressible chunk costs 64 KB + at most 19 bytes of framing.
 // Light and heightmap are not stored: they are recomputed on load.
 
 const CHUNK_RLE = 0;
@@ -162,53 +162,69 @@ function checkChunkCoord(v: number, name: string): void {
   }
 }
 
+/**
+ * Palettes larger than this go raw without finishing the scan. Real chunks hold a few dozen
+ * distinct cells; only synthetic noise gets here, where building a huge palette map would
+ * cost milliseconds for (at best) a marginal gain. Choosing raw is always a valid encoding.
+ */
+const PALETTE_BAIL = 4096;
+
 /** Serialise a chunk's cells (not light). Typical terrain: a few hundred bytes to a few KB. */
 export function encodeChunk(chunk: Chunk): Uint8Array {
   const cells = chunk.cells;
+  // Local copy: an imported binding can be a live-binding getter in dev/test transforms,
+  // which would sit inside the 32768-iteration loop below.
+  const n = CHUNK_VOLUME;
   checkChunkCoord(chunk.cx, 'cx');
   checkChunkCoord(chunk.cz, 'cz');
-  if (cells.length !== CHUNK_VOLUME) throw new RangeError(`chunk has ${cells.length} cells, expected ${CHUNK_VOLUME}`);
+  if (cells.length !== n) throw new RangeError(`chunk has ${cells.length} cells, expected ${n}`);
 
-  // Pass 1: palette in first-appearance order + run count. Map lookups happen only at run
-  // boundaries, so uniform layers cost one comparison per cell. Bail out as soon as even
-  // a 1-byte-per-run lower bound cannot beat raw (noise-like chunks).
+  // The only pass over the cells: collect runs (palette index + length) and the palette in
+  // first-appearance order. The per-cell work is one load and one compare; the map is only
+  // touched at run boundaries. Bail out to raw as soon as even a 1-byte-per-run lower bound
+  // cannot beat it (noise-like chunks).
   const paletteIndex = new Map<number, number>();
   const palette: number[] = [];
+  const runIndex: number[] = [];
+  const runLength: number[] = [];
   let prev = cells[0]!;
+  let prevIndex = 0;
   paletteIndex.set(prev, 0);
   palette.push(prev);
-  let runs = 1;
+  let start = 0;
   let rle = true;
-  for (let i = 1; i < CHUNK_VOLUME; i++) {
+  for (let i = 1; i < n; i++) {
     const v = cells[i]!;
     if (v === prev) continue;
+    runIndex.push(prevIndex);
+    runLength.push(i - start);
+    start = i;
     prev = v;
-    runs++;
-    if (!paletteIndex.has(v)) {
-      paletteIndex.set(v, palette.length);
+    let index = paletteIndex.get(v);
+    if (index === undefined) {
+      index = palette.length;
+      paletteIndex.set(v, index);
       palette.push(v);
+      if (index >= PALETTE_BAIL) {
+        rle = false;
+        break;
+      }
     }
-    if (runs + palette.length * 2 >= RAW_CELL_BYTES) {
+    prevIndex = index;
+    if (runIndex.length + palette.length * 2 >= RAW_CELL_BYTES) {
       rle = false;
       break;
     }
   }
 
-  const bits = bitLength(palette.length - 1);
   let rleBytes = 0;
+  const bits = bitLength(palette.length - 1);
   if (rle) {
-    // Pass 2: exact RLE size, so the choice below is never worse than raw.
+    runIndex.push(prevIndex);
+    runLength.push(n - start);
+    // Exact RLE size, so the choice below is never worse than raw.
     rleBytes = varuintSize(palette.length) + palette.length * 2;
-    let start = 0;
-    let v = cells[0]!;
-    for (let i = 1; i <= CHUNK_VOLUME; i++) {
-      if (i < CHUNK_VOLUME && cells[i] === v) continue;
-      rleBytes += varuintSize(((i - start - 1) << bits) | paletteIndex.get(v)!);
-      if (i < CHUNK_VOLUME) {
-        v = cells[i]!;
-        start = i;
-      }
-    }
+    for (let k = 0; k < runIndex.length; k++) rleBytes += varuintSize(((runLength[k]! - 1) << bits) | runIndex[k]!);
     rle = rleBytes < RAW_CELL_BYTES;
   }
 
@@ -217,17 +233,7 @@ export function encodeChunk(chunk: Chunk): Uint8Array {
   if (rle) {
     w.u8(CHUNK_RLE).varuint(palette.length);
     for (let k = 0; k < palette.length; k++) w.u16(palette[k]!);
-    // Pass 3: emit tokens.
-    let start = 0;
-    let v = cells[0]!;
-    for (let i = 1; i <= CHUNK_VOLUME; i++) {
-      if (i < CHUNK_VOLUME && cells[i] === v) continue;
-      w.varuint(((i - start - 1) << bits) | paletteIndex.get(v)!);
-      if (i < CHUNK_VOLUME) {
-        v = cells[i]!;
-        start = i;
-      }
-    }
+    for (let k = 0; k < runIndex.length; k++) w.varuint(((runLength[k]! - 1) << bits) | runIndex[k]!);
   } else {
     w.u8(CHUNK_RAW).u16Array(cells);
   }
@@ -245,22 +251,23 @@ export function decodeChunk(bytes: Uint8Array): DecodedChunk {
   const encoding = r.u8();
   let cells: Uint16Array;
   if (encoding === CHUNK_RLE) {
+    const volume = CHUNK_VOLUME; // local: see encodeChunk
     const n = r.count(2);
-    if (n < 1 || n > CHUNK_VOLUME) r.fail(`invalid palette size ${n}`);
+    if (n < 1 || n > volume) r.fail(`invalid palette size ${n}`);
     const palette = new Uint16Array(n);
     for (let k = 0; k < n; k++) palette[k] = r.u16();
     const bits = bitLength(n - 1);
     const mask = (1 << bits) - 1;
-    const tokenLimit = CHUNK_VOLUME * 2 ** bits; // tokens are below this, so bit ops are safe
-    cells = new Uint16Array(CHUNK_VOLUME);
+    const tokenLimit = volume * 2 ** bits; // tokens are below this, so bit ops are safe
+    cells = new Uint16Array(volume);
     let filled = 0;
-    while (filled < CHUNK_VOLUME) {
+    while (filled < volume) {
       const token = r.varuint();
       if (token >= tokenLimit) r.fail(`run token ${token} out of range`);
       const index = token & mask;
       const len = (token >>> bits) + 1;
       if (index >= n) r.fail(`palette index ${index} out of range (palette has ${n})`);
-      if (len > CHUNK_VOLUME - filled) r.fail(`run of ${len} cells overflows the chunk (${filled} filled)`);
+      if (len > volume - filled) r.fail(`run of ${len} cells overflows the chunk (${filled} filled)`);
       const v = palette[index]!;
       if (v !== 0) cells.fill(v, filled, filled + len); // fresh array is already air
       filled += len;
@@ -328,7 +335,7 @@ export function decodeTicks(bytes: Uint8Array, now: number): ScheduledTick[] {
   if (!Number.isSafeInteger(now)) throw new RangeError(`now must be a safe integer, got ${now}`);
   const { reader: r } = openBlob(bytes, BLOB_MAGIC.ticks, 'ticks');
   const n = r.count(MIN_TICK_BYTES);
-  const out: ScheduledTick[] = new Array<ScheduledTick>(n);
+  const out: ScheduledTick[] = [];
   let x = 0;
   let y = 0;
   let z = 0;
@@ -343,7 +350,7 @@ export function decodeTicks(bytes: Uint8Array, now: number): ScheduledTick[] {
     if (delay < 1) r.fail(`tick ${i}: delay must be >= 1`);
     const at = now + delay;
     if (!Number.isSafeInteger(at)) r.fail(`tick ${i}: time overflows`);
-    out[i] = { x, y, z, id, at };
+    out.push({ x, y, z, id, at });
   }
   r.expectEnd();
   return out;
@@ -376,7 +383,8 @@ export const META_MAX_ID_LENGTH = 128;
 export const META_MAX_NAME_LENGTH = 256;
 export const META_MAX_SEED_LENGTH = 256;
 
-const MODES: readonly WorldMeta['mode'][] = ['creative', 'survival'];
+/** Wire order of game modes (index stored in meta blobs: append only). */
+const MODES: readonly WorldMeta['mode'][] = Object.freeze(['creative', 'survival'] as const);
 
 /** Why `meta` is not a valid WorldMeta, or null when it is. */
 export function metaProblem(meta: unknown): string | null {

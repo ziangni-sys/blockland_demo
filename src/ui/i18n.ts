@@ -40,7 +40,7 @@ export const STRINGS = {
   'menu.newWorld': { zh: '新世界', en: 'New world' },
   'menu.worldName': { zh: '名称', en: 'Name' },
   'menu.defaultWorldName': { zh: '新世界', en: 'New World' },
-  'menu.seedPlaceholder': { zh: '留空则随机', en: 'Leave empty for a random seed' },
+  'menu.seedPlaceholder': { zh: '留空则随机', en: 'Random if empty' },
   'menu.mode': { zh: '模式', en: 'Mode' },
   'menu.modeCreativeHint': { zh: '材料无限，强力胶无限，不会受伤。', en: 'Unlimited materials and glue; no damage.' },
   'menu.modeSurvivalHint': { zh: '需要挖掘和收集，会受伤、会溺水。', en: 'Mine and gather; you can get hurt and drown.' },
@@ -77,8 +77,6 @@ export const STRINGS = {
   'key.spaceTwice': { zh: '空格 ×2', en: 'Space ×2' },
   'key.shift': { zh: 'Shift', en: 'Shift' },
   'key.again': { zh: '再次', en: 'again' },
-  'key.blockA': { zh: '方块 A', en: 'block A' },
-  'key.blockB': { zh: '相邻方块 B', en: 'adjacent block B' },
 
   // ---- controls: sections
   'ctl.sec.move': { zh: '移动', en: 'Movement' },
@@ -109,13 +107,13 @@ export const STRINGS = {
   'ctl.bearingPreview': { zh: '预览转子', en: 'Preview the rotor' },
   'ctl.bearingStart': { zh: '启动转子', en: 'Start the rotor' },
   'ctl.bearingStop': { zh: '（运转中）停止转子', en: 'Stop a running bearing' },
-  'ctl.glueApply': { zh: '在两块之间涂胶', en: 'Glue the two blocks together' },
-  'ctl.glueRemove': { zh: '第二下按住 Shift：拆胶', en: 'Hold Shift on the second click to remove glue' },
+  'ctl.glueApply': { zh: '右键方块 A，再右键相邻的 B：涂胶', en: 'Block A, then the adjacent block B: glue' },
+  'ctl.glueRemove': { zh: '第二下按住 Shift：拆胶', en: 'Shift on the second click: remove glue' },
 
   // ---- main-menu cheat-sheet (abridged mechanism lines)
   'cheat.helm': { zh: '舵轮：预览 → 组装并掌舵', en: 'Helm: preview → assemble & steer' },
   'cheat.bearing': { zh: '轴承：预览 → 启动转子', en: 'Bearing: preview → start the rotor' },
-  'cheat.glue': { zh: '强力胶：方块 A → 相邻方块 B', en: 'Glue: block A → adjacent block B' },
+  'cheat.glue': { zh: '强力胶：方块 A → 相邻 B', en: 'Glue: block A → adjacent B' },
 
   // ---- inventory
   'inv.title': { zh: '物品栏', en: 'Inventory' },
@@ -130,7 +128,6 @@ export const STRINGS = {
   'inv.shiftHint': { zh: 'Shift + 点击：直接放进快捷栏', en: 'Shift-click: straight to the hotbar' },
   'inv.slotEmpty': { zh: '空格位', en: 'Empty slot' },
   'inv.slotLabel': { zh: '{name} ×{n}', en: '{name} ×{n}' },
-  'inv.held': { zh: '手持', en: 'Held' },
 
   // ---- palette groups
   'group.mechanisms': { zh: '机构', en: 'Mechanisms' },

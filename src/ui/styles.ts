@@ -95,12 +95,15 @@ export const UI_CSS = String.raw`
 }
 .bl-ui *, .bl-ui *::before, .bl-ui *::after { box-sizing: border-box; }
 .bl-ui [hidden] { display: none !important; }
-.bl-ui button { font: inherit; color: inherit; }
+/* Element resets use :where() so they never outrank a component class. */
+:where(.bl-ui) button { font: inherit; color: inherit; }
 .bl-ui :focus { outline: none; }
 .bl-ui :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.bl-ui h1, .bl-ui h2, .bl-ui h3, .bl-ui h4, .bl-ui p, .bl-ui ul, .bl-ui dl, .bl-ui dd { margin: 0; padding: 0; }
-.bl-ui ul { list-style: none; }
-.bl-ui kbd {
+/* Dialog containers take focus programmatically (so Tab starts inside them): no ring. */
+.bl-ui [tabindex="-1"]:focus, .bl-ui [tabindex="-1"]:focus-visible { outline: none; }
+:where(.bl-ui) :where(h1, h2, h3, h4, p, ul, dl, dd) { margin: 0; padding: 0; }
+:where(.bl-ui) ul { list-style: none; }
+:where(.bl-ui) kbd {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 1.9em; height: 1.75em; padding: 0 0.5em;
   font: 600 0.78em/1 var(--font-mono); color: var(--canvas-50);
@@ -109,6 +112,12 @@ export const UI_CSS = String.raw`
   border-radius: 5px; box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5); white-space: nowrap;
 }
 .bl-ui .bl-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.bl-ui .bl-kbd-mouse { min-width: 1.75em; padding: 0 0.3em; }
+.bl-kbd-mouse svg { width: 1.12em; height: 1.45em; overflow: visible; }
+.bl-m-body { fill: none; stroke: var(--canvas-100); stroke-width: 1.2; stroke-linecap: round; }
+.bl-m-btn { fill: transparent; }
+.bl-m-btn.is-on, .bl-m-wheel { fill: var(--brass-200); }
+.bl-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* ------------------------------------------------------------------ HUD */
 .bl-hud { position: absolute; inset: 0; }
@@ -124,7 +133,8 @@ export const UI_CSS = String.raw`
 
 .bl-hint {
   position: absolute; left: 50%; top: calc(50% + 30px); transform: translate(-50%, 4px);
-  max-width: min(560px, calc(100vw - 32px));
+  /* max-content: an abs-positioned box at left:50% would otherwise shrink to half the viewport. */
+  width: max-content; max-width: min(560px, calc(100vw - 32px));
   padding: 6px 14px 6px 12px; border-radius: 999px;
   background: var(--panel-bg-soft); border: 1px solid var(--line-faint);
   border-left: 2px solid var(--brass-400);
@@ -219,6 +229,9 @@ export const UI_CSS = String.raw`
   filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.5));
 }
 .bl-slot[data-empty="1"] canvas { visibility: hidden; }
+.bl-slot[data-empty="1"]:not(.is-selected) {
+  background: linear-gradient(150deg, rgba(227, 196, 127, 0.55) 0%, rgba(166, 126, 54, 0.42) 42%, rgba(77, 56, 21, 0.5) 100%);
+}
 .bl-slot-num {
   position: absolute; top: max(2px, calc(var(--s) * 0.07)); left: max(4px, calc(var(--s) * 0.12));
   font: 600 clamp(8px, calc(var(--s) * 0.19), 14px)/1 var(--font-mono); color: var(--brass-300); opacity: 0.62;
@@ -405,7 +418,7 @@ export const UI_CSS = String.raw`
 }
 .bl-panel-modal { margin: auto; animation: bl-panel-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 .bl-panel-title {
-  display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+  display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
   font: 700 13px/1.2 var(--font-ui); letter-spacing: 0.2em; text-transform: uppercase; color: var(--brass-300);
 }
 .bl-panel-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
@@ -482,6 +495,7 @@ export const UI_CSS = String.raw`
 .bl-input::placeholder { color: var(--canvas-700); }
 .bl-input:focus { border-color: var(--brass-300); box-shadow: 0 0 0 3px rgba(213, 169, 87, 0.18); outline: none; }
 .bl-input.bl-num-input { font-family: var(--font-mono); }
+.bl-input.bl-num-input::placeholder { font-family: var(--font-ui); }
 
 .bl-range { -webkit-appearance: none; appearance: none; width: 100%; height: 28px; margin: 0; background: transparent; cursor: pointer; }
 .bl-range::-webkit-slider-runnable-track {
@@ -539,8 +553,8 @@ export const UI_CSS = String.raw`
 .bl-logo--sm .bl-logo-dim span { font-size: 13px; }
 
 /* ------------------------------------------------------------------ main menu */
-.bl-menu { padding: 0; }
-.bl-menu-draft { position: absolute; right: -2vw; bottom: -2vh; width: min(760px, 70vw); opacity: 0.16; pointer-events: none; }
+.bl-menu { padding: 0; overflow-x: hidden; }
+.bl-menu-draft { position: absolute; right: 0; bottom: 40px; width: min(760px, 70vw); opacity: 0.16; pointer-events: none; }
 .bl-menu-draft * { fill: none; stroke: #9cc8f0; stroke-width: 1.1; vector-effect: non-scaling-stroke; }
 .bl-menu-draft .bl-d-dash { stroke-dasharray: 4 5; }
 .bl-menu-draft text { fill: #9cc8f0; stroke: none; font: 12px var(--font-mono); }
@@ -552,9 +566,12 @@ export const UI_CSS = String.raw`
 .bl-menu-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .bl-menu-brand { display: flex; flex-direction: column; gap: 10px; }
 .bl-tagline { font-size: 14px; color: var(--canvas-500); letter-spacing: 0.04em; }
-.bl-menu-grid { flex: 1; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: clamp(14px, 2vw, 22px); min-height: 0; align-items: start; }
-.bl-menu-side { display: flex; flex-direction: column; gap: clamp(14px, 2vw, 22px); }
-.bl-worlds { display: flex; flex-direction: column; min-height: 0; }
+.bl-menu-grid { flex: 1 0 auto; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: clamp(14px, 1.8vw, 22px); align-items: start; }
+.bl-worlds { display: flex; flex-direction: column; grid-row: span 2; }
+@media (min-width: 1100px) {
+  .bl-menu-grid { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.92fr); }
+  .bl-worlds { grid-row: auto; }
+}
 .bl-world-list { display: flex; flex-direction: column; gap: 8px; max-height: max(220px, calc(100vh - 330px)); overflow-y: auto; margin: 0 -6px; padding: 2px 6px; scrollbar-width: thin; scrollbar-color: var(--brass-600) transparent; }
 .bl-world {
   display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 10px 10px 14px; border-radius: 11px;
@@ -565,7 +582,7 @@ export const UI_CSS = String.raw`
 .bl-world-main { flex: 1; min-width: 0; }
 .bl-world-name { font-size: 16px; font-weight: 650; color: var(--canvas-50); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bl-world-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; font-size: 12px; color: var(--canvas-500); }
-.bl-world-seed { font-family: var(--font-mono); max-width: 16em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-world-seed { font-family: var(--font-mono); max-width: 11em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bl-world-seed em { font-style: normal; font-family: var(--font-ui); color: var(--canvas-700); margin-right: 4px; }
 .bl-world-actions { display: flex; gap: 8px; flex: none; }
 .bl-world--confirm { border-color: rgba(233, 112, 95, 0.55); background: rgba(80, 26, 22, 0.45); }
@@ -611,18 +628,19 @@ export const UI_CSS = String.raw`
   position: absolute; inset: 0; pointer-events: none;
   background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(5, 11, 22, 0.55) calc(10% - 1px) 10%);
 }
-.bl-loading-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--canvas-300); }
+.bl-loading-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--canvas-300); }
 .bl-loading-pct { font: 600 13px/1 var(--font-mono); color: var(--canvas-50); }
 
 /* ------------------------------------------------------------------ pause */
-.bl-pause-panel { width: min(940px, 100%); display: grid; grid-template-columns: minmax(240px, 300px) 1fr; gap: 26px; padding: 26px 28px; }
+.bl-pause-panel { width: min(960px, 100%); display: grid; grid-template-columns: minmax(230px, 280px) 1fr; gap: 26px; padding: 26px 28px; align-items: start; }
 .bl-pause-main { display: flex; flex-direction: column; gap: 10px; }
 .bl-pause-main .bl-title-lg { margin-bottom: 10px; }
 .bl-pause-mode { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
 .bl-pause-mode .bl-seg-ctl { width: 100%; }
 .bl-pause-mode .bl-seg-ctl button { flex: 1; }
-.bl-pause-spacer { flex: 1; }
+.bl-pause-quit { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--line-faint); }
 .bl-pause-ref { min-width: 0; padding-left: 26px; border-left: 1px solid var(--line-faint); }
+.bl-pause-ref > .bl-subtitle { margin-bottom: 14px; }
 .bl-ref-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; }
 .bl-ref-sec h4 {
   margin-bottom: 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line-faint);
@@ -646,6 +664,10 @@ export const UI_CSS = String.raw`
 .bl-palette-scroll {
   flex: 1; min-height: 0; max-height: calc(var(--islot) * 7.6 + 60px); overflow-y: auto; padding: 2px 8px 6px 2px; margin-right: -8px;
   scrollbar-width: thin; scrollbar-color: var(--brass-600) transparent;
+  /* Fade the bottom edge so it reads as "more below". */
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 26px), transparent);
+  padding-bottom: 22px;
 }
 .bl-pgroup + .bl-pgroup { margin-top: 12px; }
 .bl-pgroup h3 { margin-bottom: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; color: var(--canvas-500); }
@@ -698,7 +720,7 @@ export const UI_CSS = String.raw`
     var(--scrim);
 }
 .bl-death-card { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; padding: 30px 34px; max-width: 460px; }
-.bl-death-mark { width: 64px; height: 64px; }
+.bl-death-mark { width: 84px; height: 84px; margin-bottom: -4px; }
 .bl-death-mark * { fill: none; stroke: var(--vital-400); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .bl-death-title { font: 600 clamp(30px, 6vw, 44px)/1.1 var(--font-display); letter-spacing: 0.06em; color: var(--canvas-50); text-shadow: 0 2px 18px rgba(196, 63, 44, 0.55); }
 .bl-death-sub { font-size: 15px; color: var(--canvas-300); }
@@ -708,6 +730,7 @@ export const UI_CSS = String.raw`
 /* ------------------------------------------------------------------ responsive */
 @media (max-width: 860px) {
   .bl-menu-grid { grid-template-columns: minmax(0, 1fr); }
+  .bl-worlds { grid-row: auto; }
   .bl-world-list { max-height: none; }
   .bl-pause-panel { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 22px 18px; }
   .bl-pause-ref { padding-left: 0; padding-top: 16px; border-left: 0; border-top: 1px solid var(--line-faint); }
@@ -720,11 +743,21 @@ export const UI_CSS = String.raw`
   .bl-ui { font-size: 14px; }
   .bl-panel { padding: 16px 14px; border-radius: 14px; }
   .bl-menu-head { align-items: flex-start; }
-  .bl-menu-settings { position: absolute; top: clamp(18px, 4vh, 44px); right: 16px; }
+  .bl-menu-settings { position: absolute; top: clamp(18px, 4vh, 44px); right: 14px; min-width: 40px; padding: 8px; }
   .bl-menu-settings .bl-btn-label { display: none; }
+  .bl-menu-brand { padding-right: 46px; }
+  .bl-logo { gap: 10px; }
+  .bl-logo-mark { width: 44px; }
+  .bl-logo-word { font-size: clamp(20px, 6.4vw, 30px); letter-spacing: 0.12em; margin-right: -0.12em; }
+  .bl-logo-dim { margin-top: 5px; gap: 6px; }
+  .bl-logo-dim span { font-size: 12px; letter-spacing: 0.45em; margin-right: -0.45em; }
+  .bl-ui[data-debug="1"] .bl-toasts { top: 132px; }
   .bl-ref-grid { grid-template-columns: minmax(0, 1fr); }
-  .bl-world { flex-wrap: wrap; }
-  .bl-world-actions { width: 100%; justify-content: flex-end; }
+  .bl-world { gap: 8px; padding: 10px 8px 10px 12px; }
+  .bl-world-actions { gap: 6px; }
+  .bl-world-actions .bl-btn--primary { padding: 8px 12px; }
+  .bl-world--confirm { flex-wrap: wrap; }
+  .bl-world--confirm .bl-world-actions { width: 100%; }
   .bl-world--confirm .bl-world-actions .bl-btn { flex: 1; }
   .bl-field { grid-template-columns: 1fr auto; gap: 6px 12px; }
   .bl-field .bl-range { grid-column: 1 / -1; grid-row: 2; }

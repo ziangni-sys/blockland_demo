@@ -6,10 +6,16 @@
  * thin decal parts (plant planes, helm wheel, propeller blades) are double-sided quads lit
  * flat with the cell's own light, since a paper-thin plane has no meaningful AO.
  */
-import { ID_MASK, STATE_MASK, STATE_SHIFT, stateFacing, stateLayers } from '../../blocks/cell';
+import * as cellBits from '../../blocks/cell';
 import { DIR_X, DIR_Y, DIR_Z } from '../../core/dirs';
 import { DIAG_02, type MeshContext } from './builder';
-import { BASE_FLAGS, CORNER_U, CORNER_V, G_CUTOUT, GROUP, INFO, TILE_SLOT } from './tables';
+import * as tables from './tables';
+
+// Hot-path imports are bound to module-local constants once, at module init. Module
+// runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
+// would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
+const { ID_MASK, STATE_MASK, STATE_SHIFT, stateFacing, stateLayers } = cellBits;
+const { BASE_FLAGS, CORNER_U, CORNER_V, G_CUTOUT, GROUP, INFO, TILE_SLOT } = tables;
 
 const UP = 2;
 const DOWN = 3;

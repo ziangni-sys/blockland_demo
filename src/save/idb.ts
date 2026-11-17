@@ -55,14 +55,14 @@ function indexedDBFactory(): IDBFactory | null {
   return null;
 }
 
-const HINTS: Readonly<Record<string, string>> = {
+const HINTS: Readonly<Record<string, string>> = Object.freeze({
   QuotaExceededError: 'storage quota exceeded (free disk space or delete old worlds)',
   VersionError: 'the save database was created by a newer version of the game',
   InvalidStateError: 'the database connection is closed',
   UnknownError: "the browser's storage backend failed",
   SecurityError: 'storage access is not allowed in this context',
   AbortError: 'the operation was aborted',
-};
+});
 
 /** "hint (Name: message)" for DOMExceptions and errors, String(e) for anything else. */
 function explain(e: unknown): string {
@@ -417,6 +417,11 @@ export class IdbStorage implements SaveStorage {
       if (this.db === db) {
         this.db = null;
         this.lostReason = `the connection failed (${explain(first)})`;
+      }
+      try {
+        db.close(); // release it either way (closing twice is harmless)
+      } catch {
+        // already closed
       }
       db = await this.connection();
       try {

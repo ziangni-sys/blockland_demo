@@ -111,8 +111,8 @@ function paintPlanks(c: Canvas, seed: number, r: Ramp, joints: readonly number[]
   // Darker grain streaks.
   for (let i = 0; i < 6; i++) {
     const x = rng.int(0, S - 1);
-    const y = rng.int(0, 3) === 3 ? 1 : rng.int(0, S - 1);
-    if ((y & 3) === 3) continue;
+    const y = rng.int(0, S - 1);
+    if ((y & 3) === 3) continue; // never on the gap row between boards
     const len = rng.int(2, 4);
     for (let k = 0; k < len; k++) f.set(x + k, y, Math.min(f.get(x + k, y), 1.2));
   }
@@ -210,7 +210,7 @@ const paintLeavesPine: Painter = (c, seed) => {
       if (i % 2 === 0 && i < len - 1) {
         for (let k = 1; k <= 2; k++) {
           const tip = k === 2;
-          f.set(x + k * dir, y - k, tip ? (hrand(x, y, seed + sprig) > 0.6 ? 3.8 : 3) : 2.2);
+          f.set(x + k * dir, y - k, tip ? (hrand(x, y, seed + sprig) > 0.85 ? 3.6 : 2.8) : 2.1);
           f.set(x + k * dir, y + k, tip ? 2.4 : 1.6);
         }
       }

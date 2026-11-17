@@ -37,15 +37,15 @@ const paintStoneBricks: Painter = (c, seed) => {
   const f = new Field();
   // Two courses of 8 px; vertical joints offset by half a tile between courses.
   const jointX = [15, 7];
-  const brickTone = [2 + (rng.next() - 0.5) * 0.5, 2 + (rng.next() - 0.5) * 0.5, 2 + (rng.next() - 0.5) * 0.5];
+  const brickTone = [2 + (rng.next() - 0.5) * 0.5, 2 + (rng.next() - 0.5) * 0.5];
   f.each((x, y) => {
     const course = y >> 3;
     const row = y & 7;
     const jx = jointX[course]!;
     if (row === 7 || x === jx) return Number.NaN; // mortar, painted below
-    // Which brick (for tone variety): course 1 is split into two bricks by its joint.
-    const brick = course === 0 ? 0 : x < jx ? 1 : 2;
-    let t = brickTone[brick]! + sfbm(x, y, 4, 2, seed + 1) * 0.35;
+    // One brick per course: each course's brick wraps across the tile edge to its joint, so
+    // both sides of the edge must share a tone (otherwise the tiling shows a seam).
+    let t = brickTone[course]! + sfbm(x, y, 4, 2, seed + 1) * 0.35;
     // Bevel: lit top / left inner edges, shaded bottom / right.
     if (row === 0) t += 0.75;
     if (row === 6) t -= 0.65;
@@ -109,11 +109,11 @@ const paintBricks: Painter = (c, seed) => {
 // ---------------------------------------------------------------- sandstone
 
 const SANDSTONE_BANDS: ReadonlyArray<readonly [number, number]> = [
-  [3, 0.55],
-  [2, -0.35],
-  [4, 0.15],
-  [3, -0.55],
-  [4, 0.35],
+  [3, 0.7],
+  [2, -0.6],
+  [4, 0.2],
+  [3, -0.7],
+  [4, 0.45],
 ];
 
 const paintSandstoneSide: Painter = (c, seed) => {
@@ -158,31 +158,29 @@ const paintSandstoneTop: Painter = (c, seed) => {
 
 const paintIronBlock: Painter = (c, seed) => {
   const f = new Field();
-  const seamX = [15, 7];
+  // Two long horizontal plates; brushed finish = thin streaks along x.
   f.each((x, y) => {
-    const plate = y >> 3;
     const row = y & 7;
-    const sx = seamX[plate]!;
-    if (row === 7 || x === sx) return 0.1;
-    // Brushed finish: thin horizontal streaks (one lattice cell per row).
-    let t = 2.2 + (vnoise(x, y, 2, 16, seed + 1) - 0.5) * 1.0 + (hrand(x >> 2, y, seed + 2) - 0.5) * 0.35;
-    if (row === 0) t += 0.9;
-    if (row === 6) t -= 0.6;
-    if (x === wrap(sx + 1)) t += 0.5;
-    if (x === wrap(sx - 1)) t -= 0.5;
+    if (row === 7) return 0.1;
+    let t = 2.2 + (vnoise(x, y, 2, 16, seed + 1) - 0.5) * 1.1 + (hrand(x >> 2, y, seed + 2) - 0.5) * 0.3;
+    if (row === 0) t += 1;
+    if (row === 1) t += 0.3;
+    if (row === 6) t -= 0.7;
     return t;
   });
-  // Rivets near both ends of every plate: bright head, dark shadow to the lower right.
+  // A soft diagonal sheen across each plate.
+  f.each((x, y, t) => (y & 7) !== 7 && wrap(x - (y & 7) * 2, 16) < 3 ? t + 0.6 : t);
+  // Rivets at both ends of every plate: bright head, dark shadow to the lower right.
   for (const [x, y] of [
-    [2, 2],
-    [12, 2],
-    [10, 10],
-    [4, 10],
+    [1, 3],
+    [13, 3],
+    [1, 11],
+    [13, 11],
   ] as const) {
     f.set(x, y, 4.2);
-    f.set(x + 1, y + 1, 0.6);
-    f.set(x + 1, y, 1.6);
-    f.set(x, y + 1, 1.6);
+    f.set(x + 1, y + 1, 0.4);
+    f.set(x + 1, y, 1.5);
+    f.set(x, y + 1, 1.5);
   }
   paintField(c, f, M.STEEL);
 };
@@ -203,7 +201,8 @@ const paintLamp: Painter = (c, seed) => {
       // Distance to the cell centre in lattice units: bright core, amber rim.
       const du = Math.abs(u - 3);
       const dv = Math.abs(v - 4);
-      const cell = Math.floor((x + y) / 8) * 3 + Math.floor((x - y + 16) / 8);
+      // Cell id modulo the 16-px period, so a diamond cut by the tile edge keeps its tone.
+      const cell = wrap(Math.floor((x + y) / 8), 2) * 2 + wrap(Math.floor((x - y) / 8), 2);
       const d = Math.max(du, dv) - hrand(cell, 0, seed) * 0.6;
       let t = 4.2 - d * 1.05;
       if (du + dv <= 1 && u <= 3 && v <= 4) t += 0.5; // hot spot toward the light
@@ -218,15 +217,14 @@ function paintFelt(c: Canvas, seed: number, r: Ramp): void {
   const bi = r === M.WOOL['white'] ? 3 : r === M.WOOL['black'] ? 1 : 2;
   const f = new Field();
   f.each((x, y) => {
-    // Soft twill: diagonal ribs with a 4-px period, broken up by fuzzy noise.
-    const rib = wrap(x + y * 2, 4) < 2 ? 0.28 : -0.28;
-    let t = bi + rib + sfbm(x, y, 4, 2, seed + 1) * 0.55;
-    const h = hrand(x, y, seed + 2);
-    if (h > 0.93) t += 0.7; // stray light fibre
-    else if (h < 0.06) t -= 0.7;
+    // Soft twill: diagonal ribs (period 4, wraps) sitting half a tone below the base, so the
+    // ribs alternate between two neighbouring tones; broad mottling keeps it felt-like.
+    const rib = wrap(x + y * 2, 4) < 2 ? 0.3 : -0.3;
+    let t = bi - 0.2 + rib + sfbm(x, y, 4, 2, seed + 1) * 0.35 + (hrand(x, y, seed + 2) - 0.5) * 0.25;
+    if (hrand(x, y, seed + 3) > 0.975) t += 0.9; // a stray light fibre
     return t;
   });
-  paintField(c, f, r, { dither: 0.45 });
+  paintField(c, f, r);
 }
 
 const paintCanvas: Painter = (c, seed) => {

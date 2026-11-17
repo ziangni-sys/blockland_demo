@@ -92,13 +92,6 @@ export class Canvas {
   clear(): void {
     this.data.fill(0);
   }
-
-  /** Fraction of pixels with alpha 0. */
-  transparentFraction(): number {
-    let n = 0;
-    for (let i = 3; i < this.data.length; i += 4) if (this.data[i] === 0) n++;
-    return n / (this.size * this.size);
-  }
 }
 
 /**

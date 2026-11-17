@@ -36,8 +36,9 @@ export function serveMeshRequests(scope: MeshWorkerScope): void {
   };
 }
 
-// Only bind when actually running as a worker (Node, where tests import this file, has no `self`).
-if (typeof self !== 'undefined' && typeof (self as unknown as { postMessage?: unknown }).postMessage === 'function') {
+// Bind only inside a real worker: Node (where tests import this file) has no worker scope,
+// and on a page's main thread `self` is the window, which must not be hijacked.
+if (typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== 'undefined' && typeof self !== 'undefined') {
   const ctx = self as unknown as MeshWorkerScope;
   serveMeshRequests(ctx);
 }

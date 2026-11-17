@@ -1,8 +1,17 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chunkKey } from '../../src/voxel/chunk';
+import { Chunk, chunkKey } from '../../src/voxel/chunk';
 import { SaveFormatError } from '../../src/save/bytes';
-import { SAVE_VERSION, type WorldMeta } from '../../src/save/codec';
+import {
+  SAVE_VERSION,
+  decodeChunk,
+  decodeMeta,
+  decodeTicks,
+  encodeChunk,
+  encodeMeta,
+  encodeTicks,
+  type WorldMeta,
+} from '../../src/save/codec';
 import { MemoryStorage, SaveStorageError, type SaveStorage } from '../../src/save/storage';
 import { IdbStorage, openBestStorage } from '../../src/save/idb';
 
@@ -274,6 +283,27 @@ function storageSuite(label: string, make: () => Promise<SaveStorage>): void {
       expect(got.buffer.byteLength).toBe(4);
     });
 
+    it('round-trips real codec output end to end', async () => {
+      const chunk = new Chunk(-2, 3);
+      for (let y = 0; y < 40; y++) for (let i = 0; i < 256; i++) chunk.cells[(y << 8) | i] = y === 0 ? 7 : y < 36 ? 1 : 3;
+      chunk.set(5, 40, 5, 8 | (1 << 10));
+      const m = meta('e2e', 123);
+      await s.putAll(
+        'e2e',
+        m,
+        [[chunkKey(chunk.cx, chunk.cz), encodeChunk(chunk)]],
+        [
+          ['meta-copy', encodeMeta(m)],
+          ['ticks', encodeTicks([{ x: -30, y: 41, z: 50, id: 40, at: 1010 }], 1000)],
+        ],
+      );
+      const [stored] = await s.getChunks('e2e', [chunkKey(-2, 3)]);
+      const back = decodeChunk(stored!);
+      expect(back.cells).toEqual(chunk.cells);
+      expect(decodeMeta((await s.getBlob('e2e', 'meta-copy'))!)).toEqual(m);
+      expect(decodeTicks((await s.getBlob('e2e', 'ticks'))!, 0)).toEqual([{ x: -30, y: 41, z: 50, id: 40, at: 10 }]);
+    });
+
     it('rejects (never throws synchronously) on invalid arguments', async () => {
       const calls: Array<() => Promise<unknown>> = [
         () => s.getMeta(''),
@@ -344,7 +374,9 @@ describe('IdbStorage specifics', () => {
     const realPut = proto.put;
     let calls = 0;
     proto.put = function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
-      if (++calls === 4) throw new Error('injected failure');
+      ++calls;
+      // 1st putAll: meta, K1, K2, then fail on the first blob. 2nd: meta, K1, then fail on K2.
+      if (calls === 4 || calls === 7) throw new Error('injected failure');
       return realPut.call(this, value, key);
     } as typeof proto.put;
     try {
@@ -357,7 +389,7 @@ describe('IdbStorage specifics', () => {
     } finally {
       proto.put = realPut;
     }
-    expect(calls).toBeGreaterThanOrEqual(8);
+    expect(calls).toBe(7);
     expect(await s.getMeta('w')).toEqual(meta('w', 1));
     expect(await s.getChunks('w', [K1, K2])).toEqual([bytes(1), null]);
     expect(await s.getBlob('w', 'glue')).toEqual(bytes(1));
@@ -448,6 +480,53 @@ describe('IdbStorage specifics', () => {
       req.onerror = () => reject(req.error);
     });
     await expect(IdbStorage.open(name)).rejects.toThrow(/no "meta" store/);
+  });
+
+  it('opens lazily once for concurrent first calls', async () => {
+    const name = freshDbName();
+    const s = new IdbStorage(name);
+    const results = await Promise.all([
+      s.putBlob('w', 'glue', bytes(1)),
+      s.putChunks('w', [[K1, bytes(2)]]),
+      s.putMeta(meta('w', 1)),
+      s.getMeta('w'),
+      s.listWorlds(),
+    ]);
+    expect(results).toHaveLength(5);
+    expect(await s.getBlob('w', 'glue')).toEqual(bytes(1));
+    expect(await s.getChunk('w', K1)).toEqual(bytes(2));
+    s.close();
+  });
+
+  it('deletes a large world without touching its neighbours', async () => {
+    const name = freshDbName();
+    const s = await IdbStorage.open(name);
+    for (const id of ['alpha', 'beta', 'gamma']) {
+      const entries: Array<[number, Uint8Array]> = [];
+      for (let i = 0; i < 150; i++) entries.push([chunkKey(i - 75, i % 7), bytes(i & 255)]);
+      await s.putAll(id, meta(id, 1), entries, [['glue', bytes(1)], ['structures', bytes(2)]]);
+    }
+    await s.deleteWorld('beta');
+    s.close();
+    const raw = await rawOpen(name);
+    expect(await rawCount(raw, 'chunks')).toBe(300);
+    expect(await rawCount(raw, 'blobs')).toBe(4);
+    expect(await rawCount(raw, 'meta')).toBe(2);
+    raw.close();
+    const again = await IdbStorage.open(name);
+    expect((await again.listWorlds()).map((m) => m.id).sort()).toEqual(['alpha', 'gamma']);
+    expect(await again.getChunk('alpha', chunkKey(-75, 0))).toEqual(bytes(0));
+    expect(await again.getChunk('beta', chunkKey(-75, 0))).toBeNull();
+    again.close();
+  });
+
+  it('close() during the initial open discards that connection', async () => {
+    const s = new IdbStorage(freshDbName());
+    const pending = s.getMeta('w');
+    s.close();
+    await expect(pending).rejects.toThrow(/closed while opening/);
+    expect(await s.getMeta('w')).toBeNull(); // the next call opens normally
+    s.close();
   });
 
   it('validates the database name', () => {
@@ -558,13 +637,15 @@ describe('openBestStorage', () => {
     expect((await openBestStorage('x')).persistent).toBe(false);
   });
 
-  it('falls back when opening works but the first read fails, closing the connection', async () => {
-    let closed = 0;
+  it('falls back when opening works but the first read fails, closing every connection', async () => {
+    const connections: Array<{ closed: number }> = [];
     setIdb({
       value: scriptedFactory((req) => {
+        const conn = { closed: 0 };
+        connections.push(conn);
         req.result = {
           objectStoreNames: { contains: () => true },
-          close: () => closed++,
+          close: () => conn.closed++,
           transaction() {
             throw Object.assign(new Error('backend broken'), { name: 'UnknownError' });
           },
@@ -575,7 +656,9 @@ describe('openBestStorage', () => {
     });
     const r = await openBestStorage();
     expect(r.persistent).toBe(false);
-    expect(closed).toBe(1);
+    expect(connections.length).toBeGreaterThanOrEqual(1);
+    for (const c of connections) expect(c.closed).toBeGreaterThanOrEqual(1);
+    await expect(IdbStorage.open('x').then((s) => s.ping())).rejects.toThrow(/backend failed.*UnknownError: backend broken/);
   });
 
   it('gives up on an open request that never answers when the caller says so', async () => {

@@ -95,8 +95,7 @@ function stem(c: Canvas, topY: number, leaves: ReadonlyArray<readonly [number, n
   for (const [x, y] of leaves) c.set(x, y, M.STEM[2]!);
 }
 
-function paintFlower(c: Canvas, petals: number, petalRamp: Ramp, centre: Ramp[number], ring: boolean): void {
-  c.clear();
+function flowerStem(c: Canvas): void {
   stem(c, 7, [
     [5, 12],
     [6, 12],
@@ -108,44 +107,71 @@ function paintFlower(c: Canvas, petals: number, petalRamp: Ramp, centre: Ramp[nu
   // Shadow side of the leaves.
   c.set(6, 13, M.STEM[0]!);
   c.set(9, 14, M.STEM[0]!);
+}
+
+/** Emberbloom: five broad, rounded petals with dark creases and a golden eye. */
+const paintFlowerRed: Painter = (c) => {
+  c.clear();
+  flowerStem(c);
+  const r = M.RED_PETAL;
+  const cx = 8;
+  const cy = 5;
+  const petals = 5;
+  for (let y = 0; y < 11; y++) {
+    for (let x = 1; x < S - 1; x++) {
+      const ox = x + 0.5 - cx;
+      const oy = y + 0.5 - cy;
+      const rr = Math.sqrt(ox * ox + oy * oy);
+      // Nearest petal by angle; each petal is an ellipse pushed out from the centre.
+      const a = Math.atan2(oy, ox) + Math.PI / 2;
+      const k = Math.round((a / (Math.PI * 2)) * petals);
+      const pa = (k / petals) * Math.PI * 2 - Math.PI / 2;
+      const px = cx + Math.cos(pa) * 2.1;
+      const py = cy + Math.sin(pa) * 2.1;
+      const dx = x + 0.5 - px;
+      const dy = y + 0.5 - py;
+      const radial = dx * Math.cos(pa) + dy * Math.sin(pa);
+      const tang = -dx * Math.sin(pa) + dy * Math.cos(pa);
+      const inPetal = (radial / 2.25) ** 2 + (tang / 1.75) ** 2 <= 1;
+      if (!inPetal && rr > 1.6) continue;
+      if (rr < 1.3) {
+        c.set(x, y, M.YELLOW_PETAL[rr < 0.8 ? 3 : 1]!);
+        continue;
+      }
+      // Crease between petals: angular distance to the petal's own axis is large.
+      const crease = Math.abs(tang) > 1.25 && rr < 3.4;
+      let t = 2.3 - ((ox + oy) / 4.5) * 1.1;
+      if (radial > 1.3) t -= 0.5;
+      if (crease) t = 0.6;
+      c.set(x, y, r[toneIndex(t, r.length)]!);
+    }
+  }
+  outlineSprite(c, r[0]!);
+};
+
+/** Sunpetal: a ring of narrow petals around a brown centre. */
+const paintFlowerYellow: Painter = (c) => {
+  c.clear();
+  flowerStem(c);
+  const r = M.YELLOW_PETAL;
   const cx = 8;
   const cy = 5;
   for (let y = 0; y < 11; y++) {
     for (let x = 1; x < S - 1; x++) {
       const ox = x + 0.5 - cx;
       const oy = y + 0.5 - cy;
-      const r = Math.sqrt(ox * ox + oy * oy);
+      const rr = Math.sqrt(ox * ox + oy * oy);
       const a = Math.atan2(oy, ox);
-      let inside: boolean;
-      if (ring) {
-        // Daisy: many narrow petals in a ring.
-        inside = r <= 4.2 && (r < 1.9 || Math.cos(a * petals) > -0.45);
-      } else {
-        // Rounded petals: radius modulated by the petal count.
-        const rr = 3.1 + Math.cos(a * petals + Math.PI / 2) * 0.9;
-        inside = r <= rr;
-      }
-      if (!inside) continue;
-      if (r < (ring ? 1.6 : 1.3)) {
-        c.set(x, y, centre);
+      if (rr > 4.3 || (rr >= 1.9 && Math.cos(a * 9) < -0.45)) continue;
+      if (rr < 1.7) {
+        c.set(x, y, M.DIRT[ox + oy < -0.5 ? 3 : 1]!);
         continue;
       }
-      const t = 2.2 - ((ox + oy) / 4) * 1.1 - (r > 3.2 ? 0.4 : 0);
-      c.set(x, y, petalRamp[toneIndex(t, petalRamp.length)]!);
+      const t = 2.3 - ((ox + oy) / 4) * 1.1 - (rr > 3.3 ? 0.4 : 0);
+      c.set(x, y, r[toneIndex(t, r.length)]!);
     }
   }
-  outlineSprite(c, petalRamp[0]!);
-}
-
-const paintFlowerRed: Painter = (c) => {
-  paintFlower(c, 5, M.RED_PETAL, M.YELLOW_PETAL[1]!, false);
-  c.set(7, 4, M.YELLOW_PETAL[3]!); // pollen
-  c.set(8, 5, M.RED_PETAL[0]!);
-};
-
-const paintFlowerYellow: Painter = (c) => {
-  paintFlower(c, 9, M.YELLOW_PETAL, M.DIRT[1]!, true);
-  c.set(7, 4, M.DIRT[3]!);
+  outlineSprite(c, r[0]!);
 };
 
 const paintTallGrass: Painter = (c, seed) => {
@@ -179,4 +205,3 @@ export const PLANT_PAINTERS: Readonly<Record<string, Painter>> = Object.freeze({
   tall_grass: paintTallGrass,
 });
 
-export { outlineSprite };

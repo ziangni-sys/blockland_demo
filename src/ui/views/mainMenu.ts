@@ -147,7 +147,7 @@ export class MainMenuView implements ScreenView {
 
     this.el = h(d, 'div', 'bl-screen bl-screen--opaque bl-menu', { hidden: true, 'data-screen': 'mainMenu' }, [
       h(d, 'div', 'bl-menu-draft', { 'aria-hidden': 'true' }, [svg(d, draftMarkup())]),
-      h(d, 'div', 'bl-menu-inner', null, [head, h(d, 'div', 'bl-menu-grid', null, [worlds, h(d, 'div', 'bl-menu-side', null, [newWorld, cheats])]), foot]),
+      h(d, 'div', 'bl-menu-inner', null, [head, h(d, 'div', 'bl-menu-grid', null, [worlds, newWorld, cheats]), foot]),
     ]);
   }
 

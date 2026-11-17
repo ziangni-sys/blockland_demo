@@ -64,11 +64,6 @@ export function hrand(x: number, y: number, seed: number): number {
   return hash3(wrap(x | 0), wrap(y | 0), 0x51ed, seed) / 4294967296;
 }
 
-/** 1D periodic value noise along a coordinate (period TILE_SIZE), in [0,1). */
-export function vnoise1(t: number, cells: number, seed: number): number {
-  return vnoise(t, 0, cells, 1, seed);
-}
-
 // ---------------------------------------------------------------- feature points
 
 /** A feature point on the tile torus. */
