@@ -52,8 +52,16 @@ export const RIPPLE_WAVES: readonly Wave[] = Object.freeze([
   Object.freeze({ kx: k(167), kz: k(134), w: -3.9, a: 0.004 }),
 ]);
 
-/** Spatial phase of plant sway: phase = kx * x + kz * z. */
-export const SWAY_PHASE: Readonly<{ kx: number; kz: number }> = Object.freeze({ kx: k(29), kz: k(18) });
+/**
+ * Spatial phases of plant sway (phase = kx * x + kz * z): the main x sway, a faster x
+ * overtone and the z sway. Separate whole-cycle vectors rather than multiples of one phase,
+ * because a non-integer multiple of a periodic phase is no longer periodic.
+ */
+export const SWAY_PHASES: readonly Readonly<{ kx: number; kz: number }>[] = Object.freeze([
+  Object.freeze({ kx: k(29), kz: k(18) }),
+  Object.freeze({ kx: k(49), kz: k(31) }),
+  Object.freeze({ kx: k(38), kz: k(23) }),
+]);
 
 /** Animation origin for a camera coordinate: snapped down to a multiple of WAVE_PERIOD. */
 export function animOrigin(c: number): number {

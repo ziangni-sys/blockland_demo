@@ -541,6 +541,9 @@ export function buildWorld(): VoxelBox {
   const th = height(tx, tz);
   for (let y = th + 1; y <= th + 9; y++) for (let z = tz; z < tz + 2; z++) for (let x = tx; x < tx + 2; x++) w.set(x, y, z, B.STONE_BRICKS);
   w.set(tx, th + 9, tz + 2, B.BEARING);
+  // A frozen corner of the lake: ice on the top water layer (translucent, but no water
+  // effects: it must stay perfectly still).
+  for (let z = 58; z < 64; z++) for (let x = 33; x < 39; x++) if (w.get(x, WATER_TOP, z) === B.WATER) w.set(x, WATER_TOP, z, B.ICE);
   computeLight(w);
   return w;
 }
@@ -618,4 +621,28 @@ export function buildRotor(): StructureDemo {
   }
   const mesh = meshRegion({ box, x0: 0, y0: 0, z0: 0, sx: S, sy: S, sz: 1, lit: false });
   return { mesh, ox: -c, oy: -c, oz: 0, pivot: [0.5, 0.5, 0.5], dry: null };
+}
+
+/**
+ * A small open raft laid out exactly like src/structures/hull.ts analyses it: 7 x 5 planks
+ * floor at local y 0, 2-high walls at y 1..2, analysed box = tight bounds grown by one cell
+ * (so the mask layer below the bilge is the non-dry floor). Interior air at y 1..2 is dry.
+ */
+export function buildRaft(): StructureDemo {
+  const L = 7;
+  const W = 5;
+  const box = new VoxelBox(L, 3, W);
+  for (let z = 0; z < W; z++) {
+    for (let x = 0; x < L; x++) {
+      box.set(x, 0, z, B.PLANKS_OAK);
+      if (x === 0 || z === 0 || x === L - 1 || z === W - 1) for (let y = 1; y <= 2; y++) box.set(x, y, z, B.PLANKS_PINE);
+    }
+  }
+  const mesh = meshRegion({ box, x0: 0, y0: 0, z0: 0, sx: L, sy: 3, sz: W, lit: false });
+  const sx = L + 2;
+  const sy = 3 + 2;
+  const sz = W + 2;
+  const dry: DryVolume = { ox: -1, oy: -1, oz: -1, sx, sy, sz, mask: new Uint8Array(sx * sy * sz) };
+  for (let y = 1; y <= 2; y++) for (let z = 1; z < W - 1; z++) for (let x = 1; x < L - 1; x++) dry.mask[x + 1 + (z + 1) * sx + (y + 1) * sx * sz] = 1;
+  return { mesh, ox: 0, oy: 0, oz: 0, pivot: [L / 2, 0, W / 2], dry };
 }

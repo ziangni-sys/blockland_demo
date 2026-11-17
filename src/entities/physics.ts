@@ -20,13 +20,17 @@
  */
 import { SOLID } from '../blocks/registry';
 import { ID_MASK } from '../blocks/cell';
+import { TICK_DT } from '../core/constants';
 import { aabb, qrotateInv, vec3, type AABB, type Vec3 } from '../core/math';
 import { boxOverlapsSolid, CONTACT_EPS, deepestPenetration, hasSupportBelow, sweepAxis, type PushOptions } from '../voxel/shape';
 import type { World } from '../voxel/world';
 import {
   ATTACH_INSET,
   ATTACH_INSET_MAX_FRACTION,
+  GRAZE_MIN,
+  GRAZE_RATIO,
   GROUND_NORMAL_Y,
+  LAND_BIAS_SLACK,
   MAX_PUSH_ITERATIONS,
   MAX_PUSH_LIFT,
   MAX_SUBSTEP,
@@ -36,7 +40,6 @@ import {
   PREFER_MIN_SPEED,
   PREFER_WEIGHT,
   PUSH_SKIN,
-  SNEAK_DISK_MARGIN,
   SNEAK_LADDER_STEP,
   SNEAK_PROBE_DEPTH,
   SNEAK_STEP,
@@ -147,6 +150,10 @@ export class Mover {
   private overlapRec: StructRec | null = null;
   /** Structure whose floor the last applyPush() lifted the body onto, or null. */
   private liftRec: StructRec | null = null;
+  /** Adjustments admitOthers() made to the current trial push (floor lifts, graze nudges). */
+  private adjX = 0;
+  private adjY = 0;
+  private adjZ = 0;
   // sneak guard output
   private clipX = 0;
   private clipZ = 0;
@@ -163,6 +170,10 @@ export class Mover {
   private readonly ld: Vec3 = vec3();
   private readonly prefer: Vec3 = vec3();
   private readonly opts: PushOptions = { prefer: this.prefer, preferWeight: PREFER_WEIGHT };
+  /** Push options that pick a cell's top face whenever it is exposed (structure step-up). */
+  private readonly upOpts: PushOptions = { prefer: vec3(0, 1, 0), preferWeight: 4 };
+  /** Push options leaning toward the top face by the distance the body came down (see groundBias). */
+  private readonly landOpts: PushOptions = { prefer: vec3(0, 1, 0), preferWeight: 0 };
   /** Per near index: did the body overlap it before the current push / at the sub-step start? -1 unknown. */
   private beforeOverlap = new Int8Array(16);
   private startOverlap = new Int8Array(16);
@@ -192,6 +203,10 @@ export class Mover {
     }
     if (sneakGuard && (dx !== 0 || dz !== 0)) {
       this.clipSneak(e, dx, dz);
+      // The edge stops the velocity it refused, like a wall: otherwise the stored push toward
+      // the edge carries a player who then jumps right over it.
+      if (dx !== 0) rel.x *= this.clipX / dx;
+      if (dz !== 0) rel.z *= this.clipZ / dz;
       dx = this.clipX;
       dz = this.clipZ;
     }
@@ -210,14 +225,17 @@ export class Mover {
       this.groundStep = false;
       this.ceilingStep = false;
       this.overlapValid = false;
+      this.canStep = false;
+      this.movedX = 0;
+      this.movedZ = 0;
       this.sweepWorldY(e, rel, sy);
       // Structure support BEFORE the horizontal sweeps: the vertical step may have sunk the
       // feet a little into a deck, and a world block level with that deck (a pier) must not
       // turn into a wall for those few hundredths of a block.
       const resolvedY = n !== 0 && this.movedY !== 0;
       if (resolvedY) this.resolveStructures(e, rel);
-      // Only a body that stands on something steps up (never a falling or rising one).
-      this.canStep = walker && (wasOnGround || this.onWorldGround || this.groundStep) && rel.y <= 0;
+      // Only a body that stands on something steps up (never a falling, jumping or swimming one).
+      this.canStep = walker && (wasOnGround || this.onWorldGround || this.groundStep) && rel.y < 1;
       this.sweepWorldXZ(e, rel, sx, sz);
       if (this.blockedX) sx = 0;
       if (this.blockedY) sy = 0;
@@ -401,7 +419,7 @@ export class Mover {
         for (let it = 0; it < MAX_PUSH_ITERATIONS; it++) {
           const b = e.box(this.box);
           if (!boxNearRec(b, r, 0)) break;
-          let pen = deepestPenetration(r.grid, b);
+          let pen = deepestPenetration(r.grid, b, this.groundBias(e, r));
           if (pen === null || !(pen.depth > 0)) break;
           if (pen.depth >= PREFER_MIN_DEPTH) {
             // Deep intrusion: lean toward the structure's motion so the body ends up in front
@@ -424,6 +442,12 @@ export class Mover {
             mask = 2;
           } else {
             mask = (Math.abs(nx) > 1e-9 ? 1 : 0) | (Math.abs(ny) > 1e-9 ? 2 : 0) | (Math.abs(nz) > 1e-9 ? 4 : 0);
+            // A walker that walked into a low structure side (a deck floating a little above the
+            // pier it boards from) steps up onto it, like onto a world ledge.
+            if (this.canStep && nx * this.movedX + nz * this.movedZ < 0 && this.stepOntoStructure(e, rel, r)) {
+              moved = true;
+              continue;
+            }
           }
           if (!this.applyPush(e, r, nx, ny, nz, pen.depth, mask)) {
             this.pushBlocked = true;
@@ -514,7 +538,9 @@ export class Mover {
         }
       }
       let failed = -1;
-      let lift = 0;
+      this.adjX = 0;
+      this.adjY = 0;
+      this.adjZ = 0;
       this.liftRec = null;
       for (let i = 0; i < 3; i++) {
         const a = i === 0 ? a0 : i === 1 ? a1 : a2;
@@ -526,17 +552,15 @@ export class Mover {
           break;
         }
         translateAxis(tb, a, t);
-        const l = this.admitOthers(tb, b0, r);
-        if (l < 0) {
+        if (!this.admitOthers(tb, b0, r, t)) {
           failed = a;
           break;
         }
-        lift += l;
       }
       if (failed < 0) {
-        e.pos.x += tx;
-        e.pos.y += ty + lift;
-        e.pos.z += tz;
+        e.pos.x += tx + this.adjX;
+        e.pos.y += ty + this.adjY;
+        e.pos.z += tz + this.adjZ;
         return true;
       }
       mask &= ~AXIS_BIT[failed as 0 | 1 | 2];
@@ -547,29 +571,84 @@ export class Mover {
   }
 
   /**
-   * The trial box `tb` of a push by structure r: does it newly overlap ANOTHER structure
-   * (overlaps that existed before the push, in b0, do not count)? A shallow dip into another
-   * structure's floor — the push slides the body along a deck that rolls or pitches a little —
-   * is not a wall: tb is lifted onto that floor (a ground push, at most MAX_PUSH_LIFT, never into
-   * the world). Returns the lift applied to tb (>= 0), or -1 when the box would newly enter
-   * another structure. Without this a blade pushing a rider uphill along a gently rolling deck
-   * was refused and judged a crush (review finding; DESIGN 实体被挤: only 推不动 is a crush).
+   * The trial box `tb` of a push by structure r has just moved by `t` along one axis: does it
+   * newly overlap ANOTHER structure (overlaps that existed before the push, in b0, do not count)?
+   * Two kinds of new overlap are not walls and are resolved on tb instead of refusing the axis:
+   *  - a dip into another structure's FLOOR (the push slides the body along a deck that rolls or
+   *    pitches): tb is lifted onto it (a ground push, at most MAX_PUSH_LIFT in all);
+   *  - a GRAZE: the overlap is at most GRAZE_RATIO of the axis move (the surface is tilted to the
+   *    move, e.g. lifting a rider out of a rolling deck beside a turntable whose side leans by
+   *    the same roll): tb is nudged off that surface along its normal.
+   * Neither may enter the world. The adjustments accumulate in adjX / adjY / adjZ (liftRec = the
+   * floor). Returns false when the box would newly enter another structure for real. Without
+   * this a blade pushing a rider uphill along a gently rolling deck, or the deck itself holding
+   * up a rider next to its own turntable, was refused and judged a crush (review finding;
+   * DESIGN 实体被挤: only 推不动 is a crush).
    */
-  private admitOthers(tb: AABB, b0: AABB, r: StructRec): number {
-    let lift = 0;
-    for (let guard = 0; guard < 3; guard++) {
+  private admitOthers(tb: AABB, b0: AABB, r: StructRec, t: number): boolean {
+    const grazeMax = GRAZE_RATIO * Math.abs(t) + GRAZE_MIN;
+    for (let guard = 0; guard < 4; guard++) {
       const o = this.newOverlap(tb, b0, r);
-      if (o === null) return lift;
+      if (o === null) return true;
       const pen = deepestPenetration(o.grid, tb);
-      if (pen === null || !(pen.ny > GROUND_NORMAL_Y)) return -1;
+      if (pen === null) return false; // embedded without an exposed face
+      if (pen.ny > GROUND_NORMAL_Y) {
+        const l = pen.depth / pen.ny + PUSH_SKIN;
+        if (!(this.adjY + l <= MAX_PUSH_LIFT)) return false;
+        if (sweepAxis(this.world, tb, 1, l) !== l) return false;
+        translateAxis(tb, 1, l);
+        this.adjY += l;
+        if (this.liftRec === null) this.liftRec = o;
+        continue;
+      }
+      if (!(pen.depth <= grazeMax)) return false;
+      const s = pen.depth + PUSH_SKIN;
+      const gx = pen.nx * s;
+      const gy = pen.ny * s;
+      const gz = pen.nz * s;
+      translateAxis(tb, 0, gx);
+      translateAxis(tb, 1, gy);
+      translateAxis(tb, 2, gz);
+      if (boxOverlapsSolid(this.world, tb)) return false;
+      this.adjX += gx;
+      this.adjY += gy;
+      this.adjZ += gz;
+    }
+    return this.newOverlap(tb, b0, r) === null;
+  }
+
+  /**
+   * Structure step-up: lift the body onto the top of structure r's cells it walked into, when
+   * that takes at most STEP_HEIGHT, the world above is free and no other structure is newly
+   * entered. Applied as a ground push (the body then stands on r). False: nothing changed, the
+   * normal side push follows.
+   */
+  private stepOntoStructure(e: Entity, rel: Vec3, r: StructRec): boolean {
+    const b0 = e.box(this.box0);
+    const tb = copyBox(b0, this.sb);
+    let lift = 0;
+    for (let k = 0; k < 2; k++) {
+      // The top face of the worst cell whenever it is exposed (a wall cell under another cell
+      // has none: no stepping up walls).
+      const pen = deepestPenetration(r.grid, tb, k === 0 ? this.upOpts : undefined);
+      if (pen === null) break;
+      if (!(pen.ny > GROUND_NORMAL_Y)) return false;
       const l = pen.depth / pen.ny + PUSH_SKIN;
-      if (!(lift + l <= MAX_PUSH_LIFT)) return -1;
-      if (sweepAxis(this.world, tb, 1, l) !== l) return -1;
+      if (!(lift + l <= STEP_HEIGHT)) return false;
+      if (sweepAxis(this.world, tb, 1, l) !== l) return false;
       translateAxis(tb, 1, l);
       lift += l;
-      if (this.liftRec === null) this.liftRec = o;
+      if (!boxOverlapsSolid(r.grid, tb)) break;
+      if (k === 1) return false;
     }
-    return this.newOverlap(tb, b0, r) === null ? lift : -1;
+    if (lift === 0) return false;
+    this.beforeOverlap.fill(-1, 0, this.near.length);
+    if (this.newOverlap(tb, b0, r) !== null) return false;
+    e.pos.y += lift;
+    this.cancelInto(e, rel, r, 0, 1, 0);
+    this.groundStep = true;
+    if (this.groundRec === null) this.groundRec = r;
+    return true;
   }
 
   /** First structure other than r that tb overlaps although b0 did not, or null. */
@@ -615,6 +694,30 @@ export class Mover {
       rel.y -= vn * ny;
       rel.z -= vn * nz;
     }
+  }
+
+  /**
+   * Landing bias: a body that came DOWN onto a structure by `s` this sub-step (its own fall, or
+   * the structure rising under it) may be inside a top face by up to `s`; when its footprint
+   * only overlaps the edge cell by less than that, the smallest push would be sideways and would
+   * shove it off the edge (landing on a deck's rim after a jump, a sneaking rider at the edge).
+   * So the push leans toward the top face by exactly the downward approach (+ a little slack):
+   * top wins when depth_top < depth_side + s. A body really beside a hull has its feet far below
+   * the top (depth_top large) and keeps its side push. Undefined when the body is not coming down.
+   */
+  private groundBias(e: Entity, r: StructRec): PushOptions | undefined {
+    let down = -this.movedY;
+    if (r.id !== e.carrierId && r.moved) {
+      const c = this.c;
+      c.x = e.pos.x;
+      c.y = e.pos.y;
+      c.z = e.pos.z;
+      // The structure rose relative to the body's carrier frame this tick.
+      down += (pointVelocity(r, c, this.v).y - e.carrierVel.y) * TICK_DT;
+    }
+    if (!(down > 0)) return undefined;
+    this.landOpts.preferWeight = down + LAND_BIAS_SLACK;
+    return this.landOpts;
   }
 
   /** Push bias toward a structure's motion relative to the body (a blade sweeping into it). */
@@ -739,12 +842,13 @@ export class Mover {
    * 下去, ACCEPTANCE 19). Engaged whenever the body sneaks on the ground — it never switches
    * itself off.
    *
-   * The probe is the guard disk (radius half width - SNEAK_DISK_MARGIN, see constants.ts),
-   * sampled in every support's own heading, so its verdict does not change while a deck yaws
-   * under the body. A step is accepted when the disk stays supported after it. A body that
-   * already stands outside its guard disk (it walked to the edge, then started sneaking) may
-   * still move, but never farther from its support: its disk radius is the smallest of a
-   * ladder of larger disks that is supported now, and its box must keep standing.
+   * The probe is the guard disk — the attach probe's inscribed circle, radius half width -
+   * attach inset (see constants.ts) — sampled in every support's own heading, so its verdict
+   * does not change while a deck yaws under the body. A step is accepted when the disk stays
+   * supported after it. A body that already stands outside its guard disk (it walked to the
+   * edge, then started sneaking) may still move, but never farther from its support: its disk
+   * radius is the smallest of a ladder of larger disks that is supported now, and its box must
+   * keep standing.
    */
   private clipSneak(e: Entity, dx: number, dz: number): void {
     this.clipX = dx;
@@ -752,8 +856,7 @@ export class Mover {
     const cx = e.pos.x;
     const cy = e.pos.y;
     const cz = e.pos.z;
-    let rad = e.halfWidth - SNEAK_DISK_MARGIN;
-    if (!(rad > 0)) rad = e.halfWidth * 0.5;
+    let rad = e.halfWidth - attachInset(e);
     let band = false;
     if (!this.diskSupported(cx, cy, cz, rad)) {
       band = true;

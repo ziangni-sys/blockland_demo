@@ -6,9 +6,19 @@
 export interface DynamicsOptions {
   /** Fixed sub-steps per tick (default 8 -> 160 Hz). LESSONS: 每个 tick 内必须再分子步. */
   substeps?: number;
+  /**
+   * Upper bound of the sub-step count (default 32). A tick takes more than `substeps` sub-steps
+   * only while a rotor whose blades travel farther than maxSubstepTravel per sub-step can reach a
+   * ship (a long windmill's tips): then both the blade and the hull it pushes still move at most
+   * maxSubstepTravel per sub-step.
+   */
+  maxSubsteps?: number;
   /** Gravity, blocks/s^2 (default 9.81). */
   gravity?: number;
-  /** Density of water on the BlockDef.density scale (default 1). */
+  /**
+   * Density of water on the BlockDef.density scale (default 1). Buoyancy, the float / sink
+   * verdict (mass < waterDensity * maxDisplacement), wetness and the adaptive damping all use it.
+   */
   waterDensity?: number;
   /** Sequential-impulse iterations per sub-step for velocities (default 10). */
   velocityIterations?: number;
@@ -80,9 +90,17 @@ export interface DynamicsOptions {
   sleepTicks?: number;
 
   // ---- pinning (ACCEPTANCE 16, LESSONS 能动的船被误判压坏) — relative thresholds only
-  /** A blade still "presses" when its velocity into the contact, relative to the hull, exceeds this fraction of its own speed (default 0.25). */
+  /**
+   * A blade still "presses" when its velocity into the contact — by itself, and relative to the
+   * hull after the solve — exceeds this fraction of its own speed (default 0.25).
+   */
   pinPressRatio?: number;
-  /** A terrain normal "opposes" the press when cos(angle to the reversed press direction) exceeds this (default 0.9, ~25 deg). */
+  /**
+   * A support normal "opposes" the blade when cos(angle between it and the reversed direction
+   * of the blade's motion) exceeds this (default 0.9, ~25 deg). Outside this cone a ship pushed
+   * against terrain slides away along it: terrain contacts that oppose a pressing blade are
+   * frictionless, so friction cannot jam it there (see dynamics.ts).
+   */
   pinOpposeCos?: number;
 
   /** Terrain contacts kept per body and normal direction after manifold reduction (default 12). */
@@ -93,6 +111,7 @@ export type ResolvedOptions = Readonly<Required<DynamicsOptions>>;
 
 export const DEFAULT_OPTIONS: ResolvedOptions = Object.freeze({
   substeps: 8,
+  maxSubsteps: 32,
   gravity: 9.81,
   waterDensity: 1,
   velocityIterations: 10,
@@ -143,6 +162,8 @@ export function resolveOptions(opts: DynamicsOptions | undefined): ResolvedOptio
     }
   }
   o.substeps = Math.max(1, Math.floor(o.substeps));
+  o.maxSubsteps = Math.max(o.substeps, Math.floor(o.maxSubsteps) || 0);
+  if (!(o.waterDensity > 0)) o.waterDensity = DEFAULT_OPTIONS.waterDensity;
   o.velocityIterations = Math.max(1, Math.floor(o.velocityIterations));
   o.positionIterations = Math.max(0, Math.floor(o.positionIterations));
   o.sleepTicks = Math.max(1, Math.floor(o.sleepTicks));

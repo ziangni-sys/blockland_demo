@@ -37,7 +37,7 @@ describe('review: syncCarried is not idempotent', () => {
     b.entities.update();
     b.tick(5);
     const l1 = ship.grid.toLocal(p.pos, vec3());
-    // today the rider is shifted by one extra tick of ship motion (0.25 block), permanently
+    // before the fix the rider was shifted by one extra tick of ship motion (0.25 block), permanently
     expect(Math.abs(l1.x - l0.x)).toBeLessThan(1e-6);
   });
 
@@ -50,7 +50,7 @@ describe('review: syncCarried is not idempotent', () => {
     b.entities.syncCarried();
     b.tick(1);
     const l1 = ship.grid.toLocal(p.pos, vec3());
-    // today: the rider lags one tick of ship motion (-0.25) and its carrier velocity doubles (10 b/s)
+    // before the fix: the rider lagged one tick of ship motion (-0.25) and its carrier velocity doubles (10 b/s)
     expect(Math.abs(l1.x - l0.x)).toBeLessThan(1e-6);
     expect(p.carrierVel.x).toBeCloseTo(5, 6);
   });
@@ -60,7 +60,7 @@ describe('review: spawnItem accepts garbage counts', () => {
   it('count 0, negative or NaN is rejected instead of creating an item from nothing / a stack that breaks saving', () => {
     const b = new Bench();
     b.entities.createPlayer('survival', 0.5, 61, 0.5);
-    // today: count 0 and -5 each create a drop of 1; NaN creates a NaN stack after which
+    // before the fix: count 0 and -5 each created a drop of 1; NaN creates a NaN stack after which
     // serialize() throws "varuint out of range" until the drop despawns 5 minutes later.
     expect(() => b.entities.spawnItem(3.5, 61, 0.5, B.STONE, 0, vec3())).toThrow();
     expect(() => b.entities.spawnItem(3.5, 61, 0.5, B.STONE, -5, vec3())).toThrow();
@@ -85,7 +85,7 @@ describe('review: deserialize is not atomic', () => {
     const keep = b.entities.createPlayer('creative', 1.5, 60, 1.5);
     const rabbit = b.entities.spawnRabbit(3.5, 60, 3.5);
     expect(() => b.entities.deserialize(new ByteReader(corrupt))).toThrow();
-    // today: everything was cleared first and a half-read survival player from the corrupt
+    // before the fix: everything was cleared first and a half-read survival player from the corrupt
     // blob is now the local player
     expect(b.entities.player).toBe(keep);
     expect(b.entities.get(rabbit.id)).toBe(rabbit);

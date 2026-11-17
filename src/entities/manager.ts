@@ -62,6 +62,7 @@ import {
   NO_ATTACH_TICKS,
   PICKUP_REACH_H,
   PICKUP_REACH_V,
+  PLAYER_MAX_HEALTH,
   AIR_REFILL_PER_TICK,
   RABBIT_CRUSH_LIMIT,
   RABBIT_HOP_FORWARD,
@@ -118,7 +119,7 @@ export class EntityManager {
   private snapshotDone = false;
   /** syncCarried() ran since the last update() (update() runs it itself otherwise). */
   private carriedThisTick = false;
-  /** > 0 while the manager walks `list`: remove() then only marks (see compactIfNeeded). */
+  /** > 0 while the manager walks `list`: remove() then only marks; endIteration() compacts. */
   private iterDepth = 0;
   private removedWhileIterating = false;
   private readonly pendingBlasts: TntEntity[] = [];
@@ -309,7 +310,8 @@ export class EntityManager {
 
   /**
    * Throw a stack from the player's eyes along the look direction (dropping the cursor stack,
-   * the drop key). It cannot be picked up again for 2 seconds.
+   * the drop key). It cannot be picked up again for 2 seconds. Same argument checks as
+   * spawnItem(); returns the first drop.
    */
   dropFromPlayer(player: Player, item: number, count: number): ItemEntity {
     const cp = Math.cos(player.pitch);
@@ -317,8 +319,13 @@ export class EntityManager {
     const fy = Math.sin(player.pitch);
     const fz = -Math.cos(player.yaw) * cp;
     const v = vec3(player.vel.x + fx * 6, player.vel.y + fy * 6 + 1.5, player.vel.z + fz * 6);
+    const before = this.list.length;
     const e = this.spawnItem(player.pos.x, player.pos.y + player.eyeHeight - 0.3, player.pos.z, item, count, v);
-    e.pickupDelay = 40;
+    // every stack of a split drop (spawnItem appends them in order)
+    for (let i = before; i < this.list.length; i++) {
+      const d = this.list[i]!;
+      if (d instanceof ItemEntity) d.pickupDelay = 40;
+    }
     return e;
   }
 
@@ -565,38 +572,44 @@ export class EntityManager {
 
   // ================================================================== save
 
-  /** All entities including the player (position, look, health, air, mode, flying, inventory, spawn). */
+  /**
+   * All entities including the player (position, look, health, air, mode, flying, inventory,
+   * spawn). Never writes a value deserialize() would reject: a non-player entity whose state is
+   * not finite (or a drop that holds nothing) is left out, non-finite player fields are written
+   * as safe defaults — one broken entity must not make the whole save unloadable.
+   */
   serialize(w: ByteWriter): void {
     w.u8(SAVE_VERSION);
     w.varuint(this.nextId);
     let count = 0;
-    for (const e of this.list) if (!e.removed) count++;
+    for (const e of this.list) if (saveable(e)) count++;
     w.varuint(count);
     for (const e of this.list) {
-      if (e.removed) continue;
+      if (!saveable(e)) continue;
       w.u8(KIND_TAG[e.kind]);
       w.varuint(e.id);
-      writeVec(w, e.pos);
-      writeVec(w, e.vel);
-      writeVec(w, e.carrierVel);
-      w.f64(e.yaw);
-      w.f64(e.pitch);
+      if (e instanceof Player && !finiteVec(e.pos)) writeVec(w, finiteVec(e.spawn) ? e.spawn : ORIGIN);
+      else writeVec(w, e.pos);
+      writeVec(w, finiteVec(e.vel) ? e.vel : ORIGIN);
+      writeVec(w, finiteVec(e.carrierVel) ? e.carrierVel : ORIGIN);
+      w.f64(finiteOr(e.yaw, 0));
+      w.f64(finiteOr(e.pitch, 0));
       w.bool(e.onGround);
-      w.f64(e.wet);
+      w.f64(finiteOr(e.wet, 0));
       w.bool(e.headWet);
       w.bool(e.inLava);
-      w.varuint(e.carrierId);
+      w.varuint(uint(e.carrierId));
       w.varuint(uint(e.noAttachTicks));
-      w.varuint(e.noAttachStructureId);
+      w.varuint(uint(e.noAttachStructureId));
       w.varuint(uint(e.age));
-      w.f64(e.fallDistance);
-      w.f64(e.contactNx);
-      w.f64(e.contactNz);
+      w.f64(finiteOr(e.fallDistance, 0));
+      w.f64(finiteOr(e.contactNx, 0));
+      w.f64(finiteOr(e.contactNz, 0));
       w.bool(e.onWorldGround);
       if (e instanceof Player) {
         w.u8(e.mode === 'creative' ? 1 : 0);
-        w.f64(e.health);
-        w.f64(e.maxHealth);
+        w.f64(finiteOr(e.health, e.maxHealth));
+        w.f64(finiteOr(e.maxHealth, PLAYER_MAX_HEALTH));
         w.varuint(uint(e.air));
         w.varuint(uint(e.maxAir));
         w.bool(e.dead);
@@ -604,9 +617,9 @@ export class EntityManager {
         w.bool(e.flying);
         w.bool(e.sneaking);
         w.bool(e.sprinting);
-        w.varuint(e.steeringShipId);
-        writeVec(w, e.seat);
-        writeVec(w, e.spawn);
+        w.varuint(uint(e.steeringShipId));
+        writeVec(w, finiteVec(e.seat) ? e.seat : ORIGIN);
+        writeVec(w, finiteVec(e.spawn) ? e.spawn : ORIGIN);
         w.varuint(uint(e.drownTicks));
         w.varuint(uint(e.lavaTicks));
         w.varuint(Math.min(uint(e.unhurtTicks), 1 << 30));
@@ -615,19 +628,19 @@ export class EntityManager {
         e.inventory.serialize(w);
       } else if (e instanceof ItemEntity) {
         w.varuint(e.stack.item);
-        w.varuint(e.stack.count);
+        w.varuint(uint(e.stack.count));
         w.varuint(uint(e.pickupDelay));
       } else if (e instanceof FallingBlockEntity) {
         w.u16(e.cell & 0xffff);
       } else if (e instanceof TntEntity) {
         w.varuint(uint(e.fuse));
       } else if (e instanceof Rabbit) {
-        w.u8(Math.min(255, e.crushCount));
+        w.u8(Math.min(255, uint(e.crushCount)));
         w.u8(e.aiState === 'hop' ? 1 : 0);
         w.varint(int(e.aiTimer));
         w.varint(int(e.hopsLeft));
         w.varint(int(e.hopCooldown));
-        w.f64(e.wanderYaw);
+        w.f64(finiteOr(e.wanderYaw, 0));
       }
     }
   }
@@ -693,10 +706,10 @@ export class EntityManager {
       } else if (tag === KIND_TAG.item) {
         const item = r.varuint();
         const cnt = r.varuint();
-        const it = new ItemEntity(id, { item, count: Math.max(1, cnt) });
+        const it = new ItemEntity(id, { item, count: cnt });
         it.pickupDelay = r.varuint();
-        if (!isItem(item)) {
-          // An item that no longer exists: drop it from the world rather than fail the load.
+        if (!isItem(item) || cnt === 0) {
+          // An item that no longer exists (or an empty drop): leave it out rather than fail the load.
           continue;
         }
         e = it;
@@ -1118,6 +1131,9 @@ export class EntityManager {
    *  - airborne with a carrier -> keep it while its column under the footprint holds a cell
    *    (jumping on a deck keeps you with the ship), else its parent's, else detach.
    *    Swimmers are never kept (ACCEPTANCE 19: a swimmer next to a hull is never picked up).
+   * Attaching needs the inset probe (strictly inside the push range); KEEPING an existing
+   * carrier — standing or airborne over its column — uses the plain footprint (inset 0), so a
+   * rider who stands at the very edge and jumps comes down with the ship.
    */
   private updateCarrier(e: Entity): void {
     const flying = e instanceof Player && e.flying;
@@ -1150,7 +1166,7 @@ export class EntityManager {
     const swimming = e.wet >= SWIMMING_WET && !e.onGround;
     if (cur !== undefined && !flying && !swimming) {
       for (let r: StructRec | null = cur; r !== null; r = r.parent) {
-        if (columnHasSolidBelow(r.grid, b, COLUMN_DEPTH, inset)) {
+        if (columnHasSolidBelow(r.grid, b, COLUMN_DEPTH, 0)) {
           this.setCarrier(e, r);
           return;
         }
@@ -1197,8 +1213,10 @@ export class EntityManager {
     const inp = p.input;
     inp.forward = axisValue(inp.forward);
     inp.strafe = axisValue(inp.strafe);
-    inp.yaw = finiteAngle(inp.yaw, p.yaw);
-    inp.pitch = finiteAngle(inp.pitch, p.pitch);
+    // Garbage look input keeps the current look; if a caller poisoned that too (wrote NaN into
+    // both), the last finite one, else straight ahead.
+    inp.yaw = finiteAngle(inp.yaw, finiteAngle(p.yaw, finiteAngle(p.prevYaw, 0)));
+    inp.pitch = finiteAngle(inp.pitch, finiteAngle(p.pitch, finiteAngle(p.prevPitch, 0)));
     const slot = Math.floor(inp.slot);
     if (slot >= 0 && slot < p.inventory.hotbar.length) p.inventory.selected = slot;
     if (p.mode !== 'creative') p.flying = false;
@@ -1481,19 +1499,26 @@ export class EntityManager {
     this.moveBody(e, false, true);
   }
 
-  /** Is the spot one hop ahead safe: supported within RABBIT_MAX_DROP and not water / lava? */
+  /**
+   * Is the spot one hop ahead safe: supported within RABBIT_MAX_DROP and not water / lava?
+   * A structure floor under the spot (a raft, a deck) is safe ground whatever lies under it:
+   * the world's water below a floating ship must not keep its rabbits from ever hopping.
+   */
   private rabbitCanHop(e: Rabbit, dirx: number, dirz: number): boolean {
     const tx = e.pos.x + dirx * 1.1;
     const tz = e.pos.z + dirz * 1.1;
     this.gatherNear(e, dirx * 1.2, -RABBIT_MAX_DROP, dirz * 1.2);
+    // Probe from just above a 1-block step down to RABBIT_MAX_DROP below the current feet.
+    const b = boxAt(e, tx, e.pos.y + 1.05, tz, this.box1);
+    const depth = RABBIT_MAX_DROP + 1.05;
+    const inset = attachInset(e);
+    if (this.mover.supportedByStructure(b, depth, inset)) return true;
     const world = this.host.world;
     const fx = Math.floor(tx);
     const fz = Math.floor(tz);
     const fy = Math.floor(e.pos.y + 0.1);
     if (LIQUID[world.getCell(fx, fy, fz) & ID_MASK] !== 0 || LIQUID[world.getCell(fx, fy - 1, fz) & ID_MASK] !== 0) return false;
-    const b = boxAt(e, tx, e.pos.y + 1.05, tz, this.box1);
-    // Probe from just above a 1-block step down to RABBIT_MAX_DROP below the current feet.
-    return this.mover.supported(b, RABBIT_MAX_DROP + 1.05, attachInset(e));
+    return hasSupportBelow(world, b, depth, inset);
   }
 
   // ------------------------------------------------------------------ crush
@@ -1531,12 +1556,16 @@ export class EntityManager {
     reach.maxZ += PICKUP_REACH_H;
     reach.minY -= PICKUP_REACH_V;
     reach.maxY += PICKUP_REACH_V;
+    const world = this.host.world;
+    if (!world.isLoaded(Math.floor(p.pos.x), Math.floor(p.pos.z))) return;
     const list = this.list;
     for (let i = 0; i < list.length; i++) {
       const e = list[i]!;
       if (!(e instanceof ItemEntity) || e.removed || e.pickupDelay > 0) continue;
       const b = e.box(this.box1);
       if (b.minX >= reach.maxX || b.maxX <= reach.minX || b.minY >= reach.maxY || b.maxY <= reach.minY || b.minZ >= reach.maxZ || b.maxZ <= reach.minZ) continue;
+      // A drop in an unloaded chunk is frozen: it does nothing, not even get picked up.
+      if (!world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
       const left = p.inventory.add(e.stack.item, e.stack.count);
       const taken = e.stack.count - left;
       if (taken <= 0) continue;
@@ -1546,62 +1575,74 @@ export class EntityManager {
     }
   }
 
+  /**
+   * Identical drops close to each other merge. Each drop looks around every
+   * MERGE_INTERVAL_TICKS, staggered by id and phased by the manager's tick counter (not by the
+   * drop's age: a frozen drop does not age and would otherwise be due every tick). Only drops
+   * in loaded chunks take part (frozen ones do nothing). The drops are sorted by x so a due one
+   * only scans its neighbours along x: O(n log n) instead of O(n^2) per tick.
+   */
   private merges(): void {
-    // Only drops take part; each one looks around every MERGE_INTERVAL_TICKS (staggered by id).
     const items = this.items;
     items.length = 0;
+    const world = this.host.world;
+    const phase = this.tickCount;
     let due = false;
-    for (let i = 0; i < this.list.length; i++) {
-      const e = this.list[i]!;
-      if (e instanceof ItemEntity && !e.removed) {
-        items.push(e);
-        if ((e.age + e.id) % MERGE_INTERVAL_TICKS === 0) due = true;
-      }
+    let maxHalf = 0;
+    const list = this.list;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i]!;
+      if (!(e instanceof ItemEntity) || e.removed) continue;
+      if (!world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
+      items.push(e);
+      if (e.halfWidth > maxHalf) maxHalf = e.halfWidth;
+      if ((phase + e.id) % MERGE_INTERVAL_TICKS === 0) due = true;
     }
-    if (!due) return;
+    if (!due || items.length < 2) return;
+    items.sort(byPosX);
     const ba = this.box1;
     const bb = this.box2;
     for (let i = 0; i < items.length; i++) {
       const a = items[i]!;
-      if (a.removed || (a.age + a.id) % MERGE_INTERVAL_TICKS !== 0) continue;
+      if (a.removed || (phase + a.id) % MERGE_INTERVAL_TICKS !== 0) continue;
       const max = maxStackOf(a.stack.item);
       if (a.stack.count >= max) continue;
       a.box(ba);
-      for (let j = 0; j < items.length; j++) {
-        const b = items[j]!;
-        if (b === a || b.removed || b.stack.item !== a.stack.item) continue;
-        b.box(bb);
-        if (bb.minX - MERGE_REACH >= ba.maxX || bb.maxX + MERGE_REACH <= ba.minX) continue;
-        if (bb.minY - MERGE_REACH >= ba.maxY || bb.maxY + MERGE_REACH <= ba.minY) continue;
-        if (bb.minZ - MERGE_REACH >= ba.maxZ || bb.maxZ + MERGE_REACH <= ba.minZ) continue;
-        // The bigger stack (ties: the older entity) absorbs the other.
-        const into = a.stack.count > b.stack.count || (a.stack.count === b.stack.count && a.id < b.id) ? a : b;
-        const from = into === a ? b : a;
-        const moved = Math.min(from.stack.count, max - into.stack.count);
-        if (moved <= 0) continue;
-        into.stack.count += moved;
-        from.stack.count -= moved;
-        into.age = Math.min(into.age, from.age);
-        into.pickupDelay = Math.max(into.pickupDelay, from.pickupDelay);
-        if (from.stack.count <= 0) {
-          this.host.emit({ type: 'despawn', entity: from, cause: 'merged' });
-          this.remove(from);
+      // Boxes within MERGE_REACH of each other have centres at most this far apart along x.
+      const reachX = a.halfWidth + maxHalf + MERGE_REACH;
+      for (let dir = -1; dir <= 1 && !a.removed; dir += 2) {
+        for (let j = i + dir; j >= 0 && j < items.length; j += dir) {
+          const b = items[j]!;
+          if (Math.abs(b.pos.x - a.pos.x) > reachX) break;
+          if (b.removed || b.stack.item !== a.stack.item) continue;
+          b.box(bb);
+          if (bb.minX - MERGE_REACH >= ba.maxX || bb.maxX + MERGE_REACH <= ba.minX) continue;
+          if (bb.minY - MERGE_REACH >= ba.maxY || bb.maxY + MERGE_REACH <= ba.minY) continue;
+          if (bb.minZ - MERGE_REACH >= ba.maxZ || bb.maxZ + MERGE_REACH <= ba.minZ) continue;
+          // The bigger stack (ties: the older entity) absorbs the other.
+          const into = a.stack.count > b.stack.count || (a.stack.count === b.stack.count && a.id < b.id) ? a : b;
+          const from = into === a ? b : a;
+          const moved = Math.min(from.stack.count, max - into.stack.count);
+          if (moved <= 0) continue;
+          into.stack.count += moved;
+          from.stack.count -= moved;
+          into.age = Math.min(into.age, from.age);
+          into.pickupDelay = Math.max(into.pickupDelay, from.pickupDelay);
+          if (from.stack.count <= 0) {
+            this.host.emit({ type: 'despawn', entity: from, cause: 'merged' });
+            this.remove(from);
+          }
+          if (a.removed) break;
+          a.box(ba);
         }
-        if (a.removed) break;
-        a.box(ba);
       }
     }
   }
+}
 
-  private compact(): void {
-    const list = this.list;
-    let w = 0;
-    for (let i = 0; i < list.length; i++) {
-      const e = list[i]!;
-      if (!e.removed) list[w++] = e;
-    }
-    list.length = w;
-  }
+/** Sort order of the merge sweep (deterministic: ties by id). */
+function byPosX(a: Entity, b: Entity): number {
+  return a.pos.x - b.pos.x || a.id - b.id;
 }
 
 // ====================================================================== helpers
@@ -1613,7 +1654,24 @@ function sweepAxisSafe(world: VoxelGrid, b: AABB, axis: number, d: number): numb
 
 /** A tick counter as a non-negative integer (save fields are integers even if a caller set a fraction). */
 function uint(v: number): number {
-  return v > 0 ? Math.floor(v) : 0;
+  return v > 0 ? (v < Number.MAX_SAFE_INTEGER ? Math.floor(v) : Number.MAX_SAFE_INTEGER) : 0;
+}
+function finiteOr(v: number, fallback: number): number {
+  return Number.isFinite(v) ? v : fallback;
+}
+function finiteVec(v: Vec3): boolean {
+  return Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z);
+}
+/** Written in place of a non-finite vector. Immutable. */
+const ORIGIN: Readonly<Vec3> = Object.freeze(vec3(0, 0, 0));
+
+/** Does serialize() write this entity? (see serialize) */
+function saveable(e: Entity): boolean {
+  if (e.removed) return false;
+  if (e instanceof Player) return true;
+  if (!finiteVec(e.pos)) return false;
+  if (e instanceof ItemEntity) return isItem(e.stack.item) && Number.isFinite(e.stack.count) && e.stack.count >= 1;
+  return true;
 }
 function int(v: number): number {
   return Number.isFinite(v) ? Math.trunc(v) : 0;

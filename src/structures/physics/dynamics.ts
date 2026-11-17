@@ -2,17 +2,25 @@
  * ShipDynamics implementation: the tick driver.
  *
  * Per step():
- *   1. classify ships: refresh derived data; skip removed / empty ones; frozen ships and ships
- *      whose surroundings are not loaded become immovable obstacles (LESSONS 船被弹飞);
- *      sleeping ships stay asleep unless disturbed.
- *   2. per awake ship: copy the world around it into its WorldPatch, list rotors in reach.
- *   3. n sub-steps, all ships in lock-step:
+ *   1. refresh derived data of every ship and read its start-of-tick pose. Ships with no hard
+ *      cell are held motionless (they can neither collide nor float).
+ *   2. rotor views: shape, spin over the tick, swept box.
+ *   3. sub-step count: `substeps`, more while a rotor whose blades travel farther than
+ *      maxSubstepTravel per sub-step can reach a ship (up to maxSubsteps).
+ *   4. classify: frozen ships and ships whose surroundings are not loaded become immovable
+ *      obstacles (LESSONS 船被弹飞); sleeping ships stay asleep unless disturbed.
+ *   5. sleepers near something that moves (a rotor's sweep, a moving or rotor-driven ship, a ship
+ *      whose cells just changed) wake; a sleeper next to a quiet awake ship joins its solve as an
+ *      immovable obstacle instead.
+ *   6. per awake ship: copy the world around it into its WorldPatch, list rotors in reach.
+ *   7. n sub-steps, all ships in lock-step:
  *        forces (gravity, buoyancy, drag, keel, thrust, rudder) -> velocities, clamped
  *        contacts at the start-of-sub-step poses (rotors interpolated to alpha = k/n)
+ *        terrain / ships the blades press a ship into: frictionless; held ships: immovable
  *        sequential impulses (rotor / ship contacts first, terrain last)
- *        pinning check -> if any blade is pinned, re-solve without its contacts
+ *        pinning check -> pinned (ship, rotor) pairs drop out, re-solve
  *        split-impulse penetration recovery, then integrate the poses
- *   4. write back, destroy at most one pinned hull cell per ship, refresh, sleep bookkeeping.
+ *   8. write back, destroy at most one pinned hull cell per ship, refresh, sleep bookkeeping.
  *
  * Nothing here reads a clock or a random source: identical inputs give identical results.
  * Iteration orders are those of the input arrays and of the cell storage.
@@ -30,29 +38,58 @@ import { applyHydrodynamics } from './hydro';
 import { mat3Congruence } from './mat3';
 import { refreshShip } from './massprops';
 import { resolveOptions, type DynamicsOptions, type ResolvedOptions } from './options';
-import { PinDetector } from './pinning';
+import { bladePresses, PinDetector, SupportQuery } from './pinning';
 import { RotorView } from './rotorview';
 import { Islands, isQuiet, putToSleep, updateRest, wakeShip } from './sleep';
-import { prepareContacts, resetImpulses, solvePositionPass, solveVelocityPass } from './solver';
+import { prepareContacts, solvePositionPass, solveVelocityPass } from './solver';
 
 // Contact record offsets as module constants (hot loops; see solver.ts).
 const F_A = CR.F_A;
 const F_B = CR.F_B;
 const F_DEPTH = CR.F_DEPTH;
+const F_FIX = CR.F_FIX;
+const FIX_A = CR.FIX_A;
+const FIX_B = CR.FIX_B;
+const FIX_CONFLICT = CR.FIX_CONFLICT;
+const FIX_NONE = CR.FIX_NONE;
 const F_LN = CR.F_LN;
+const F_MU = CR.F_MU;
+const F_NX = CR.F_NX;
 const F_PIN = CR.F_PIN;
+const PIN_PINNED = CR.PIN_PINNED;
+const F_SRC = CR.F_SRC;
+const F_VO = CR.F_VO;
 const STRIDE = CR.STRIDE;
 
-/** World cells copied around a ship beyond its box (>= max travel per tick + neighbour lookups). */
-const PATCH_MARGIN = 3;
-/** Unloaded columns this close to a ship's box freeze it (a stricter version of "box + 2"). */
+/** World cells copied around a ship beyond its box: its travel this tick plus this many. */
+const PATCH_EXTRA = 3;
+/** Unloaded columns this close to a ship's box freeze it (at least; more when it can travel farther). */
 const LOADED_MARGIN = 3;
+/** A sleeping ship wakes when a moving rotor's swept box comes this close (blocks). */
+const ROTOR_WAKE_MARGIN = 0.25;
+/**
+ * Terrain contacts whose normal opposes a pressing blade's motion by more than this (cosine)
+ * are frictionless for the sub-step. Against an infinitely strong blade, Coulomb friction from
+ * the terrain the blade presses the ship into grows without bound: with the default 0.6 it would
+ * jam a ship pushed up to 31 degrees off the wall's normal, up to 48 together with the blade's own
+ * friction, so the ship could neither slide away (as LESSONS 能动的船被误判压坏 demands for
+ * anything outside the 25-degree pin cone) nor be pinned, and the blade would cut into its hull.
+ * Without that friction the pin cone alone decides: inside it the ship is held and pinned,
+ * outside it the blade slides the ship along the terrain. Ground under a ship pushed sideways
+ * (normal across the push) keeps its friction. The same goes for the pushed ship's contacts
+ * with other ships.
+ */
+const FRICTION_RELEASE = 0.2;
 
 export class ShipDynamicsImpl implements ShipDynamics {
   readonly options: ResolvedOptions;
   private readonly host: StructureHost;
   private readonly bodyMap = new WeakMap<Ship, Body>();
   private readonly viewMap = new WeakMap<Rotor, RotorView>();
+  /** Ships with hard cells seen this step, in input order. */
+  private readonly considered: Body[] = [];
+  /** Ships whose cells or rotors changed since the previous step (incl. ones left without hard cells). */
+  private readonly changedBodies: Body[] = [];
   /** Bodies taking part in this tick's solve (active + static), indexed by body.index. */
   private readonly bodies: Body[] = [];
   private readonly active: Body[] = [];
@@ -67,22 +104,34 @@ export class ShipDynamicsImpl implements ShipDynamics {
   private readonly ter = new ContactSet();
   private readonly gen = new ContactGenerator();
   private readonly pins = new PinDetector();
+  private readonly supports = new SupportQuery();
   private readonly mR = new Float64Array(9);
   private readonly mI = new Float64Array(9);
   private readonly mT = new Float64Array(9);
   private readonly cellCentre: Vec3 = vec3();
   /** Incremented every step; a body's mode is only meaningful when its stamp matches. */
   private stamp = 0;
+  private substepCount = 0;
 
   constructor(host: StructureHost, opts?: DynamicsOptions) {
     this.host = host;
     this.options = resolveOptions(opts);
+    this.substepCount = this.options.substeps;
+  }
+
+  /** Sub-steps the last step() used (more than options.substeps while a fast rotor was in reach). */
+  get lastSubsteps(): number {
+    return this.substepCount;
   }
 
   // ------------------------------------------------------------------ ShipDynamics
 
   refresh(ship: Ship): void {
-    if (refreshShip(ship, this.bodyOf(ship), this.options)) wakeShip(ship);
+    const b = this.bodyOf(ship);
+    if (refreshShip(ship, b, this.options)) {
+      b.changed = true;
+      wakeShip(ship);
+    }
   }
 
   wake(ship: Ship): void {
@@ -93,7 +142,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
     if (ship.removed) return;
     this.refresh(ship);
     const b = this.bodyOf(ship);
-    if (b.mass <= 0) return;
+    if (b.mass <= 0 || b.shape.solidCount === 0) return;
     const g = ship.grid;
     const im = b.invMass;
     g.linearVelocity.x += impulse.x * im;
@@ -117,43 +166,44 @@ export class ShipDynamicsImpl implements ShipDynamics {
 
   step(ships: readonly Ship[], rotors: readonly Rotor[]): void {
     const o = this.options;
-    const n = o.substeps;
-    const dt = TICK_DT / n;
-    const invDt = 1 / dt;
     const bodies = this.bodies;
     const active = this.active;
     const sleeping = this.sleeping;
+    const cands = this.considered;
+    const changed = this.changedBodies;
     bodies.length = 0;
     active.length = 0;
     sleeping.length = 0;
+    cands.length = 0;
+    changed.length = 0;
     const stamp = ++this.stamp;
 
-    // ---- 1. classify
+    // ---- 1. refresh, start-of-tick poses
     for (let i = 0; i < ships.length; i++) {
       const ship = ships[i]!;
       if (ship.removed) continue;
       const b = this.bodyOf(ship);
-      if (refreshShip(ship, b, o)) wakeShip(ship);
+      if (refreshShip(ship, b, o)) {
+        wakeShip(ship);
+        b.changed = true;
+      }
       b.resetTickStats();
       b.stamp = stamp;
       b.mode = MODE_NONE;
       b.index = -1;
-      if (b.mass <= 0 || b.shape.solidCount === 0) continue;
+      // A changed ship wakes sleepers near where it was and where it is now (the old box covers
+      // cells that just disappeared, e.g. a deck mined under a resting boat).
+      if (b.changed) {
+        b.beginChangedBox();
+        changed.push(b);
+      }
+      if (b.mass <= 0 || b.shape.solidCount === 0) {
+        holdInert(b);
+        continue;
+      }
       b.loadPose();
-      if (ship.frozen || !this.surroundingsLoaded(b)) {
-        b.stats.frozen = true;
-        b.makeStatic();
-        b.index = bodies.length;
-        bodies.push(b);
-        continue;
-      }
-      // Helm input, or game code that moved / pushed the ship since we put it to sleep.
-      if (ship.asleep && (ship.throttle !== 0 || ship.rudder !== 0 || b.disturbedSinceWrite())) wakeShip(ship);
-      if (ship.asleep) {
-        sleeping.push(b);
-        continue;
-      }
-      this.activate(b);
+      if (b.changed) b.extendChangedBox();
+      cands.push(b);
     }
 
     // ---- 2. rotor views
@@ -167,13 +217,38 @@ export class ShipDynamicsImpl implements ShipDynamics {
         view = new RotorView(r);
         this.viewMap.set(r, view);
       }
-      view.beginTick(this.activeParent(r));
+      view.beginTick();
       views.push(view);
     }
 
-    // ---- 3. wake sleepers disturbed by a moving rotor or a moving ship in reach; a sleeper
-    // next to a quiet awake ship joins the solve as an immovable obstacle instead
-    const travel = o.substeps * o.maxSubstepTravel;
+    // ---- 3. sub-steps for this tick
+    const n = this.chooseSubsteps(cands);
+    this.substepCount = n;
+    const dt = TICK_DT / n;
+    const invDt = 1 / dt;
+    const travel = n * o.maxSubstepTravel; // farthest any hull point can move this tick
+
+    // ---- 4. classify
+    for (let i = 0; i < cands.length; i++) {
+      const b = cands[i]!;
+      const ship = b.ship;
+      if (ship.frozen || !this.surroundingsLoaded(b, travel)) {
+        b.stats.frozen = true;
+        b.makeStatic();
+        b.index = bodies.length;
+        bodies.push(b);
+        continue;
+      }
+      // Helm input, or game code that moved / pushed the ship since we put it to sleep.
+      if (ship.asleep && (ship.throttle !== 0 || ship.rudder !== 0 || b.disturbedSinceWrite())) wakeShip(ship);
+      if (ship.asleep) sleeping.push(b);
+      else this.activate(b);
+    }
+    for (let k = 0; k < views.length; k++) views[k]!.attachParent(this.activeParent(views[k]!.rotor));
+    for (let i = 0; i < active.length; i++) active[i]!.rotorNear = this.rotorInReach(active[i]!, travel);
+
+    // ---- 5. wake sleepers disturbed by something that moves; a sleeper next to a quiet awake
+    // ship joins the solve as an immovable obstacle instead
     const inSolve = this.sleepersInSolve;
     inSolve.length = 0;
     for (let i = 0; i < sleeping.length; i++) {
@@ -183,17 +258,23 @@ export class ShipDynamicsImpl implements ShipDynamics {
       for (let k = 0; k < views.length && !disturb; k++) {
         const v = views[k]!;
         if (v.rotor.parent === sb.ship || !v.moving || v.shape.solidCount === 0) continue;
-        if (sphereNearBox(v, sb, 1 + (v.parentBody !== null ? travel : 0))) disturb = true;
+        const m = ROTOR_WAKE_MARGIN + (v.parentBody !== null ? travel : 0);
+        if (v.sweptNear(sb.minX, sb.minY, sb.minZ, sb.maxX, sb.maxY, sb.maxZ, m)) disturb = true;
+      }
+      for (let k = 0; k < changed.length && !disturb; k++) {
+        const cb = changed[k]!;
+        if (cb !== sb && cb.changedBoxNear(sb, 1 + travel)) disturb = true;
       }
       for (let k = 0; k < active.length && !disturb; k++) {
         const ab = active[k]!;
         if (!boxesOverlap(ab, sb, 1 + travel)) continue;
         near = true;
-        if (!isQuiet(ab, o)) disturb = true;
+        if (!isQuiet(ab, o) || ab.rotorNear) disturb = true;
       }
       if (disturb) {
         wakeShip(sb.ship);
         this.activate(sb);
+        sb.rotorNear = this.rotorInReach(sb, travel);
       } else if (near) {
         sb.makeStatic();
         sb.index = bodies.length;
@@ -201,24 +282,28 @@ export class ShipDynamicsImpl implements ShipDynamics {
         inSolve.push(sb);
       }
     }
+    for (let k = 0; k < changed.length; k++) changed[k]!.changed = false;
     // rotors riding on a ship woken just now move with it this tick
     for (let k = 0; k < views.length; k++) {
       const v = views[k]!;
-      if (v.parentBody === null) v.parentBody = this.activeParent(v.rotor);
+      if (v.parentBody === null) v.attachParent(this.activeParent(v.rotor));
     }
 
-    // ---- 4. per-tick setup of awake ships
+    // ---- 6. per-tick setup of awake ships
     const world = this.host.world;
+    const margin = Math.ceil(travel) + PATCH_EXTRA;
     for (let i = 0; i < active.length; i++) {
       const b = active[i]!;
       b.stats.simulated = true;
-      const x0 = Math.floor(b.minX) - PATCH_MARGIN;
-      const y0 = Math.floor(b.minY) - PATCH_MARGIN;
-      const z0 = Math.floor(b.minZ) - PATCH_MARGIN;
-      const x1 = Math.floor(b.maxX) + PATCH_MARGIN;
-      const y1 = Math.floor(b.maxY) + PATCH_MARGIN;
-      const z1 = Math.floor(b.maxZ) + PATCH_MARGIN;
-      b.patch.fill(world, x0, y0, z0, x1, y1, z1);
+      b.patch.fill(
+        world,
+        Math.floor(b.minX) - margin,
+        Math.floor(b.minY) - margin,
+        Math.floor(b.minZ) - margin,
+        Math.floor(b.maxX) + margin,
+        Math.floor(b.maxY) + margin,
+        Math.floor(b.maxZ) + margin,
+      );
       // terrain edge corners the hull can reach this tick
       const reach = travel + 0.5;
       b.patch.collectCorners(
@@ -235,7 +320,8 @@ export class ShipDynamicsImpl implements ShipDynamics {
       for (let k = 0; k < views.length; k++) {
         const v = views[k]!;
         if (v.rotor.parent === b.ship || v.shape.solidCount === 0) continue;
-        if (!sphereNearBox(v, b, travel * 2 + 1)) continue;
+        const m = travel + 0.5 + (v.parentBody !== null ? travel : 0);
+        if (!v.sweptNear(b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ, m)) continue;
         cand.push(k);
         v.used = true;
       }
@@ -251,13 +337,13 @@ export class ShipDynamicsImpl implements ShipDynamics {
       }
     }
 
-    // ---- 5. sub-steps
+    // ---- 7. sub-steps
     this.islands.reset(bodies.length);
     if (active.length > 0) {
       for (let k = 0; k < n; k++) this.substep(k / n, (k + 1) / n, dt, invDt);
     }
 
-    // ---- 6. finish
+    // ---- 8. finish
     for (let i = 0; i < active.length; i++) active[i]!.writeBack();
     for (let i = 0; i < active.length; i++) {
       const b = active[i]!;
@@ -266,7 +352,10 @@ export class ShipDynamicsImpl implements ShipDynamics {
     for (let i = 0; i < active.length; i++) {
       const b = active[i]!;
       b.stats.submerged = b.submerged;
-      if (refreshShip(b.ship, b, o)) wakeShip(b.ship);
+      if (refreshShip(b.ship, b, o)) {
+        wakeShip(b.ship);
+        b.changed = true; // its neighbours hear about it next tick
+      }
       updateRest(b, o);
     }
     // a sleeper pushed hard enough to leave the sleep band wakes for the next tick
@@ -331,13 +420,50 @@ export class ShipDynamicsImpl implements ShipDynamics {
     this.active.push(b);
   }
 
-  private surroundingsLoaded(b: Body): boolean {
-    return this.host.world.isAreaLoaded(
-      b.minX - LOADED_MARGIN,
-      b.minZ - LOADED_MARGIN,
-      b.maxX + LOADED_MARGIN,
-      b.maxZ + LOADED_MARGIN,
-    );
+  /**
+   * Sub-steps for this tick: options.substeps, raised while a spinning rotor that could reach a
+   * (not frozen) ship moves its blades farther than maxSubstepTravel per sub-step — a long
+   * windmill's tips outrun both the contact generation and the hull's speed clamp otherwise.
+   */
+  private chooseSubsteps(cands: readonly Body[]): number {
+    const o = this.options;
+    let n = o.substeps;
+    if (o.maxSubsteps <= n) return n;
+    const reachMax = o.maxSubsteps * o.maxSubstepTravel + 1;
+    const views = this.views;
+    for (let k = 0; k < views.length; k++) {
+      const v = views[k]!;
+      if (!v.spinning || v.shape.solidCount === 0) continue;
+      const need = Math.ceil(v.travel / o.maxSubstepTravel - 1e-9);
+      if (need <= n) continue;
+      const m = v.rotor.parent !== null ? 2 * reachMax : reachMax;
+      for (let i = 0; i < cands.length; i++) {
+        const b = cands[i]!;
+        if (b.ship.frozen || v.rotor.parent === b.ship) continue;
+        if (v.sweptNear(b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ, m)) {
+          n = need;
+          break;
+        }
+      }
+    }
+    return n < o.maxSubsteps ? n : o.maxSubsteps;
+  }
+
+  /** Can a moving rotor (not mounted on this ship) reach the body this tick? */
+  private rotorInReach(b: Body, travel: number): boolean {
+    const views = this.views;
+    for (let k = 0; k < views.length; k++) {
+      const v = views[k]!;
+      if (v.rotor.parent === b.ship || !v.moving || v.shape.solidCount === 0) continue;
+      const m = travel + 0.5 + (v.parentBody !== null ? travel : 0);
+      if (v.sweptNear(b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ, m)) return true;
+    }
+    return false;
+  }
+
+  private surroundingsLoaded(b: Body, travel: number): boolean {
+    const m = Math.max(LOADED_MARGIN, Math.ceil(travel) + 1);
+    return this.host.world.isAreaLoaded(b.minX - m, b.minZ - m, b.maxX + m, b.maxZ + m);
   }
 
   private substep(a0: number, a1: number, dt: number, invDt: number): void {
@@ -380,15 +506,16 @@ export class ShipDynamicsImpl implements ShipDynamics {
         const start = kin.count;
         gen.rotor(b, views[vi]!, vi, kin, o.rotorFriction, invDt);
         gen.reduce(kin, start, o.maxContactsPerNormal); // per rotor: each keeps its own manifold
+        if (kin.count > start && views[vi]!.moving) b.rotorTouchThisTick = true;
       }
       b.kinEnd = kin.count;
       const st = b.stats;
       st.terrainContacts = b.terEnd - b.terStart;
       st.rotorContacts = b.kinEnd - b.kinStart;
       st.shipContacts = 0;
-      if (b.kinEnd > b.kinStart) b.rotorTouchThisTick = true;
     }
-    // kin holds every body's rotor contacts first, then ship/ship contacts from here on.
+    // kin holds every body's rotor contacts first (grouped by ship, then rotor), then ship/ship
+    // contacts from here on.
     const shipStart = kin.count;
     const pairs = this.pairs;
     for (let p = 0; p < pairs.length; p += 2) {
@@ -400,50 +527,33 @@ export class ShipDynamicsImpl implements ShipDynamics {
 
     const anyContacts = kin.count + ter.count > 0;
     if (anyContacts) {
+      if (shipStart > 0) this.prepareDriven(shipStart);
       prepareContacts(kin, bodies, invDt, o.slop, o.correctionRate, o.maxCorrectionSpeed);
       prepareContacts(ter, bodies, invDt, o.slop, o.correctionRate, o.maxCorrectionSpeed);
       for (let i = 0; i < active.length; i++) active[i]!.snapshotVelocity();
       this.solveVelocities();
       if (shipStart > 0) {
         // there are rotor contacts: check them for pinning
-        const pinned = this.pins.detect(kin, ter, bodies, o);
+        const pinned = this.pins.detect(kin, ter, shipStart, bodies, o);
         if (pinned > 0) {
-          for (let i = 0; i < active.length; i++) {
-            const b = active[i]!;
-            b.restoreVelocity();
+          for (let i = 0; i < active.length; i++) active[i]!.restoreVelocity();
+          this.countPinned(shipStart);
+          // A pinned blade drives nothing: friction and two-sided ship contacts come back unless
+          // another blade still drives the ship (a hull hitting the wall must not keep sliding).
+          const tf = ter.f;
+          for (let i = 0; i < ter.count; i++) tf[i * STRIDE + F_MU] = o.terrainFriction;
+          const kf = kin.f;
+          for (let i = shipStart; i < kin.count; i++) {
+            kf[i * STRIDE + F_MU] = o.shipFriction;
+            kf[i * STRIDE + F_FIX] = FIX_NONE;
           }
-          this.countPinned();
-          resetImpulses(kin);
-          resetImpulses(ter);
+          this.prepareDriven(shipStart);
+          prepareContacts(kin, bodies, invDt, o.slop, o.correctionRate, o.maxCorrectionSpeed);
+          prepareContacts(ter, bodies, invDt, o.slop, o.correctionRate, o.maxCorrectionSpeed);
           this.solveVelocities();
         }
       }
-      // terrain that carried load supports the ship (sleep, pinning statistics)
-      const tf = ter.f;
-      for (let i = 0; i < active.length; i++) {
-        const b = active[i]!;
-        if (b.supportedThisTick) continue;
-        for (let c = b.terStart; c < b.terEnd; c++) {
-          if (tf[c * STRIDE + F_LN]! > 0) {
-            b.supportedThisTick = true;
-            break;
-          }
-        }
-      }
-      // ship/ship contacts that carried load: support, sleep islands, pushes on sleepers
-      const kf = kin.f;
-      for (let i = shipStart; i < kin.count; i++) {
-        const c = i * STRIDE;
-        const l = kf[c + F_LN]!;
-        if (!(l > 0)) continue;
-        const A = bodies[kf[c + F_A]!]!;
-        const B = bodies[kf[c + F_B]!]!;
-        A.supportedThisTick = true;
-        B.supportedThisTick = true;
-        A.shipImpulseThisTick += l;
-        B.shipImpulseThisTick += l;
-        if (A.mode === MODE_ACTIVE && B.mode === MODE_ACTIVE) this.islands.union(A.index, B.index);
-      }
+      this.supportStats(shipStart);
     }
     for (let i = 0; i < active.length; i++) active[i]!.clampVelocity(o.maxSubstepTravel, dt);
     if (anyContacts) {
@@ -460,6 +570,113 @@ export class ShipDynamicsImpl implements ShipDynamics {
     for (let it = 0; it < its; it++) {
       solveVelocityPass(this.kin, this.bodies);
       solveVelocityPass(this.ter, this.bodies);
+    }
+  }
+
+  /**
+   * Before a solve: for every ship that an active blade contact presses (pinning condition 1a),
+   * with d the blades' direction of motion,
+   *  - its contacts that oppose d, with terrain and with other ships, become frictionless (see
+   *    FRICTION_RELEASE): outside the pin cone the blade slides the ship along them;
+   *  - another ship it is pressed against that cannot give way along that contact's normal (held
+   *    by terrain, a frozen ship ... — the pin test's support rule, here on contacts present
+   *    rather than loaded) is immovable for that contact (F_FIX, see solver.ts), so the driven
+   *    hull slides along the held one instead of being squeezed into it.
+   * The held ships keep their own friction: they are held, not driven, and a frictionless wedge
+   * between an infinitely strong blade and a wall would squeeze them out at any speed.
+   */
+  private prepareDriven(shipStart: number): void {
+    const active = this.active;
+    const bodies = this.bodies;
+    const kin = this.kin;
+    const kf = kin.f;
+    const tf = this.ter.f;
+    const ratio = this.options.pinPressRatio;
+    const sup = this.supports;
+    sup.configure(this.options.pinOpposeCos, false);
+    for (let i = 0; i < active.length; i++) {
+      const b = active[i]!;
+      if (b.kinEnd <= b.kinStart) continue;
+      let dx = 0;
+      let dy = 0;
+      let dz = 0;
+      for (let k = b.kinStart; k < b.kinEnd; k++) {
+        const c = k * STRIDE;
+        if (kf[c + F_PIN] !== 0 || !bladePresses(kf, c, ratio)) continue;
+        const vx = kf[c + F_VO]!;
+        const vy = kf[c + F_VO + 1]!;
+        const vz = kf[c + F_VO + 2]!;
+        const l = Math.sqrt(vx * vx + vy * vy + vz * vz);
+        dx += vx / l;
+        dy += vy / l;
+        dz += vz / l;
+      }
+      const dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dl < 1e-9) continue;
+      dx /= dl;
+      dy /= dl;
+      dz /= dl;
+      for (let k = b.terStart; k < b.terEnd; k++) {
+        const c = k * STRIDE;
+        if (tf[c + F_NX]! * dx + tf[c + F_NX + 1]! * dy + tf[c + F_NX + 2]! * dz < -FRICTION_RELEASE) tf[c + F_MU] = 0;
+      }
+      for (let k = shipStart; k < kin.count; k++) {
+        const c = k * STRIDE;
+        // b's normal is +n when it is the contact's body A, -n when it is body B
+        const isA = kf[c + F_A] === b.index;
+        if (!isA && kf[c + F_B] !== b.index) continue;
+        const sgn = isA ? 1 : -1;
+        const nx = kf[c + F_NX]! * sgn;
+        const ny = kf[c + F_NX + 1]! * sgn;
+        const nz = kf[c + F_NX + 2]! * sgn;
+        if (nx * dx + ny * dy + nz * dz >= -FRICTION_RELEASE) continue;
+        kf[c + F_MU] = 0;
+        const other = bodies[(isA ? kf[c + F_B] : kf[c + F_A])!]!;
+        // the other ship is pushed along -n_b; is it held that way?
+        if (!sup.blocked(other, kin, this.ter, shipStart, bodies, -nx, -ny, -nz, -1, 0)) continue;
+        const want = isA ? FIX_B : FIX_A;
+        const cur = kf[c + F_FIX]!;
+        kf[c + F_FIX] = cur === FIX_NONE || cur === want ? want : FIX_CONFLICT;
+      }
+    }
+  }
+
+  /** After the solve: support (sleep, islands) and pushes on sleepers from load-carrying contacts. */
+  private supportStats(shipStart: number): void {
+    const active = this.active;
+    const bodies = this.bodies;
+    const views = this.views;
+    // terrain that carried load supports the ship
+    const tf = this.ter.f;
+    for (let i = 0; i < active.length; i++) {
+      const b = active[i]!;
+      if (b.supportedThisTick) continue;
+      for (let c = b.terStart; c < b.terEnd; c++) {
+        if (tf[c * STRIDE + F_LN]! > 0) {
+          b.supportedThisTick = true;
+          break;
+        }
+      }
+    }
+    const kf = this.kin.f;
+    // a stopped rotor is something to rest on, like terrain
+    for (let i = 0; i < shipStart; i++) {
+      const c = i * STRIDE;
+      if (!(kf[c + F_LN]! > 0) || views[kf[c + F_SRC]!]!.moving) continue;
+      bodies[kf[c + F_A]!]!.supportedThisTick = true;
+    }
+    // ship/ship contacts that carried load: support, sleep islands, pushes on sleepers
+    for (let i = shipStart; i < this.kin.count; i++) {
+      const c = i * STRIDE;
+      const l = kf[c + F_LN]!;
+      if (!(l > 0)) continue;
+      const A = bodies[kf[c + F_A]!]!;
+      const B = bodies[kf[c + F_B]!]!;
+      A.supportedThisTick = true;
+      B.supportedThisTick = true;
+      A.shipImpulseThisTick += l;
+      B.shipImpulseThisTick += l;
+      if (A.mode === MODE_ACTIVE && B.mode === MODE_ACTIVE) this.islands.union(A.index, B.index);
     }
   }
 
@@ -488,12 +705,12 @@ export class ShipDynamicsImpl implements ShipDynamics {
     }
   }
 
-  private countPinned(): void {
+  private countPinned(shipStart: number): void {
     const kf = this.kin.f;
     const bodies = this.bodies;
-    for (let i = 0; i < this.kin.count; i++) {
+    for (let i = 0; i < shipStart; i++) {
       const c = i * STRIDE;
-      if (kf[c + F_PIN] !== 0) bodies[kf[c + F_A]!]!.stats.pinned++;
+      if (kf[c + F_PIN] === PIN_PINNED) bodies[kf[c + F_A]!]!.stats.pinned++;
     }
   }
 
@@ -527,16 +744,18 @@ export class ShipDynamicsImpl implements ShipDynamics {
   }
 }
 
-/** Does the rotor's bounding sphere come within `margin` of the body's world box? */
-function sphereNearBox(v: RotorView, b: Body, margin: number): boolean {
-  const qx = v.cx < b.minX ? b.minX : v.cx > b.maxX ? b.maxX : v.cx;
-  const qy = v.cy < b.minY ? b.minY : v.cy > b.maxY ? b.maxY : v.cy;
-  const qz = v.cz < b.minZ ? b.minZ : v.cz > b.maxZ ? b.maxZ : v.cz;
-  const dx = v.cx - qx;
-  const dy = v.cy - qy;
-  const dz = v.cz - qz;
-  const r = v.radius + margin;
-  return dx * dx + dy * dy + dz * dz <= r * r;
+/**
+ * A ship with no hard cell (or no cell) cannot collide or float: hold it motionless with zero
+ * velocity, asleep, so nothing reads a speed it does not have. Adding cells wakes it (refresh).
+ */
+function holdInert(b: Body): void {
+  b.stats.inert = true;
+  const ship = b.ship;
+  const g = ship.grid;
+  g.linearVelocity.x = g.linearVelocity.y = g.linearVelocity.z = 0;
+  g.angularVelocity.x = g.angularVelocity.y = g.angularVelocity.z = 0;
+  ship.asleep = true;
+  ship.restTicks = 0;
 }
 
 function boxesOverlap(a: Body, b: Body, margin: number): boolean {

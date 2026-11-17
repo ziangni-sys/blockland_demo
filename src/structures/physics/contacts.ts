@@ -13,9 +13,22 @@
  * those that oppose the intruding point's own surface normals: a hull point on the bow face
  * that entered a wall can only be pushed back out of the wall's near face, however deep it
  * went — never out through the far side of a 1-thick wall (LESSONS 船被推穿薄墙). Among the
- * accepted faces the shallowest wins; for rotor contacts the choice may be biased toward the
- * blade's sweep direction, but the depth stored is always the true distance to the chosen
- * face (LESSONS 叶片侧面擦过船时船被猛踢).
+ * accepted faces the shallowest wins, and the depth stored is always the true distance to the
+ * chosen face.
+ *
+ * Rotor contacts (LESSONS 叶片侧面擦过船时船被猛踢). A blade is infinitely heavy and its contacts
+ * are velocity constraints, so whatever normal a contact gets, the hull is made to match the
+ * blade's full speed along it, however small the overlap. A normal along the blade's sweep is
+ * therefore a full-strength push, and must only be chosen when the hull really stands in the
+ * blade's path. Where a hull edge merely overlaps the swept band by a little (a blade face
+ * sliding past the hull's side, a tip brushing a corner), the exposed face ACROSS the sweep is
+ * the true, shallow overlap: the hull is slid out of the band by that much instead of being
+ * flung along. So for rotor contacts, faces along the relative sweep pay a depth penalty of up
+ * to GRAZE_PENALTY: a perpendicular exit shallower than that wins. Points on a face of the hull
+ * (one normal) are unaffected — the alignment rule leaves them only the face toward the blade,
+ * so a blade that meets a hull squarely pushes it at full strength. Rotor contacts never use
+ * the deep "walk back" fallback either: a point the blade has passed more than a cell into is
+ * left alone instead of being pushed out through the blade's far side.
  */
 import { DIR_X, DIR_Y, DIR_Z } from '../../core/dirs';
 import type { Body } from './body';
@@ -37,7 +50,7 @@ export const F_A = 0; // body index
 export const F_B = 1; // body index or -1
 export const F_KIND = 2;
 export const F_SRC = 3; // rotor view index (rotor contacts)
-export const F_PIN = 4; // 1 = pinned: transfers nothing
+export const F_PIN = 4; // 0 = active, PIN_PINNED / PIN_STALE: transfers nothing
 export const F_PX = 5;
 export const F_NX = 8;
 export const F_DEPTH = 11;
@@ -71,7 +84,19 @@ export const F_CELL = 72; // hull cell (A-local) known exactly
 export const F_HASCELL = 75; // 1 = F_CELL valid, 2 = owner must be resolved from F_LOC / F_OBS
 export const F_LOC = 76; // hull-local sample point (owner resolution)
 export const F_OBS = 79; // obstacle cell centre in hull-local coordinates
-export const STRIDE = 82;
+export const F_FIX = 82; // ship/ship: FIX_* (a side the solver treats as immovable)
+export const STRIDE = 83;
+
+/** F_FIX values: which body of a ship/ship contact gets no impulse from it this sub-step. */
+export const FIX_NONE = 0;
+export const FIX_A = 1;
+export const FIX_B = 2;
+/** Both sides asked to be fixed: the contact stays two-sided. */
+export const FIX_CONFLICT = 3;
+
+/** F_PIN values. */
+export const PIN_PINNED = 1; // its (ship, rotor) pair is pinned this sub-step
+export const PIN_STALE = 2; // rotor contact deeper than ROTOR_STALE_DEPTH (see below)
 
 export class ContactSet {
   count = 0;
@@ -105,8 +130,30 @@ export class ContactSet {
 export const ALIGN_MIN = 0.5;
 /** Fallback: cells walked through hard material along the best-aligned axis. */
 const WALK_MAX = 2;
-/** Depth credit (blocks) for an exit face that points along a blade's relative sweep. */
-const SWEEP_BIAS = 0.35;
+/**
+ * Rotor contacts: depth penalty (blocks) of an exit face pointing along the blade's relative
+ * sweep. A hull edge overlapping the swept band by less than about this is slid out across the
+ * band instead of being pushed along it. Below the spacing of the surface sample points (0.5),
+ * so a hull that overlaps the band by half a block or more is always pushed.
+ */
+const GRAZE_PENALTY = 0.35;
+/**
+ * Relative speed (blocks/s) below which the sweep direction is not trusted at full weight: the
+ * graze penalty is scaled by min(1, |relative velocity| / max(|blade velocity|, this)), so a hull
+ * already moving with the blade (pushed squarely) gets plain shallowest-face contacts.
+ */
+const SWEEP_SPEED_MIN = 0.25;
+/**
+ * Rotor contacts deeper than this (blocks) transfer no force. With the blade moving at most
+ * maxSubstepTravel per sub-step and the hull kept up with it, a real push never overlaps by more
+ * than a few tenths; a deeper overlap means the blade has already cut into the hull (it was
+ * pinned while cells were being destroyed one per tick). The exit face of such a point is no
+ * longer the side the hull came from (LESSONS: the exit bias only works below half a cell), and
+ * handing the hull the blade's full speed along it is what flung a just-released hull around.
+ * Such contacts stay in the set (marked PIN_STALE) so the pinning can still pick the cell the
+ * blade is deepest in for destruction.
+ */
+export const ROTOR_STALE_DEPTH = 0.5;
 
 /**
  * Picks the exit face of a penetrated cell. Works in the TARGET's local frame (the grid whose
@@ -116,6 +163,8 @@ const SWEEP_BIAS = 0.35;
 export class Prober {
   dir = 0;
   depth = 0;
+  /** Alignment of the chosen face with the intruder's normals (1 for an intruder without normals). */
+  faceAlign = 1;
   cellX = 0;
   cellY = 0;
   cellZ = 0;
@@ -148,11 +197,12 @@ export class Prober {
   }
 
   /**
-   * Point (x,y,z) in target-local coordinates, intruder normal mask `mask`. (sx,sy,sz) is an
-   * optional preferred direction for the exit normal (target-local; zero = none). Returns false
-   * when the point is not in a hard cell or no exit could be found.
+   * Point (x,y,z) in target-local coordinates, intruder normal mask `mask`. (sx,sy,sz) is the
+   * weighted sweep (rotor contacts; target-local, length <= 1, zero = none): exit faces whose
+   * push on the intruder points along it pay GRAZE_PENALTY * (normal . sweep). `walk` allows the
+   * deep fallback. Returns false when the point is not in a hard cell or no exit was found.
    */
-  probe(t: ProbeTarget, x: number, y: number, z: number, mask: number, sx: number, sy: number, sz: number): boolean {
+  probe(t: ProbeTarget, x: number, y: number, z: number, mask: number, sx: number, sy: number, sz: number, walk: boolean): boolean {
     const cx = Math.floor(x);
     const cy = Math.floor(y);
     const cz = Math.floor(z);
@@ -161,6 +211,7 @@ export class Prober {
     let best = -1;
     let bestScore = Infinity;
     let bestDepth = 0;
+    let bestAlign = 1;
     let fallback = 0;
     let fallbackAlign = -Infinity;
     for (let g = 0; g < 6; g++) {
@@ -175,12 +226,13 @@ export class Prober {
       let score = depth;
       if (sweep) {
         const s = g === 0 ? sx : g === 1 ? -sx : g === 2 ? sy : g === 3 ? -sy : g === 4 ? sz : -sz;
-        if (s > 0) score -= SWEEP_BIAS * s;
+        if (s > 0) score += GRAZE_PENALTY * s;
       }
       if (score < bestScore) {
         bestScore = score;
         best = g;
         bestDepth = depth;
+        bestAlign = al;
       }
     }
     this.cellX = cx;
@@ -189,8 +241,10 @@ export class Prober {
     if (best >= 0) {
       this.dir = best;
       this.depth = bestDepth;
+      this.faceAlign = bestAlign;
       return true;
     }
+    if (!walk) return false;
     // No acceptable exposed face on this cell: the point is deeper than one cell (or the
     // surface opposite its normal is buried). Walk back the way the intruder came.
     const g = fallback;
@@ -201,12 +255,40 @@ export class Prober {
       if (t.isOpen(nx, ny, nz)) {
         this.dir = g;
         this.depth = faceDepth(g, x, y, z, cx, cy, cz) + (k - 1);
+        this.faceAlign = fallbackAlign;
         return true;
       }
       if (!t.isSolid(nx, ny, nz)) break; // sealed cavity: no way out along this axis
     }
     return false;
   }
+}
+
+/**
+ * Weight of the blade's relative sweep at world point (wx,wy,wz), whose blade velocity is in
+ * vel[0..2]; writes the unit relative velocity (blade minus hull, before this sub-step's solve)
+ * to vel[3..5]. 0 when the relative motion is negligible. A hull that already moves with the
+ * blade (pushed squarely) has a small relative speed, so its contacts fall back to the plain
+ * shallowest face and stay consistent with the push.
+ */
+function sweepWeight(b: Body, vel: Float64Array, wx: number, wy: number, wz: number): number {
+  const rx = wx - b.px;
+  const ry = wy - b.py;
+  const rz = wz - b.pz;
+  const vx = vel[0]!;
+  const vy = vel[1]!;
+  const vz = vel[2]!;
+  const relx = vx - (b.vx + b.wy * rz - b.wz * ry);
+  const rely = vy - (b.vy + b.wz * rx - b.wx * rz);
+  const relz = vz - (b.vz + b.wx * ry - b.wy * rx);
+  const rl = Math.sqrt(relx * relx + rely * rely + relz * relz);
+  if (rl < 1e-6) return 0;
+  vel[3] = relx / rl;
+  vel[4] = rely / rl;
+  vel[5] = relz / rl;
+  const vb = Math.sqrt(vx * vx + vy * vy + vz * vz);
+  const w = rl / (vb > SWEEP_SPEED_MIN ? vb : SWEEP_SPEED_MIN);
+  return w < 1 ? w : 1;
 }
 
 function faceDepth(g: number, x: number, y: number, z: number, cx: number, cy: number, cz: number): number {
@@ -242,7 +324,8 @@ export class ContactGenerator {
   readonly prober = new Prober();
   private readonly C: Mat3 = new Float64Array(9);
   private readonly RT: Mat3 = new Float64Array(9);
-  private readonly vel = new Float64Array(3);
+  /** [0..2] blade velocity at the contact, [3..5] unit relative sweep (see sweepWeight). */
+  private readonly vel = new Float64Array(6);
   private readonly idx: Int32Array[] = [];
   private readonly counts = new Int32Array(6);
   private keep = new Uint8Array(256);
@@ -308,7 +391,7 @@ export class ContactGenerator {
       } else if (!patch.isSolid(ix + pox, iy + poy, iz + poz)) {
         continue;
       }
-      if (!pr.probe(patch, wx, wy, wz, pm[i]!, 0, 0, 0)) continue;
+      if (!pr.probe(patch, wx, wy, wz, pm[i]!, 0, 0, 0, true)) continue;
       const base = f.push();
       const a = f.f;
       a[base + F_A] = b.index;
@@ -363,7 +446,7 @@ export class ContactGenerator {
         const hz = Math.floor(qz) - soz;
         if (hx < 0 || hy < 0 || hz < 0 || hx >= ssx || hy >= ssy || hz >= ssz) continue;
         if (occ[hx + hz * ssx + hy * ssx * ssz] !== OCC_SOLID) continue;
-        if (!pr.probe(s, qx, qy, qz, cms[j]!, 0, 0, 0)) continue;
+        if (!pr.probe(s, qx, qy, qz, cms[j]!, 0, 0, 0, true)) continue;
         const base = f.push();
         const a = f.f;
         a[base + F_A] = b.index;
@@ -547,23 +630,21 @@ export class ContactGenerator {
       const wy = R[3]! * plx + R[4]! * ply + R[5]! * plz + tsy;
       const wz = R[6]! * plx + R[7]! * ply + R[8]! * plz + tsz;
       rv.velocityAt(lx, ly, lz, wx, wy, wz, invDt, vel);
-      // sweep preference in rotor-local frame: exit normal along the blade's relative motion
-      const rx = wx - b.px;
-      const ry = wy - b.py;
-      const rz = wz - b.pz;
-      const relx = vel[0]! - (b.vx + b.wy * rz - b.wz * ry);
-      const rely = vel[1]! - (b.vy + b.wz * rx - b.wx * rz);
-      const relz = vel[2]! - (b.vz + b.wx * ry - b.wy * rx);
-      const rl = Math.sqrt(relx * relx + rely * rely + relz * relz);
+      // Weighted relative sweep in the rotor's frame. The hull is pushed along the rotor face's
+      // normal g, so "along the sweep" is g . sweep > 0.
+      const ws = sweepWeight(b, vel, wx, wy, wz);
       let sx = 0;
       let sy = 0;
       let sz = 0;
-      if (rl > 1e-6) {
-        sx = (R0[0]! * relx + R0[3]! * rely + R0[6]! * relz) / rl;
-        sy = (R0[1]! * relx + R0[4]! * rely + R0[7]! * relz) / rl;
-        sz = (R0[2]! * relx + R0[5]! * rely + R0[8]! * relz) / rl;
+      if (ws > 0) {
+        const rx = vel[3]! * ws;
+        const ry = vel[4]! * ws;
+        const rz = vel[5]! * ws;
+        sx = R0[0]! * rx + R0[3]! * ry + R0[6]! * rz;
+        sy = R0[1]! * rx + R0[4]! * ry + R0[7]! * rz;
+        sz = R0[2]! * rx + R0[5]! * ry + R0[8]! * rz;
       }
-      if (!pr.probe(rs, lx, ly, lz, s.pmask[i]!, sx, sy, sz)) continue;
+      if (!pr.probe(rs, lx, ly, lz, s.pmask[i]!, sx, sy, sz, false)) continue;
       const base = set.push();
       const a = set.f;
       a[base + F_A] = b.index;
@@ -575,6 +656,7 @@ export class ContactGenerator {
       a[base + F_PX + 2] = wz;
       dirToWorld(R0, pr.dir, a, base + F_NX); // ship pushed out through the rotor's face
       a[base + F_DEPTH] = pr.depth;
+      if (pr.depth > ROTOR_STALE_DEPTH) a[base + F_PIN] = PIN_STALE;
       a[base + F_VO] = vel[0]!;
       a[base + F_VO + 1] = vel[1]!;
       a[base + F_VO + 2] = vel[2]!;
@@ -628,23 +710,27 @@ export class ContactGenerator {
       const wy = R0[3]! * plx + R0[4]! * ply + R0[5]! * plz + t0y;
       const wz = R0[6]! * plx + R0[7]! * ply + R0[8]! * plz + t0z;
       rv.velocityAt(plx, ply, plz, wx, wy, wz, invDt, vel);
-      const rx = wx - b.px;
-      const ry = wy - b.py;
-      const rz = wz - b.pz;
-      const relx = vel[0]! - (b.vx + b.wy * rz - b.wz * ry);
-      const rely = vel[1]! - (b.vy + b.wz * rx - b.wx * rz);
-      const relz = vel[2]! - (b.vz + b.wx * ry - b.wy * rx);
-      const rl = Math.sqrt(relx * relx + rely * rely + relz * relz);
-      // The ship is pushed along -R e_g, so the preferred exit face points AGAINST the sweep.
+      // A point inside one face of the blade (one normal) stands for that flat face: the blade
+      // face pressing into the hull pushes it along the FACE's normal, whatever hull face is
+      // nearest. Taking the hull's face normal there (right only for a blade edge or corner
+      // against a hull face) turned an oblique blade into a push straight into a quay wall.
+      const pm = rs.pmask[j]!;
+      const faceInterior = pm !== 0 && (pm & (pm - 1)) === 0;
+      // Edges and corners: the ship is pushed along -R e_g (out through the hull face g), so
+      // "along the sweep" is g . (-sweep) > 0: hand the prober the negated sweep, hull frame.
+      const ws = faceInterior ? 0 : sweepWeight(b, vel, wx, wy, wz);
       let sx = 0;
       let sy = 0;
       let sz = 0;
-      if (rl > 1e-6) {
-        sx = -(R[0]! * relx + R[3]! * rely + R[6]! * relz) / rl;
-        sy = -(R[1]! * relx + R[4]! * rely + R[7]! * relz) / rl;
-        sz = -(R[2]! * relx + R[5]! * rely + R[8]! * relz) / rl;
+      if (ws > 0) {
+        const rx = -vel[3]! * ws;
+        const ry = -vel[4]! * ws;
+        const rz = -vel[5]! * ws;
+        sx = R[0]! * rx + R[3]! * ry + R[6]! * rz;
+        sy = R[1]! * rx + R[4]! * ry + R[7]! * rz;
+        sz = R[2]! * rx + R[5]! * ry + R[8]! * rz;
       }
-      if (!pr.probe(s, qx, qy, qz, rs.pmask[j]!, sx, sy, sz)) continue;
+      if (!pr.probe(s, qx, qy, qz, pm, sx, sy, sz, false)) continue;
       const base = set.push();
       const a = set.f;
       a[base + F_A] = b.index;
@@ -654,11 +740,21 @@ export class ContactGenerator {
       a[base + F_PX] = wx;
       a[base + F_PX + 1] = wy;
       a[base + F_PX + 2] = wz;
-      dirToWorld(R, pr.dir, a, base + F_NX);
-      a[base + F_NX] = -a[base + F_NX]!;
-      a[base + F_NX + 1] = -a[base + F_NX + 1]!;
-      a[base + F_NX + 2] = -a[base + F_NX + 2]!;
-      a[base + F_DEPTH] = pr.depth;
+      let depth: number;
+      if (faceInterior) {
+        // Moving the hull by s along the blade normal u moves the point out through hull face g
+        // (depth d) once s (u . -g) = d; the prober's alignment is exactly u . -g (>= ALIGN_MIN).
+        dirToWorld(R0, 31 - Math.clz32(pm), a, base + F_NX);
+        depth = pr.depth / pr.faceAlign;
+      } else {
+        dirToWorld(R, pr.dir, a, base + F_NX);
+        a[base + F_NX] = -a[base + F_NX]!;
+        a[base + F_NX + 1] = -a[base + F_NX + 1]!;
+        a[base + F_NX + 2] = -a[base + F_NX + 2]!;
+        depth = pr.depth;
+      }
+      a[base + F_DEPTH] = depth;
+      if (depth > ROTOR_STALE_DEPTH) a[base + F_PIN] = PIN_STALE;
       a[base + F_VO] = vel[0]!;
       a[base + F_VO + 1] = vel[1]!;
       a[base + F_VO + 2] = vel[2]!;
@@ -723,7 +819,7 @@ export class ContactGenerator {
       const iz = Math.floor(lz) - toz;
       if (ix < 0 || iy < 0 || iz < 0 || ix >= tsx || iy >= tsy || iz >= tsz) continue;
       if (occ[ix + iz * tsx + iy * tsx * tsz] !== OCC_SOLID) continue;
-      if (!pr.probe(t, lx, ly, lz, s.pmask[i]!, 0, 0, 0)) continue;
+      if (!pr.probe(t, lx, ly, lz, s.pmask[i]!, 0, 0, 0, true)) continue;
       const base = set.push();
       const f = set.f;
       const A = sign > 0 ? src : dst;

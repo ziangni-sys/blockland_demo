@@ -57,18 +57,11 @@ import {
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import { AMBIENT_FLOOR, FACE_BOTTOM, FACE_TOP, FACE_X, FACE_Z, LIGHT_CURVE_K, type FogParams, type SkyState } from './lighting';
-import { animOrigin, BOB_OFFSET, BOB_WAVES, RIPPLE_WAVES, SWAY_PHASE } from './waves';
+import { animOrigin, BOB_OFFSET, BOB_WAVES, RIPPLE_WAVES, SWAY_PHASES } from './waves';
+import { DRY_THRESHOLD } from './drymask';
 
 /** Number of structures whose dry volumes cut world water at the same time. */
 export const DRY_SLOTS = 4;
-/**
- * Mask value above which world water is cut. The mask is sampled bilinearly in the
- * horizontal plane only (exact layer in y, see dryVolumeFactor): inside a dry cell the value
- * never drops below 0.25 (an inner corner of the hold, one dry cell out of four around the
- * vertex), so 0.2 cuts every dry fragment while the cut reaches at most ~0.3 cells into the
- * neighbouring hull walls (which hide it) and never into open cells.
- */
-const DRY_THRESHOLD = 0.2;
 
 type N<T> = Node<T>;
 
@@ -286,7 +279,8 @@ function waveSum(waves: readonly { kx: number; kz: number; w: number; a: number 
  * therefore get bit-identical wave heights and the liquid surface stays watertight.
  */
 function animSpacePosition(u: SharedUniforms): N<'vec3'> {
-  const t = modelWorldMatrix.element(3).xyz;
+  // M * (0,0,0,1) is the translation column, exactly (products with 0 and 1 are exact).
+  const t = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
   return t.sub(u.animOrigin).add(modelWorldMatrix.mul(vec4(positionLocal, 0)).xyz);
 }
 
@@ -300,10 +294,10 @@ function animatedPosition(u: SharedUniforms, vl: VertexLight): N<'vec3'> {
   const a = animSpacePosition(u);
   const t = u.time;
   const bob = waveSum(BOB_WAVES, a.xz, t).add(BOB_OFFSET).mul(vl.liquid);
-  const phase = a.x.mul(SWAY_PHASE.kx).add(a.z.mul(SWAY_PHASE.kz));
+  const ph = SWAY_PHASES.map((s) => a.x.mul(s.kx).add(a.z.mul(s.kz)));
   const swayW = uv().y.mul(vl.plant).mul(0.055);
-  const sx = sin(t.mul(1.9).add(phase)).add(sin(t.mul(3.1).add(phase.mul(1.7))).mul(0.35));
-  const sz = cos(t.mul(1.6).add(phase.mul(1.3)));
+  const sx = sin(t.mul(1.9).add(ph[0]!)).add(sin(t.mul(3.1).add(ph[1]!)).mul(0.35));
+  const sz = cos(t.mul(1.6).add(ph[2]!));
   return p.add(vec3(sx.mul(swayW), bob, sz.mul(swayW).mul(0.7)));
 }
 
@@ -384,12 +378,15 @@ export function createVoxelMaterials(
     const uvs = uv();
     const tex = texture(placeholder, uvs).depth(int(layer));
     tileNodes.push(tex);
-    const worldPos = positionWorld;
+    const rel = cameraRelativePosition();
 
     if (pass === 'translucent') {
-      const dry = dryVolumeFactor(u, worldPos, dryTextures, dryNodes);
+      const dry = dryVolumeFactor(u, rel, dryTextures, dryNodes);
       const li = float(layer);
+      // Water is recognised by its tile layers: the ripples, glints, fresnel opacity and the
+      // dry-volume cut are for water only. Other translucent blocks (ice) stay static.
       const isWater = li.equal(u.waterLayers.x).or(li.equal(u.waterLayers.y));
+      const water = select(isWater, float(1), float(0));
       const cut = objUniform.w.greaterThan(0.5).and(isWater).and(dry.greaterThan(DRY_THRESHOLD));
       m.transparent = true;
       m.depthWrite = false;
@@ -401,17 +398,20 @@ export function createVoxelMaterials(
         });
         const albedo = tex;
         const light = lightColor(u, vl, nW);
-        const viewVec = cameraPosition.sub(worldPos);
-        const V = normalize(viewVec);
-        // Ripple normal for upward faces (analytic derivative of a few travelling waves).
-        const up = smoothstep(0.5, 0.9, nW.y);
+        const V = normalize(rel.negate());
+        // Ripple normal for upward WATER faces (analytic gradient of travelling waves, in
+        // anim space so it is precise and seamless anywhere, see waves.ts).
+        const up = smoothstep(0.5, 0.9, nW.y).mul(water);
         const t = u.time;
-        const p = worldPos.xz;
-        const k1 = p.x.mul(1.9).add(p.y.mul(0.7)).add(t.mul(2.1));
-        const k2 = p.y.mul(2.3).sub(p.x.mul(0.9)).add(t.mul(2.7));
-        const k3 = p.x.mul(4.1).add(p.y.mul(3.3)).sub(t.mul(3.9));
-        const dhx = cos(k1).mul(1.9 * 0.012).sub(cos(k2).mul(0.9 * 0.01)).add(cos(k3).mul(4.1 * 0.004));
-        const dhz = cos(k1).mul(0.7 * 0.012).add(cos(k2).mul(2.3 * 0.01)).add(cos(k3).mul(3.3 * 0.004));
+        const p = rel.add(u.cameraAnim).xz;
+        const phases = RIPPLE_WAVES.map((wv) => p.x.mul(wv.kx).add(p.y.mul(wv.kz)).add(t.mul(wv.w)));
+        let dhx: N<'float'> = float(0);
+        let dhz: N<'float'> = float(0);
+        RIPPLE_WAVES.forEach((wv, i) => {
+          const c = cos(phases[i]!);
+          dhx = dhx.add(c.mul(wv.a * wv.kx));
+          dhz = dhz.add(c.mul(wv.a * wv.kz));
+        });
         const rippleN = normalize(vec3(dhx.negate(), 1, dhz.negate()));
         const N = normalize(mix(nW, rippleN, up));
         const ndv = abs(dot(N, V));
@@ -420,15 +420,20 @@ export function createVoxelMaterials(
         const skyVis = lightCurveNode(vl.sky);
         const reflCol = skyGradientNode(u, vec3(R.x, abs(R.y), R.z)).mul(skyVis.mul(0.85).add(0.15));
         // Gentle moving shimmer: two interfering wave fields brighten crests a little.
-        const shimmer = pow(sin(k1.mul(0.5)).mul(sin(k2.mul(0.5))).mul(0.5).add(0.5), 6).mul(0.12).mul(up);
+        const shimmer = pow(sin(phases[0]!.mul(0.5)).mul(sin(phases[1]!.mul(0.5))).mul(0.5).add(0.5), 6).mul(0.12).mul(up);
         const body = albedo.rgb.mul(light).mul(float(1).add(shimmer));
         const sunAmt = pow(max(dot(R, u.sunDir), 0), 180).mul(smoothstep(-0.05, 0.1, u.sunDir.y));
         const moonAmt = pow(max(dot(R, u.moonDir), 0), 300).mul(smoothstep(-0.05, 0.1, u.moonDir.y)).mul(0.35);
         const spec = u.sunColor.mul(sunAmt).add(u.moonColor.mul(moonAmt)).mul(skyVis).mul(up).mul(2.5);
-        const color = mix(body, reflCol, fres.mul(0.85)).add(spec);
-        // Clearer looking straight down, more opaque (and sky coloured) at grazing angles.
-        const alpha = clamp(mix(albedo.a.mul(0.78), float(0.96), fres).add(spec.x.mul(0.5)), 0, 1);
-        return vec4(encodeOutput(applyFogNode(u, color, worldPos)), alpha);
+        // Water mirrors the sky strongly at grazing angles; ice only a little (static: its
+        // normal is the face normal and nothing depends on time).
+        const color = mix(body, reflCol, fres.mul(mix(float(0.3), float(0.85), water))).add(spec);
+        // Water: clearer looking straight down, more opaque (and sky coloured) at grazing
+        // angles. Ice keeps its authored alpha, a little more opaque at grazing angles.
+        const alphaWater = mix(albedo.a.mul(0.78), float(0.96), fres).add(spec.x.mul(0.5));
+        const alphaOther = mix(albedo.a, max(albedo.a, float(0.92)), fres.mul(0.5));
+        const alpha = clamp(mix(alphaOther, alphaWater, water), 0, 1);
+        return vec4(encodeOutput(applyFogNode(u, color, rel)), alpha);
       })();
     } else {
       m.colorNode = Fn(() => {
@@ -440,7 +445,7 @@ export function createVoxelMaterials(
         }
         const light = lightColor(u, vl, nW);
         const lit = mix(albedo.rgb.mul(light), vec3(1, 1, 1), objUniform.z);
-        return vec4(encodeOutput(applyFogNode(u, lit, worldPos)), 1);
+        return vec4(encodeOutput(applyFogNode(u, lit, rel)), 1);
       })();
     }
     return m;
@@ -450,25 +455,36 @@ export function createVoxelMaterials(
 
 /**
  * Dry-volume test (docs/LESSONS.md "船舱里冒出水面": the water stays in the world, the renderer
- * cuts it). Returns > DRY_THRESHOLD where the fragment lies inside the dry mask of one of the nearest
- * structures. Built eagerly (outside any Fn) so the four texture nodes exist exactly once and
- * the backend can retarget them every frame. Texture fetches are unconditional (uniform
- * control flow); only the results are selected per slot.
+ * cuts it). Returns > DRY_THRESHOLD where the fragment lies inside the dry mask of one of the
+ * nearest structures. Built eagerly (outside any Fn) so the four texture nodes exist exactly
+ * once and the backend can retarget them every frame. Texture fetches are unconditional
+ * (uniform control flow); only the results are selected per slot.
+ *
+ * Filtering (mirrored and tested in drymask.ts): the mask is sampled at the CENTRE of the
+ * fragment's mask layer (exact in local y) and bilinearly in local x/z. Vertical filtering would let a non-dry layer above or below
+ * (the hold floor, the deck) attenuate the value of a dry cell; near an inner corner of the
+ * hold that pushed it under the threshold whenever the waterline came within ~0.3 cells of
+ * the floor, the normal floating position of a small boat. Horizontal filtering is kept on
+ * purpose: it moves the cut ~0.3 cells into the hull walls, which removes the z-fight line
+ * where the water plane meets the inner wall faces.
  */
 function dryVolumeFactor(
   u: SharedUniforms,
-  worldPos: N<'vec3'>,
+  rel: N<'vec3'>,
   dryTextures: readonly THREE.Data3DTexture[],
   dryNodes: THREE.TextureNode[],
 ): N<'float'> {
+  const layers = [u.dryLayers.x, u.dryLayers.y, u.dryLayers.z, u.dryLayers.w];
   let dry: N<'float'> = float(0);
   for (let i = 0; i < DRY_SLOTS; i++) {
-    const p = u.dryMatrices[i]!.mul(vec4(worldPos, 1)).xyz;
+    const p = u.dryMatrices[i]!.mul(vec4(rel, 1)).xyz;
     const inside = p.x.greaterThanEqual(0).and(p.x.lessThan(1))
       .and(p.y.greaterThanEqual(0)).and(p.y.lessThan(1))
       .and(p.z.greaterThanEqual(0)).and(p.z.lessThan(1))
       .and(u.dryCount.greaterThan(i));
-    const tn = texture3D(dryTextures[i]!, clamp(p, 0, 1), 0);
+    const sy = layers[i]!;
+    const w = floor(clamp(p.z, 0, 1).mul(sy)).min(sy.sub(1)).add(0.5).div(sy);
+    const tn = texture3D(dryTextures[i]!, vec3(clamp(p.x, 0, 1), clamp(p.y, 0, 1), w), 0);
     dryNodes.push(tn);
     dry = max(dry, select(inside, tn.r, float(0)));
   }

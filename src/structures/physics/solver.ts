@@ -8,6 +8,12 @@
  * Ordering matters for "the ship is never pushed into terrain" (LESSONS 船被转子硬推进地形):
  * every pass solves rotor / ship contacts first and terrain contacts LAST, so whatever a blade
  * demands, the velocity that leaves the solver respects the terrain.
+ *
+ * A ship/ship contact may treat one side as immovable (F_FIX): the dynamics sets it when a blade
+ * drives a ship against another ship that terrain holds along that push. Gauss-Seidel would
+ * otherwise share every correction between the two hulls only for the terrain (solved last) to
+ * take the held hull's share back, so the chain blade -> ship -> ship -> wall converges far too
+ * slowly and the driven hull is squeezed into the held one.
  */
 import type { Body } from './body';
 import * as C from './contacts';
@@ -47,11 +53,19 @@ const F_RB = C.F_RB;
 const F_T1 = C.F_T1;
 const F_T2 = C.F_T2;
 const F_VO = C.F_VO;
+const F_FIX = C.F_FIX;
+const FIX_A = C.FIX_A;
+const FIX_B = C.FIX_B;
 const STRIDE = C.STRIDE;
+
+/** Inverse inertia of a side that is held immovable for a contact (read only). */
+const ZERO_INERTIA = new Float64Array(9);
 
 /**
  * Per-contact constants: lever arms, tangent basis, Jacobian rows, effective masses and the
- * positional bias. `bodies` is indexed by the contact's body indices.
+ * positional bias; accumulated impulses to zero. Pinned / stale rows get zero effective mass
+ * (they transfer nothing). `bodies` is indexed by the contact's body indices. Calling it again
+ * re-arms the set for a fresh solve.
  */
 export function prepareContacts(
   set: ContactSet,
@@ -104,10 +118,12 @@ export function prepareContacts(
     f[c + F_RA] = rax;
     f[c + F_RA + 1] = ray;
     f[c + F_RA + 2] = raz;
-    const ima = A.solverInvMass;
-    let kN = ima + angular(f, c + F_JAN, c + F_KAN, A.invIw, rax, ray, raz, nx, ny, nz);
-    let kT1 = ima + angular(f, c + F_JAT1, c + F_KAT1, A.invIw, rax, ray, raz, t1x, t1y, t1z);
-    let kT2 = ima + angular(f, c + F_JAT2, c + F_KAT2, A.invIw, rax, ray, raz, t2x, t2y, t2z);
+    const fix = f[c + F_FIX]!;
+    const ima = fix === FIX_A ? 0 : A.solverInvMass;
+    const IA = fix === FIX_A ? ZERO_INERTIA : A.invIw;
+    let kN = ima + angular(f, c + F_JAN, c + F_KAN, IA, rax, ray, raz, nx, ny, nz);
+    let kT1 = ima + angular(f, c + F_JAT1, c + F_KAT1, IA, rax, ray, raz, t1x, t1y, t1z);
+    let kT2 = ima + angular(f, c + F_JAT2, c + F_KAT2, IA, rax, ray, raz, t2x, t2y, t2z);
     if (B !== null) {
       const rbx = px - B.px;
       const rby = py - B.py;
@@ -115,10 +131,11 @@ export function prepareContacts(
       f[c + F_RB] = rbx;
       f[c + F_RB + 1] = rby;
       f[c + F_RB + 2] = rbz;
-      const imb = B.solverInvMass;
-      kN += imb + angular(f, c + F_JBN, c + F_KBN, B.invIw, rbx, rby, rbz, nx, ny, nz);
-      kT1 += imb + angular(f, c + F_JBT1, c + F_KBT1, B.invIw, rbx, rby, rbz, t1x, t1y, t1z);
-      kT2 += imb + angular(f, c + F_JBT2, c + F_KBT2, B.invIw, rbx, rby, rbz, t2x, t2y, t2z);
+      const imb = fix === FIX_B ? 0 : B.solverInvMass;
+      const IB = fix === FIX_B ? ZERO_INERTIA : B.invIw;
+      kN += imb + angular(f, c + F_JBN, c + F_KBN, IB, rbx, rby, rbz, nx, ny, nz);
+      kT1 += imb + angular(f, c + F_JBT1, c + F_KBT1, IB, rbx, rby, rbz, t1x, t1y, t1z);
+      kT2 += imb + angular(f, c + F_JBT2, c + F_KBT2, IB, rbx, rby, rbz, t2x, t2y, t2z);
     }
     const pinned = f[c + F_PIN] !== 0;
     f[c + F_MN] = !pinned && kN > 1e-12 ? 1 / kN : 0;
@@ -131,6 +148,11 @@ export function prepareContacts(
     const excess = f[c + F_DEPTH]! - slop;
     let bias = excess > 0 ? rate * invDt * excess : 0;
     if (bias > maxCorr) bias = maxCorr;
+    // A kinematic obstacle (rotor) moving away along -n removes the overlap by itself at that
+    // speed; correcting it as well would shove the hull after a blade that is already leaving
+    // (e.g. toward the trailing side of a blade that has passed through cells being destroyed).
+    const von = f[c + F_VO]! * nx + f[c + F_VO + 1]! * ny + f[c + F_VO + 2]! * nz;
+    if (von < 0) bias = bias + von > 0 ? bias + von : 0;
     f[c + F_BIAS] = bias;
   }
 }
@@ -163,23 +185,6 @@ function angular(
   return jx * kx + jy * ky + jz * kz;
 }
 
-/** Re-arm a prepared set for a fresh solve (pinning re-solve): accumulated impulses to zero, pinned rows disabled. */
-export function resetImpulses(set: ContactSet): void {
-  const f = set.f;
-  for (let i = 0; i < set.count; i++) {
-    const c = i * STRIDE;
-    f[c + F_LN] = 0;
-    f[c + F_LT1] = 0;
-    f[c + F_LT2] = 0;
-    f[c + F_LP] = 0;
-    if (f[c + F_PIN] !== 0) {
-      f[c + F_MN] = 0;
-      f[c + F_MT1] = 0;
-      f[c + F_MT2] = 0;
-    }
-  }
-}
-
 /** One velocity pass over the set. */
 export function solveVelocityPass(set: ContactSet, bodies: readonly Body[]): void {
   const f = set.f;
@@ -190,8 +195,9 @@ export function solveVelocityPass(set: ContactSet, bodies: readonly Body[]): voi
     const A = bodies[f[c + F_A]!]!;
     const bi = f[c + F_B]!;
     const B = bi >= 0 ? bodies[bi]! : null;
-    const ima = A.solverInvMass;
-    const imb = B !== null ? B.solverInvMass : 0;
+    const fix = f[c + F_FIX]!;
+    const ima = fix === FIX_A ? 0 : A.solverInvMass;
+    const imb = B !== null && fix !== FIX_B ? B.solverInvMass : 0;
     // relative linear velocity (A - B - obstacle)
     let dvx = A.vx - f[c + F_VO]!;
     let dvy = A.vy - f[c + F_VO + 1]!;
@@ -314,7 +320,8 @@ export function solvePositionPass(set: ContactSet, bodies: readonly Body[]): voi
     const dl = lp - old;
     f[c + F_LP] = lp;
     if (dl === 0) continue;
-    const ima = A.solverInvMass;
+    const fix = f[c + F_FIX]!;
+    const ima = fix === FIX_A ? 0 : A.solverInvMass;
     A.vpx += ima * dl * nx;
     A.vpy += ima * dl * ny;
     A.vpz += ima * dl * nz;
@@ -322,7 +329,7 @@ export function solvePositionPass(set: ContactSet, bodies: readonly Body[]): voi
     A.wpy += f[c + F_KAN + 1]! * dl;
     A.wpz += f[c + F_KAN + 2]! * dl;
     if (B !== null) {
-      const imb = B.solverInvMass;
+      const imb = fix === FIX_B ? 0 : B.solverInvMass;
       B.vpx -= imb * dl * nx;
       B.vpy -= imb * dl * ny;
       B.vpz -= imb * dl * nz;

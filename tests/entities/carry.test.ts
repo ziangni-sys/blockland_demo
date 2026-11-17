@@ -213,7 +213,10 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     expect(Math.hypot(p.pos.x - start.x, p.pos.z - start.z)).toBeGreaterThan(2);
   });
 
-  it('swimming INTO a low raft while holding jump climbs aboard and attaches (deliberate, unlike drifting next to it)', () => {
+  it('swimming INTO even a low raft with W + space never lifts the swimmer aboard (structure sides give no climb-out boost)', () => {
+    // ACCEPTANCE 19 / the brief: a swimmer next to a hull is never attached. W + space is how
+    // one swims at the surface, so it cannot count as "climbing aboard" (review finding).
+    // Climbing out against WORLD ledges still works (movement.test.ts).
     const b = new Bench();
     fill(b.world, -20, 40, -20, 19, 40, 19, B.STONE);
     fill(b.world, -20, 41, -20, 19, 47, 19, makeCell(B.WATER));
@@ -224,9 +227,17 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     b.tick(40);
     expect(p.carrierId).toBe(0);
     p.input.forward = 1; // north, into the raft
-    const n = b.tickUntil(() => p.carrierId === ship.id && p.onGround, 200);
-    expect(n).toBeLessThan(200);
-    expect(ship.grid.toLocal(p.pos, vec3()).y).toBeCloseTo(48, 3);
+    let maxY = -Infinity;
+    for (let i = 0; i < 200; i++) {
+      b.tick();
+      expect(p.carrierId).toBe(0);
+      expect(inStructure(ship, p)).toBe(false);
+      maxY = Math.max(maxY, p.pos.y);
+    }
+    expect(maxY).toBeLessThan(47.6);
+    expect(p.wet).toBeGreaterThan(0.3);
+    // it really swam into the raft's side (stopped by it, not drifting elsewhere)
+    expect(ship.grid.toLocal(p.pos, vec3()).z).toBeLessThan(4.5);
   });
 
   it.each([0.17, -0.17, 0.4])('walking along a world wall on a ship yawed by %f rad costs no health', (shipYaw) => {

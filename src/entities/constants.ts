@@ -55,18 +55,23 @@ export const NO_ATTACH_TICKS = 10;
 // centre, laid out in each grid's own heading (world grid: world axes; a structure: its yaw), so
 // the probe is fixed relative to every support while the world-aligned body box turns relative
 // to a yawing deck (LESSONS 潜行走到甲板边缘掉下去; review: the old square attach-inset probe
-// changed its reach with the relative angle and switched the guard off). Every disk point lies
-// within SNEAK_DISK_RADIUS < half width of the centre, i.e. inside the body footprint at EVERY
-// relative rotation: guard-supported implies standing-supported (hasSupportBelow, inset 0) for as
-// long as the body does not move, however the deck turns — and a carried body keeps its carrier
-// through the inset-0 hysteresis.
+// changed its reach with the relative angle and switched the guard off).
+//
+// The disk is the INSCRIBED CIRCLE OF THE ATTACH PROBE (radius = half width - attach inset):
+// every disk point lies inside the attach probe, and so inside the standing footprint, at EVERY
+// relative rotation. Guard-supported therefore implies attach-supported and standing-supported
+// for as long as the body does not move, however the deck turns: a sneaking rider stopped at a
+// deck edge stays attachable, keeps its carrier when it jumps, and the footprint overlaps the
+// edge cell by at least the attach inset — more than the per-tick gravity sink (~0.04), so the
+// ground push always wins over the side push there.
 
-/** The guard disk is the footprint's inscribed circle shrunk by this margin. Larger than the
- *  per-tick gravity sink (~0.04) so the ground push at a deck edge always wins over the side push. */
-export const SNEAK_DISK_MARGIN = 0.06;
-/** A body that stands outside the guard disk (walked to the edge, then sneaked) may move only
- *  without getting farther from its support, measured with disks this much larger per step. */
-export const SNEAK_LADDER_STEP = 0.05;
+/**
+ * A body that stands outside the guard disk (walked to the edge, then sneaked) may move only
+ * without getting farther from its support, measured with a ladder of disks this much larger
+ * per rung. The measure never rises (a step is accepted only if the current rung's disk stays
+ * supported), so the body can creep outward by less than one rung in all, never ratchet away.
+ */
+export const SNEAK_LADDER_STEP = 0.02;
 
 // ====================================================================== pushing
 
@@ -80,6 +85,12 @@ export const GROUND_NORMAL_Y = 0.7;
 export const MIN_PUSH_PROJECTION_SQ = 0.1;
 /** Pushes clear the face by this much, so a pushed body is reliably "touching", never overlapping. */
 export const PUSH_SKIN = 1e-6;
+/**
+ * A body coming down onto a structure prefers the top face of a cell over a side face by the
+ * distance it came down this sub-step plus this slack (Mover.groundBias): landing on a deck's
+ * rim never shoves the body sideways off the edge.
+ */
+export const LAND_BIAS_SLACK = 0.02;
 /** Push iterations per structure per sub-step. */
 export const MAX_PUSH_ITERATIONS = 4;
 /** Relative motion longer than this per tick is split into sub-steps (a 1-cell deck cannot be tunnelled). */
@@ -102,6 +113,14 @@ export const PREFER_MIN_DEPTH = 0.2;
  * the needed lift is at most this. A deeper overlap is a wall: the axis is refused.
  */
 export const MAX_PUSH_LIFT = 0.3;
+/**
+ * A push axis that makes the body overlap ANOTHER structure by at most this fraction of the axis
+ * move (+ GRAZE_MIN) only grazes a surface tilted to the move (a turntable side leaning with the
+ * deck's roll, ~11 degrees at most): the body is nudged off it instead of the axis being refused.
+ * Moving into a wall overlaps it by about the whole move and is still refused.
+ */
+export const GRAZE_RATIO = 0.2;
+export const GRAZE_MIN = 1e-4;
 /** Free-spot search radius after a crush. */
 export const CRUSH_SEARCH_RADIUS = 3;
 /** Free-spot search radius for a body stuck inside world blocks. */

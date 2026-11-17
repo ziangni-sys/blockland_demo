@@ -3,24 +3,28 @@
  *
  * URL parameters:
  *   t=0.3            day time 0..1 (0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight)
- *   view=overview    camera preset: overview | above | waterline | under | hull | hut | mill | entities
+ *   view=overview    camera preset: overview | above | waterline | under | hull | hut | mill | entities |
+ *                    closeup | rabbit | deck | anchor | glue | gluetop | hold | holdeye | raft | ice
  *   cam=x,y,z,yaw,pitch   explicit camera (degrees), overrides view
  *   sub=water|lava|none   submerged state (default: from the camera preset)
  *   webgl=1          force the WebGL2 backend
  *   aa=0             disable MSAA
+ *   validate=0       skip the WebGPU presentation check (to exercise device-loss handling)
  *   vd=96            view distance (blocks)
  *   time=12.5        animation clock start (seconds); freeze=1 keeps it fixed (stable screenshots)
  *   stress=4         replicate the world's sections on a 4 x 4 grid (performance testing)
+ *   origin=1048576   shift the whole scene by (origin, 0, origin) blocks (float precision far
+ *                    from the world origin; must be a multiple of 16)
  * window.harness exposes the same controls plus stats() for scripted runs.
  */
 import { createThreeBackend } from '../../src/render/three/index';
 import type { ThreeBackend } from '../../src/render/three/backend';
-import type { BackendInfo, CameraState, EntityRenderState, EnvironmentState, OverlayState, RenderStats, StructurePose } from '../../src/render/backend';
+import type { BackendInfo, CameraState, EntityRenderState, EnvironmentState, OverlayCell, OverlayState, RenderStats, StructurePose } from '../../src/render/backend';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { qfromAxisAngle, qmul, qrotate, vec3 } from '../../src/core/math';
 import { sectionKey } from '../../src/voxel/chunk';
-import { buildRotor, buildShip, buildWorld, makeTiles, meshRegion, windmillAnchor, WORLD_X, WORLD_Y, WORLD_Z } from './synth';
+import { buildRaft, buildRotor, buildShip, buildWorld, makeTiles, meshRegion, windmillAnchor, WORLD_X, WORLD_Y, WORLD_Z } from './synth';
 
 const params = new URLSearchParams(location.search);
 const num = (k: string, d: number): number => {
@@ -30,11 +34,21 @@ const num = (k: string, d: number): number => {
 
 const canvas = document.getElementById('view') as HTMLCanvasElement;
 const hud = document.getElementById('hud') as HTMLDivElement;
-const backend = createThreeBackend({ forceWebGL: params.get('webgl') === '1', antialias: params.get('aa') !== '0' });
+const backend = createThreeBackend({
+  forceWebGL: params.get('webgl') === '1',
+  antialias: params.get('aa') !== '0',
+  validateWebGPU: params.get('validate') !== '0',
+  onLost: (info) => {
+    state.lost = `${info.api}: ${info.reason ?? ''} ${info.message}`;
+  },
+});
 
 const SHIP = 1;
 const ROTOR = 2;
+const RAFT = 3;
 const DEG = Math.PI / 180;
+/** Scene offset in x and z (blocks, multiple of 16). */
+const ORIGIN = Math.round(num('origin', 0) / 16) * 16;
 
 const state = {
   dayTime: num('t', 0.3),
@@ -48,12 +62,15 @@ const state = {
   /** Mean CPU time of backend.render() over the last 120 frames. */
   avgMs: 0,
   info: null as BackendInfo | null,
+  /** Set when the backend reports a lost device. */
+  lost: '',
 };
 
 // ---------------------------------------------------------------- world + structures
 const world = buildWorld();
 const ship = buildShip();
 const rotor = buildRotor();
+const raft = buildRaft();
 const anchor = windmillAnchor(world);
 
 function shipPose(t: number): StructurePose {
@@ -66,6 +83,23 @@ function shipPose(t: number): StructurePose {
 function rotorPose(t: number): StructurePose {
   const q = qfromAxisAngle(vec3(0, 0, 1), t * 0.9);
   return { px: anchor.x + 0.5, py: anchor.y + 0.5, pz: anchor.z + 0.5, qx: q.x, qy: q.y, qz: q.z, qw: q.w, pivotX: rotor.pivot[0], pivotY: rotor.pivot[1], pivotZ: rotor.pivot[2], sky: 15, block: 0 };
+}
+
+/**
+ * The raft floats with its floor top at world 47.7, 0.1-0.19 below the (bobbing) water
+ * surface: the band where small boats float and where the dry cut used to leak at the inner
+ * corners of the hold.
+ */
+function raftPose(t: number): StructurePose {
+  const q = qfromAxisAngle(vec3(0, 1, 0), 12 * DEG + Math.sin(t * 0.15) * DEG);
+  return { px: 56, py: 46.7, pz: 41, qx: q.x, qy: q.y, qz: q.z, qw: q.w, pivotX: raft.pivot[0], pivotY: raft.pivot[1], pivotZ: raft.pivot[2], sky: 15, block: 0 };
+}
+
+/** Raft-local point -> world. */
+function raftToWorld(x: number, y: number, z: number, t: number): { x: number; y: number; z: number } {
+  const p = raftPose(t);
+  const r = qrotate({ x: p.qx, y: p.qy, z: p.qz, w: p.qw }, vec3(x - p.pivotX, y - p.pivotY, z - p.pivotZ));
+  return { x: r.x + p.px, y: r.y + p.py, z: r.z + p.pz };
 }
 
 /** Ship-local point -> world (for camera presets inside the hull). */
@@ -111,6 +145,28 @@ const PRESETS: Record<string, () => { cam: CameraState; sub: 'none' | 'water' | 
     const t = state.time;
     return { cam: lookAt(shipToWorld(-1.5, 7, 6.5, t), shipToWorld(4, 3, 3, t)), sub: 'none' };
   },
+  glue: () => {
+    const t = state.time;
+    return { cam: lookAt(shipToWorld(3, 6.2, -2.6, t), shipToWorld(4.2, 2.2, 1.6, t)), sub: 'none' };
+  },
+  gluetop: () => {
+    const t = state.time;
+    return { cam: lookAt(shipToWorld(1.2, 6.6, 5.4, t), shipToWorld(3, 4, 3, t)), sub: 'none' };
+  },
+  hold: () => {
+    const t = state.time;
+    const c = raftToWorld(3.5, 1, 2.5, t);
+    return { cam: { x: c.x, y: c.y + 5, z: c.z, yaw: 12 * DEG, pitch: -89.9 * DEG, fov: 70 }, sub: 'none' };
+  },
+  holdeye: () => {
+    const t = state.time;
+    return { cam: lookAt(raftToWorld(1.6, 2.62, 1.6, t), raftToWorld(5.4, 1, 3.4, t)), sub: 'none' };
+  },
+  raft: () => {
+    const t = state.time;
+    return { cam: lookAt(raftToWorld(-4, 5, -5, t), raftToWorld(3.5, 1, 2.5, t)), sub: 'none' };
+  },
+  ice: () => ({ cam: lookAt({ x: 31, y: 50.2, z: 68 }, { x: 36, y: 47.9, z: 60 }), sub: 'none' }),
 };
 
 function applyView(): void {
@@ -188,10 +244,14 @@ const overlays: OverlayState = {
     { structureId: SHIP, x: 12, y: 1, z: 3 },
     { structureId: SHIP, x: 12, y: 2, z: 3 },
   ],
+  // Real glue, as the client sends it: the smaller cell of two adjacent BLOCKS plus the
+  // positive face along the glue axis (both sides are always occupied).
   glue: [
-    { structureId: SHIP, x: 2, y: 3, z: 3, face: 2 },
-    { structureId: SHIP, x: 3, y: 3, z: 2, face: 2 },
-    { structureId: SHIP, x: 0, y: 2, z: 3, face: 1 },
+    { structureId: SHIP, x: 2, y: 3, z: 3, face: 0 }, // deck plank | deck plank (x)
+    { structureId: SHIP, x: 3, y: 3, z: 2, face: 4 }, // deck plank | deck plank (z)
+    { structureId: SHIP, x: 4, y: 0, z: 0, face: 2 }, // floor | wall (y)
+    { structureId: SHIP, x: 6, y: 1, z: 0, face: 2 }, // wall | wall (y)
+    { structureId: SHIP, x: 7, y: 2, z: 0, face: 0 }, // wall | wall (x)
   ],
   glueAnchor: { structureId: SHIP, x: 2, y: 3, z: 3 },
 };
@@ -204,6 +264,44 @@ function environment(): EnvironmentState {
 const msRing = new Float64Array(120);
 let stopped = false;
 let last = performance.now();
+
+// ---- scene offset (origin=...): everything handed to the backend is shifted in x / z.
+const shiftedCam: CameraState = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, fov: 70 };
+function camAt(c: CameraState): CameraState {
+  shiftedCam.x = c.x + ORIGIN;
+  shiftedCam.y = c.y;
+  shiftedCam.z = c.z + ORIGIN;
+  shiftedCam.yaw = c.yaw;
+  shiftedCam.pitch = c.pitch;
+  shiftedCam.fov = c.fov;
+  return shiftedCam;
+}
+function poseAt(p: StructurePose): StructurePose {
+  p.px += ORIGIN;
+  p.pz += ORIGIN;
+  return p;
+}
+const shiftedEntities: EntityRenderState[] = entities.map((e) => ({ ...e }));
+function entitiesAt(): EntityRenderState[] {
+  for (let i = 0; i < entities.length; i++) {
+    Object.assign(shiftedEntities[i]!, entities[i]!);
+    shiftedEntities[i]!.x += ORIGIN;
+    shiftedEntities[i]!.z += ORIGIN;
+  }
+  return shiftedEntities;
+}
+function shiftCell<T extends OverlayCell>(c: T): T {
+  return c.structureId === 0 ? { ...c, x: c.x + ORIGIN, z: c.z + ORIGIN } : c;
+}
+const shiftedOverlays: OverlayState = {
+  ...overlays,
+  target: overlays.target && shiftCell(overlays.target),
+  preview: overlays.preview.map(shiftCell),
+  conflicts: overlays.conflicts.map(shiftCell),
+  glue: overlays.glue.map(shiftCell),
+  glueAnchor: overlays.glueAnchor && shiftCell(overlays.glueAnchor),
+};
+
 function frame(now: number): void {
   if (stopped) return;
   const dt = Math.min(0.1, (now - last) / 1000);
@@ -211,13 +309,14 @@ function frame(now: number): void {
   if (!state.frozen) state.time += dt;
   const t = state.time;
   backend.setEnvironment(environment());
-  backend.setCamera(state.cam);
-  backend.setStructurePose(SHIP, shipPose(t));
-  backend.setStructurePose(ROTOR, rotorPose(t));
+  backend.setCamera(camAt(state.cam));
+  backend.setStructurePose(SHIP, poseAt(shipPose(t)));
+  backend.setStructurePose(ROTOR, poseAt(rotorPose(t)));
+  backend.setStructurePose(RAFT, poseAt(raftPose(t)));
   updateEntities(t);
-  backend.setEntities(entities);
-  overlays.breakProgress = state.frozen ? 0.45 : (t * 0.25) % 1;
-  backend.setOverlays(overlays);
+  backend.setEntities(entitiesAt());
+  shiftedOverlays.breakProgress = state.frozen ? 0.45 : (t * 0.25) % 1;
+  backend.setOverlays(shiftedOverlays);
   const t0 = performance.now();
   backend.render();
   state.frameMs = performance.now() - t0;
@@ -239,28 +338,42 @@ function resize(): void {
   backend.resize(window.innerWidth, window.innerHeight, Math.min(2, window.devicePixelRatio || 1));
 }
 
+function addStructures(): void {
+  backend.setStructureMesh(SHIP, ship.ox, ship.oy, ship.oz, ship.mesh);
+  backend.setStructurePose(SHIP, poseAt(shipPose(state.time)));
+  backend.setStructureDryVolume(SHIP, ship.dry);
+  backend.setStructureMesh(ROTOR, rotor.ox, rotor.oy, rotor.oz, rotor.mesh);
+  backend.setStructurePose(ROTOR, poseAt(rotorPose(state.time)));
+  backend.setStructureMesh(RAFT, raft.ox, raft.oy, raft.oz, raft.mesh);
+  backend.setStructurePose(RAFT, poseAt(raftPose(state.time)));
+  backend.setStructureDryVolume(RAFT, raft.dry);
+}
+
 async function start(): Promise<BackendInfo> {
   applyView();
-  const info = await backend.init(canvas);
-  state.info = info;
+  // Sized, textured and filled BEFORE init resolves: the backend applies the size when the
+  // renderer exists and queues tiles / meshes until its pipelines are built.
   resize();
   window.addEventListener('resize', resize);
+  const initDone = backend.init(canvas);
   backend.setTiles(makeTiles());
   const t0 = performance.now();
   let sections = 0;
   const stress = Math.max(1, Math.floor(num('stress', 1)));
   const half = Math.floor(stress / 2);
+  const oc = ORIGIN / 16;
   for (let sy = 0; sy < WORLD_Y / 16; sy++) {
     for (let sz = 0; sz < WORLD_Z / 16; sz++) {
       for (let sx = 0; sx < WORLD_X / 16; sx++) {
         const mesh = meshRegion({ box: world, x0: sx * 16, y0: sy * 16, z0: sz * 16, sx: 16, sy: 16, sz: 16, lit: true });
         if (!mesh.opaque && !mesh.cutout && !mesh.translucent) continue;
-        // Stress mode: the same section meshes repeated on a grid of world copies (the backend
-        // owns nothing of the MeshData, so sharing the typed arrays is fine).
+        // Stress mode: the same section meshes repeated on a grid of world copies. The backend
+        // takes ownership of MeshData arrays but only ever reads them, so read-only sharing
+        // between sections is fine here.
         for (let gz = -half; gz < stress - half; gz++) {
           for (let gx = -half; gx < stress - half; gx++) {
-            const cx = sx + gx * (WORLD_X / 16);
-            const cz = sz + gz * (WORLD_Z / 16);
+            const cx = sx + gx * (WORLD_X / 16) + oc;
+            const cz = sz + gz * (WORLD_Z / 16) + oc;
             backend.setSectionMesh(sectionKey(cx, sy, cz), cx * 16, sy * 16, cz * 16, mesh);
             sections++;
           }
@@ -268,11 +381,9 @@ async function start(): Promise<BackendInfo> {
       }
     }
   }
-  backend.setStructureMesh(SHIP, ship.ox, ship.oy, ship.oz, ship.mesh);
-  backend.setStructurePose(SHIP, shipPose(state.time));
-  backend.setStructureDryVolume(SHIP, ship.dry);
-  backend.setStructureMesh(ROTOR, rotor.ox, rotor.oy, rotor.oz, rotor.mesh);
-  backend.setStructurePose(ROTOR, rotorPose(state.time));
+  addStructures();
+  const info = await initDone;
+  state.info = info;
   console.info(`[harness] ${info.api} (${info.detail}); ${sections} sections meshed in ${(performance.now() - t0).toFixed(0)} ms`);
   requestAnimationFrame(frame);
   return info;
@@ -323,13 +434,11 @@ const harness: Harness = {
   },
   toggleStructures: (on) => {
     if (on) {
-      backend.setStructureMesh(SHIP, ship.ox, ship.oy, ship.oz, ship.mesh);
-      backend.setStructurePose(SHIP, shipPose(state.time));
-      backend.setStructureDryVolume(SHIP, ship.dry);
-      backend.setStructureMesh(ROTOR, rotor.ox, rotor.oy, rotor.oz, rotor.mesh);
+      addStructures();
     } else {
       backend.setStructureMesh(SHIP, 0, 0, 0, null);
       backend.setStructureMesh(ROTOR, 0, 0, 0, null);
+      backend.setStructureMesh(RAFT, 0, 0, 0, null);
     }
   },
 };

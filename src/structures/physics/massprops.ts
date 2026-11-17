@@ -145,7 +145,7 @@ export function refreshShip(ship: Ship, body: Body, o: ResolvedOptions): boolean
   }
 
   // ---- floating (whole ship) and the shape built from it
-  const floats = hull !== null && mass < hull.maxDisplacement;
+  const floats = hull !== null && mass < hull.maxDisplacement * o.waterDensity;
   if (hull !== null) hull.floats = floats;
   body.floats = floats;
 
@@ -211,9 +211,9 @@ function selectForward(ship: Ship): void {
 /**
  * Linear water damping adapted to the hull, so that every ship design bobs briefly and
  * settles instead of oscillating (LESSONS 船纵倾、横倾过大). From the upright equilibrium
- * waterline (Archimedes on the displacing cells, layer by layer) we take the waterplane
- * area A and its second moments Ix, Iz; then
- *     heave:  w^2 = g A / m            roll about local X: w^2 = g Ix / I_xx   (Z likewise)
+ * waterline (Archimedes on the displacing cells, layer by layer: displaced volume = m / rho)
+ * we take the waterplane area A and its second moments Ix, Iz; then
+ *     heave:  w^2 = rho g A / m        roll about local X: w^2 = rho g Ix / I_xx   (Z likewise)
  * and the damping is 2 * zeta * w. Ships that cannot float keep moderate defaults.
  */
 function estimateDamping(body: Body, I: Float64Array, o: ResolvedOptions): void {
@@ -233,10 +233,12 @@ function estimateDamping(body: Body, I: Float64Array, o: ResolvedOptions): void 
   const layers = Math.round(ymax - ymin) + 1;
   const counts = new Float64Array(layers);
   for (let i = 0; i < n; i++) counts[Math.round(s.dy[i]! - ymin)]! += 1;
+  const rho = o.waterDensity;
+  const volume = body.mass / rho;
   let acc = 0;
   let wl = layers - 1;
   for (let l = 0; l < layers; l++) {
-    if (acc + counts[l]! >= body.mass) {
+    if (acc + counts[l]! >= volume) {
       wl = l;
       break;
     }
@@ -256,7 +258,7 @@ function estimateDamping(body: Body, I: Float64Array, o: ResolvedOptions): void 
     iz += dx * dx + 1 / 12;
   }
   if (area <= 0) return;
-  const g = o.gravity;
+  const g = o.gravity * rho;
   const clampC = (v: number): number => (v < 0.5 ? 0.5 : v > 25 ? 25 : v);
   body.heaveDamping = clampC(2 * o.heaveDampingRatio * Math.sqrt((g * area) / body.mass));
   body.rollDampingX = clampC(2 * o.rollDampingRatio * Math.sqrt((g * ix) / Math.max(I[0]!, 1e-6)));

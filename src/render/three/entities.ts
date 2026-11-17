@@ -4,6 +4,13 @@
  *
  * Positions: (x, y, z) is the bottom centre of the entity (feet / resting point), yaw in the
  * game's convention (0 looks toward -Z, CCW from above) which equals Object3D.rotation.y.
+ *
+ * Animation (rabbit hop, player walk) is driven by the entity's OWN motion. The contract
+ * carries no velocity, so it is measured from successive positions, and an entity riding a
+ * ship or a turntable would otherwise walk / hop in place. EntityLayer.set() only records
+ * the states; animate() runs once per rendered frame, after every structure pose of the
+ * frame is known, and asks a CarrierQuery for the displacement relative to whatever might be
+ * carrying the entity.
  */
 import * as THREE from 'three/webgpu';
 import type { EntityKind, EntityRenderState } from '../backend';
@@ -95,6 +102,25 @@ export class EntityAssets {
   }
 }
 
+/**
+ * Removes carrier motion from a measured displacement. Given an entity at world (x, y, z)
+ * that moved by (dx, dy, dz) since the previous rendered frame, writes into `out` the
+ * displacement relative to the structure most plausibly carrying it (the raw displacement
+ * when none is).
+ */
+export interface CarrierQuery {
+  selfMotion(x: number, y: number, z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void;
+}
+
+/** A CarrierQuery for a world without structures. */
+export const NO_CARRIERS: CarrierQuery = Object.freeze({
+  selfMotion(_x: number, _y: number, _z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void {
+    out.x = dx;
+    out.y = dy;
+    out.z = dz;
+  },
+});
+
 function makeMesh(geo: THREE.BufferGeometry, mat: THREE.Material, light: THREE.Vector4): THREE.Mesh {
   const m = new THREE.Mesh(geo, mat);
   m.userData.bl = light;
@@ -106,6 +132,8 @@ abstract class EntityView {
   readonly root = new THREE.Group();
   /** Per-object light uniform shared by every mesh of the view (x sky, y block, z flash). */
   readonly light = new THREE.Vector4(1, 0, 0, 0);
+  /** The state of this frame (copied: the caller may reuse its objects after setEntities). */
+  readonly cur: EntityRenderState = { id: -1, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 };
   id = -1;
   stamp = 0;
   // Motion tracking for animation.
@@ -113,15 +141,18 @@ abstract class EntityView {
   protected lastY = 0;
   protected lastZ = 0;
   protected lastT = -1;
+  /** Smoothed velocity relative to the carrier (blocks / s). */
   protected vx = 0;
   protected vy = 0;
   protected vz = 0;
+  private readonly rel = { x: 0, y: 0, z: 0 };
 
   abstract readonly kind: EntityKind;
 
   /** Called when the view is (re)assigned to an entity. */
   reset(s: EntityRenderState): void {
     this.id = s.id;
+    this.capture(s);
     this.lastX = s.x;
     this.lastY = s.y;
     this.lastZ = s.z;
@@ -130,16 +161,36 @@ abstract class EntityView {
     this.root.visible = true;
   }
 
-  /** Smoothed velocity from successive positions; returns the frame dt (0 on the first frame). */
-  protected track(s: EntityRenderState, time: number): number {
+  capture(s: EntityRenderState): void {
+    const c = this.cur;
+    c.id = s.id;
+    c.kind = s.kind;
+    c.x = s.x;
+    c.y = s.y;
+    c.z = s.z;
+    c.yaw = s.yaw;
+    c.payload = s.payload;
+    c.flash = s.flash;
+    c.sky = s.sky;
+    c.block = s.block;
+  }
+
+  /**
+   * Smoothed self-motion velocity from successive positions, carrier motion removed; returns
+   * the frame dt (0 on the first frame).
+   */
+  protected track(time: number, carriers: CarrierQuery): number {
+    const s = this.cur;
     let dt = 0;
     if (this.lastT >= 0) {
       dt = time - this.lastT;
       if (dt > 1e-4 && dt < 0.5) {
+        const r = this.rel;
+        carriers.selfMotion(s.x, s.y, s.z, s.x - this.lastX, s.y - this.lastY, s.z - this.lastZ, r);
         const k = Math.min(1, dt * 12);
-        this.vx += ((s.x - this.lastX) / dt - this.vx) * k;
-        this.vy += ((s.y - this.lastY) / dt - this.vy) * k;
-        this.vz += ((s.z - this.lastZ) / dt - this.vz) * k;
+        this.vx += (r.x / dt - this.vx) * k;
+        this.vy += (r.y / dt - this.vy) * k;
+        this.vz += (r.z / dt - this.vz) * k;
       } else if (dt >= 0.5) {
         this.vx = this.vy = this.vz = 0;
       }
@@ -156,7 +207,8 @@ abstract class EntityView {
     this.light.set(clamp01(s.sky / 15), clamp01(s.block / 15), clamp01(s.flash), 0);
   }
 
-  abstract update(s: EntityRenderState, time: number): void;
+  /** Poses the view from `cur` for this frame. */
+  abstract update(time: number, carriers: CarrierQuery): void;
 }
 
 function clamp01(v: number): number {
@@ -175,8 +227,9 @@ class ItemView extends EntityView {
     this.root.add(this.mesh);
   }
 
-  update(s: EntityRenderState, time: number): void {
-    this.track(s, time);
+  update(time: number, carriers: CarrierQuery): void {
+    const s = this.cur;
+    this.track(time, carriers);
     this.setLight(s);
     if (s.payload !== this.shown) {
       this.shown = s.payload;
@@ -206,8 +259,9 @@ class CellView extends EntityView {
     this.root.add(this.mesh);
   }
 
-  update(s: EntityRenderState, time: number): void {
-    this.track(s, time);
+  update(time: number, carriers: CarrierQuery): void {
+    const s = this.cur;
+    this.track(time, carriers);
     this.setLight(s);
     if (s.payload !== this.shown) {
       this.shown = s.payload;
@@ -233,8 +287,9 @@ class TntView extends EntityView {
     this.root.add(this.mesh);
   }
 
-  update(s: EntityRenderState, time: number): void {
-    this.track(s, time);
+  update(time: number, carriers: CarrierQuery): void {
+    const s = this.cur;
+    this.track(time, carriers);
     this.setLight(s);
     // Swells a touch as it flashes, around its centre.
     const k = 1 + clamp01(s.flash) * 0.06;
@@ -294,8 +349,9 @@ class RabbitView extends EntityView {
     this.hopper.add(this.hindL, this.hindR, foreL, foreR);
   }
 
-  update(s: EntityRenderState, time: number): void {
-    const dt = this.track(s, time);
+  update(time: number, carriers: CarrierQuery): void {
+    const s = this.cur;
+    const dt = this.track(time, carriers);
     this.setLight(s);
     const speed = Math.hypot(this.vx, this.vz);
     let lift = 0;
@@ -358,8 +414,9 @@ class PlayerView extends EntityView {
     this.root.add(torso, head, this.armL, this.armR, this.legL, this.legR);
   }
 
-  update(s: EntityRenderState, time: number): void {
-    const dt = this.track(s, time);
+  update(time: number, carriers: CarrierQuery): void {
+    const s = this.cur;
+    const dt = this.track(time, carriers);
     this.setLight(s);
     const speed = Math.hypot(this.vx, this.vz);
     const amp = Math.min(1, speed / 4.3) * 0.75;
@@ -414,7 +471,8 @@ export class EntityLayer {
     }
   }
 
-  set(list: readonly EntityRenderState[], time: number): void {
+  /** Records this frame's entity list (views are posed later, in animate()). */
+  set(list: readonly EntityRenderState[]): void {
     const stamp = ++this.stamp;
     for (let i = 0; i < list.length; i++) {
       const s = list[i]!;
@@ -429,12 +487,27 @@ export class EntityLayer {
         if (!v.root.parent) this.group.add(v.root);
         v.reset(s);
         this.live.set(s.id, v);
+      } else {
+        v.capture(s);
       }
       v.stamp = stamp;
-      v.update(s, time);
     }
     this.live.forEach(this.sweep);
   }
+
+  /** Poses every live view for a frame at `time` (seconds); call once per rendered frame. */
+  animate(time: number, carriers: CarrierQuery): void {
+    this.time = time;
+    this.carriers = carriers;
+    this.live.forEach(this.animateOne);
+    this.carriers = NO_CARRIERS;
+  }
+
+  private time = 0;
+  private carriers: CarrierQuery = NO_CARRIERS;
+  private readonly animateOne = (v: EntityView): void => {
+    v.update(this.time, this.carriers);
+  };
 
   /** Builds one view of every kind (for pipeline warm-up). */
   warmupViews(): THREE.Object3D[] {
@@ -446,7 +519,7 @@ export class EntityLayer {
       dummy.kind = k;
       dummy.payload = k === 'falling' ? B.SAND : B.STONE;
       v.reset(dummy);
-      v.update(dummy, 0);
+      v.update(0, NO_CARRIERS);
       out.push(v.root);
     }
     return out;

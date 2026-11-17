@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DryVolume, StructurePose } from '../../src/render/backend';
-import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix, transformPoint } from '../../src/render/three/pose';
+import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix, transformPoint, worldToLocal } from '../../src/render/three/pose';
 import { qfromAxisAngle, qrotate, vec3, vnormalize } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
 
@@ -101,5 +101,52 @@ describe('dry volume matrix', () => {
     expect(c.y).toBeCloseTo(r.y, 9);
     expect(c.z).toBeCloseTo(r.z, 9);
     expect(dryVolumeRadius(dry)).toBeCloseTo(0.5 * Math.hypot(5, 3, 7), 12);
+  });
+});
+
+describe('camera-relative and inverse transforms', () => {
+  it('worldToLocal inverts poseToMatrix (also for non-unit quaternions)', () => {
+    const rng = new Rng(7);
+    const m = new Float64Array(16);
+    const w = vec3();
+    const l = vec3();
+    for (let i = 0; i < 100; i++) {
+      const axis = vnormalize(vec3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)));
+      const q = qfromAxisAngle(axis, rng.range(-Math.PI, Math.PI));
+      const s = rng.range(0.98, 1.02);
+      const ps = pose([rng.range(-1e5, 1e5), rng.range(0, 128), rng.range(-1e5, 1e5)], { x: q.x * s, y: q.y * s, z: q.z * s, w: q.w * s }, [rng.range(-5, 5), 1.5, rng.range(-5, 5)]);
+      poseToMatrix(ps, m);
+      const lx = rng.range(-10, 10);
+      const ly = rng.range(-10, 10);
+      const lz = rng.range(-10, 10);
+      transformPoint(m, lx, ly, lz, w);
+      worldToLocal(ps, w.x, w.y, w.z, l);
+      expect(l.x).toBeCloseTo(lx, 6);
+      expect(l.y).toBeCloseTo(ly, 6);
+      expect(l.z).toBeCloseTo(lz, 6);
+    }
+  });
+
+  // Review finding (float32 far from the origin): the dry-volume matrix takes camera-relative
+  // positions, so its translation stays small and its float32 copy is exact enough.
+  it('dry volume matrix with an origin maps (world - origin) like the plain matrix maps world', () => {
+    const dry: DryVolume = { ox: -1, oy: -1, oz: -1, sx: 9, sy: 5, sz: 7, mask: new Uint8Array(9 * 5 * 7) };
+    const q = qfromAxisAngle(vnormalize(vec3(0.2, 1, 0.1)), 0.8);
+    const ps = pose([1048576.3, 47.6, -2097152.8], q, [3.5, 1, 2.5]);
+    const plain = new Float64Array(16);
+    const rel = new Float64Array(16);
+    const cam = [1048570.25, 52.5, -2097160.5] as const;
+    dryVolumeMatrix(ps, dry, plain);
+    dryVolumeMatrix(ps, dry, rel, cam[0], cam[1], cam[2]);
+    const wpt = refWorld(ps, 2.3, 1.4, 3.9);
+    const a = transformPoint(plain, wpt.x, wpt.y, wpt.z, vec3());
+    const b = transformPoint(rel, wpt.x - cam[0], wpt.y - cam[1], wpt.z - cam[2], vec3());
+    expect(b.x).toBeCloseTo(a.x, 6);
+    expect(b.y).toBeCloseTo(a.y, 6);
+    expect(b.z).toBeCloseTo(a.z, 6);
+    expect(b.x).toBeCloseTo((2.3 - dry.ox) / dry.sx, 6);
+    // The camera-relative translation is small (no catastrophic cancellation in float32).
+    for (const k of [12, 13, 14]) expect(Math.abs(rel[k]!)).toBeLessThan(10);
+    expect(Math.fround(rel[12]!)).toBeCloseTo(rel[12]!, 6);
   });
 });

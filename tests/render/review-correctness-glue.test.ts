@@ -38,7 +38,10 @@ function glueInstances(root: THREE.Object3D): { box: THREE.Box3; depthTested: bo
     for (let i = 0; i < o.count; i++) {
       o.getMatrixAt(i, m);
       const box = geo.boundingBox!.clone().applyMatrix4(m);
-      const depthTested = mat.depthTest !== false && mat.depthFunc !== THREE.AlwaysDepth;
+      // Hidden by the blocks in front of it only under a "nearer wins" depth function. (An
+      // x-ray pass with GreaterDepth is drawn precisely BECAUSE something is in front of it.)
+      const nearerWins = mat.depthFunc === THREE.LessDepth || mat.depthFunc === THREE.LessEqualDepth || mat.depthFunc === THREE.EqualDepth;
+      const depthTested = mat.depthTest !== false && nearerWins;
       out.push({ box, depthTested });
     }
   });

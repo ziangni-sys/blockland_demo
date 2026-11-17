@@ -7,7 +7,7 @@
  * Frame: world = R * local + t, with R = rotation matrix and t = position - R * pivot.
  * The pivot is the centre of mass, so (px,py,pz) = grid.position is the COM in world space.
  */
-import { qintegrate, qnormalize, qtoMat3, quat, vec3, type Quat, type Vec3 } from '../../core/math';
+import { qnormalize, qtoMat3, quat, vec3, type Quat, type Vec3 } from '../../core/math';
 import type { Ship } from '../structure';
 import { mat3Congruence, type Mat3 } from './mat3';
 import { WorldPatch } from './patch';
@@ -23,6 +23,12 @@ export interface ShipPhysicsStats {
   simulated: boolean;
   /** Skipped because ship.frozen or its surroundings are not loaded. */
   frozen: boolean;
+  /**
+   * Not simulated because the ship has no hard cell left (only soft cells such as torches, or
+   * no cell at all): nothing can collide or float, so it is held motionless with zero velocity
+   * and asleep until cells are added. The structure manager should remove such ships.
+   */
+  inert: boolean;
   /** Contacts in the last sub-step, by kind. */
   terrainContacts: number;
   rotorContacts: number;
@@ -44,6 +50,7 @@ export class Body {
   readonly stats: ShipPhysicsStats = {
     simulated: false,
     frozen: false,
+    inert: false,
     terrainContacts: 0,
     rotorContacts: 0,
     shipContacts: 0,
@@ -135,6 +142,22 @@ export class Body {
   rotorTouchThisTick = false;
   /** Sum of normal impulses of ship/ship contacts this tick (wakes a sleeper that gets pushed). */
   shipImpulseThisTick = 0;
+  /** A moving rotor can reach the ship this tick (its sleeping neighbours must not stay asleep). */
+  rotorNear = false;
+  /**
+   * Cells or mounted rotors changed since the previous step (refresh recomputed the mass data):
+   * sleeping ships within reach are woken, e.g. a boat resting on a deck that was just mined.
+   */
+  changed = false;
+  /** World box covering this ship before and after its last change (valid when changed). */
+  private cMinX = Infinity;
+  private cMinY = Infinity;
+  private cMinZ = Infinity;
+  private cMaxX = -Infinity;
+  private cMaxY = -Infinity;
+  private cMaxZ = -Infinity;
+  /** minX..maxZ hold a real box (computed at least once with hard cells). */
+  private hasBox = false;
   /** Best pinned hull cell found this tick (deepest overlap); destroyed after the tick. */
   pinHas = false;
   pinDepth = 0;
@@ -153,7 +176,6 @@ export class Body {
   private lastQw = 1;
 
   private readonly tmpM: Mat3 = new Float64Array(9);
-  private readonly tmpW: Vec3 = vec3();
 
   constructor(ship: Ship) {
     this.ship = ship;
@@ -225,6 +247,7 @@ export class Body {
       if (wz > maxZ) maxZ = wz;
     }
     this.rMax = Math.sqrt(r2);
+    this.hasBox = true;
     this.minX = minX;
     this.minY = minY;
     this.minZ = minZ;
@@ -287,6 +310,43 @@ export class Body {
       if (x >= lx0 && x <= lx1 && y >= ly0 && y <= ly1 && z >= lz0 && z <= lz1) out[c++] = i;
     }
     this.terrainCandCount = c;
+  }
+
+  /** Start the changed-ship box with the box of the previous tick (before loadPose). */
+  beginChangedBox(): void {
+    if (this.hasBox) {
+      this.cMinX = this.minX;
+      this.cMinY = this.minY;
+      this.cMinZ = this.minZ;
+      this.cMaxX = this.maxX;
+      this.cMaxY = this.maxY;
+      this.cMaxZ = this.maxZ;
+    } else {
+      this.cMinX = this.cMinY = this.cMinZ = Infinity;
+      this.cMaxX = this.cMaxY = this.cMaxZ = -Infinity;
+    }
+  }
+
+  /** Grow the changed-ship box by the current box (after loadPose). */
+  extendChangedBox(): void {
+    if (this.minX < this.cMinX) this.cMinX = this.minX;
+    if (this.minY < this.cMinY) this.cMinY = this.minY;
+    if (this.minZ < this.cMinZ) this.cMinZ = this.minZ;
+    if (this.maxX > this.cMaxX) this.cMaxX = this.maxX;
+    if (this.maxY > this.cMaxY) this.cMaxY = this.maxY;
+    if (this.maxZ > this.cMaxZ) this.cMaxZ = this.maxZ;
+  }
+
+  /** Does the changed-ship box come within `margin` of the other body's box? */
+  changedBoxNear(o: Body, margin: number): boolean {
+    return (
+      this.cMinX - margin < o.maxX &&
+      this.cMaxX + margin > o.minX &&
+      this.cMinY - margin < o.maxY &&
+      this.cMaxY + margin > o.minY &&
+      this.cMinZ - margin < o.maxZ &&
+      this.cMaxZ + margin > o.minZ
+    );
   }
 
   /** Make this body an immovable obstacle for the tick (frozen ships). */
@@ -353,11 +413,7 @@ export class Body {
     this.px += (this.vx + vpx) * dt;
     this.py += (this.vy + vpy) * dt;
     this.pz += (this.vz + vpz) * dt;
-    const w = this.tmpW;
-    w.x = this.wx + wpx;
-    w.y = this.wy + wpy;
-    w.z = this.wz + wpz;
-    qintegrate(this.q, w, dt, this.q);
+    integrateOrientation(this.q, this.wx + wpx, this.wy + wpy, this.wz + wpz, dt);
     this.vpx = this.vpy = this.vpz = 0;
     this.wpx = this.wpy = this.wpz = 0;
   }
@@ -442,6 +498,7 @@ export class Body {
     const s = this.stats;
     s.simulated = false;
     s.frozen = false;
+    s.inert = false;
     s.terrainContacts = 0;
     s.rotorContacts = 0;
     s.shipContacts = 0;
@@ -452,7 +509,43 @@ export class Body {
     this.supportedThisTick = false;
     this.rotorTouchThisTick = false;
     this.shipImpulseThisTick = 0;
+    this.rotorNear = false;
     this.pinHas = false;
     this.pinDepth = 0;
   }
+}
+
+/**
+ * q <- exp(w dt / 2) * q, normalised: the exact rotation for a constant world angular velocity
+ * over dt (the same as core qintegrate, without its temporary quaternion — this runs on every
+ * sub-step of every ship).
+ */
+function integrateOrientation(q: Quat, wx: number, wy: number, wz: number, dt: number): void {
+  const wl = Math.sqrt(wx * wx + wy * wy + wz * wz);
+  const angle = wl * dt;
+  if (angle < 1e-12) return;
+  const s = Math.sin(angle * 0.5) / wl;
+  const ax = wx * s;
+  const ay = wy * s;
+  const az = wz * s;
+  const aw = Math.cos(angle * 0.5);
+  const bx = q.x;
+  const by = q.y;
+  const bz = q.z;
+  const bw = q.w;
+  let x = aw * bx + ax * bw + ay * bz - az * by;
+  let y = aw * by - ax * bz + ay * bw + az * bx;
+  let z = aw * bz + ax * by - ay * bx + az * bw;
+  let w = aw * bw - ax * bx - ay * by - az * bz;
+  const l = Math.sqrt(x * x + y * y + z * z + w * w);
+  if (l > 0) {
+    x /= l;
+    y /= l;
+    z /= l;
+    w /= l;
+  }
+  q.x = x;
+  q.y = y;
+  q.z = z;
+  q.w = w;
 }

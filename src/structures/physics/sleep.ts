@@ -1,10 +1,12 @@
 /**
- * Sleep: a ship that stays (nearly) motionless while supported — resting on terrain or on
- * another ship, or floating at equilibrium — for sleepTicks ticks is skipped by the dynamics
- * until something disturbs it (wake(), applyImpulse(), throttle / rudder, a cell change, game
- * code moving it, a moving rotor or a MOVING ship in reach, or a noticeable push from a ship
- * touching it; the structure manager also wakes ships when world cells near them change).
- * A sleeping ship does not move at all, so resting ships show exactly zero drift.
+ * Sleep: a ship that stays (nearly) motionless while supported — resting on terrain, on another
+ * ship or on a stopped rotor, or floating at equilibrium — for sleepTicks ticks is skipped by the
+ * dynamics until something disturbs it: wake(), applyImpulse(), throttle / rudder, a change of
+ * its own cells or rotors, game code moving it, a moving rotor whose sweep reaches it, a ship in
+ * reach that moves, is driven by a moving rotor or had its cells changed (a deck mined under a
+ * resting boat), or a noticeable push from a ship touching it; the structure manager also wakes
+ * ships when world cells near them change. A sleeping ship does not move at all, so resting
+ * ships show exactly zero drift.
  *
  * Ships touching each other sleep as one island: an island falls asleep only when every member
  * has been quiet long enough, so two moored boats (or one resting on the other) can never keep
@@ -15,7 +17,7 @@ import type { Ship } from '../structure';
 import type { Body } from './body';
 import type { ResolvedOptions } from './options';
 
-/** Relative tolerance of "floating at equilibrium": |submerged - mass| <= this * mass + 0.1. */
+/** Relative tolerance of "floating at equilibrium": |rho * submerged - mass| <= this * mass + 0.1. */
 const FLOAT_EQUILIBRIUM = 0.05;
 
 export function wakeShip(ship: Ship): void {
@@ -36,10 +38,14 @@ export function isQuiet(body: Body, o: ResolvedOptions): boolean {
   );
 }
 
-/** End-of-tick rest bookkeeping for a simulated body: counts quiet, supported ticks. */
+/**
+ * End-of-tick rest bookkeeping for a simulated body: counts quiet, supported ticks. Only a
+ * MOVING rotor touching the ship prevents rest; a stopped one is just something to lie on.
+ */
 export function updateRest(body: Body, o: ResolvedOptions): void {
   const ship = body.ship;
-  const floating = body.floats && Math.abs(body.submerged - body.mass) <= FLOAT_EQUILIBRIUM * body.mass + 0.1;
+  const floating =
+    body.floats && Math.abs(body.submerged * o.waterDensity - body.mass) <= FLOAT_EQUILIBRIUM * body.mass + 0.1;
   const rest = isQuiet(body, o) && !body.rotorTouchThisTick && (body.supportedThisTick || floating);
   ship.restTicks = rest ? ship.restTicks + 1 : 0;
 }

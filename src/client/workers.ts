@@ -21,8 +21,15 @@ export interface WorkerPoolOptions {
   /** For diagnostics ("mesh", "terrain"). */
   name: string;
   size: number;
-  /** Creates one worker; may throw (then the pool fails). */
+  /** Creates one worker; may throw (then the pool fails, or moves on to `alternatives`). */
   create: () => WorkerLike;
+  /**
+   * Other ways to start the same worker, tried in order when every worker of the current way
+   * failed to start (e.g. module workers from blob URLs are refused in opaque-origin sandboxes,
+   * while the same code from a data: URL runs). Jobs in flight fail with 'restarting' and are
+   * retried by their callers.
+   */
+  alternatives?: ReadonlyArray<() => WorkerLike>;
   /** A worker that has not answered its first job after this long is considered dead. */
   firstReplyTimeoutMs: number;
   now: () => number;
@@ -54,6 +61,9 @@ export class WorkerPool<Res extends { id: number }> {
   private slots: Slot[] = [];
   private nextId = 1;
   private restarts = 0;
+  /** 0 = opts.create, k = opts.alternatives[k - 1]. */
+  private way = 0;
+  private anyProven = false;
   private _state: PoolState = 'idle';
   private _failReason = '';
 
@@ -86,7 +96,8 @@ export class WorkerPool<Res extends { id: number }> {
    */
   submit(build: (id: number) => unknown, transfer: Transferable[], onDone: (res: Res) => void, onFail: (reason: string) => void): boolean {
     if (this._state === 'failed') return false;
-    if (this._state === 'idle') this.start();
+    // A way of starting workers that throws right away moves on to the next one at once.
+    for (let guard = 0; this._state === 'idle' && guard <= (this.opts.alternatives?.length ?? 0); guard++) this.start();
     if (this._state !== 'running') return false;
     const slot = this.leastLoaded();
     if (!slot) return false;
@@ -157,7 +168,8 @@ export class WorkerPool<Res extends { id: number }> {
   private spawn(): Slot | null {
     let worker: WorkerLike;
     try {
-      worker = this.opts.create();
+      const create = this.way === 0 ? this.opts.create : this.opts.alternatives![this.way - 1]!;
+      worker = create();
     } catch (e) {
       this.fail(`cannot create a ${this.opts.name} worker: ${e instanceof Error ? e.message : String(e)}`);
       return null;
@@ -172,6 +184,7 @@ export class WorkerPool<Res extends { id: number }> {
   private onMessage(slot: Slot, data: unknown): void {
     if (slot.dead) return;
     slot.proven = true;
+    this.anyProven = true;
     const id = data !== null && typeof data === 'object' ? (data as { id?: unknown }).id : undefined;
     if (typeof id !== 'number') return;
     const job = slot.jobs.get(id);
@@ -209,8 +222,28 @@ export class WorkerPool<Res extends { id: number }> {
 
   private fail(reason: string): void {
     if (this._state === 'failed') return;
+    const alternatives = this.opts.alternatives ?? [];
+    if (!this.anyProven && this.way < alternatives.length) {
+      // This way of starting workers does not work here: try the next one on the next submit.
+      this.way++;
+      const jobs = this.dropAll();
+      this._state = 'idle';
+      for (const j of jobs) j.onFail('restarting');
+      return;
+    }
     this._state = 'failed';
     this._failReason = reason;
+    const jobs = this.dropAll();
+    try {
+      this.opts.onFailed?.(reason);
+    } catch {
+      // ignore
+    }
+    for (const j of jobs) j.onFail('pool failed');
+  }
+
+  /** Terminate every worker; returns the jobs that were in flight. */
+  private dropAll(): Job[] {
     const jobs: Job[] = [];
     for (const s of this.slots) {
       s.dead = true;
@@ -223,12 +256,7 @@ export class WorkerPool<Res extends { id: number }> {
       }
     }
     this.slots = [];
-    try {
-      this.opts.onFailed?.(reason);
-    } catch {
-      // ignore
-    }
-    for (const j of jobs) j.onFail('pool failed');
+    return jobs;
   }
 
   private leastLoaded(): Slot | null {

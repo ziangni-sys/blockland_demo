@@ -45,7 +45,8 @@ import { applySettingsPatch, languageFromLocale, SettingsStore, type KeyValueSto
 import { clientText, type ClientStringKey } from './strings';
 import { ToastList } from './toasts';
 import { UiStateBuilder } from './uistate';
-import { createGenWorker, createMeshWorker } from './workerfactory';
+import { installFormSubmitShim } from './uishim';
+import { createGenWorker, createGenWorkerFromDataUrl, createMeshWorker, createMeshWorkerFromDataUrl } from './workerfactory';
 import { WorkerPool } from './workers';
 
 export const CLIENT_VERSION = '0.1.0';
@@ -164,6 +165,8 @@ export class Game implements InputHost {
         }
       },
     });
+    // Sandboxed hosts without allow-forms never deliver form submit events (see uishim.ts).
+    installFormSubmitShim(env.uiRoot);
     this.binder = new InputBinder(env.win, env.canvas, this);
     this.loop = new FrameLoop(
       {
@@ -289,6 +292,7 @@ export class Game implements InputHost {
       name: 'terrain',
       size: 2,
       create: createGenWorker,
+      alternatives: [createGenWorkerFromDataUrl],
       firstReplyTimeoutMs: 20_000,
       now,
       onFailed: warn('terrain'),
@@ -298,6 +302,7 @@ export class Game implements InputHost {
       name: 'mesh',
       size: cores >= 8 ? 3 : 2,
       create: createMeshWorker,
+      alternatives: [createMeshWorkerFromDataUrl],
       firstReplyTimeoutMs: 20_000,
       now,
       onFailed: warn('mesh'),

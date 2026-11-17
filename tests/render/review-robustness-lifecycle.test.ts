@@ -35,10 +35,15 @@ function mesh(): MeshData {
   return { opaque: quad(), cutout: null, translucent: null };
 }
 
-/** A backend whose materials exist (what init() does before the first frame), without a GPU. */
+/**
+ * A backend in the state init() leaves it in (pipelines built, ready), without a GPU. Before
+ * init completes the backend now queues meshes instead of dropping them, so `ready` must be
+ * set as well for meshes to be applied immediately.
+ */
 function backendWithPipelines(): ThreeBackend {
   const be = new ThreeBackend({ forceWebGL: true });
   (be as unknown as { buildPipelines(): void }).buildPipelines();
+  (be as unknown as { ready: boolean }).ready = true;
   return be;
 }
 

@@ -1,17 +1,28 @@
 /**
  * three.js implementation of RenderBackend (WebGPURenderer + TSL node materials; falls back
- * to WebGL2 when WebGPU is unavailable).
+ * to WebGL2 when WebGPU is unavailable or cannot present).
  *
  * Scene layout:
  *   sections   static world section meshes (matrices computed once, never re-traversed)
  *   structures one Group per structure, matrix written from StructurePose each frame
  *   entities   pooled entity views
- *   overlays   world-space overlays (structure-space overlays live under their structure)
+ *   overlays   world-space overlays, placed at an integer anchor near the camera
+ *              (structure-space overlays live under their structure)
  *   sky        far-plane dome drawn after the opaque world
  *
  * Render order: opaque (renderOrder 0, front to back) -> cutout (1) -> sky (50) ->
  * transparent list (water 0, overlays 60+). Every voxel pass culls back faces (mesh
  * contract). Rendering goes straight to the canvas; materials encode sRGB themselves.
+ *
+ * Precision: renderer.highPrecision computes every model-view matrix on the CPU in float64,
+ * and the shaders work in camera-relative / anim-origin-relative coordinates (shading.ts),
+ * so nothing cracks, shifts or swims far from the world origin.
+ *
+ * Lifecycle: every public method is callable at any time. Before init() resolves, tiles,
+ * meshes and dry volumes are queued (last write wins) and applied when the pipelines exist;
+ * after dispose() (also while init() is still pending) every call is a no-op and a pending
+ * init() rejects. A lost GPU device / context stops rendering and is reported through
+ * ThreeBackendOptions.onLost and isLost().
  */
 import * as THREE from 'three/webgpu';
 import { renderGroup, uniform } from 'three/tsl';
@@ -32,15 +43,23 @@ import { SECTION_SIZE } from '../../core/constants';
 import { B } from '../../blocks/defs';
 import { BLOCKS } from '../../blocks/registry';
 import { buildBox } from './boxgeom';
-import { EntityAssets, EntityLayer } from './entities';
+import { EntityAssets, EntityLayer, type CarrierQuery } from './entities';
 import { computeBoundsFromPositions, setBoxBounds, toBufferGeometry, type GeometryOptions } from './geometry';
 import { computeFog, computeSkyState, createFogParams, createSkyState, linearToSrgb, SUN_TILT } from './lighting';
 import { createModelMaterial } from './models';
-import { OverlayLayer } from './overlays';
-import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix } from './pose';
+import { OverlayLayer, type OverlayAnchor } from './overlays';
+import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix, transformPoint, worldToLocal } from './pose';
 import { createSky, type Sky } from './sky';
 import { createVoxelMaterials, DRY_SLOTS, SharedUniforms, type VoxelMaterials } from './shading';
 import { prepareTilePixels } from './tiles';
+import { animOrigin } from './waves';
+
+/** Why the GPU stopped rendering (ThreeBackendOptions.onLost). */
+export interface DeviceLostInfo {
+  api: 'webgpu' | 'webgl2';
+  message: string;
+  reason: string | null;
+}
 
 export interface ThreeBackendOptions {
   /** Use the WebGL2 backend even when WebGPU is available. */
@@ -49,12 +68,48 @@ export interface ThreeBackendOptions {
   antialias?: boolean;
   /** Passed to the WebGPU adapter request (default 'high-performance'). */
   powerPreference?: GPUPowerPreference;
+  /**
+   * Before committing the caller's canvas to WebGPU, present two frames on a throw-away
+   * canvas and fall back to WebGL2 if the device dies (default true). A canvas that once had
+   * a WebGPU context can never get a WebGL2 one, so this is the only point where falling
+   * back is still possible; some environments (e.g. headless SwiftShader) hand out an
+   * adapter whose device is lost on the first presented frame.
+   */
+  validateWebGPU?: boolean;
+  /**
+   * Called once when the GPU device / WebGL context is lost after init. The backend draws
+   * nothing from then on; to recover, dispose it and create a new backend on a NEW canvas
+   * (forceWebGL: true is the safe choice after a WebGPU loss).
+   */
+  onLost?: (info: DeviceLostInfo) => void;
+}
+
+/** Thrown by init() when dispose() was called before it finished. */
+export class BackendDisposedError extends Error {
+  constructor() {
+    super('ThreeBackend was disposed during init()');
+    this.name = 'BackendDisposedError';
+  }
 }
 
 /** Margin added to section bounds for liquid bobbing / plant sway. */
 const ANIM_MARGIN = 0.25;
 const GROUPS = ['opaque', 'cutout', 'translucent'] as const;
 const ORDER = [0, 1, 0];
+
+/**
+ * Upload budget: meshes that were handed over but never drawn (outside the view) are drawn
+ * once with frustum culling off, a few per frame, so their GPU buffers and render objects
+ * exist before they first come into view. Otherwise turning the camera after loading uploads
+ * hundreds of sections inside one frame (tens of ms).
+ */
+const PRIME_MAX_MESHES = 48;
+const PRIME_MAX_VERTICES = 65536;
+
+/** Horizontal / vertical slack of the carrier test around a structure's mesh bounds (blocks). */
+const CARRY_PAD_XZ = 0.75;
+const CARRY_PAD_BELOW = 0.5;
+const CARRY_PAD_ABOVE = 2.5;
 
 interface SectionRecord {
   meshes: [THREE.Mesh | null, THREE.Mesh | null, THREE.Mesh | null];
@@ -68,8 +123,32 @@ interface StructureRecord {
   light: THREE.Vector4;
   pose: StructurePose;
   hasPose: boolean;
+  /** group.matrix at the end of the previous rendered frame (carrier motion of entities). */
+  prevMatrix: Float64Array;
+  hasPrev: boolean;
+  /** Local-space bounds of all meshes (minX, minY, minZ, maxX, maxY, maxZ); hasBounds false = none. */
+  bounds: Float64Array;
+  hasBounds: boolean;
   dryTex: THREE.Data3DTexture | null;
   dry: DryVolume | null;
+}
+
+interface PendingMesh {
+  ox: number;
+  oy: number;
+  oz: number;
+  mesh: MeshData;
+}
+
+/** Per-mesh bookkeeping of the upload primer, kept in Object3D.userData. */
+interface MeshUpload {
+  /** Light uniform read by the voxel materials (see shading.ts). */
+  bl: THREE.Vector4;
+  /** The geometry has been drawn at least once (its GPU buffers exist). */
+  drawn: boolean;
+  /** Geometry that was drawn (a replaced geometry must not be released by mistake). */
+  drawnGeo: THREE.BufferGeometry | null;
+  queued: boolean;
 }
 
 function newPose(): StructurePose {
@@ -115,10 +194,9 @@ function makeMaskTexture(data: Uint8Array, sx: number, sy: number, sz: number): 
   t.format = THREE.RedFormat;
   t.type = THREE.UnsignedByteType;
   t.colorSpace = THREE.NoColorSpace;
-  // Linear on purpose: with the shader's 0.2 threshold the dry region reaches ~0.3 cells
-  // into neighbouring (hull wall) cells (still 0.25 at concave corners), which removes the 1 px
-  // z-fight line where the water
-  // plane meets the inner wall faces. The walls hide everything else that is cut.
+  // Linear: the shader samples each mask layer at its centre (exact in y) and filters only
+  // across x / z, which pulls the cut ~0.3 cells into the hull walls (see shading.ts
+  // dryVolumeFactor) and removes the z-fight line where the water meets the inner walls.
   t.magFilter = THREE.LinearFilter;
   t.minFilter = THREE.LinearFilter;
   t.generateMipmaps = false;
@@ -130,9 +208,72 @@ function makeMaskTexture(data: Uint8Array, sx: number, sy: number, sz: number): 
   return t;
 }
 
+/** Replaces every CPU-side array of an uploaded geometry by an empty one of the same type. */
+function releaseGeometryArrays(geo: THREE.BufferGeometry): void {
+  // three reads an attribute's array only to create / update its GPU buffer (version change)
+  // and for its element type (BYTES_PER_ELEMENT, constructor), which an empty array of the
+  // same type preserves. `count` is a plain property fixed at construction and keeps the draw
+  // range. Nothing here ever bumps the version again, so the arrays are dead weight.
+  const release = (a: THREE.BufferAttribute): void => {
+    const arr = a.array as unknown as { length: number; constructor: new (n: number) => THREE.TypedArray };
+    if (arr.length > 0) a.array = new arr.constructor(0);
+  };
+  for (const name in geo.attributes) {
+    const a = geo.attributes[name];
+    if (a instanceof THREE.BufferAttribute) release(a);
+  }
+  if (geo.index) release(geo.index);
+}
+
+/**
+ * Presents two frames with a device of `adapter` on a detached canvas and reports whether the
+ * device survived. The probe device is destroyed afterwards.
+ */
+async function webgpuCanPresent(adapter: GPUAdapter): Promise<boolean> {
+  if (typeof document === 'undefined' || !navigator.gpu) return false;
+  let device: GPUDevice | null = null;
+  let lost = false;
+  try {
+    device = await adapter.requestDevice();
+    const dev = device;
+    void dev.lost.then(() => {
+      lost = true;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = 4;
+    canvas.height = 4;
+    const ctx = canvas.getContext('webgpu') as GPUCanvasContext | null;
+    if (!ctx) return false;
+    ctx.configure({ device: dev, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: 'opaque' });
+    for (let f = 0; f < 2 && !lost; f++) {
+      const enc = dev.createCommandEncoder();
+      const pass = enc.beginRenderPass({
+        colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+      });
+      pass.end();
+      dev.queue.submit([enc.finish()]);
+      await Promise.race([dev.queue.onSubmittedWorkDone(), dev.lost]);
+      // Presentation happens at the end of the frame: give it one.
+      await new Promise<void>((resolve) => {
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+        else setTimeout(resolve, 16);
+      });
+    }
+    ctx.unconfigure();
+    return !lost;
+  } catch {
+    return false;
+  } finally {
+    device?.destroy();
+  }
+}
+
 export class ThreeBackend implements RenderBackend {
   private renderer: THREE.WebGPURenderer | null = null;
   private ready = false;
+  private disposed = false;
+  private lost = false;
+  private initPromise: Promise<BackendInfo> | null = null;
   private info: BackendInfo = { api: 'webgl2', detail: '' };
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(70, 1, 0.05, 512);
@@ -143,8 +284,8 @@ export class ThreeBackend implements RenderBackend {
   /** Per-object vec4 uniform (see shading.ts). */
   private readonly worldLight = new THREE.Vector4(1, 0, 0, 1);
   private readonly objUniform = uniform(new THREE.Vector4(1, 0, 0, 1)).onObjectUpdate((frame) => {
-    const bl = frame.object?.userData.bl as THREE.Vector4 | undefined;
-    return bl ?? this.worldLight;
+    const ud = frame.object?.userData as Partial<MeshUpload> | undefined;
+    return ud?.bl ?? this.worldLight;
   });
   private readonly tileSize = uniform(16).setGroup(renderGroup);
   private readonly tileNodes: THREE.TextureNode[] = [];
@@ -169,6 +310,28 @@ export class ThreeBackend implements RenderBackend {
   /** Bumped when structures appear / disappear (overlay layers re-parent then). */
   private topology = 0;
 
+  // Work handed over before the pipelines exist (applied at the end of init, last write wins).
+  private readonly pendingSections = new Map<number, PendingMesh | null>();
+  private readonly pendingStructures = new Map<number, PendingMesh | null>();
+  private readonly pendingDry = new Map<number, DryVolume | null>();
+  /**
+   * Poses of structures that have no record (yet) this frame. A record adopts its pose when
+   * its mesh arrives later in the same frame; the map is cleared after every render() so a
+   * stale pose of a removed structure (or of one that never gets a mesh) never resurrects
+   * or leaks anything.
+   */
+  private readonly pendingPoses = new Map<number, StructurePose>();
+  private readonly freePoses: StructurePose[] = [];
+
+  // Upload primer (see PRIME_MAX_MESHES).
+  private readonly primeQueue: THREE.Mesh[] = [];
+  private primeHead = 0;
+  private readonly primed: THREE.Mesh[] = [];
+  /** Meshes drawn for the first time during the last render() (their CPU arrays get released). */
+  private justDrawn: THREE.Mesh[] = [];
+  private releasing: THREE.Mesh[] = [];
+  private readonly markDrawn: THREE.Object3D['onBeforeRender'];
+
   private readonly skyState = createSkyState();
   private readonly fog = createFogParams();
   private envTime = 0;
@@ -177,16 +340,25 @@ export class ThreeBackend implements RenderBackend {
   private readonly clearColor = new THREE.Color(0, 0, 0);
   private width = 1;
   private height = 1;
+  private pixelRatio = 1;
+  private lastDrawCalls = 0;
+  private lastTriangles = 0;
+  private readonly anchor: OverlayAnchor = { x: 0, y: 0, z: 0 };
 
   // Dry volume slot selection scratch (no allocation per frame).
   /** Indices into structureList of the chosen slots. */
   private readonly slotIds = new Int32Array(DRY_SLOTS);
   private readonly slotDist = new Float64Array(DRY_SLOTS);
   private readonly scratchV = { x: 0, y: 0, z: 0 };
+  private readonly scratchL = { x: 0, y: 0, z: 0 };
 
   private readonly resolveParent = (structureId: number): THREE.Object3D | null => {
     if (structureId === 0) return this.overlayRoot;
     return this.structures.get(structureId)?.group ?? null;
+  };
+
+  private readonly carrierQuery: CarrierQuery = {
+    selfMotion: (x, y, z, dx, dy, dz, out) => this.selfMotion(x, y, z, dx, dy, dz, out),
   };
 
   constructor(private readonly opts: ThreeBackendOptions = {}) {
@@ -206,16 +378,34 @@ export class ThreeBackend implements RenderBackend {
     this.scene.add(this.sectionsRoot, this.structuresRoot, this.overlayRoot);
     this.camera.rotation.order = 'YXZ';
     this.scene.matrixAutoUpdate = false;
+    const justDrawn = (): THREE.Mesh[] => this.justDrawn;
+    // First-draw hook of world / structure meshes: three calls onBeforeRender right before it
+    // uploads the geometry for a draw, so a mesh seen here has its GPU buffers after this
+    // frame. The hook removes itself (one call per geometry).
+    this.markDrawn = function (this: THREE.Object3D): void {
+      const mesh = this as THREE.Mesh;
+      delete (mesh as Partial<THREE.Object3D>).onBeforeRender;
+      const ud = mesh.userData as MeshUpload;
+      ud.drawn = true;
+      ud.drawnGeo = mesh.geometry;
+      justDrawn().push(mesh);
+    };
   }
 
   // ------------------------------------------------------------------ lifecycle
 
-  async init(canvas: HTMLCanvasElement): Promise<BackendInfo> {
+  init(canvas: HTMLCanvasElement): Promise<BackendInfo> {
+    if (this.disposed) return Promise.reject(new BackendDisposedError());
+    this.initPromise ??= this.initInner(canvas);
+    return this.initPromise;
+  }
+
+  private async initInner(canvas: HTMLCanvasElement): Promise<BackendInfo> {
     let forceWebGL = this.opts.forceWebGL === true;
     let adapterDetail = '';
     if (!forceWebGL) {
-      // Probe first: without an adapter three would log a fallback warning; probing lets us
-      // pick the WebGL2 backend up front instead.
+      // Probe first: without an adapter three would log a fallback warning, and once the
+      // canvas has a WebGPU context it can never fall back to WebGL2.
       const gpu = typeof navigator !== 'undefined' ? navigator.gpu : undefined;
       if (!gpu) {
         forceWebGL = true;
@@ -227,11 +417,16 @@ export class ThreeBackend implements RenderBackend {
             // GPUAdapter.info is missing in older Chromium builds; it is only cosmetic here.
             const ai = (adapter as { info?: GPUAdapterInfo }).info;
             if (ai) adapterDetail = [ai.vendor, ai.architecture, ai.device, ai.description].filter((s) => s && s.length > 0).join(' ');
+            if (this.opts.validateWebGPU !== false && !(await webgpuCanPresent(adapter))) {
+              console.warn('[render] WebGPU device could not present a frame; using WebGL2');
+              forceWebGL = true;
+            }
           }
         } catch {
           forceWebGL = true;
         }
       }
+      if (this.disposed) throw new BackendDisposedError();
     }
 
     const renderer = new THREE.WebGPURenderer({
@@ -241,7 +436,16 @@ export class ThreeBackend implements RenderBackend {
       alpha: false,
       powerPreference: this.opts.powerPreference ?? 'high-performance',
     });
-    await renderer.init();
+    try {
+      await renderer.init();
+    } catch (e) {
+      renderer.dispose();
+      throw e;
+    }
+    if (this.disposed) {
+      renderer.dispose();
+      throw new BackendDisposedError();
+    }
     this.renderer = renderer;
     renderer.setClearColor(0x000000, 1);
     renderer.toneMapping = THREE.NoToneMapping;
@@ -249,21 +453,57 @@ export class ThreeBackend implements RenderBackend {
     // RGBA16F framebuffer and no conversion pass; the materials encode sRGB themselves
     // (shading.ts encodeOutput). Saves a full-screen pass and lets MSAA resolve to 8-bit.
     renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+    // float64 model-view matrices on the CPU: the default computes view * world on the GPU
+    // in float32, where the large translations far from the origin cancel badly (section
+    // seams crack, geometry shifts).
+    renderer.highPrecision = true;
+    // stats() reports the last render() call, independent of rAF timing.
+    renderer.info.autoReset = false;
+    renderer.setPixelRatio(this.pixelRatio);
+    renderer.setSize(this.width, this.height, false);
 
-    const backend = renderer.backend as unknown as { isWebGPUBackend?: boolean; gl?: WebGL2RenderingContext };
+    const backend = renderer.backend as unknown as { isWebGPUBackend?: boolean; gl?: WebGL2RenderingContext; device?: GPUDevice };
     const isWebGPU = backend.isWebGPUBackend === true;
     this.geoOpts = { padNormals: isWebGPU };
     this.info = { api: isWebGPU ? 'webgpu' : 'webgl2', detail: isWebGPU ? `WebGPU ${adapterDetail}`.trim() : `WebGL2 ${glRendererName(backend.gl)}`.trim() };
+    this.hookDeviceLoss(renderer, backend.device ?? null);
 
     this.buildPipelines();
     await this.compileWarmup();
-    if (this.pendingTiles) {
-      const t = this.pendingTiles;
-      this.pendingTiles = null;
-      this.setTiles(t);
-    }
+    if (this.disposed) throw new BackendDisposedError();
     this.ready = true;
+    this.flushPending();
     return this.info;
+  }
+
+  /**
+   * Device / context loss: three's own handler only logs (and ignores a WebGPU loss whose
+   * reason is 'destroyed', which is also what a crashed GPU process can report), so the
+   * WebGPU device is watched directly as well. A loss after dispose() is our own doing.
+   */
+  private hookDeviceLoss(renderer: THREE.WebGPURenderer, device: GPUDevice | null): void {
+    const api = this.info.api;
+    renderer.onDeviceLost = (i: { message?: string; reason?: string | null }) => this.handleLost({ api, message: i.message ?? 'unknown', reason: i.reason ?? null });
+    if (device) {
+      void device.lost.then((i) => this.handleLost({ api, message: i.message || 'unknown', reason: i.reason ?? null }));
+    }
+  }
+
+  private handleLost(info: DeviceLostInfo): void {
+    if (this.disposed || this.lost) return;
+    this.lost = true;
+    this.ready = false;
+    console.error(`[render] ${info.api} device lost (${info.reason ?? 'no reason'}): ${info.message}`);
+    try {
+      this.opts.onLost?.(info);
+    } catch (e) {
+      console.error('[render] onLost handler threw', e);
+    }
+  }
+
+  /** True once the GPU device / context was lost; the backend then draws nothing. */
+  isLost(): boolean {
+    return this.lost;
   }
 
   private buildPipelines(): void {
@@ -309,13 +549,31 @@ export class ThreeBackend implements RenderBackend {
     this.camera.position.set(0, 0, 3);
     this.camera.updateMatrixWorld();
     await renderer.compileAsync(g, this.camera, this.scene);
+    if (this.disposed) return;
     await renderer.compileAsync(this.scene, this.camera);
+    if (this.disposed) return;
     // One frame while loading: configures the canvas / MSAA targets before the first game frame.
     renderer.render(this.scene, this.camera);
   }
 
+  /** Applies everything queued before the pipelines existed. */
+  private flushPending(): void {
+    if (this.pendingTiles) {
+      const t = this.pendingTiles;
+      this.pendingTiles = null;
+      this.setTiles(t);
+    }
+    for (const [key, p] of this.pendingSections) if (p) this.setSectionMesh(key, p.ox, p.oy, p.oz, p.mesh);
+    this.pendingSections.clear();
+    for (const [id, p] of this.pendingStructures) if (p) this.setStructureMesh(id, p.ox, p.oy, p.oz, p.mesh);
+    this.pendingStructures.clear();
+    for (const [id, d] of this.pendingDry) if (d) this.setStructureDryVolume(id, d);
+    this.pendingDry.clear();
+  }
+
   setTiles(tiles: TileTextureData): void {
-    if (!this.renderer || !this.materials) {
+    if (this.disposed) return;
+    if (!this.ready) {
       this.pendingTiles = tiles;
       return;
     }
@@ -329,12 +587,22 @@ export class ThreeBackend implements RenderBackend {
 
   // ------------------------------------------------------------------ world sections
 
+  /**
+   * The backend takes ownership of the MeshData typed arrays (zero copy): the caller must not
+   * modify, reuse or transfer them afterwards. They are released (replaced by empty arrays)
+   * once the GPU has its copy.
+   */
   setSectionMesh(key: number, ox: number, oy: number, oz: number, mesh: MeshData | null): void {
-    const mats = this.materials;
-    // Meshes only make sense after init() (the contract orders init -> setTiles -> meshes).
-    if (!mats) return;
+    if (this.disposed) return;
+    const empty = !mesh || (!mesh.opaque && !mesh.cutout && !mesh.translucent);
+    if (!this.ready) {
+      if (empty) this.pendingSections.delete(key);
+      else this.pendingSections.set(key, { ox, oy, oz, mesh });
+      return;
+    }
+    const mats = this.materials!;
     let rec = this.sections.get(key);
-    if (!mesh || (!mesh.opaque && !mesh.cutout && !mesh.translucent)) {
+    if (empty) {
       if (rec) {
         for (const m of rec.meshes) if (m) this.disposeMesh(m);
         this.sections.delete(key);
@@ -360,8 +628,7 @@ export class ThreeBackend implements RenderBackend {
         m.geometry.dispose();
         m.geometry = geo;
       } else {
-        m = new THREE.Mesh(geo, i === 0 ? mats.opaque : i === 1 ? mats.cutout : mats.translucent);
-        m.userData.bl = this.worldLight;
+        m = this.newMesh(geo, i === 0 ? mats.opaque : i === 1 ? mats.cutout : mats.translucent, this.worldLight);
         m.renderOrder = ORDER[i]!;
         m.matrixAutoUpdate = false;
         // Static: computed once here, skipped by the per-frame scene graph traversal.
@@ -372,8 +639,28 @@ export class ThreeBackend implements RenderBackend {
       m.position.set(ox, oy, oz);
       m.updateMatrix();
       m.matrixWorld.copy(m.matrix);
+      this.queueUpload(m);
     }
     if (!rec.meshes[0] && !rec.meshes[1] && !rec.meshes[2]) this.sections.delete(key);
+  }
+
+  private newMesh(geo: THREE.BufferGeometry, mat: THREE.Material, light: THREE.Vector4): THREE.Mesh {
+    const m = new THREE.Mesh(geo, mat);
+    const ud: MeshUpload = { bl: light, drawn: false, drawnGeo: null, queued: false };
+    m.userData = ud as unknown as Record<string, unknown>;
+    return m;
+  }
+
+  /** (Re)arms the first-draw hook of a mesh whose geometry is new and queues it for priming. */
+  private queueUpload(m: THREE.Mesh): void {
+    const ud = m.userData as MeshUpload;
+    ud.drawn = false;
+    ud.drawnGeo = null;
+    m.onBeforeRender = this.markDrawn;
+    if (!ud.queued) {
+      ud.queued = true;
+      this.primeQueue.push(m);
+    }
   }
 
   private disposeMesh(m: THREE.Mesh): void {
@@ -383,37 +670,77 @@ export class ThreeBackend implements RenderBackend {
 
   // ------------------------------------------------------------------ structures
 
-  private structure(id: number): StructureRecord {
-    let rec = this.structures.get(id);
-    if (!rec) {
-      const group = new THREE.Group();
-      group.name = `structure-${id}`;
-      group.matrixAutoUpdate = false;
-      rec = { id, group, meshes: [null, null, null], light: new THREE.Vector4(1, 0, 0, 0), pose: newPose(), hasPose: false, dryTex: null, dry: null };
-      this.structures.set(id, rec);
-      this.structureList.push(rec);
-      this.structuresRoot.add(group);
-      this.topology++;
+  private createStructure(id: number): StructureRecord {
+    const group = new THREE.Group();
+    group.name = `structure-${id}`;
+    group.matrixAutoUpdate = false;
+    // Hidden until its first pose: an identity matrix would flash the structure at the origin.
+    group.visible = false;
+    const rec: StructureRecord = {
+      id,
+      group,
+      meshes: [null, null, null],
+      light: new THREE.Vector4(1, 0, 0, 0),
+      pose: newPose(),
+      hasPose: false,
+      prevMatrix: new Float64Array(16),
+      hasPrev: false,
+      bounds: new Float64Array(6),
+      hasBounds: false,
+      dryTex: null,
+      dry: null,
+    };
+    this.structures.set(id, rec);
+    this.structureList.push(rec);
+    this.structuresRoot.add(group);
+    this.topology++;
+    const pending = this.pendingPoses.get(id);
+    if (pending) {
+      this.applyPose(rec, pending);
+      this.pendingPoses.delete(id);
+      this.freePoses.push(pending);
     }
     return rec;
   }
 
+  private removeStructure(rec: StructureRecord): void {
+    for (const m of rec.meshes) if (m) this.disposeMesh(m);
+    rec.dryTex?.dispose();
+    rec.dryTex = null;
+    rec.group.removeFromParent();
+    this.structures.delete(rec.id);
+    const li = this.structureList.indexOf(rec);
+    if (li >= 0) this.structureList.splice(li, 1);
+    this.topology++;
+  }
+
+  /** See setSectionMesh for the ownership of the MeshData arrays. */
   setStructureMesh(id: number, ox: number, oy: number, oz: number, mesh: MeshData | null): void {
-    if (!mesh) {
-      const rec = this.structures.get(id);
-      if (!rec) return;
-      for (const m of rec.meshes) if (m) this.disposeMesh(m);
-      rec.dryTex?.dispose();
-      rec.group.removeFromParent();
-      this.structures.delete(id);
-      const li = this.structureList.indexOf(rec);
-      if (li >= 0) this.structureList.splice(li, 1);
-      this.topology++;
+    if (this.disposed) return;
+    if (!this.ready) {
+      if (mesh) this.pendingStructures.set(id, { ox, oy, oz, mesh });
+      else {
+        this.pendingStructures.delete(id);
+        this.pendingDry.delete(id);
+      }
       return;
     }
-    const mats = this.materials;
-    if (!mats) return;
-    const rec = this.structure(id);
+    if (!mesh) {
+      const rec = this.structures.get(id);
+      if (rec) this.removeStructure(rec);
+      const p = this.pendingPoses.get(id);
+      if (p) {
+        this.pendingPoses.delete(id);
+        this.freePoses.push(p);
+      }
+      return;
+    }
+    const mats = this.materials!;
+    const rec = this.structures.get(id) ?? this.createStructure(id);
+    const b = rec.bounds;
+    b[0] = b[1] = b[2] = Infinity;
+    b[3] = b[4] = b[5] = -Infinity;
+    rec.hasBounds = false;
     for (let i = 0; i < 3; i++) {
       const data: GeometryData | null = mesh[GROUPS[i]!];
       const old = rec.meshes[i]!;
@@ -429,8 +756,7 @@ export class ThreeBackend implements RenderBackend {
         m.geometry.dispose();
         m.geometry = geo;
       } else {
-        m = new THREE.Mesh(geo, i === 0 ? mats.opaque : i === 1 ? mats.cutout : mats.translucent);
-        m.userData.bl = rec.light;
+        m = this.newMesh(geo, i === 0 ? mats.opaque : i === 1 ? mats.cutout : mats.translucent, rec.light);
         m.renderOrder = ORDER[i]!;
         m.matrixAutoUpdate = false;
         rec.group.add(m);
@@ -438,23 +764,58 @@ export class ThreeBackend implements RenderBackend {
       }
       m.position.set(ox, oy, oz);
       m.updateMatrix();
+      m.matrixWorldNeedsUpdate = true;
+      const bb = geo.boundingBox!;
+      b[0] = Math.min(b[0]!, bb.min.x + ox);
+      b[1] = Math.min(b[1]!, bb.min.y + oy);
+      b[2] = Math.min(b[2]!, bb.min.z + oz);
+      b[3] = Math.max(b[3]!, bb.max.x + ox);
+      b[4] = Math.max(b[4]!, bb.max.y + oy);
+      b[5] = Math.max(b[5]!, bb.max.z + oz);
+      rec.hasBounds = true;
+      this.queueUpload(m);
     }
     rec.group.matrixWorldNeedsUpdate = true;
   }
 
   setStructurePose(id: number, pose: StructurePose): void {
-    const rec = this.structure(id);
+    if (this.disposed) return;
+    const rec = this.structures.get(id);
+    if (rec) {
+      this.applyPose(rec, pose);
+      return;
+    }
+    // No record (yet): keep the pose for the rest of this frame only.
+    let p = this.pendingPoses.get(id);
+    if (!p) {
+      p = this.freePoses.pop() ?? newPose();
+      this.pendingPoses.set(id, p);
+    }
+    copyPose(pose, p);
+  }
+
+  private applyPose(rec: StructureRecord, pose: StructurePose): void {
     copyPose(pose, rec.pose);
     rec.hasPose = true;
+    rec.group.visible = true;
     poseToMatrix(pose, rec.group.matrix.elements);
     rec.group.matrixWorldNeedsUpdate = true;
     rec.light.set(clamp01(pose.sky / 15), clamp01(pose.block / 15), 0, 0);
   }
 
   setStructureDryVolume(id: number, dry: DryVolume | null): void {
-    const rec = this.structures.get(id) ?? (dry ? this.structure(id) : undefined);
+    if (this.disposed) return;
+    const valid = dry !== null && dry.sx > 0 && dry.sy > 0 && dry.sz > 0;
+    if (!this.ready) {
+      // Copy: the caller may reuse its mask buffer before init finishes.
+      this.pendingDry.set(id, valid ? { ...dry, mask: dry.mask.slice() } : null);
+      return;
+    }
+    // A dry volume may arrive before the structure's first mesh (meshing is asynchronous),
+    // so it creates the record; only setStructureMesh(id, null) removes it.
+    const rec = this.structures.get(id) ?? (valid ? this.createStructure(id) : undefined);
     if (!rec) return;
-    if (!dry || dry.sx <= 0 || dry.sy <= 0 || dry.sz <= 0) {
+    if (!valid) {
       rec.dryTex?.dispose();
       rec.dryTex = null;
       rec.dry = null;
@@ -483,10 +844,12 @@ export class ThreeBackend implements RenderBackend {
   // ------------------------------------------------------------------ per frame state
 
   setEntities(list: readonly EntityRenderState[]): void {
-    this.entities?.set(list, this.envTime);
+    if (this.disposed) return;
+    this.entities?.set(list);
   }
 
   setCamera(cam: CameraState): void {
+    if (this.disposed) return;
     const c = this.camera;
     c.position.set(cam.x, cam.y, cam.z);
     c.rotation.set(cam.pitch, cam.yaw, 0, 'YXZ');
@@ -494,9 +857,11 @@ export class ThreeBackend implements RenderBackend {
       c.fov = cam.fov;
       c.updateProjectionMatrix();
     }
+    this.u.applyCamera(cam.x, cam.y, cam.z);
   }
 
   setEnvironment(env: EnvironmentState): void {
+    if (this.disposed) return;
     this.envTime = env.time;
     this.u.time.value = env.time;
     computeSkyState(env.dayTime, this.skyState);
@@ -518,26 +883,142 @@ export class ThreeBackend implements RenderBackend {
   }
 
   setOverlays(o: OverlayState): void {
-    this.overlays?.update(o, this.resolveParent, this.topology);
+    if (this.disposed || !this.overlays) return;
+    // World overlays are positioned relative to an integer anchor near the camera (exact
+    // float32 instance matrices anywhere in the world); the root sits at the anchor.
+    const p = this.camera.position;
+    const a = this.anchor;
+    const ax = animOrigin(p.x);
+    const ay = animOrigin(p.y);
+    const az = animOrigin(p.z);
+    if (ax !== a.x || ay !== a.y || az !== a.z) {
+      a.x = ax;
+      a.y = ay;
+      a.z = az;
+      this.overlayRoot.matrix.makeTranslation(ax, ay, az);
+      this.overlayRoot.matrixWorldNeedsUpdate = true;
+    }
+    this.overlays.update(o, this.resolveParent, this.topology, a);
   }
 
   resize(width: number, height: number, pixelRatio: number): void {
+    if (this.disposed) return;
     this.width = Math.max(1, Math.floor(width));
     this.height = Math.max(1, Math.floor(height));
+    this.pixelRatio = pixelRatio > 0 && Number.isFinite(pixelRatio) ? pixelRatio : 1;
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
+    // Before init the size is stored and applied when the renderer is created.
     if (this.renderer) {
-      this.renderer.setPixelRatio(pixelRatio);
+      this.renderer.setPixelRatio(this.pixelRatio);
       this.renderer.setSize(this.width, this.height, false);
     }
   }
 
   render(): void {
     const r = this.renderer;
-    if (!r || !this.ready) return;
+    if (!r || !this.ready || this.lost || this.disposed) {
+      this.clearPendingPoses();
+      return;
+    }
+    this.entities?.animate(this.envTime, this.carrierQuery);
     this.assignDrySlots();
+    this.releaseUploaded();
+    this.primeUploads();
     r.setClearColor(this.clearColor, 1);
+    r.info.reset();
     r.render(this.scene, this.camera);
+    this.lastDrawCalls = r.info.render.drawCalls;
+    this.lastTriangles = r.info.render.triangles;
+    const list = this.structureList;
+    for (let i = 0; i < list.length; i++) {
+      const rec = list[i]!;
+      rec.prevMatrix.set(rec.group.matrix.elements);
+      rec.hasPrev = rec.hasPose;
+    }
+    this.clearPendingPoses();
+  }
+
+  private clearPendingPoses(): void {
+    if (this.pendingPoses.size === 0) return;
+    this.pendingPoses.forEach((p) => this.freePoses.push(p));
+    this.pendingPoses.clear();
+  }
+
+  /** Drops the CPU copies of geometries whose first draw happened in the previous frame. */
+  private releaseUploaded(): void {
+    const list = this.justDrawn;
+    this.justDrawn = this.releasing;
+    this.releasing = list;
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i]!;
+      const ud = m.userData as MeshUpload;
+      // Skip meshes that were removed or got a new geometry since that draw.
+      if (ud.drawn && ud.drawnGeo === m.geometry && m.parent) releaseGeometryArrays(m.geometry);
+    }
+    list.length = 0;
+  }
+
+  /** Lets a budget of never-drawn meshes be drawn this frame regardless of the frustum. */
+  private primeUploads(): void {
+    const primed = this.primed;
+    for (let i = 0; i < primed.length; i++) primed[i]!.frustumCulled = true;
+    primed.length = 0;
+    const q = this.primeQueue;
+    let vertices = 0;
+    while (this.primeHead < q.length && primed.length < PRIME_MAX_MESHES && vertices < PRIME_MAX_VERTICES) {
+      const m = q[this.primeHead++]!;
+      const ud = m.userData as MeshUpload;
+      ud.queued = false;
+      if (ud.drawn || !m.parent) continue;
+      m.frustumCulled = false;
+      primed.push(m);
+      vertices += m.geometry.getAttribute('position').count;
+    }
+    if (this.primeHead >= q.length) {
+      q.length = 0;
+      this.primeHead = 0;
+    } else if (this.primeHead > 1024 && this.primeHead * 2 > q.length) {
+      q.copyWithin(0, this.primeHead);
+      q.length -= this.primeHead;
+      this.primeHead = 0;
+    }
+  }
+
+  /**
+   * CarrierQuery: the displacement of an entity relative to the structure that most
+   * plausibly carries it. For every structure whose (padded) bounds contain the entity, the
+   * point fixed to the structure that is at the entity now was at prevMatrix * local in the
+   * previous frame; the entity's motion relative to that structure is its own displacement
+   * minus the point's. The smallest relative motion wins (no carrier included), so an
+   * entity standing on a sailing ship or a turntable reads as standing still.
+   */
+  private selfMotion(x: number, y: number, z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void {
+    out.x = dx;
+    out.y = dy;
+    out.z = dz;
+    let best = dx * dx + dy * dy + dz * dz;
+    const list = this.structureList;
+    for (let i = 0; i < list.length && best > 0; i++) {
+      const rec = list[i]!;
+      if (!rec.hasPose || !rec.hasPrev || !rec.hasBounds) continue;
+      const l = worldToLocal(rec.pose, x, y, z, this.scratchL);
+      const b = rec.bounds;
+      if (l.x < b[0]! - CARRY_PAD_XZ || l.x > b[3]! + CARRY_PAD_XZ) continue;
+      if (l.z < b[2]! - CARRY_PAD_XZ || l.z > b[5]! + CARRY_PAD_XZ) continue;
+      if (l.y < b[1]! - CARRY_PAD_BELOW || l.y > b[4]! + CARRY_PAD_ABOVE) continue;
+      const prev = transformPoint(rec.prevMatrix, l.x, l.y, l.z, this.scratchV);
+      const rx = dx - (x - prev.x);
+      const ry = dy - (y - prev.y);
+      const rz = dz - (z - prev.z);
+      const m = rx * rx + ry * ry + rz * rz;
+      if (m < best) {
+        best = m;
+        out.x = rx;
+        out.y = ry;
+        out.z = rz;
+      }
+    }
   }
 
   /** Picks the DRY_SLOTS structures nearest to the camera that have a dry volume. */
@@ -569,25 +1050,29 @@ export class ThreeBackend implements RenderBackend {
       dist[k] = d;
       ids[k] = si;
     }
+    const layers = this.u.dryLayers.value;
     for (let i = 0; i < DRY_SLOTS; i++) {
       const node = this.dryNodes[i];
       if (!node) continue;
       if (i < count) {
         const rec = list[ids[i]!]!;
-        dryVolumeMatrix(rec.pose, rec.dry!, this.u.dryMatrices[i]!.value.elements);
+        // Camera-relative: the shader feeds camera-relative positions (precise anywhere).
+        dryVolumeMatrix(rec.pose, rec.dry!, this.u.dryMatrices[i]!.value.elements, cp.x, cp.y, cp.z);
+        layers.setComponent(i, rec.dry!.sy);
         if (node.value !== rec.dryTex) node.value = rec.dryTex!;
-      } else if (node.value !== this.dryPlaceholders[i]) {
-        node.value = this.dryPlaceholders[i]!;
+      } else {
+        layers.setComponent(i, 1);
+        if (node.value !== this.dryPlaceholders[i]) node.value = this.dryPlaceholders[i]!;
       }
     }
     this.u.dryCount.value = count;
   }
 
+  /** Draw calls / triangles of the LAST render() call (not reset by three's rAF loop). */
   stats(): RenderStats {
-    const info = this.renderer?.info.render;
     return {
-      drawCalls: info?.drawCalls ?? 0,
-      triangles: info?.triangles ?? 0,
+      drawCalls: this.lastDrawCalls,
+      triangles: this.lastTriangles,
       sections: this.sections.size,
       structures: this.structures.size,
     };
@@ -599,11 +1084,12 @@ export class ThreeBackend implements RenderBackend {
   }
 
   /**
-   * Debug counters: render pipelines / shader programs alive in three's caches. Used by the
-   * harness to verify the warm-up (no new pipeline when the first water / structure / entity
-   * appears) and that steady-state frames never create pipelines.
+   * Debug counters: render pipelines / shader programs alive in three's caches, plus the
+   * upload primer's backlog. Used by the harness to verify the warm-up (no new pipeline when
+   * the first water / structure / entity appears) and that steady-state frames never create
+   * pipelines.
    */
-  debugCounters(): { pipelines: number; programs: number; geometries: number; textures: number } {
+  debugCounters(): { pipelines: number; programs: number; geometries: number; textures: number; uploadBacklog: number } {
     const r = this.renderer as unknown as {
       _pipelines?: { caches?: Map<string, unknown> };
       info: { memory: { programs: number; geometries: number; textures: number } };
@@ -613,20 +1099,29 @@ export class ThreeBackend implements RenderBackend {
       programs: r?.info.memory.programs ?? 0,
       geometries: r?.info.memory.geometries ?? 0,
       textures: r?.info.memory.textures ?? 0,
+      uploadBacklog: this.primeQueue.length - this.primeHead,
     };
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.ready = false;
+    this.lastDrawCalls = 0;
+    this.lastTriangles = 0;
     for (const rec of this.sections.values()) for (const m of rec.meshes) if (m) this.disposeMesh(m);
     this.sections.clear();
-    for (const rec of this.structures.values()) {
-      for (const m of rec.meshes) if (m) this.disposeMesh(m);
-      rec.dryTex?.dispose();
-      rec.group.removeFromParent();
-    }
-    this.structures.clear();
-    this.structureList.length = 0;
+    for (const rec of [...this.structureList]) this.removeStructure(rec);
+    this.pendingSections.clear();
+    this.pendingStructures.clear();
+    this.pendingDry.clear();
+    this.pendingPoses.clear();
+    this.pendingTiles = null;
+    this.primeQueue.length = 0;
+    this.primeHead = 0;
+    this.primed.length = 0;
+    this.justDrawn.length = 0;
+    this.releasing.length = 0;
     this.entities?.dispose();
     this.entityAssets?.dispose();
     this.overlays?.dispose();

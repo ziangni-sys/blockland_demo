@@ -13,7 +13,6 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import * as shape from '../../src/voxel/shape';
-import { vec3 } from '../../src/core/math';
 import { B, Bench, fill } from './harness';
 
 vi.mock('../../src/voxel/shape', async (importOriginal) => {
@@ -32,7 +31,7 @@ describe('review: item drops buried deep in rock', () => {
     b.tick(5);
     spy.mockClear();
     b.tick(100);
-    // 10 items x 100 ticks = 1000 item-ticks. Today every one of them runs a failing ~2000-candidate
+    // 10 items x 100 ticks = 1000 item-ticks. Before the fix every one of them ran a failing ~2000-candidate
     // search (1000 calls). Allow at most one search per 10 item-ticks.
     expect(spy.mock.calls.length).toBeLessThanOrEqual(100);
   });

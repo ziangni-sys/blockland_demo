@@ -28,6 +28,20 @@ export interface InputHost {
   onPointerStateChange(): void;
 }
 
+/**
+ * True inside a sandboxed frame without allow-same-origin (an opaque origin served over a
+ * network scheme). Such strict hosts virtually never grant allow-pointer-lock either, and a
+ * refused request makes the browser log a console error, so drag-to-look is used from the
+ * start. Local files also have an opaque origin but are not sandboxed: they keep pointer lock.
+ */
+function sandboxedOpaqueOrigin(win: Window): boolean {
+  try {
+    return win.origin === 'null' && win.location.protocol !== 'file:';
+  } catch {
+    return false;
+  }
+}
+
 /** If neither lock nor error arrives this long after a first request, assume locking does not work. */
 const LOCK_SILENCE_MS = 1500;
 
@@ -66,7 +80,7 @@ export class InputBinder {
     on(canvas, 'contextmenu', (e: Event) => e.preventDefault());
     on(doc, 'pointerlockchange', () => this.onLockChange());
     on(doc, 'pointerlockerror', () => this.onLockError());
-    if (typeof canvas.requestPointerLock !== 'function') this.dragLook = true;
+    if (typeof canvas.requestPointerLock !== 'function' || sandboxedOpaqueOrigin(win)) this.dragLook = true;
   }
 
   /** Per frame: promotes a still drag-mode press to a held button; detects silent lock refusals. */

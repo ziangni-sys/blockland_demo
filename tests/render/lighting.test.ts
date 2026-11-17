@@ -8,6 +8,7 @@ import {
   createSkyState,
   dayLightFactor,
   faceShade,
+  fogFactor,
   hexToLinear,
   lightCurve,
   NIGHT_LIGHT,
@@ -164,6 +165,10 @@ describe('fog', () => {
     expect(f.start).toBeGreaterThan(40);
     expect(f.end).toBeLessThanOrEqual(128);
     expect(f.end).toBeGreaterThan(f.start);
+    expect(f.tint).toEqual({ r: 1, g: 1, b: 1 });
+    expect(f.density).toBe(0);
+    expect(fogFactor(f, f.start * 0.9)).toBe(0);
+    expect(fogFactor(f, 128)).toBe(1);
   });
 
   it('is short and tinted under water and very short in lava', () => {
@@ -176,5 +181,26 @@ describe('fog', () => {
     const l = computeFog(128, 'lava', 1, createFogParams());
     expect(l.end).toBeLessThan(5);
     expect(l.color.r).toBeGreaterThan(l.color.b * 4);
+  });
+
+  // Review finding: under water, geometry a few blocks away kept its dry colour (the fog
+  // started at 0 but rose only 3 % by 3 blocks). The medium now tints everything and the
+  // exponential fog is substantial right in front of the camera.
+  it('submerged: strong distance-independent tint and fog rising from the first block', () => {
+    const w = computeFog(128, 'water', 1, createFogParams());
+    expect(w.tint.r).toBeLessThan(0.6);
+    expect(w.tint.g).toBeGreaterThan(w.tint.r);
+    expect(w.tint.b).toBeGreaterThan(w.tint.r);
+    expect(fogFactor(w, 3)).toBeGreaterThan(0.25);
+    expect(fogFactor(w, 5)).toBeGreaterThan(0.4);
+    expect(fogFactor(w, 10)).toBeGreaterThan(0.65);
+    expect(fogFactor(w, w.end)).toBeGreaterThan(0.94);
+    const l = computeFog(128, 'lava', 1, createFogParams());
+    expect(l.tint.r).toBeGreaterThan(l.tint.b * 3);
+    expect(fogFactor(l, 1)).toBeGreaterThan(0.6);
+    // Back to air: tint and density reset on the same object.
+    computeFog(128, 'none', 1, w);
+    expect(w.tint).toEqual({ r: 1, g: 1, b: 1 });
+    expect(w.density).toBe(0);
   });
 });

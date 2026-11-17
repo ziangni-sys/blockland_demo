@@ -8,9 +8,9 @@
  * from forward drag or thrust); rotation has its own damping; a keel term strongly resists
  * sideways slip relative to the bow so the ship goes where it points.
  *
- * Wetness: wet = submerged / min(mass, displacing cells) — 1 for a ship floating at its
- * Archimedes draught and for a fully submerged one; the water terms scale with it. Thrust and
- * rudder only work while a floating hull is at least half as deep as it would float
+ * Wetness: wet = submerged / min(mass / waterDensity, displacing cells) — 1 for a ship floating
+ * at its Archimedes draught and for a fully submerged one; the water terms scale with it. Thrust
+ * and rudder only work while a floating hull is at least half as deep as it would float
  * (thrustWet): a beached or sunken ship cannot be steered.
  *
  * Steering convention: rudder +1 turns to starboard = clockwise from above = NEGATIVE yaw rate
@@ -33,9 +33,11 @@ export function applyHydrodynamics(body: Body, o: ResolvedOptions, dt: number): 
   const ship = body.ship;
   const m = body.mass;
   const S = body.submerged;
-  const cap = Math.min(m, body.shape.dispCount);
+  const rho = o.waterDensity;
+  // displaced volume at the Archimedes draught is m / rho
+  const cap = Math.min(m / rho, body.shape.dispCount);
   const wet = cap > 0 ? Math.min(1, S / cap) : 0;
-  const thrustWet = body.floats && m > 0 ? Math.min(1, (2 * S) / m) : 0;
+  const thrustWet = body.floats && m > 0 ? Math.min(1, (2 * S * rho) / m) : 0;
   body.wet = wet;
   body.thrustWet = thrustWet;
 

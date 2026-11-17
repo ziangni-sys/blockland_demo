@@ -67,10 +67,14 @@ export class Inventory {
 
   /**
    * Remove `count` of `item`, preferring the selected slot, then the hotbar, then the backpack.
-   * All or nothing: returns false (and removes nothing) when there are not enough.
+   * All or nothing: returns false (and removes nothing) when there are not enough. `count` must
+   * be a non-negative integer: 0 trivially succeeds; a negative, fractional or non-finite count
+   * is a caller bug and is refused (false) — it could otherwise create items or leave a stack
+   * the save format cannot hold.
    */
   consume(item: number, count: number): boolean {
-    if (!(count > 0)) return true;
+    if (!validCount(count)) return false;
+    if (count === 0) return true;
     if (this.count(item) < count) return false;
     let left = count;
     left = this.takeFrom(this.hotbar, this.selected, item, left);
@@ -79,8 +83,13 @@ export class Inventory {
     return true;
   }
 
-  /** Remove `count` from the selected stack. False (nothing removed) when it holds fewer. */
+  /**
+   * Remove `count` (a non-negative integer, as for consume) from the selected stack. False
+   * (nothing removed) when it holds fewer or `count` is invalid.
+   */
   consumeSelected(count = 1): boolean {
+    if (!validCount(count)) return false;
+    if (count === 0) return true;
     const s = this.selectedStack();
     if (s === null || s.count < count) return false;
     s.count -= count;
@@ -100,6 +109,8 @@ export class Inventory {
   slotClick(area: InventoryArea, index: number, button: 0 | 2, shift: boolean): void {
     const slots = area === 'hotbar' ? this.hotbar : this.main;
     if (!Number.isInteger(index) || index < 0 || index >= slots.length) return;
+    // Only the two documented buttons (a middle click from an untyped caller is not a right click).
+    if (button !== 0 && button !== 2) return;
     const slot = slots[index] ?? null;
     if (shift) {
       if (slot === null) return;
@@ -200,22 +211,31 @@ export class Inventory {
 
   serialize(w: ByteWriter): void {
     w.u8(SAVE_VERSION);
-    w.u8(this.selected);
+    const sel = this.selected;
+    w.u8(Number.isInteger(sel) && sel >= 0 && sel < HOTBAR_SLOTS ? sel : 0);
     for (const s of this.hotbar) writeSlot(w, s);
     for (const s of this.main) writeSlot(w, s);
     writeSlot(w, this.cursor);
   }
 
-  /** Replace the whole content. Stacks of items that no longer exist are dropped. */
+  /**
+   * Replace the whole content. Stacks of items that no longer exist are dropped. Atomic: a
+   * corrupt blob throws (SaveFormatError) and leaves the inventory as it was.
+   */
   deserialize(r: ByteReader): void {
     const v = r.u8();
     if (v !== SAVE_VERSION) r.fail(`unsupported inventory version ${v}`);
     const sel = r.u8();
     if (sel >= HOTBAR_SLOTS) r.fail(`bad selected slot ${sel}`);
+    const hotbar: Array<ItemStack | null> = [];
+    const main: Array<ItemStack | null> = [];
+    for (let i = 0; i < HOTBAR_SLOTS; i++) hotbar.push(readSlot(r));
+    for (let i = 0; i < MAIN_SLOTS; i++) main.push(readSlot(r));
+    const cursor = readSlot(r);
     this.selected = sel;
-    for (let i = 0; i < HOTBAR_SLOTS; i++) this.hotbar[i] = readSlot(r);
-    for (let i = 0; i < MAIN_SLOTS; i++) this.main[i] = readSlot(r);
-    this.cursor = readSlot(r);
+    for (let i = 0; i < HOTBAR_SLOTS; i++) this.hotbar[i] = hotbar[i]!;
+    for (let i = 0; i < MAIN_SLOTS; i++) this.main[i] = main[i]!;
+    this.cursor = cursor;
   }
 
   // ------------------------------------------------------------ helpers
@@ -251,13 +271,20 @@ export class Inventory {
   }
 }
 
+/** A count consume() accepts: a non-negative integer. */
+function validCount(n: number): boolean {
+  return Number.isInteger(n) && n >= 0;
+}
+
 function writeSlot(w: ByteWriter, s: ItemStack | null): void {
-  if (s === null || s.count <= 0) {
+  // Whatever a caller did to a stack, the save stays writable: counts are whole and positive.
+  const n = s === null ? 0 : Math.floor(s.count);
+  if (s === null || !(n > 0) || !Number.isFinite(n) || !isItem(s.item)) {
     w.varuint(0);
     return;
   }
   w.varuint(s.item + 1);
-  w.varuint(s.count);
+  w.varuint(n);
 }
 
 function readSlot(r: ByteReader): ItemStack | null {
