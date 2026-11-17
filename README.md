@@ -37,6 +37,7 @@ npm run build:artifact
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 重写版的代码架构与约定 |
 | [docs/LESSONS.md](docs/LESSONS.md) | 原型踩过的坑和解法方向 |
 | [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | 验收场景（实现成自动化测试） |
+| [docs/NETCODE.md](docs/NETCODE.md) | 联机协议与同步的实现规格 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 前提、里程碑、完成标准和进度 |
 
 必须原创：名字、贴图、UI 都不能模仿 Minecraft。
