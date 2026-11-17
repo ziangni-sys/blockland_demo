@@ -35,7 +35,7 @@ const SAMPLES = PER_SIDE * PER_SIDE;
  */
 const SEA_TARGET = 0.49;
 /** Regions drift around the target by up to about this much (very low-frequency noise). */
-const SEA_SWING = 0;
+const SEA_SWING = 0.05;
 /** Nodes kept in the cache (each covers CELL x CELL blocks: 4096 nodes = 16k x 16k blocks). */
 const MAX_NODES = 4096;
 const KEY_BIAS = 1 << 16;

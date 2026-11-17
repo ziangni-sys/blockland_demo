@@ -435,3 +435,12 @@ export function rotateShip(ship: Ship, axis: Vec3, angle: number): void {
 export function chunkOf(x: number): number {
   return x >> CHUNK_SHIFT;
 }
+
+/** Wrap an angle to (-PI, PI]. */
+export function wrap(a: number): number {
+  const t = Math.PI * 2;
+  a %= t;
+  if (a > Math.PI) a -= t;
+  else if (a <= -Math.PI) a += t;
+  return a;
+}

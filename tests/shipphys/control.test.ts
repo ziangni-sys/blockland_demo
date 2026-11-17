@@ -3,7 +3,7 @@ import { NZ, PX } from '../../src/core/dirs';
 import { qyaw } from '../../src/core/math';
 import { topSpeedFor, DEFAULT_OPTIONS } from '../../src/structures/physics';
 import type { Ship } from '../../src/structures/structure';
-import { launch, makeWorld, plankBoat, run, setup, wrap } from './controlHelpers';
+import { launch, makeWorld, plankBoat, run, setup, wrap } from './helpers';
 
 /** Long channel of open water: x in [-48, 47], z in [-240, 47]. */
 function channel() {
