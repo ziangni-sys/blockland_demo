@@ -4,14 +4,17 @@
  * identical snapshots return immediately, and each view compares against its own memo of
  * what it last rendered, writing the DOM only for real changes.
  */
+import { allItems } from '../blocks/items';
 import { UiContext } from './context';
 import { h } from './dom';
 import { IconCache, type IconProvider } from './icons';
+import { ACTIVATOR_ROLES, blocksRepeatActivation, type KeyTargetKind } from './keys';
 import type { Screen, UiActions, UiHandle, UiState } from './model';
 import { UI_CSS } from './styles';
 import { DeathView } from './views/death';
 import { Hud } from './views/hud';
 import { InventoryView } from './views/inventory';
+import { HudLayoutController } from './views/layout';
 import { LoadingView } from './views/loading';
 import { MainMenuView } from './views/mainMenu';
 import { PauseView } from './views/pause';
@@ -42,13 +45,28 @@ function isInGame(s: UiState): boolean {
   return true;
 }
 
+/** How the focused element treats Enter / Space (see keys.ts). */
+function keyTargetKind(t: EventTarget | null): KeyTargetKind {
+  if (t instanceof HTMLTextAreaElement) return 'multiline';
+  if (t instanceof HTMLInputElement) return TEXT_INPUT_TYPES.has(t.type) ? 'field' : 'activator';
+  if (t instanceof HTMLButtonElement || t instanceof HTMLAnchorElement || t instanceof HTMLSelectElement) return 'activator';
+  if (t instanceof HTMLElement) {
+    if (t.isContentEditable) return 'multiline';
+    const role = t.getAttribute('role');
+    if (role !== null && ACTIVATOR_ROLES.has(role)) return 'activator';
+  }
+  return 'other';
+}
+
 export class UiRoot implements UiHandle {
   private readonly el: HTMLElement;
   private readonly doc: Document;
   private readonly ctx: UiContext;
   private readonly hud: Hud;
   private readonly toasts: ToastStack;
+  private readonly inventory: InventoryView;
   private readonly screens: Readonly<Record<ModalScreen, ScreenView>>;
+  private readonly layout: HudLayoutController;
   private readonly onContextMenu = (e: Event): void => {
     // The host page's context menu is never useful over the game UI (right click is a game
     // input), except in text fields where copy / paste live.
@@ -56,6 +74,12 @@ export class UiRoot implements UiHandle {
     if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
     e.preventDefault();
   };
+  /** Capture phase: cancel auto-repeated Enter / Space activations before any control sees them. */
+  private readonly onKeyGuard = (e: KeyboardEvent): void => {
+    if (blocksRepeatActivation(e.key, e.repeat, e.isComposing, keyTargetKind(e.target))) e.preventDefault();
+  };
+  private dprQuery: MediaQueryList | null = null;
+  private readonly onDprChange = (): void => this.watchPixelRatio();
   private last: UiState | null = null;
   private screen: Screen | null = null;
   private inGame: boolean | null = null;
@@ -72,21 +96,45 @@ export class UiRoot implements UiHandle {
     this.ctx = new UiContext(doc, actions, new IconCache(doc, opts.iconProvider), iconSize, reduced);
 
     this.el = h(doc, 'div', 'bl-ui', { 'data-screen': '', 'data-ingame': '0', lang: 'zh-CN' });
-    this.hud = new Hud(this.ctx, this.el);
+    this.hud = new Hud(this.ctx);
     this.toasts = new ToastStack(this.ctx);
+    this.inventory = new InventoryView(this.ctx, this.el);
     this.screens = {
       mainMenu: new MainMenuView(this.ctx),
       loading: new LoadingView(this.ctx),
       pause: new PauseView(this.ctx),
-      inventory: new InventoryView(this.ctx, this.el),
+      inventory: this.inventory,
       settings: new SettingsView(this.ctx),
       death: new DeathView(this.ctx),
     };
-    this.el.prepend(this.hud.el);
+    const safeProbe = h(doc, 'div', 'bl-safe-probe', { 'aria-hidden': 'true' });
+    this.el.prepend(this.hud.el, safeProbe);
     for (const v of Object.values(this.screens)) this.el.insertBefore(v.el, this.el.querySelector('.bl-tooltip'));
     this.el.insertBefore(this.toasts.el, this.el.querySelector('.bl-tooltip'));
     this.el.addEventListener('contextmenu', this.onContextMenu);
+    this.el.addEventListener('keydown', this.onKeyGuard, true);
     root.appendChild(this.el);
+
+    const hud = this.hud;
+    this.layout = new HudLayoutController({
+      root: this.el,
+      cluster: hud.cluster,
+      crosshair: hud.crosshair,
+      hint: hud.hintEl,
+      debug: hud.debugEl,
+      helm: hud.helmEl,
+      veil: hud.veil,
+      veilCard: hud.veilCard,
+      toasts: this.toasts.el,
+      safeProbe,
+    });
+    this.watchPixelRatio();
+    // Render every item icon in idle time while the player is still on the menus, so the
+    // first creative palette (every item at once) opens without a stall.
+    this.ctx.icons.prewarm(
+      allItems().map((it) => it.id),
+      this.ctx.iconSize,
+    );
   }
 
   update(s: UiState): void {
@@ -153,10 +201,38 @@ export class UiRoot implements UiHandle {
     if (this.disposed) return;
     this.disposed = true;
     this.el.removeEventListener('contextmenu', this.onContextMenu);
+    this.el.removeEventListener('keydown', this.onKeyGuard, true);
+    this.dprQuery?.removeEventListener('change', this.onDprChange);
+    this.layout.dispose();
     for (const v of Object.values(this.screens)) v.dispose();
     this.toasts.dispose();
+    this.ctx.icons.dispose();
     this.el.remove();
     releaseStyle(this.doc);
+  }
+
+  /**
+   * Keep icon resolution matched to devicePixelRatio, which changes with browser zoom or when
+   * the window moves to another monitor. A resolution media query for the current ratio fires
+   * 'change' once the ratio leaves it; then re-arm for the new ratio and repaint if the icon
+   * backing size moved.
+   */
+  private watchPixelRatio(): void {
+    const win = this.doc.defaultView;
+    if (!win || typeof win.matchMedia !== 'function') return;
+    this.dprQuery?.removeEventListener('change', this.onDprChange);
+    const dpr = win.devicePixelRatio || 1;
+    this.dprQuery = win.matchMedia(`(resolution: ${dpr}dppx)`);
+    this.dprQuery.addEventListener('change', this.onDprChange);
+    const size = iconSizeFor(dpr);
+    if (size === this.ctx.iconSize) return;
+    this.ctx.iconSize = size;
+    this.hud.repaintIcons();
+    this.inventory.repaintIcons();
+    this.ctx.icons.prewarm(
+      allItems().map((it) => it.id),
+      size,
+    );
   }
 }
 

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { B } from '../../src/blocks/defs';
-import { SOLID } from '../../src/blocks/registry';
 import { NZ, PX } from '../../src/core/dirs';
 import { analyzeHull } from '../../src/structures/hull';
 import { StructureManager } from '../../src/structures/manager';
@@ -8,7 +7,7 @@ import { Ship } from '../../src/structures/structure';
 import { Chunk } from '../../src/voxel/chunk';
 import { StructureGrid } from '../../src/voxel/sgrid';
 import { World } from '../../src/voxel/world';
-import { c, cellMap, facing, FakeHost, fill, log, scene, snapshotBox, WATER, windmill, worldCentre } from './helpers';
+import { c, cellMap, facing, FakeHost, fill, log, scene, snapshotBox, WATER, worldCentre } from './helpers';
 
 /** Every water source in a world box, as [x, y, z]. */
 function sourcesIn(world: World, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): Array<[number, number, number]> {

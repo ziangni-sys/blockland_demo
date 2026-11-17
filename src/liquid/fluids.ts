@@ -349,6 +349,17 @@ export class Fluids {
   }
 
   /**
+   * Forget the cells waiting for unloaded chunks. Call it when the world's content is replaced
+   * wholesale under this instance (a save imported into a running simulation), together with
+   * world.ticks.clear(); then rescheduleChunk() every chunk as it is added. (Left alone, stale
+   * entries would only cost an extra tick each.)
+   */
+  clear(): void {
+    this.deferred.clear();
+    this.restGen++;
+  }
+
+  /**
    * Run one scheduled tick for the liquid at (x,y,z). The simulation's tick dispatcher calls
    * this for every due ScheduledTick whose id handles() accepts. A tick whose block id no
    * longer matches the cell is ignored.

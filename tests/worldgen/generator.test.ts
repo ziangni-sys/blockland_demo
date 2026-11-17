@@ -257,6 +257,40 @@ describe('TerrainGenerator: world shape', () => {
     expect(minTop).toBeLessThan(30);
   });
 
+  it('snow cover fades in over a band around the snow line (no hard white contour)', () => {
+    // Seed 9 has snowy hills next to forest around (176, -244). Bin open-sky land columns by
+    // their height above the column's snow line and measure the share with snow cover.
+    const gen = new TerrainGenerator(9);
+    const area = new ChunkArea(gen, 7, -20, 8);
+    const s = createColumnSample();
+    const n = new Map<number, number>();
+    const snow = new Map<number, number>();
+    for (let z = area.z0; z < area.z0 + area.size; z++) {
+      for (let x = area.x0; x < area.x0 + area.size; x++) {
+        gen.sampler.sample(x, z, s);
+        const top = gen.heightAt(x, z);
+        if (top !== s.height || top < SEA_LEVEL) continue;
+        let open = true;
+        for (let y = top + 2; y < WORLD_HEIGHT && open; y++) if (area.get(x, y, z) !== B.AIR) open = false;
+        if (!open) continue;
+        const d = Math.floor(top - s.snowLine);
+        n.set(d, (n.get(d) ?? 0) + 1);
+        if (cellId(area.get(x, top + 1, z)) === B.SNOW_LAYER) snow.set(d, (snow.get(d) ?? 0) + 1);
+      }
+    }
+    const share = (d: number): number => (snow.get(d) ?? 0) / n.get(d)!;
+    for (let d = -10; d <= 12; d++) expect(n.get(d) ?? 0, `columns ${d} above the snow line`).toBeGreaterThanOrEqual(40);
+    for (let d = -10; d <= -8; d++) expect(share(d)).toBeLessThanOrEqual(0.02);
+    for (let d = 9; d <= 12; d++) expect(share(d)).toBe(1);
+    let partial = 0;
+    for (let d = -7; d <= 8; d++) {
+      if (share(d) > 0.05 && share(d) < 0.95) partial++;
+      expect(share(d) + 0.1, `snow share rises with height (${d})`).toBeGreaterThanOrEqual(share(d - 1));
+    }
+    // Measured: about 10 partial bins (a 14-block fade). A hard contour has at most 2.
+    expect(partial).toBeGreaterThanOrEqual(6);
+  });
+
   it('biome borders do not create height seams', () => {
     // Heights never read the biome label, so where the label changes for purely climatic
     // reasons the terrain must look like terrain anywhere else. (Labels that depend on

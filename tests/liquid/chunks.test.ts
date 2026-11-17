@@ -240,6 +240,18 @@ describe('unloaded chunks', () => {
     for (const c of liquidCells(fw.world)) expect(diamond(8, 8, 7).has(`${c.x},${c.z}`)).toBe(true);
   });
 
+  it('clear() forgets deferred cells (a save imported into the running simulation)', () => {
+    const world = new World(1);
+    for (const [cx, cz] of chunkCoords(AROUND_ORIGIN)) if (cx !== 1) world.addChunk(makeChunk(cx, cz, platform));
+    const fluids = new Fluids(world);
+    fluids.attach();
+    world.setCell(10, SURFACE, 8, water());
+    pumpUntilQuiet({ world, fluids });
+    expect(fluids.deferredCount).toBeGreaterThan(0);
+    fluids.clear();
+    expect(fluids.deferredCount).toBe(0);
+  });
+
   it('rescheduleChunk ignores a chunk that is not in the world', () => {
     const world = new World(1);
     const fluids = new Fluids(world);
