@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { NZ, PY } from '../../src/core/dirs';
+import { NZ, PX, PY } from '../../src/core/dirs';
 import type { ItemEntity } from '../../src/entities/entity';
 import { FALL_DELAY } from '../../src/sim/blockupdates';
 import { FLAT_TOP, SEA_TOP, click, fill, flatSim, idAt, items, seaSim } from './helpers';
@@ -107,5 +107,34 @@ describe('block updates', () => {
     expect(idAt(ship.grid, 1, SEA_TOP, 1)).toBe(B.AIR);
     expect(items(sim, B.TORCH).entities).toBe(1);
     void PY;
+  });
+
+  it('a rotor started on a ship takes the support from under a flower left on the deck: it pops', () => {
+    // Flowers stick to nothing, so the rotor leaves it behind in the ship grid; bulk moves inside
+    // structures are re-evaluated like any other change (nobody else checks them).
+    const sim = flatSim({ mode: 'survival', spawn: { x: 12.5, y: T, z: 12.5 } });
+    sim.structures.dynamics = null;
+    const w = sim.world;
+    const y0 = T + 2;
+    fill(w, 0, y0, 0, 2, y0, 2, B.PLANKS_OAK);
+    w.setCell(1, y0 + 1, 2, makeCell(B.HELM, facingState(NZ)));
+    fill(w, 0, y0 + 1, 1, 0, y0 + 4, 1, B.PLANKS_OAK); // mast
+    const by = y0 + 4;
+    w.setCell(1, by, 1, makeCell(B.BEARING, facingState(PX)));
+    for (const [dy, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]] as const) w.setCell(2, by + dy, 1 + dz, makeCell(B.CANVAS));
+    sim.worldGlue.add(2, by, 1, 1 /* NX: the hub rides along with the ship */);
+    const sres = sim.structures.assembleShip(1, y0 + 1, 2);
+    expect(sres.ok).toBe(true);
+    if (!sres.ok) return;
+    const ship = sres.structure;
+    expect(idAt(ship.grid, 2, by + 1, 1)).toBe(B.CANVAS);
+    ship.grid.setCell(2, by + 2, 1, makeCell(B.FLOWER_RED)); // on top of the upper blade
+    sim.tick();
+    expect(idAt(ship.grid, 2, by + 2, 1)).toBe(B.FLOWER_RED);
+    const rres = sim.structures.startRotor(ship.grid, 1, by, 1);
+    expect(rres.ok).toBe(true);
+    sim.tick();
+    expect(idAt(ship.grid, 2, by + 2, 1)).toBe(B.AIR);
+    expect(items(sim, B.FLOWER_RED).entities).toBe(1);
   });
 });

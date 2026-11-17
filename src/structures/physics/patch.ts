@@ -97,10 +97,20 @@ export class WorldPatch implements ProbeTarget {
     let maxY = -Infinity;
     let maxZ = -Infinity;
     let waterTop = -Infinity;
+    let ccx = 0;
+    let ccz = 0;
+    let cells: Uint16Array | null = null;
+    let haveChunk = false;
     for (let z = z0; z <= z1; z++) {
       for (let x = x0; x <= x1; x++) {
-        const chunk = world.getChunk(x >> SHIFT, z >> SHIFT);
-        const cells = chunk !== undefined ? chunk.cells : null;
+        // one chunk lookup per run of 16 columns, not per column
+        if (!haveChunk || x >> SHIFT !== ccx || z >> SHIFT !== ccz) {
+          ccx = x >> SHIFT;
+          ccz = z >> SHIFT;
+          const chunk = world.getChunk(ccx, ccz);
+          cells = chunk !== undefined ? chunk.cells : null;
+          haveChunk = true;
+        }
         const col = (x & MASK) | ((z & MASK) << 4);
         let i = ((z - z0) * sx + (x - x0)) * sy;
         let colSolid = false;
@@ -110,7 +120,8 @@ export class WorldPatch implements ProbeTarget {
           else if (y >= HEIGHT) cell = AIR;
           else if (cells === null) cell = UNLOADED;
           else cell = cells[col | (y << 8)]!;
-          const fl = cellFlags(cell);
+          const id = cell & ID_BITS_MASK;
+          const fl = (SOLID_TABLE[id] === 1 ? PF_SOLID : 0) | (id === WATER_ID ? PF_WATER : 0); // cellFlags, inlined
           f[i] = fl;
           if (fl === PF_SOLID) {
             colSolid = true;

@@ -1,9 +1,13 @@
 /**
- * Adversarial review (correctness lens) of the pinning rules — ACCEPTANCE 15/16,
- * LESSONS 能动的船被误判压坏 / 船被转子硬推进地形, brief: "A ship that can still slide away along
- * the wall is not pinned" and "every rotor ... is an infinitely heavy moving obstacle".
- *
- * These tests are expected to FAIL against the current implementation; they document defects.
+ * Regression tests from the adversarial review (correctness lens) of the pinning rules —
+ * ACCEPTANCE 15/16, LESSONS 能动的船被误判压坏 / 船被转子硬推进地形, brief: "A ship that can still
+ * slide away along the wall is not pinned" and "every rotor ... is an infinitely heavy moving
+ * obstacle". Each block failed before the fix it is named after:
+ *  - oblique blades destroyed cells of a boat sliding away along a wall (the pin test took its
+ *    direction from the post-solve relative velocity; now the blade's own motion, see pinning.ts);
+ *  - a blade passed through a boat wedged against another ship (ship supports were ignored);
+ *  - a tip grazing a boat flung it (sweep-biased exit faces; now the graze rule in contacts.ts);
+ *  - a ship resting on a stopped rotor never slept.
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';

@@ -16,9 +16,10 @@
  * Block updates (falling sand, popping torches) queued by any phase run right after it.
  *
  * Scripted control (tests, tools, the debug console): lookAt / lookAtCell, use / attack,
- * useOn / mine (aim + click, checked), targetCell, hold / giveItem, teleport, advance,
- * setDayTime. They only write what the client would write (input, inventory) or what a
- * command would (teleport), so a scripted session behaves exactly like a played one.
+ * useOn / mine (aim + click, checked), targetCell / mineTargetCell, hold / emptyHand /
+ * giveItem, teleport, advance, setDayTime. They only write what the client would write
+ * (input, inventory) or what a command would (teleport), so a scripted session behaves
+ * exactly like a played one.
  */
 import { DAY_TICKS, ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../core/dirs';
@@ -64,6 +65,14 @@ export interface SimOptions {
   spawn?: { x: number; y: number; z: number };
   /** Ambient rabbits by day (default true). Tests that count entities turn them off. */
   rabbits?: boolean;
+  /**
+   * Do not generate and light the ground around the spawn point in the constructor (default
+   * false). Set it when the next call is importSave(): that throws every chunk away and loads
+   * the ground under the SAVED player itself, so the constructor's work would be wasted (tens of
+   * milliseconds on generated terrain). A simulation that is ticked without an import still gets
+   * its chunks (syncChunks, or chunks.provide()); until they arrive the player is frozen in place.
+   */
+  deferInitialLoad?: boolean;
 }
 
 /** Lighting work per tick (cells visited) — keeps a big relight from stalling a frame. */
@@ -144,8 +153,8 @@ export class Simulation {
     // Start in the morning. The clock must be set BEFORE any chunk is loaded: loading
     // schedules liquid ticks relative to world.time.
     this.world.time = Math.floor(DAY_TICKS * START_DAY_TIME);
-    // The ground under the player must exist before the first tick.
-    this.chunks.loadAround(opts.generator, spawn.x, spawn.z, 1);
+    // The ground under the player must exist before the first tick (unless a save brings its own).
+    if (opts.deferInitialLoad !== true) this.chunks.loadAround(opts.generator, spawn.x, spawn.z, 1);
     // Generated chunks are pristine: whatever the hooks queued while loading is not a change.
     this.blocks.clear();
     const player = this.entities.createPlayer(opts.mode, spawn.x, spawn.y, spawn.z);
@@ -170,7 +179,18 @@ export class Simulation {
     const p = this.entities.player;
     return p !== null && p.mode === 'creative';
   }
-  /** 0..1 over a day: 0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight. */
+  /**
+   * Ticks since the world began (read-only view of world.time, which is saved). The clock drives
+   * scheduled block ticks: never write world.time to change the time of day — use setDayTime().
+   */
+  get ticks(): number {
+    return this.world.time;
+  }
+  /**
+   * 0..1 over a day: 0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight. THE time of day: it is
+   * (world.time + dayOffset) mod DAY_TICKS, so world.time % DAY_TICKS alone is wrong as soon as
+   * setDayTime() was used.
+   */
   get dayTime(): number {
     return mod(this.world.time + this.dayOffset, DAY_TICKS) / DAY_TICKS;
   }
@@ -313,6 +333,23 @@ export class Simulation {
     this.player.input.attackPresses++;
   }
 
+  /**
+   * Hold nothing: select the first empty hotbar slot, or empty the selected one when the hotbar
+   * is full (its stack is discarded). Useful before clicks that differ with a block in hand
+   * (lighting a blast crate, sneak + right-click docking at a ship's helm).
+   */
+  emptyHand(): void {
+    const p = this.player;
+    const inv = p.inventory;
+    let slot = inv.hotbar.findIndex((s) => s === null || s.count <= 0);
+    if (slot < 0) {
+      slot = inv.selected;
+      inv.hotbar[slot] = null;
+    }
+    inv.selected = slot;
+    p.input.slot = slot;
+  }
+
   /** Put items into the inventory like a pickup does. Returns the amount that did not fit. */
   giveItem(item: number, count = 1): number {
     return this.player.inventory.add(item, count);
@@ -352,9 +389,17 @@ export class Simulation {
     for (let i = 0; i < ticks; i++) this.tick();
   }
 
-  /** The cell the player looks at right now (with the held item's ray rules), or null. */
+  /**
+   * The cell the player looks at right now with the held item's use ray (what a right-click acts
+   * on: with a bucket in hand, liquid sources count), or null.
+   */
   targetCell(): (GridCell & { face: Dir }) | null {
     const h = this.interaction.raycast();
+    return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face };
+  }
+  /** The cell a left-click would mine right now (liquid never counts), or null. */
+  mineTargetCell(): (GridCell & { face: Dir }) | null {
+    const h = this.interaction.raycastMining();
     return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face };
   }
 
@@ -376,7 +421,7 @@ export class Simulation {
    * when the cell was mined; false when it could not be aimed at or did not break in time.
    */
   mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxTicks = 400): boolean {
-    if (!this.aimAt(x, y, z, face, gridId)) return false;
+    if (!this.aimAt(x, y, z, face, gridId, true)) return false;
     const input = this.player.input;
     const grid = this.structures.gridById(gridId)!;
     const before = grid.getCell(x, y, z);
@@ -388,7 +433,7 @@ export class Simulation {
         const g = this.structures.gridById(gridId);
         if (g === undefined || g.getCell(x, y, z) !== before) return true;
         // Keep aiming at the cell: a carrier may have turned the player.
-        if (!this.aimAt(x, y, z, face, gridId)) return false;
+        if (!this.aimAt(x, y, z, face, gridId, true)) return false;
       }
       return false;
     } finally {
@@ -396,11 +441,14 @@ export class Simulation {
     }
   }
 
-  /** lookAtCell + check that the ray hits exactly that cell. */
-  private aimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number): boolean {
+  /**
+   * lookAtCell + check that the ray hits exactly that cell: the use ray of the held item, or the
+   * mining ray (which never stops at liquid, even with a bucket in hand).
+   */
+  private aimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining = false): boolean {
     if (!this.lookAtCell(x, y, z, face, gridId)) return false;
-    const t = this.targetCell();
-    return t !== null && t.gridId === gridId && t.x === x && t.y === y && t.z === z && (face === undefined || t.face === face);
+    const h = mining ? this.interaction.raycastMining() : this.interaction.raycast();
+    return h !== null && h.grid.gridId === gridId && h.x === x && h.y === y && h.z === z && (face === undefined || h.face === face);
   }
 
   // ------------------------------------------------------------------ tick

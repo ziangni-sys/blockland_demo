@@ -184,4 +184,29 @@ describe('save / load', () => {
     expect(res.ok && res.structure instanceof Ship).toBe(true);
     expect(first.structures.all().some((s) => s instanceof Rotor)).toBe(true); // the old world is untouched
   });
+
+  it('a simulation built for loading (deferInitialLoad) generates nothing itself and ends up the same as the normal path', () => {
+    const sim = shipWithWindmill();
+    sim.advance(30);
+    const bundle = copyBundle(exportSave(sim));
+    const opts = { seed: 2, mode: 'creative', generator: seaGenerator(), syncChunks: true, loadRadius: 2, rabbits: false } as const;
+    const normal = new Simulation(opts);
+    const deferred = new Simulation({ ...opts, deferInitialLoad: true });
+    expect(normal.world.chunks.size).toBeGreaterThan(0);
+    expect(deferred.world.chunks.size).toBe(0);
+    importSave(normal, bundle);
+    importSave(deferred, copyBundle(bundle));
+    expect([...deferred.world.chunks.keys()].sort()).toEqual([...normal.world.chunks.keys()].sort());
+    expect(deferred.ticks).toBe(sim.ticks);
+    normal.advance(20);
+    deferred.advance(20);
+    sim.advance(20);
+    for (const other of [normal, deferred]) {
+      expect(other.ticks).toBe(sim.ticks);
+      expect(other.rng.state).toBe(sim.rng.state);
+      expect(other.structures.rotors()[0]!.angle).toBe(sim.structures.rotors()[0]!.angle);
+      expect(other.structures.ships()[0]!.grid.position).toEqual(sim.structures.ships()[0]!.grid.position);
+      expect(other.player.pos).toEqual(sim.player.pos);
+    }
+  });
 });

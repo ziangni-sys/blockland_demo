@@ -236,30 +236,64 @@ async function runMode(mode, pageUrl, hostRequests) {
   };
   const center = { x: VIEWPORT.width / 2, y: VIEWPORT.height / 2 };
   const DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-  /** Right-click at the crosshair with planks in hand; returns the cell that became planks. */
-  const placeBlock = async (yaw, pitch) => {
-    await G(([y, p]) => window.__blocklands.game.debug.look(y, p), [yaw, pitch]);
-    await nextTick();
-    const t = (await state()).target;
-    check(t, `nothing in reach to place against (yaw ${yaw}, pitch ${pitch})`);
-    const d = DIRS[t.face];
-    const candidates = [{ x: t.x, y: t.y, z: t.z }, { x: t.x + d[0], y: t.y + d[1], z: t.z + d[2] }];
-    await page.mouse.click(center.x, center.y, { button: 'right' });
-    await waitFor(
-      'the block to appear',
-      ([cs, id]) => cs.some((c) => (window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) === id),
-      [candidates, PLANKS],
-    );
-    for (const c of candidates) if ((await cellId(c)) === PLANKS) return c;
-    throw new StepError('placed block vanished');
+  /** Does cell c intersect the player's body (placing there would be refused)? */
+  const touchesPlayer = (c, p) =>
+    c.x < p.x + 0.35 && c.x + 1 > p.x - 0.35 && c.z < p.z + 0.35 && c.z + 1 > p.z - 0.35 && c.y < p.y + 1.85 && c.y + 1 > p.y - 0.05;
+  /**
+   * Right-click at the crosshair with planks in hand, trying a few look directions until a
+   * block appears; returns the cell that became planks.
+   */
+  const placeBlock = async (aims) => {
+    for (const [yaw, pitch] of aims) {
+      await G(([y, p]) => window.__blocklands.game.debug.look(y, p), [yaw, pitch]);
+      await nextTick();
+      const st = await state();
+      const t = st.target;
+      if (!t || t.gridId !== 0) continue;
+      const d = DIRS[t.face];
+      const candidates = [{ x: t.x, y: t.y, z: t.z }, { x: t.x + d[0], y: t.y + d[1], z: t.z + d[2] }];
+      if (candidates.some((c) => touchesPlayer(c, st.player))) continue;
+      await page.mouse.click(center.x, center.y, { button: 'right' });
+      try {
+        await page.waitForFunction(
+          ([cs, id]) => cs.some((c) => (window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) === id),
+          [candidates, PLANKS],
+          { timeout: 8000, polling: 250 },
+        );
+      } catch {
+        log(`no block appeared looking at ${t.x} ${t.y} ${t.z} (face ${t.face}); trying another spot`);
+        continue;
+      }
+      for (const c of candidates) if ((await cellId(c)) === PLANKS) return c;
+    }
+    throw new StepError('could not place a block anywhere in front of the player');
   };
+  const AIMS = [
+    [0, -0.6],
+    [0.7, -0.6],
+    [-0.7, -0.6],
+    [1.6, -0.55],
+    [-1.6, -0.55],
+    [Math.PI, -0.6],
+  ];
 
   let result = 'PASS';
   let persistent = false;
   let reloaded = 'skipped';
   try {
     await page.goto(pageUrl, { timeout: 60_000 });
-    await waitFor('the game to boot', () => !!window.__blocklands, undefined, 60_000);
+    // A dev server may reload the page once while it boots (dependency optimisation, HMR):
+    // only start once the page has been quiet for a moment.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 30_000 });
+        await page.waitForFunction(() => !!window.__blocklands, undefined, { timeout: 60_000 });
+        await page.waitForTimeout(500);
+        if (await G(() => !!window.__blocklands)) break;
+      } catch (e) {
+        if (attempt >= 2) throw new StepError(`the game did not boot: ${e.message}`);
+      }
+    }
     await G((rd) => window.__blocklands.game.changeSettings({ renderDistance: rd, showDebug: true }), RENDER_DISTANCE);
     await waitFor('the main menu', () => window.__blocklands.game.screen === 'mainMenu');
     await page.waitForTimeout(500);
@@ -310,7 +344,7 @@ async function runMode(mode, pageUrl, hostRequests) {
 
     // ---- place a block, break it, place a second one to keep
     await G((id) => window.__blocklands.game.debug.give(id), PLANKS);
-    const first = await placeBlock(0, -0.75);
+    const first = await placeBlock(AIMS);
     log(`placed planks at ${first.x} ${first.y} ${first.z}`);
     await shot('05-placed');
     await aimAt(first);
@@ -321,7 +355,7 @@ async function runMode(mode, pageUrl, hostRequests) {
     await waitFor('the block to break', ([c, id]) => (window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) !== id, [first, PLANKS]);
     log(`broke it (cell is now ${await cellId(first)})`);
     await shot('06-broken');
-    const kept = await placeBlock(0.5, -0.9);
+    const kept = await placeBlock(AIMS.slice(1).concat([AIMS[0]]));
     log(`placed planks to keep at ${kept.x} ${kept.y} ${kept.z}`);
 
     // ---- inventory

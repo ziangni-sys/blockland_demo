@@ -10,6 +10,8 @@
  *   webgl=1          force the WebGL2 backend
  *   aa=0             disable MSAA
  *   validate=0       skip the WebGPU presentation check (to exercise device-loss handling)
+ *   offscreen=1      render into a texture and paint read-back pixels over the page (see
+ *                    offscreen.ts; with validate=0 this exercises WebGPU where presenting fails)
  *   vd=96            view distance (blocks)
  *   time=12.5        animation clock start (seconds); freeze=1 keeps it fixed (stable screenshots)
  *   stress=4         replicate the world's sections on a 4 x 4 grid (performance testing)
@@ -24,6 +26,7 @@ import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { qfromAxisAngle, qmul, qrotate, vec3 } from '../../src/core/math';
 import { sectionKey } from '../../src/voxel/chunk';
+import { installOffscreen } from './offscreen';
 import { buildRaft, buildRotor, buildShip, buildWorld, makeTiles, meshRegion, windmillAnchor, WORLD_X, WORLD_Y, WORLD_Z } from './synth';
 
 const params = new URLSearchParams(location.search);
@@ -34,6 +37,8 @@ const num = (k: string, d: number): number => {
 
 const canvas = document.getElementById('view') as HTMLCanvasElement;
 const hud = document.getElementById('hud') as HTMLDivElement;
+// offscreen=1: render into a texture and show read-back pixels (WebGPU where presenting fails).
+if (params.get('offscreen') === '1') installOffscreen(canvas);
 const backend = createThreeBackend({
   forceWebGL: params.get('webgl') === '1',
   antialias: params.get('aa') !== '0',

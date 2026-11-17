@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { cellState, makeCell, stateAxis, stateFacing, stateLayers } from '../../src/blocks/cell';
+import { cellState, facingState, makeCell, stateAxis, stateFacing, stateLayers } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { NX, NZ, PX, PY, PZ } from '../../src/core/dirs';
 import { qfromYaw } from '../../src/core/math';
-import { EventLog, FLAT_TOP, click, flatSim, idAt } from './helpers';
+import { EventLog, FLAT_TOP, click, fill, flatSim, idAt } from './helpers';
 
 const T = FLAT_TOP; // first air row; the ground's top face is at y = T
 
@@ -185,5 +185,107 @@ describe('placement', () => {
     sim.lookAtCell(0, T, -2);
     click(sim);
     expect(idAt(sim.world, 0, T, -2)).toBe(B.PLANKS_OAK);
+  });
+});
+
+describe('placement on ships', () => {
+  /** A 3x3 plank deck hovering at y = T + 1 (dynamics off: it stays exactly there), helm facing north at (1, T + 2, 2). */
+  function hoveringRaft(sim: ReturnType<typeof flatSim>) {
+    sim.structures.dynamics = null;
+    const w = sim.world;
+    fill(w, 0, T + 1, 0, 2, T + 1, 2, B.PLANKS_OAK);
+    w.setCell(1, T + 2, 2, makeCell(B.HELM, facingState(NZ)));
+    const res = sim.structures.assembleShip(1, T + 2, 2);
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error('assembly failed');
+    return res.structure;
+  }
+
+  it('snow cover stacks on a deck like in the world; a grass tuft on a deck is replaced in place', () => {
+    const sim = flatSim({ spawn: { x: 1.5, y: T, z: 5.5 } });
+    const ship = hoveringRaft(sim);
+    sim.teleport(1.5, T + 3, -2.5);
+    sim.player.flying = true;
+    sim.tick();
+    const log = new EventLog(sim);
+    sim.hold(B.SNOW_LAYER);
+    expect(sim.useOn(1, T + 1, 0, PY, ship.id)).toBe(true);
+    for (let i = 0; i < 2; i++) expect(sim.useOn(1, T + 2, 0, undefined, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 1, T + 3, 0)).toBe(B.AIR); // nothing went on top of the cover
+    expect(stateLayers(cellState(ship.grid.getCell(1, T + 2, 0)))).toBe(3);
+    expect(log.toastKeys()).toEqual([]);
+
+    ship.grid.setCell(0, T + 2, 0, makeCell(B.TALL_GRASS));
+    sim.hold(B.PLANKS_OAK);
+    expect(sim.useOn(0, T + 2, 0, undefined, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 0, T + 2, 0)).toBe(B.PLANKS_OAK);
+    expect(idAt(ship.grid, 0, T + 3, 0)).toBe(B.AIR);
+  });
+
+  it('sneak + right-click with a block item on a ship helm places the block (as on a world helm); docking needs an empty hand', () => {
+    // The player stands on the ground south-east of the hovering raft, below its deck.
+    const sim = flatSim({ spawn: { x: 4.5, y: T, z: 4.5 } });
+    const ship = hoveringRaft(sim);
+    sim.advance(3);
+    const log = new EventLog(sim);
+    sim.hold(B.STONE);
+    sim.lookAtCell(1, T + 2, 2, PX, ship.id);
+    sim.tick();
+    expect(sim.view.hint?.key).toBe('hint.helm.steerPlace'); // says how to dock with a block in hand
+    sim.player.input.sneak = true;
+    sim.lookAtCell(1, T + 2, 2, PX, ship.id); // the eye is lower while sneaking
+    sim.tick();
+    expect(sim.view.target).toMatchObject({ gridId: ship.id, x: 1, y: T + 2, z: 2 });
+    expect(sim.view.hint).toBeNull();
+    expect(sim.useOn(1, T + 2, 2, PX, ship.id)).toBe(true);
+    expect(ship.removed).toBe(false);
+    expect(idAt(ship.grid, 2, T + 2, 2)).toBe(B.STONE);
+    expect(log.toastKeys()).not.toContain('toast.dock.done');
+
+    sim.emptyHand();
+    sim.lookAtCell(1, T + 2, 2, PZ, ship.id);
+    sim.tick();
+    expect(sim.view.hint?.key).toBe('hint.helm.steer');
+    expect(sim.useOn(1, T + 2, 2, PZ, ship.id)).toBe(true);
+    sim.player.input.sneak = false;
+    expect(ship.removed).toBe(true);
+    expect(log.toastKeys()).toContain('toast.dock.done');
+    expect(idAt(sim.world, 2, T + 2, 2)).toBe(B.STONE);
+    expect(idAt(sim.world, 1, T + 2, 2)).toBe(B.HELM);
+  });
+
+  it('a ship cannot grow past its assembly limit by placing blocks (it could never be assembled again)', () => {
+    const sim = flatSim({ spawn: { x: 0.5, y: T, z: 0.5 }, loadRadius: 4 });
+    sim.advance(25); // every chunk under the deck and around it
+    sim.structures.dynamics = null;
+    const w = sim.world;
+    const y0 = T + 1;
+    // A two-layer deck of 50 x 40 x 2 = 4000 cells, minus two corner cells, plus the helm.
+    fill(w, -20, y0, -20, 29, y0 + 1, 19, B.PLANKS_OAK);
+    w.setCell(29, y0 + 1, 19, 0);
+    w.setCell(29, y0 + 1, 18, 0);
+    w.setCell(0, y0 + 2, 3, makeCell(B.HELM, facingState(NZ)));
+    const res = sim.structures.assembleShip(0, y0 + 2, 3);
+    expect(res.ok ? 'ok' : res.reason).toBe('ok');
+    if (!res.ok) return;
+    const ship = res.structure;
+    expect(ship.grid.count).toBe(sim.shipMaxCells - 1);
+    sim.teleport(0.5, y0 + 2, 0.5);
+    sim.player.flying = true;
+    sim.tick();
+    const log = new EventLog(sim);
+    sim.hold(B.STONE);
+    expect(sim.useOn(0, y0 + 1, -2, PY, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 0, y0 + 2, -2)).toBe(B.STONE);
+    expect(ship.grid.count).toBe(sim.shipMaxCells);
+    expect(sim.useOn(2, y0 + 1, -2, PY, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 2, y0 + 2, -2)).toBe(B.AIR);
+    expect(ship.grid.count).toBe(sim.shipMaxCells);
+    expect(log.toasts()).toContainEqual({ key: 'fail.ship.too_big', params: { max: sim.shipMaxCells } });
+    // Replacing soft cover adds no cell, so it is still allowed at the limit.
+    ship.grid.setCell(4, y0 + 2, -2, makeCell(B.TALL_GRASS));
+    expect(ship.grid.count).toBe(sim.shipMaxCells + 1); // (set directly, past the limit)
+    expect(sim.useOn(4, y0 + 2, -2, undefined, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 4, y0 + 2, -2)).toBe(B.STONE);
   });
 });

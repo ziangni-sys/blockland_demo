@@ -120,7 +120,8 @@ export class InputBinder {
 
   /** The drag gesture is aborted and any held button released. */
   cancelGesture(): void {
-    if (this.gesture.cancel() === 'endHold') this.host.input.buttonUp(this.gesture.button);
+    const button = this.gesture.button; // cancel() forgets it
+    if (this.gesture.cancel() === 'endHold') this.host.input.buttonUp(button);
   }
 
   dispose(): void {

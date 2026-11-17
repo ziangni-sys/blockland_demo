@@ -1,21 +1,16 @@
 /**
- * Adversarial review (robustness lens): LESSONS 叶片侧面擦过船时船被猛踢. FAILS against the current
- * implementation; left in place for the fixer.
+ * Regression test from the adversarial review (robustness lens): LESSONS 叶片侧面擦过船时船被猛踢.
  *
  * A boat drifts at 0.3 block/s against the FLAT side of a spinning horizontal-axis rotor (a
  * water-wheel-like windmill): the blade face slides past the hull tangentially. The true overlap
- * is a few hundredths of a block and the only tangential coupling should be blade friction
- * (rotorFriction 0.3 times a normal impulse of ~0.3 block/s * mass), i.e. a fraction of a block/s.
+ * is a few hundredths of a block and the only tangential coupling should be blade friction, i.e.
+ * a fraction of a block/s.
  *
- * What happens: in the first contact tick the boat goes from (-0.3, 0, 0) to about
- * (+0.59, -0.93, -0.58) block/s (it even rebounds faster than it came in), and then one
- * persistent slop-depth contact drags it along the blade's sweep, accelerating it to ~5 block/s
- * in the blade plane. Cause: Prober.probe() credits SWEEP_BIAS (0.35 block) to exit faces that
- * point along the blade's relative sweep, so for a hull point that sits on the shared face (true
- * depth ~0) the leading/trailing face of the blade cell (depth up to 0.35) wins. The contact
- * NORMAL then points along the sweep, and the non-penetration row forces the hull to match the
- * blade's full sweep speed along it — the "kick" the LESSONS bullet describes. The stored depth
- * is the distance to that biased face, not the true (minimum) overlap.
+ * Before the fix the boat was dragged along the blade's sweep at ~5 block/s: Prober.probe()
+ * credited a depth bonus to exit faces pointing along the blade's relative sweep, so for a hull
+ * edge point on the shared face (true depth ~0) the leading/trailing face of the blade cell (depth
+ * up to 0.35) won, and the non-penetration row made the hull match the blade's full sweep speed.
+ * Now faces along the sweep pay a penalty instead (the graze rule in contacts.ts).
  */
 import { describe, expect, it } from 'vitest';
 import { NZ, PX } from '../../src/core/dirs';

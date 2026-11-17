@@ -1,20 +1,15 @@
 /**
- * Adversarial review (robustness lens): sleep / lifecycle gaps. These tests FAIL against the
- * current implementation; they are left in place for the fixer.
+ * Regression tests from the adversarial review (robustness lens): sleep / lifecycle gaps. Both
+ * failed before the fixes:
  *
- *  1. A ship asleep on another ship's deck never wakes when the cells it rests on are removed
- *     (mined) and the carrier stays quiet (resting on land, or barely affected): the carrier is
- *     refreshed and woken, the sleeper joins its solve as an IMMOVABLE obstacle (sleeper next to
- *     a quiet awake ship), nothing touches it any more, so it hovers in mid-air forever. The
- *     manager only wakes ships for WORLD cell changes (onWorldCell), never for another ship's
- *     cell changes, and the dynamics' wake rules (moving rotor / non-quiet ship / ship impulse)
- *     never fire here.
+ *  1. A ship asleep on another ship's deck never woke when the cells it rested on were mined and
+ *     the carrier stayed quiet (resting on land): the sleeper joined the carrier's solve as an
+ *     immovable obstacle and nothing touched it any more. Now a ship whose cells or rotors changed
+ *     wakes the sleepers near where it was and where it is.
  *
- *  2. A ship left with no HARD cell (e.g. only a torch after its planks were destroyed by
- *     pinning or an explosion) is skipped by step() entirely (b.shape.solidCount === 0): it hangs
- *     in the air for ever, and its grid keeps reporting the velocity it had (the helm read-out and
- *     anything using velocityAt see a moving ship that never moves). The manager removes only
- *     ships with grid.count === 0, so nothing else cleans it up.
+ *  2. A ship left with no HARD cell (only a torch after its planks were destroyed) was skipped by
+ *     step() and kept reporting its old velocity forever. Now it is held inert: zero velocity,
+ *     asleep, stats.inert (the structure manager should remove it — see the module report).
  */
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
@@ -64,5 +59,32 @@ describe('review: a ship with no hard cell left', () => {
     const speed = Math.hypot(v.x, v.y, v.z);
     // either it is simulated (it moves, e.g. falls) or its state says it is at rest
     expect(moved > 0.1 || speed === 0).toBe(true);
+  });
+});
+
+describe('a ship with no hard cell left (inert)', () => {
+  it('is reported inert, held at rest, and simulated again once a hard cell is added', () => {
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const s = newShip(world, 1);
+    shipBox(s, 0, 52, 0, 2, 52, 2, B.PLANKS_OAK);
+    s.grid.setCell(1, 53, 1, makeCell(B.TORCH));
+    launch(s, dyn);
+    run(dyn, [s], 5);
+    for (let x = 0; x <= 2; x++) for (let z = 0; z <= 2; z++) s.grid.setCell(x, 52, z, 0);
+    run(dyn, [s], 3);
+    const st = dyn.getStats(s)!;
+    expect(st.inert).toBe(true);
+    expect(st.simulated).toBe(false);
+    expect(s.asleep).toBe(true);
+    expect(s.grid.linearVelocity).toEqual({ x: 0, y: 0, z: 0 });
+    expect(s.grid.angularVelocity).toEqual({ x: 0, y: 0, z: 0 });
+    // a plank placed under the torch: it is a ship again and falls into the sea
+    s.grid.setCell(1, 52, 1, makeCell(B.PLANKS_OAK));
+    const y0 = s.grid.position.y;
+    run(dyn, [s], 10);
+    expect(dyn.getStats(s)!.inert).toBe(false);
+    expect(dyn.getStats(s)!.simulated).toBe(true);
+    expect(s.grid.position.y).toBeLessThan(y0 - 0.5);
   });
 });

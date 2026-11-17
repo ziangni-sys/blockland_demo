@@ -19,6 +19,7 @@ const EN = {
   'hint.helm.preview': 'Right-click to preview the ship',
   'hint.helm.assemble': 'Right-click again to assemble ({count} blocks)',
   'hint.helm.steer': 'Right-click to steer · Sneak + right-click to dock',
+  'hint.helm.steerPlace': 'Right-click to steer · To dock, sneak + right-click with an empty hand',
   'hint.steering': 'W/S throttle · A/D rudder · Right-click to let go · Sneak + right-click to dock',
   // ---- hints: bearing
   'hint.bearing.preview': 'Right-click to preview the rotor',
@@ -87,6 +88,7 @@ const ZH: Record<MessageKey, string> = {
   'hint.helm.preview': '右键预览要组装的船',
   'hint.helm.assemble': '再次右键确认组装（{count} 格）',
   'hint.helm.steer': '右键掌舵 · 潜行右键停靠',
+  'hint.helm.steerPlace': '右键掌舵 · 空手潜行右键停靠',
   'hint.steering': 'W/S 油门 · A/D 转向 · 右键松开舵 · 潜行右键停靠',
   'hint.bearing.preview': '右键预览转子',
   'hint.bearing.start': '再次右键启动（{count} 格，{sails} 块帆）',

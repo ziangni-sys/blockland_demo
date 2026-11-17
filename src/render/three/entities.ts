@@ -437,6 +437,12 @@ export class EntityLayer {
   private readonly live = new Map<number, EntityView>();
   private readonly free: Record<EntityKind, EntityView[]> = { player: [], item: [], falling: [], tnt: [], rabbit: [] };
   private stamp = 0;
+  /** animate() arguments, held for the allocation-free forEach callback. */
+  private time = 0;
+  private carriers: CarrierQuery = NO_CARRIERS;
+  private readonly animateOne = (v: EntityView): void => {
+    v.update(this.time, this.carriers);
+  };
   private readonly sweep = (v: EntityView, id: number): void => {
     if (v.stamp !== this.stamp) {
       v.root.visible = false;
@@ -502,12 +508,6 @@ export class EntityLayer {
     this.live.forEach(this.animateOne);
     this.carriers = NO_CARRIERS;
   }
-
-  private time = 0;
-  private carriers: CarrierQuery = NO_CARRIERS;
-  private readonly animateOne = (v: EntityView): void => {
-    v.update(this.time, this.carriers);
-  };
 
   /** Builds one view of every kind (for pipeline warm-up). */
   warmupViews(): THREE.Object3D[] {

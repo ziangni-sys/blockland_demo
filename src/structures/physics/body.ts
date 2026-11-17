@@ -29,13 +29,19 @@ export interface ShipPhysicsStats {
    * and asleep until cells are added. The structure manager should remove such ships.
    */
   inert: boolean;
-  /** Contacts in the last sub-step, by kind. */
+  /** Contacts in the last sub-step, by kind (after manifold reduction). */
   terrainContacts: number;
   rotorContacts: number;
   shipContacts: number;
-  /** Deepest generated terrain / rotor / ship penetration during the last step, blocks. */
+  /**
+   * Deepest generated terrain / rotor / ship penetration during the last step, blocks. Includes
+   * stale rotor contacts (a blade that has cut into the hull while it was pinned).
+   */
   maxDepth: number;
-  /** Rotor contacts found pinned during the last step (summed over sub-steps). */
+  /**
+   * Rotor contacts that transferred nothing because their (ship, rotor) pair was pinned, summed
+   * over the sub-steps of the last step. 0 = the ship was never pinned.
+   */
   pinned: number;
   /** Hull cells destroyed by pinning during the last step. */
   destroyed: number;

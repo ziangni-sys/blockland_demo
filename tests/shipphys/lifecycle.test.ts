@@ -326,4 +326,62 @@ describe('determinism', () => {
     expect(a.length).toBe(b.length);
     expect(Buffer.from(a.buffer).equals(Buffer.from(b.buffer))).toBe(true);
   });
+
+  /** Pinning in a corner, a blade squeezing a boat against a moored one, a long fast blade (more sub-steps). */
+  function crushScenario(): { data: Float64Array; drops: number; maxSubsteps: number; pinned: number } {
+    const world = makeSea();
+    fillWorld(world, -6, 36, -14, -4, 52, 0, B.STONE); // corner: west wall ...
+    fillWorld(world, -6, 36, -3, -1, 52, -2, B.STONE); // ... and south wall
+    fillWorld(world, -40, 36, 10, -38, 52, 30, B.STONE); // quay, face x = -37
+    const { dyn, host } = setup(world);
+    const ships: Ship[] = [
+      launch(plankBoat(world, 1, -3, 46, -6, 3, 3), dyn), // in the corner
+      launch(plankBoat(world, 2, -37, 46, 16, 3, 4, NZ), dyn), // moored at the quay
+      launch(plankBoat(world, 3, -34, 46, 16, 3, 4, NZ), dyn), // against the moored one
+      launch(plankBoat(world, 4, 30, 46, 20, 3, 3, NZ), dyn), // in the long blade's path
+    ];
+    const bladeCells = (hx: number, hz: number, len: number): Array<[number, number, number]> => {
+      const c: Array<[number, number, number]> = [[hx, 47, hz]];
+      for (let x = hx + 1; x <= hx + len; x++) for (let y = 46; y <= 49; y++) c.push([x, y, hz]);
+      return c;
+    };
+    const rotors = [
+      newRotor(world, 50, 0, 47, 0, PY, bladeCells(0, 0, 7)),
+      newRotor(world, 51, -31, 47, 23, PY, bladeCells(-31, 23, 10)),
+      newRotor(world, 52, 0, 47, 24, PY, bladeCells(0, 24, 40)),
+    ];
+    rotors[0]!.angle = (80 * Math.PI) / 180;
+    qfromAxisAngle(vec3(0, 1, 0), rotors[0]!.angle, rotors[0]!.grid.rotation);
+    rotors[1]!.angle = (60 * Math.PI) / 180;
+    qfromAxisAngle(vec3(0, 1, 0), rotors[1]!.angle, rotors[1]!.grid.rotation);
+    const out: number[] = [];
+    let maxSubsteps = 0;
+    let pinned = 0;
+    for (let t = 0; t < 120; t++) {
+      tick(dyn, ships, rotors, 1);
+      out.push(dyn.lastSubsteps);
+      maxSubsteps = Math.max(maxSubsteps, dyn.lastSubsteps);
+      for (const s of ships) {
+        const g = s.grid;
+        const st = dyn.getStats(s)!;
+        pinned += st.pinned;
+        out.push(g.position.x, g.position.y, g.position.z, g.rotation.x, g.rotation.y, g.rotation.z, g.rotation.w);
+        out.push(g.linearVelocity.x, g.linearVelocity.y, g.linearVelocity.z, g.angularVelocity.x, g.angularVelocity.y, g.angularVelocity.z);
+        out.push(g.count, st.pinned, st.rotorContacts);
+      }
+    }
+    for (const d of host.drops) out.push(d.x, d.y, d.z, d.item, d.count);
+    return { data: Float64Array.from(out), drops: host.drops.length, maxSubsteps, pinned };
+  }
+
+  it('two identical runs with pinning, ship chains and fast rotors are bit-identical', () => {
+    const a = crushScenario();
+    const b = crushScenario();
+    // the scenario does exercise those paths
+    expect(a.pinned).toBeGreaterThan(0);
+    expect(a.drops).toBeGreaterThan(0);
+    expect(a.maxSubsteps).toBeGreaterThan(8);
+    expect(a.data.length).toBe(b.data.length);
+    expect(Buffer.from(a.data.buffer).equals(Buffer.from(b.data.buffer))).toBe(true);
+  });
 });

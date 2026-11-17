@@ -14,9 +14,13 @@
  * transparent list (water 0, overlays 60+). Every voxel pass culls back faces (mesh
  * contract). Rendering goes straight to the canvas; materials encode sRGB themselves.
  *
- * Precision: renderer.highPrecision computes every model-view matrix on the CPU in float64,
- * and the shaders work in camera-relative / anim-origin-relative coordinates (shading.ts),
- * so nothing cracks, shifts or swims far from the world origin.
+ * Precision: the scene is drawn in a floating RENDER SPACE, world minus an integer origin
+ * near the camera (a multiple of WAVE_PERIOD, rebased with hysteresis as the camera
+ * travels). Every matrix three uploads and every position a shader sees is then small, so
+ * nothing cracks, shifts or swims however far the player is from the world origin, at no
+ * per-object cost (three's highPrecision would compute a model-view matrix per object per
+ * frame on the CPU). Poses, entity states, overlay cells and the camera stay in WORLD space at
+ * the API; only the backend knows the origin.
  *
  * Lifecycle: every public method is callable at any time. Before init() resolves, tiles,
  * meshes and dry volumes are queued (last write wins) and applied when the pipelines exist;
@@ -52,7 +56,7 @@ import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix, transf
 import { createSky, type Sky } from './sky';
 import { createVoxelMaterials, DRY_SLOTS, SharedUniforms, type VoxelMaterials } from './shading';
 import { prepareTilePixels } from './tiles';
-import { animOrigin } from './waves';
+import { animOrigin, WAVE_PERIOD } from './waves';
 
 /** Why the GPU stopped rendering (ThreeBackendOptions.onLost). */
 export interface DeviceLostInfo {
@@ -113,6 +117,10 @@ const CARRY_PAD_ABOVE = 2.5;
 
 interface SectionRecord {
   meshes: [THREE.Mesh | null, THREE.Mesh | null, THREE.Mesh | null];
+  /** World position of the section's local origin. */
+  ox: number;
+  oy: number;
+  oz: number;
 }
 
 interface StructureRecord {
@@ -123,7 +131,7 @@ interface StructureRecord {
   light: THREE.Vector4;
   pose: StructurePose;
   hasPose: boolean;
-  /** group.matrix at the end of the previous rendered frame (carrier motion of entities). */
+  /** WORLD local->world matrix at the end of the previous rendered frame (carrier motion of entities). */
   prevMatrix: Float64Array;
   hasPrev: boolean;
   /** Local-space bounds of all meshes (minX, minY, minZ, maxX, maxY, maxZ); hasBounds false = none. */
@@ -327,6 +335,7 @@ export class ThreeBackend implements RenderBackend {
   private readonly primeQueue: THREE.Mesh[] = [];
   private primeHead = 0;
   private readonly primed: THREE.Mesh[] = [];
+  private readonly primeDeferred: THREE.Mesh[] = [];
   /** Meshes drawn for the first time during the last render() (their CPU arrays get released). */
   private justDrawn: THREE.Mesh[] = [];
   private releasing: THREE.Mesh[] = [];
@@ -344,6 +353,10 @@ export class ThreeBackend implements RenderBackend {
   private lastDrawCalls = 0;
   private lastTriangles = 0;
   private readonly anchor: OverlayAnchor = { x: 0, y: 0, z: 0 };
+  /** Integer origin of render space (multiple of WAVE_PERIOD); render = world - origin. */
+  private readonly origin = { x: 0, y: 0, z: 0 };
+  /** Camera position in world space (camera.position is in render space). */
+  private readonly camWorld = { x: 0, y: 0, z: 3 };
 
   // Dry volume slot selection scratch (no allocation per frame).
   /** Indices into structureList of the chosen slots. */
@@ -453,10 +466,6 @@ export class ThreeBackend implements RenderBackend {
     // RGBA16F framebuffer and no conversion pass; the materials encode sRGB themselves
     // (shading.ts encodeOutput). Saves a full-screen pass and lets MSAA resolve to 8-bit.
     renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-    // float64 model-view matrices on the CPU: the default computes view * world on the GPU
-    // in float32, where the large translations far from the origin cancel badly (section
-    // seams crack, geometry shifts).
-    renderer.highPrecision = true;
     // stats() reports the last render() call, independent of rAF timing.
     renderer.info.autoReset = false;
     renderer.setPixelRatio(this.pixelRatio);
@@ -516,6 +525,8 @@ export class ThreeBackend implements RenderBackend {
     this.scene.add(this.sky.mesh);
     this.entityAssets = new EntityAssets(this.materials, this.modelMaterial, this.geoOpts);
     this.entities = new EntityLayer(this.entityAssets, this.materials.opaque);
+    this.entities.group.matrixAutoUpdate = false;
+    this.entities.group.matrix.makeTranslation(-this.origin.x, -this.origin.y, -this.origin.z);
     this.scene.add(this.entities.group);
     this.overlays = new OverlayLayer(u, this.placeholderTiles, this.tileNodes);
   }
@@ -554,6 +565,9 @@ export class ThreeBackend implements RenderBackend {
     if (this.disposed) return;
     // One frame while loading: configures the canvas / MSAA targets before the first game frame.
     renderer.render(this.scene, this.camera);
+    // Back to the caller's camera (setCamera may have run before init).
+    const w = this.camWorld;
+    this.camera.position.set(w.x - this.origin.x, w.y - this.origin.y, w.z - this.origin.z);
   }
 
   /** Applies everything queued before the pipelines existed. */
@@ -610,9 +624,12 @@ export class ThreeBackend implements RenderBackend {
       return;
     }
     if (!rec) {
-      rec = { meshes: [null, null, null] };
+      rec = { meshes: [null, null, null], ox, oy, oz };
       this.sections.set(key, rec);
     }
+    rec.ox = ox;
+    rec.oy = oy;
+    rec.oz = oz;
     for (let i = 0; i < 3; i++) {
       const data: GeometryData | null = mesh[GROUPS[i]!];
       const old = rec.meshes[i]!;
@@ -636,12 +653,18 @@ export class ThreeBackend implements RenderBackend {
         this.sectionsRoot.add(m);
         rec.meshes[i] = m;
       }
-      m.position.set(ox, oy, oz);
-      m.updateMatrix();
-      m.matrixWorld.copy(m.matrix);
+      this.placeSection(m, rec);
       this.queueUpload(m);
     }
     if (!rec.meshes[0] && !rec.meshes[1] && !rec.meshes[2]) this.sections.delete(key);
+  }
+
+  /** Static section matrix in render space (computed here only, never by the scene traversal). */
+  private placeSection(m: THREE.Mesh, rec: SectionRecord): void {
+    const o = this.origin;
+    m.position.set(rec.ox - o.x, rec.oy - o.y, rec.oz - o.z);
+    m.updateMatrix();
+    m.matrixWorld.copy(m.matrix);
   }
 
   private newMesh(geo: THREE.BufferGeometry, mat: THREE.Material, light: THREE.Vector4): THREE.Mesh {
@@ -798,9 +821,18 @@ export class ThreeBackend implements RenderBackend {
     copyPose(pose, rec.pose);
     rec.hasPose = true;
     rec.group.visible = true;
-    poseToMatrix(pose, rec.group.matrix.elements);
-    rec.group.matrixWorldNeedsUpdate = true;
+    this.placeStructure(rec);
     rec.light.set(clamp01(pose.sky / 15), clamp01(pose.block / 15), 0, 0);
+  }
+
+  /** Structure group matrix in render space, from its world pose. */
+  private placeStructure(rec: StructureRecord): void {
+    const e = rec.group.matrix.elements;
+    poseToMatrix(rec.pose, e);
+    e[12] = e[12]! - this.origin.x;
+    e[13] = e[13]! - this.origin.y;
+    e[14] = e[14]! - this.origin.z;
+    rec.group.matrixWorldNeedsUpdate = true;
   }
 
   setStructureDryVolume(id: number, dry: DryVolume | null): void {
@@ -850,14 +882,51 @@ export class ThreeBackend implements RenderBackend {
 
   setCamera(cam: CameraState): void {
     if (this.disposed) return;
+    const w = this.camWorld;
+    w.x = cam.x;
+    w.y = cam.y;
+    w.z = cam.z;
+    this.updateOrigin();
+    const o = this.origin;
     const c = this.camera;
-    c.position.set(cam.x, cam.y, cam.z);
+    c.position.set(cam.x - o.x, cam.y - o.y, cam.z - o.z);
     c.rotation.set(cam.pitch, cam.yaw, 0, 'YXZ');
     if (c.fov !== cam.fov) {
       c.fov = cam.fov;
       c.updateProjectionMatrix();
     }
-    this.u.applyCamera(cam.x, cam.y, cam.z);
+  }
+
+  /**
+   * Moves the render-space origin when the camera has travelled far from it. Hysteresis
+   * (the camera may roam up to 1.5 periods from the origin) keeps a player walking back and
+   * forth across a period boundary from rebasing every few steps; a rebase rewrites every
+   * section matrix once (cheap: no GPU upload, matrices are per-object uniforms anyway).
+   */
+  private updateOrigin(): void {
+    const w = this.camWorld;
+    const o = this.origin;
+    const reach = WAVE_PERIOD * 1.5;
+    if (Math.abs(w.x - o.x - WAVE_PERIOD / 2) <= reach && Math.abs(w.y - o.y - WAVE_PERIOD / 2) <= reach && Math.abs(w.z - o.z - WAVE_PERIOD / 2) <= reach) return;
+    o.x = animOrigin(w.x);
+    o.y = animOrigin(w.y);
+    o.z = animOrigin(w.z);
+    for (const rec of this.sections.values()) for (const m of rec.meshes) if (m) this.placeSection(m, rec);
+    const list = this.structureList;
+    for (let i = 0; i < list.length; i++) if (list[i]!.hasPose) this.placeStructure(list[i]!);
+    if (this.entities) {
+      this.entities.group.matrix.makeTranslation(-o.x, -o.y, -o.z);
+      this.entities.group.matrixWorldNeedsUpdate = true;
+    }
+    this.placeOverlayRoot();
+  }
+
+  /** World overlays are written relative to `anchor`; their root sits at anchor - origin. */
+  private placeOverlayRoot(): void {
+    const a = this.anchor;
+    const o = this.origin;
+    this.overlayRoot.matrix.makeTranslation(a.x - o.x, a.y - o.y, a.z - o.z);
+    this.overlayRoot.matrixWorldNeedsUpdate = true;
   }
 
   setEnvironment(env: EnvironmentState): void {
@@ -885,8 +954,8 @@ export class ThreeBackend implements RenderBackend {
   setOverlays(o: OverlayState): void {
     if (this.disposed || !this.overlays) return;
     // World overlays are positioned relative to an integer anchor near the camera (exact
-    // float32 instance matrices anywhere in the world); the root sits at the anchor.
-    const p = this.camera.position;
+    // float32 instance matrices anywhere in the world).
+    const p = this.camWorld;
     const a = this.anchor;
     const ax = animOrigin(p.x);
     const ay = animOrigin(p.y);
@@ -895,8 +964,7 @@ export class ThreeBackend implements RenderBackend {
       a.x = ax;
       a.y = ay;
       a.z = az;
-      this.overlayRoot.matrix.makeTranslation(ax, ay, az);
-      this.overlayRoot.matrixWorldNeedsUpdate = true;
+      this.placeOverlayRoot();
     }
     this.overlays.update(o, this.resolveParent, this.topology, a);
   }
@@ -930,10 +998,15 @@ export class ThreeBackend implements RenderBackend {
     r.render(this.scene, this.camera);
     this.lastDrawCalls = r.info.render.drawCalls;
     this.lastTriangles = r.info.render.triangles;
+    this.endFrame();
+  }
+
+  /** Per-frame bookkeeping after drawing: previous structure poses, per-frame pose cache. */
+  private endFrame(): void {
     const list = this.structureList;
     for (let i = 0; i < list.length; i++) {
       const rec = list[i]!;
-      rec.prevMatrix.set(rec.group.matrix.elements);
+      if (rec.hasPose) poseToMatrix(rec.pose, rec.prevMatrix);
       rec.hasPrev = rec.hasPose;
     }
     this.clearPendingPoses();
@@ -965,12 +1038,21 @@ export class ThreeBackend implements RenderBackend {
     for (let i = 0; i < primed.length; i++) primed[i]!.frustumCulled = true;
     primed.length = 0;
     const q = this.primeQueue;
+    const deferred = this.primeDeferred;
     let vertices = 0;
     while (this.primeHead < q.length && primed.length < PRIME_MAX_MESHES && vertices < PRIME_MAX_VERTICES) {
       const m = q[this.primeHead++]!;
       const ud = m.userData as MeshUpload;
+      if (ud.drawn || !m.parent) {
+        ud.queued = false;
+        continue;
+      }
+      // A structure still hidden (no pose yet) would not be drawn: try again later.
+      if (!m.parent.visible) {
+        deferred.push(m);
+        continue;
+      }
       ud.queued = false;
-      if (ud.drawn || !m.parent) continue;
       m.frustumCulled = false;
       primed.push(m);
       vertices += m.geometry.getAttribute('position').count;
@@ -983,6 +1065,8 @@ export class ThreeBackend implements RenderBackend {
       q.length -= this.primeHead;
       this.primeHead = 0;
     }
+    for (let i = 0; i < deferred.length; i++) q.push(deferred[i]!);
+    deferred.length = 0;
   }
 
   /**
@@ -1026,7 +1110,7 @@ export class ThreeBackend implements RenderBackend {
     const ids = this.slotIds;
     const dist = this.slotDist;
     let count = 0;
-    const cp = this.camera.position;
+    const cp = this.camWorld;
     const list = this.structureList;
     for (let si = 0; si < list.length; si++) {
       const rec = list[si]!;
@@ -1120,6 +1204,7 @@ export class ThreeBackend implements RenderBackend {
     this.primeQueue.length = 0;
     this.primeHead = 0;
     this.primed.length = 0;
+    this.primeDeferred.length = 0;
     this.justDrawn.length = 0;
     this.releasing.length = 0;
     this.entities?.dispose();

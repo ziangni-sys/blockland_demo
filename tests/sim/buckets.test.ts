@@ -3,7 +3,8 @@ import { cellState, facingState, isLiquidSource, makeCell } from '../../src/bloc
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NZ, PY, PZ } from '../../src/core/dirs';
-import { EventLog, FLAT_TOP, SEA_TOP, click, fill, flatSim, idAt, seaSim } from './helpers';
+import type { Simulation } from '../../src/sim/simulation';
+import { EventLog, FLAT_TOP, SEA_TOP, click, countId, fill, flatSim, idAt, seaSim } from './helpers';
 
 const T = FLAT_TOP;
 
@@ -88,5 +89,74 @@ describe('buckets', () => {
     });
     expect(water).toBe(0);
     void PZ;
+  });
+});
+
+/**
+ * An open plank boat in the sea, kept exactly where it was assembled (dynamics off after
+ * assembly, so its hull analysis exists): floor y = 27, walls y = 28..30, a dry hold x 1..3,
+ * z 1..5 that still holds the world's sea water at y = 28..29 (hidden by the hull, never
+ * deleted — LESSONS 船舱里冒出水面). The player hovers above the hold's north end.
+ */
+function openBoat(): { sim: Simulation; shipId: number } {
+  const sim = seaSim({ mode: 'survival', spawn: { x: 2.5, y: SEA_TOP + 1, z: 1.5 } });
+  const w = sim.world;
+  fill(w, 0, 27, 0, 4, 27, 6, B.PLANKS_OAK);
+  for (let y = 28; y <= 30; y++) {
+    for (let x = 0; x <= 4; x++) {
+      w.setCell(x, y, 0, makeCell(B.PLANKS_OAK));
+      w.setCell(x, y, 6, makeCell(B.PLANKS_OAK));
+    }
+    for (let z = 0; z <= 6; z++) {
+      w.setCell(0, y, z, makeCell(B.PLANKS_OAK));
+      w.setCell(4, y, z, makeCell(B.PLANKS_OAK));
+    }
+  }
+  w.setCell(2, 31, 6, makeCell(B.HELM, facingState(NZ)));
+  sim.advance(2);
+  const res = sim.structures.assembleShip(2, 31, 6);
+  expect(res.ok).toBe(true);
+  if (!res.ok) throw new Error('assembly failed');
+  sim.structures.dynamics = null;
+  sim.teleport(2.5, 31, 1.5);
+  sim.player.flying = true;
+  sim.advance(2);
+  expect(idAt(res.structure.grid, 2, 28, 3)).toBe(B.AIR);
+  expect(idAt(w, 2, 28, 3)).toBe(B.WATER);
+  expect(idAt(w, 2, 29, 3)).toBe(B.WATER);
+  return { sim, shipId: res.structure.id };
+}
+
+describe('buckets and the world water hidden inside a hull', () => {
+  it('the bucket ray goes through the hidden water to what lies behind it, entering through the right face', () => {
+    const { sim } = openBoat();
+    // A world block standing in the hold, behind two hidden water cells. The ray comes down
+    // steeply but enters it through its north face (a face the ray's dominant axis would not name).
+    sim.world.setCell(2, 28, 4, makeCell(B.STONE));
+    sim.hold(I.BUCKET_WATER, 1);
+    sim.lookAt(2.5, 28.5, 4.0);
+    sim.tick();
+    expect(sim.targetCell()).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
+    expect(sim.view.target).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
+  });
+
+  it('no liquid is poured into the hold, even when the clicked block is a world block', () => {
+    const { sim } = openBoat();
+    const w = sim.world;
+    sim.world.setCell(2, 28, 4, makeCell(B.STONE));
+    const wet = countId(w, B.WATER, 1, 28, 1, 3, 31, 5);
+    const log = new EventLog(sim);
+    sim.hold(I.BUCKET_WATER, 1);
+    sim.lookAt(2.5, 28.5, 4.0); // the stone's north face: the new source would go to (2, 28, 3)
+    click(sim);
+    expect(log.toastKeys()).toContain('toast.bucket.structure');
+    expect(sim.player.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
+    expect(countId(w, B.WATER, 1, 28, 1, 3, 31, 5)).toBe(wet);
+    // And an empty bucket finds nothing to scoop there: the stone is what it sees.
+    sim.hold(I.BUCKET, 1);
+    sim.lookAt(2.5, 28.5, 4.0);
+    click(sim);
+    expect(sim.player.inventory.selectedStack()).toEqual({ item: I.BUCKET, count: 1 });
+    expect(countId(w, B.WATER, 1, 28, 1, 3, 31, 5)).toBe(wet);
   });
 });

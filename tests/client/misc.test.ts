@@ -164,3 +164,52 @@ describe('UiStateBuilder', () => {
     expect(b.build(inputs(inv)).hotbar[2]).toBeNull();
   });
 });
+
+describe('debug overlay text', () => {
+  it('names the facing and the clock', async () => {
+    const { facingName, worldClock } = await import('../../src/client/debug');
+    expect(facingName(0)).toBe('north');
+    expect(facingName(Math.PI / 2)).toBe('west');
+    expect(facingName(-Math.PI / 2)).toBe('east');
+    expect(facingName(Math.PI)).toBe('south');
+    expect(worldClock(0)).toBe('06:00');
+    expect(worldClock(6000)).toBe('12:00');
+    expect(worldClock(18000)).toBe('00:00');
+    expect(worldClock(23999)).toBe('05:59');
+  });
+
+  it('lists the player, the world and recent faults', async () => {
+    const { debugLines } = await import('../../src/client/debug');
+    const { Simulation } = await import('../../src/sim/simulation');
+    const { FlatGenerator } = await import('../../src/worldgen/generator');
+    const sim = new Simulation({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: 1 });
+    sim.tick();
+    const lines = debugLines(sim, {
+      version: '9.9.9',
+      rendererDetail: 'WebGL2 test',
+      fps: 60,
+      frameMs: 1,
+      tickMs: 0.5,
+      workMs: 0.2,
+      renderMs: 2,
+      yaw: 0,
+      pitch: 0,
+      drawCalls: 10,
+      triangles: 12345,
+      sectionsDrawn: 4,
+      sectionsMeshed: 8,
+      meshQueued: 2,
+      meshJobs: 1,
+      chunksInFlight: 0,
+      chunksWaiting: 0,
+      provideMs: 0.4,
+      storage: 'IndexedDB',
+      workers: 'running / running',
+      faults: [{ what: 'meshing', message: 'boom', count: 3 }],
+    });
+    expect(lines[0]).toBe('Blocklands 9.9.9 · WebGL2 test');
+    expect(lines.some((l) => l.startsWith('xyz 0.50 / 35.00 / 0.50'))).toBe(true);
+    expect(lines.some((l) => l.includes('facing north'))).toBe(true);
+    expect(lines[lines.length - 1]).toBe('! meshing: boom ×3');
+  });
+});

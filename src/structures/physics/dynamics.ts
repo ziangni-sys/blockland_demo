@@ -16,9 +16,11 @@
  *   7. n sub-steps, all ships in lock-step:
  *        forces (gravity, buoyancy, drag, keel, thrust, rudder) -> velocities, clamped
  *        contacts at the start-of-sub-step poses (rotors interpolated to alpha = k/n)
- *        terrain / ships the blades press a ship into: frictionless; held ships: immovable
+ *        rotor contacts driving a ship into its own supports: redirected or blocked; terrain /
+ *        ships the blades press a ship into: frictionless; ships held behind it: immovable
  *        sequential impulses (rotor / ship contacts first, terrain last)
- *        pinning check -> pinned (ship, rotor) pairs drop out, re-solve
+ *        pinning check -> pinned (ship, rotor) pairs drop out; jammed contacts of the other pairs
+ *        too (pinning.ts); re-solve
  *        split-impulse penetration recovery, then integrate the poses
  *   8. write back, destroy at most one pinned hull cell per ship, refresh, sleep bookkeeping.
  *
@@ -57,6 +59,8 @@ const F_MU = CR.F_MU;
 const F_NX = CR.F_NX;
 const F_PIN = CR.F_PIN;
 const PIN_PINNED = CR.PIN_PINNED;
+const PIN_BLOCKED = CR.PIN_BLOCKED;
+const PIN_REDIRECTED = CR.PIN_REDIRECTED;
 const F_SRC = CR.F_SRC;
 const F_VO = CR.F_VO;
 const STRIDE = CR.STRIDE;
@@ -436,10 +440,12 @@ export class ShipDynamicsImpl implements ShipDynamics {
       if (!v.spinning || v.shape.solidCount === 0) continue;
       const need = Math.ceil(v.travel / o.maxSubstepTravel - 1e-9);
       if (need <= n) continue;
-      const m = v.rotor.parent !== null ? 2 * reachMax : reachMax;
+      const pm = v.rotor.parent !== null ? reachMax : 0; // the carrier ship moves too
       for (let i = 0; i < cands.length; i++) {
         const b = cands[i]!;
         if (b.ship.frozen || v.rotor.parent === b.ship) continue;
+        // a sleeping ship is only touched if the sweep itself comes this close (it stays put)
+        const m = (b.ship.asleep ? ROTOR_WAKE_MARGIN + 1 : reachMax) + pm;
         if (v.sweptNear(b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ, m)) {
           n = need;
           break;
@@ -533,13 +539,15 @@ export class ShipDynamicsImpl implements ShipDynamics {
       for (let i = 0; i < active.length; i++) active[i]!.snapshotVelocity();
       this.solveVelocities();
       if (shipStart > 0) {
-        // there are rotor contacts: check them for pinning
+        // there are rotor contacts: check them for pinning, then for jams in the other pairs
         const pinned = this.pins.detect(kin, ter, shipStart, bodies, o);
-        if (pinned > 0) {
+        if (pinned > 0) this.countPinned(shipStart);
+        const jammed = this.pins.jam(kin, ter, shipStart, bodies, o);
+        if (pinned > 0 || jammed > 0) {
           for (let i = 0; i < active.length; i++) active[i]!.restoreVelocity();
-          this.countPinned(shipStart);
-          // A pinned blade drives nothing: friction and two-sided ship contacts come back unless
-          // another blade still drives the ship (a hull hitting the wall must not keep sliding).
+          // A pinned or jammed blade drives nothing: friction and two-sided ship contacts come back
+          // unless another blade still drives the ship (a hull hitting the wall must not keep
+          // sliding along it).
           const tf = ter.f;
           for (let i = 0; i < ter.count; i++) tf[i * STRIDE + F_MU] = o.terrainFriction;
           const kf = kin.f;
@@ -574,14 +582,29 @@ export class ShipDynamicsImpl implements ShipDynamics {
   }
 
   /**
-   * Before a solve: for every ship that an active blade contact presses (pinning condition 1a),
-   * with d the blades' direction of motion,
+   * Before a solve, for every ship with rotor contacts:
+   *  - a rotor contact whose blade drives into it (vo . n > 0) along a normal that the ship's own
+   *    supports oppose (the pin test's support rule) cannot be met: typically a blade edge or
+   *    corner pressing a hull face whose other side lies against a wall, while the blade itself
+   *    moves obliquely. Handed to the solver as is, it only jams the ship and spins it about the
+   *    contact. It is REDIRECTED instead: its normal becomes the blade's velocity without the
+   *    blocked component, vo - (vo . n) n, and acts on the linear velocity only (through the
+   *    centre of mass, no positional correction, no friction): the blade drags the ship along
+   *    the wall at its own speed along it, which is the escape LESSONS 能动的船被误判压坏 describes,
+   *    without spinning it about a point on its far side. When nothing usable is left (the blade moves straight into the support, or the
+   *    remaining direction is blocked too, as in a corner) it is BLOCKED: it transfers nothing,
+   *    and the pin test, in which it still takes part, pins the pair.
+   * Then, for every ship that an active blade contact presses (pinning condition 1a), with d the
+   * blades' direction of motion,
    *  - its contacts that oppose d, with terrain and with other ships, become frictionless (see
    *    FRICTION_RELEASE): outside the pin cone the blade slides the ship along them;
-   *  - another ship it is pressed against that cannot give way along that contact's normal (held
-   *    by terrain, a frozen ship ... — the pin test's support rule, here on contacts present
-   *    rather than loaded) is immovable for that contact (F_FIX, see solver.ts), so the driven
-   *    hull slides along the held one instead of being squeezed into it.
+   *  - its contacts with another ship it presses that way are one-sided (F_FIX, see solver.ts):
+   *    if that ship cannot give way along the contact's normal (held by terrain, a frozen ship
+   *    ... — the pin test's support rule) it is the immovable side and the driven hull slides
+   *    along it instead of being squeezed into it; if it can, the DRIVEN ship is the immovable
+   *    side — a blade drives it with unlimited force, so the other ship has to make way rather
+   *    than shove it back into the blade. Both sides asking (two driven ships) leaves the contact
+   *    two-sided.
    * The held ships keep their own friction: they are held, not driven, and a frictionless wedge
    * between an infinitely strong blade and a wall would squeeze them out at any speed.
    */
@@ -593,7 +616,42 @@ export class ShipDynamicsImpl implements ShipDynamics {
     const tf = this.ter.f;
     const ratio = this.options.pinPressRatio;
     const sup = this.supports;
-    sup.configure(this.options.pinOpposeCos, false);
+    sup.configure(this.options.pinOpposeCos);
+    const ter = this.ter;
+    for (let i = 0; i < active.length; i++) {
+      const b = active[i]!;
+      if (b.kinEnd <= b.kinStart) continue;
+      for (let k = b.kinStart; k < b.kinEnd; k++) {
+        const c = k * STRIDE;
+        if (kf[c + F_PIN] !== 0) continue;
+        const nx = kf[c + F_NX]!;
+        const ny = kf[c + F_NX + 1]!;
+        const nz = kf[c + F_NX + 2]!;
+        const vox = kf[c + F_VO]!;
+        const voy = kf[c + F_VO + 1]!;
+        const voz = kf[c + F_VO + 2]!;
+        const von = vox * nx + voy * ny + voz * nz;
+        if (von <= 0) continue;
+        const src = kf[c + F_SRC]!;
+        if (!sup.blocked(b, kin, ter, shipStart, bodies, nx, ny, nz, src, 0)) continue;
+        const tx = vox - von * nx;
+        const ty = voy - von * ny;
+        const tz = voz - von * nz;
+        const tl = Math.sqrt(tx * tx + ty * ty + tz * tz);
+        const vb = Math.sqrt(vox * vox + voy * voy + voz * voz);
+        if (tl > ratio * vb && !sup.blocked(b, kin, ter, shipStart, bodies, tx / tl, ty / tl, tz / tl, src, 0)) {
+          kf[c + F_NX] = tx / tl;
+          kf[c + F_NX + 1] = ty / tl;
+          kf[c + F_NX + 2] = tz / tl;
+          kf[c + F_PIN] = PIN_REDIRECTED;
+          // its tangent plane now holds the blocked normal: friction would drag the ship into
+          // the very support it cannot enter
+          kf[c + F_MU] = 0;
+        } else {
+          kf[c + F_PIN] = PIN_BLOCKED;
+        }
+      }
+    }
     for (let i = 0; i < active.length; i++) {
       const b = active[i]!;
       if (b.kinEnd <= b.kinStart) continue;
@@ -602,7 +660,8 @@ export class ShipDynamicsImpl implements ShipDynamics {
       let dz = 0;
       for (let k = b.kinStart; k < b.kinEnd; k++) {
         const c = k * STRIDE;
-        if (kf[c + F_PIN] !== 0 || !bladePresses(kf, c, ratio)) continue;
+        const pinState = kf[c + F_PIN];
+        if ((pinState !== 0 && pinState !== PIN_BLOCKED && pinState !== PIN_REDIRECTED) || !bladePresses(kf, c, ratio)) continue;
         const vx = kf[c + F_VO]!;
         const vy = kf[c + F_VO + 1]!;
         const vz = kf[c + F_VO + 2]!;
@@ -632,9 +691,11 @@ export class ShipDynamicsImpl implements ShipDynamics {
         if (nx * dx + ny * dy + nz * dz >= -FRICTION_RELEASE) continue;
         kf[c + F_MU] = 0;
         const other = bodies[(isA ? kf[c + F_B] : kf[c + F_A])!]!;
-        // the other ship is pushed along -n_b; is it held that way?
-        if (!sup.blocked(other, kin, this.ter, shipStart, bodies, -nx, -ny, -nz, -1, 0)) continue;
-        const want = isA ? FIX_B : FIX_A;
+        // The other ship is pushed along -n_b. Held that way: it is the immovable side, b slides
+        // along it. Free: b is, since an infinitely strong blade drives it — the other ship
+        // must give way entirely instead of shoving b back into the blade.
+        const held = sup.blocked(other, kin, ter, shipStart, bodies, -nx, -ny, -nz, -1, 0);
+        const want = held === isA ? FIX_B : FIX_A;
         const cur = kf[c + F_FIX]!;
         kf[c + F_FIX] = cur === FIX_NONE || cur === want ? want : FIX_CONFLICT;
       }

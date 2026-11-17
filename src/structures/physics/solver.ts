@@ -54,6 +54,7 @@ const F_T1 = C.F_T1;
 const F_T2 = C.F_T2;
 const F_VO = C.F_VO;
 const F_FIX = C.F_FIX;
+const PIN_REDIRECTED = C.PIN_REDIRECTED;
 const FIX_A = C.FIX_A;
 const FIX_B = C.FIX_B;
 const STRIDE = C.STRIDE;
@@ -63,8 +64,8 @@ const ZERO_INERTIA = new Float64Array(9);
 
 /**
  * Per-contact constants: lever arms, tangent basis, Jacobian rows, effective masses and the
- * positional bias; accumulated impulses to zero. Pinned / stale rows get zero effective mass
- * (they transfer nothing). `bodies` is indexed by the contact's body indices. Calling it again
+ * positional bias; accumulated impulses to zero. Pinned / stale / blocked rows get zero effective
+ * mass (they transfer nothing); redirected rows act on linear velocity only. `bodies` is indexed by the contact's body indices. Calling it again
  * re-arms the set for a fresh solve.
  */
 export function prepareContacts(
@@ -112,9 +113,12 @@ export function prepareContacts(
     f[c + F_T2 + 1] = t2y;
     f[c + F_T2 + 2] = t2z;
 
-    const rax = px - A.px;
-    const ray = py - A.py;
-    const raz = pz - A.pz;
+    // A redirected rotor contact drags the ship as a whole along its supports: no lever arm, so
+    // it cannot spin the hull about a point on its far side (see dynamics.ts prepareDriven).
+    const linearOnly = f[c + F_PIN] === PIN_REDIRECTED;
+    const rax = linearOnly ? 0 : px - A.px;
+    const ray = linearOnly ? 0 : py - A.py;
+    const raz = linearOnly ? 0 : pz - A.pz;
     f[c + F_RA] = rax;
     f[c + F_RA + 1] = ray;
     f[c + F_RA + 2] = raz;
@@ -137,15 +141,17 @@ export function prepareContacts(
       kT1 += imb + angular(f, c + F_JBT1, c + F_KBT1, IB, rbx, rby, rbz, t1x, t1y, t1z);
       kT2 += imb + angular(f, c + F_JBT2, c + F_KBT2, IB, rbx, rby, rbz, t2x, t2y, t2z);
     }
-    const pinned = f[c + F_PIN] !== 0;
-    f[c + F_MN] = !pinned && kN > 1e-12 ? 1 / kN : 0;
-    f[c + F_MT1] = !pinned && kT1 > 1e-12 ? 1 / kT1 : 0;
-    f[c + F_MT2] = !pinned && kT2 > 1e-12 ? 1 / kT2 : 0;
+    const pin = f[c + F_PIN]!;
+    const off = pin !== 0 && pin !== PIN_REDIRECTED;
+    f[c + F_MN] = !off && kN > 1e-12 ? 1 / kN : 0;
+    f[c + F_MT1] = !off && kT1 > 1e-12 ? 1 / kT1 : 0;
+    f[c + F_MT2] = !off && kT2 > 1e-12 ? 1 / kT2 : 0;
     f[c + F_LN] = 0;
     f[c + F_LT1] = 0;
     f[c + F_LT2] = 0;
     f[c + F_LP] = 0;
-    const excess = f[c + F_DEPTH]! - slop;
+    // A redirected rotor contact's depth was measured along its original normal: no correction.
+    const excess = pin === PIN_REDIRECTED ? 0 : f[c + F_DEPTH]! - slop;
     let bias = excess > 0 ? rate * invDt * excess : 0;
     if (bias > maxCorr) bias = maxCorr;
     // A kinematic obstacle (rotor) moving away along -n removes the overlap by itself at that

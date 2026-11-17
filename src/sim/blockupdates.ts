@@ -17,8 +17,13 @@
  * other listeners may still be waiting for the same change); the queue is drained by flush(),
  * which the Simulation calls after each phase of a tick and the explosion code calls after a
  * blast. Re-evaluation is idempotent, so a cell queued twice costs a lookup, nothing more.
- * Writes flagged SET_NO_NEIGHBOR_UPDATE (bulk structure moves) are skipped here: the
- * structures module calls updateAround() for every touched cell once the move is complete.
+ *
+ * Bulk moves (SET_NO_NEIGHBOR_UPDATE: assembling, blockifying, docking):
+ *  - WORLD writes are skipped here; the structures module calls updateAround() for every
+ *    touched world cell once the move is complete (StructureHost.blockUpdate).
+ *  - STRUCTURE writes are queued like any other: nobody else re-checks them, and a rotor that
+ *    blockifies into a ship (or starts from one) can leave a torch or a flower without the
+ *    block under it. Since evaluation waits for flush(), it sees the move complete.
  *
  * Drops follow the rule used everywhere in the simulation: nothing drops in creative mode.
  */
@@ -91,11 +96,11 @@ export class BlockUpdates {
   }
 
   /**
-   * Change hook of a structure grid. Support rules look straight down (local -Y), so only the
-   * cell above can be affected — and the changed cell itself when something was placed there.
+   * Change hook of a structure grid, bulk moves included (see WHEN). Support rules look straight
+   * down (local -Y), so only the cell above can be affected — and the changed cell itself when
+   * something was put there. A state-only change (a rotated facing) changes no support.
    */
-  onStructureChange(grid: VoxelGrid, x: number, y: number, z: number, oldCell: number, newCell: number, flags: number): void {
-    if ((flags & SET_NO_NEIGHBOR_UPDATE) !== 0) return;
+  onStructureChange(grid: VoxelGrid, x: number, y: number, z: number, oldCell: number, newCell: number, _flags: number): void {
     if ((oldCell & ID_MASK) === (newCell & ID_MASK)) return;
     this.gridQueue.push(grid, grid);
     this.gridCoords.push(x, y + 1, z, x, y, z);

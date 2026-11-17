@@ -165,38 +165,53 @@ describe('explosions', () => {
     expect(ship.removed).toBe(false);
   });
 
-  it('ships are pushed by a blast, rotors are not', () => {
-    const sim = seaSim({ seed: 15, spawn: { x: 10.5, y: SEA_TOP + 20, z: 10.5 } });
-    sim.player.flying = true;
-    const w = sim.world;
-    fill(w, 0, SEA_TOP - 1, 0, 2, SEA_TOP - 1, 2, B.PLANKS_OAK);
-    w.setCell(1, SEA_TOP, 1, makeCell(B.HELM, facingState(NZ)));
-    const sres = sim.structures.assembleShip(1, SEA_TOP, 1);
-    expect(sres.ok).toBe(true);
-    if (!sres.ok) return;
-    const ship = sres.structure;
-    // A windmill on a pillar west of the raft.
-    fill(w, -6, 20, 1, -6, SEA_TOP + 2, 1, B.STONE_BRICKS);
-    w.setCell(-6, SEA_TOP + 3, 1, makeCell(B.BEARING, facingState(PY)));
-    for (let dx = -2; dx <= 2; dx++) w.setCell(-6 + dx, SEA_TOP + 4, 1, makeCell(B.CANVAS));
-    w.setCell(-6, SEA_TOP + 4, 0, makeCell(B.CANVAS));
-    w.setCell(-6, SEA_TOP + 4, 2, makeCell(B.CANVAS));
-    const rres = sim.structures.startRotor(w, -6, SEA_TOP + 3, 1);
-    expect(rres.ok).toBe(true);
-    if (!rres.ok) return;
-    const rotor = rres.structure;
-    sim.advance(60);
-    const v0 = { ...ship.grid.linearVelocity };
-    const speed0 = rotor.angularSpeed;
-    const angle0 = rotor.angle;
-    // Blast in the air between them, out of reach of their cells.
-    explode(sim, -1.5, SEA_TOP + 1.5, 1.5, 3, null);
-    const dv = Math.hypot(ship.grid.linearVelocity.x - v0.x, ship.grid.linearVelocity.y - v0.y, ship.grid.linearVelocity.z - v0.z);
-    expect(dv).toBeGreaterThan(0.2);
-    expect(ship.grid.linearVelocity.x).toBeGreaterThan(v0.x); // pushed away from the blast (east)
-    expect(rotor.angularSpeed).toBe(speed0);
-    expect(rotor.angle).toBe(angle0);
-    expect(rotor.grid.position).toEqual(rotor.grid.prevPosition);
+  it('ships are pushed by a blast, rotors are not (compared with the same scene without the blast)', () => {
+    /**
+     * A raft on the sea and a windmill on a pillar west of it, a blast in the air between them
+     * (or none). explode() itself moves nothing — motion happens in the following ticks — so the
+     * two runs are compared over the ticks AFTER the blast: the raft's motion must differ, the
+     * rotor's angle, speed and pose must not differ at all.
+     */
+    const run = (blast: boolean) => {
+      const sim = seaSim({ seed: 15, spawn: { x: 10.5, y: SEA_TOP + 20, z: 10.5 } });
+      sim.player.flying = true;
+      const w = sim.world;
+      fill(w, 0, SEA_TOP - 1, 0, 2, SEA_TOP - 1, 2, B.PLANKS_OAK);
+      w.setCell(1, SEA_TOP, 1, makeCell(B.HELM, facingState(NZ)));
+      const sres = sim.structures.assembleShip(1, SEA_TOP, 1);
+      expect(sres.ok).toBe(true);
+      if (!sres.ok) throw new Error('assembly failed');
+      const ship = sres.structure;
+      fill(w, -6, 20, 1, -6, SEA_TOP + 2, 1, B.STONE_BRICKS);
+      w.setCell(-6, SEA_TOP + 3, 1, makeCell(B.BEARING, facingState(PY)));
+      for (let dx = -2; dx <= 2; dx++) w.setCell(-6 + dx, SEA_TOP + 4, 1, makeCell(B.CANVAS));
+      w.setCell(-6, SEA_TOP + 4, 0, makeCell(B.CANVAS));
+      w.setCell(-6, SEA_TOP + 4, 2, makeCell(B.CANVAS));
+      const rres = sim.structures.startRotor(w, -6, SEA_TOP + 3, 1);
+      expect(rres.ok).toBe(true);
+      if (!rres.ok) throw new Error('rotor failed');
+      const rotor = rres.structure;
+      sim.advance(60);
+      const rotorCells = rotor.grid.count;
+      if (blast) explode(sim, -1.5, SEA_TOP + 1.5, 1.5, 3, null);
+      // The blast must not have reached the rotor's cells: any difference below is a push.
+      expect(rotor.grid.count).toBe(rotorCells);
+      const rotorTrace: number[] = [];
+      const shipTrace: number[] = [];
+      for (let i = 0; i < 20; i++) {
+        sim.tick();
+        const g = rotor.grid;
+        rotorTrace.push(rotor.angle, rotor.angularSpeed, g.position.x, g.position.y, g.position.z, g.rotation.x, g.rotation.y, g.rotation.z, g.rotation.w);
+        shipTrace.push(ship.grid.position.x, ship.grid.position.z);
+      }
+      expect(rotor.removed).toBe(false);
+      return { rotorTrace, shipTrace, shipX: ship.grid.position.x };
+    };
+    const quiet = run(false);
+    const blasted = run(true);
+    expect(blasted.rotorTrace).toEqual(quiet.rotorTrace);
+    expect(blasted.shipTrace).not.toEqual(quiet.shipTrace);
+    expect(blasted.shipX - quiet.shipX).toBeGreaterThan(0.1); // pushed away from the blast (east)
   });
 
   it('survival damage falls off with distance and is blocked by walls; creative takes none', () => {

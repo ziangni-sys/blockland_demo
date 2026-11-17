@@ -22,6 +22,13 @@ interface Internals {
   structureList: { group: THREE.Group; prevMatrix: Float64Array; hasPrev: boolean; hasPose: boolean }[];
   pendingPoses: Map<number, StructurePose>;
   selfMotion(x: number, y: number, z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void;
+  endFrame(): void;
+  primeUploads(): void;
+  releaseUploaded(): void;
+  origin: { x: number; y: number; z: number };
+  sections: Map<number, { meshes: (THREE.Mesh | null)[] }>;
+  entities: { group: THREE.Group };
+  overlayRoot: THREE.Group;
   assignDrySlots(): void;
   camera: THREE.PerspectiveCamera;
   u: { dryLayers: { value: THREE.Vector4 }; dryCount: { value: number }; dryMatrices: { value: THREE.Matrix4 }[] };
@@ -41,14 +48,9 @@ function readyBackend(): ThreeBackend {
   return be;
 }
 
-/** End-of-frame bookkeeping of render() (renderer-free part). */
+/** End-of-frame bookkeeping of render() (its renderer-free part). */
 function endFrame(be: ThreeBackend): void {
-  const i = internals(be);
-  for (const rec of i.structureList) {
-    rec.prevMatrix.set(rec.group.matrix.elements);
-    rec.hasPrev = rec.hasPose;
-  }
-  i.pendingPoses.clear();
+  internals(be).endFrame();
 }
 
 function quad(y = 1): GeometryData {
@@ -166,6 +168,43 @@ describe('structure records', () => {
   });
 });
 
+describe('floating render origin (review: float32 precision far from the world origin)', () => {
+  it('everything is drawn relative to an origin near the camera, rebased with hysteresis', () => {
+    const be = readyBackend();
+    const i = internals(be);
+    const far = 4194304;
+    be.setSectionMesh(1, far + 16, 32, far - 48, mesh());
+    be.setStructureMesh(2, 0, 0, 0, mesh());
+    be.setStructurePose(2, pose(far + 10.25, 47.5, far + 3.75));
+    be.setCamera({ x: far + 5.5, y: 60, z: far + 2.5, yaw: 0, pitch: 0, fov: 70 });
+    expect(i.origin).toEqual({ x: far, y: 0, z: far });
+    // Small render-space numbers only.
+    expect(i.camera.position.toArray()).toEqual([5.5, 60, 2.5]);
+    const sec = i.sections.get(1)!.meshes[0]!;
+    expect(sec.matrixWorld.elements.slice(12, 15)).toEqual([16, 32, -48]);
+    const g = i.structures.get(2)!.group;
+    expect(g.matrix.elements[12]).toBeCloseTo(10.25, 9);
+    expect(g.matrix.elements[14]).toBeCloseTo(3.75, 9);
+    expect(i.entities.group.matrix.elements.slice(12, 15)).toEqual([-far, -0, -far]);
+    // Small moves (even across a period boundary) keep the origin...
+    be.setCamera({ x: far + 300, y: 60, z: far - 100, yaw: 0, pitch: 0, fov: 70 });
+    expect(i.origin).toEqual({ x: far, y: 0, z: far });
+    // ...a long trip rebases it and every static matrix with it.
+    be.setCamera({ x: far + 1000.5, y: 60, z: far, yaw: 0, pitch: 0, fov: 70 });
+    expect(i.origin.x).toBe(far + 768);
+    expect(i.camera.position.x).toBe(232.5);
+    expect(sec.matrixWorld.elements[12]).toBe(16 - 768);
+    expect(g.matrix.elements[12]).toBeCloseTo(10.25 - 768, 9);
+    expect(i.entities.group.matrix.elements[12]).toBe(-(far + 768));
+    // World overlays: root at (anchor - origin), anchor near the camera.
+    be.setOverlays({ target: { structureId: 0, x: far + 1001, y: 59, z: far + 1 }, breakProgress: 0, preview: [], conflicts: [], glue: [], glueAnchor: null });
+    const outline = i.overlayRoot.children.find((c) => c instanceof THREE.LineSegments)!;
+    i.overlayRoot.updateMatrixWorld(true);
+    const p = new THREE.Vector3().setFromMatrixPosition(outline.matrixWorld);
+    expect(p.toArray()).toEqual([far + 1001 - i.origin.x, 59, 1]);
+  });
+});
+
 describe('entity carrier compensation (review: carried rabbits hopped in place)', () => {
   /** A 10 x 1 x 6 deck spanning local [0,10] x [0,1] x [0,6]. */
   function deck(): MeshData {
@@ -213,5 +252,52 @@ describe('entity carrier compensation (review: carried rabbits hopped in place)'
     // Right next to the ship (inside its padded bounds) but not moving: no motion invented.
     internals(be).selfMotion(99.6, 48, 52, 0, 0, 0, out);
     expect(out).toEqual({ x: 0, y: 0, z: 0 });
+  });
+});
+
+describe('upload primer and CPU array release (review: turn hitch, retained mesh memory)', () => {
+  /** What three does for a mesh it draws: call onBeforeRender, then upload. */
+  const draw = (m: THREE.Mesh): void => m.onBeforeRender(undefined as never, undefined as never, undefined as never, m.geometry, m.material as THREE.Material, undefined as never);
+
+  it('never-drawn meshes are drawn a budget at a time regardless of the frustum, then released', () => {
+    const be = readyBackend();
+    const i = internals(be);
+    for (let k = 0; k < 100; k++) be.setSectionMesh(k, k * 16, 0, 0, mesh());
+    i.primeUploads();
+    const all = [...i.sections.values()].map((r) => r.meshes[0]!);
+    const primed = all.filter((m) => !m.frustumCulled);
+    expect(primed.length).toBe(48);
+    // The renderer draws them (and one in-view mesh from the rest).
+    for (const m of primed) draw(m);
+    draw(all[99]!);
+    // Next frame: the previous batch is culled normally again, the next batch is primed, and
+    // the drawn meshes drop their CPU arrays (the GPU has its copy).
+    i.releaseUploaded();
+    i.primeUploads();
+    expect(primed.every((m) => m.frustumCulled)).toBe(true);
+    // 52 queued meshes left, one of them already drawn in view: the next 48 are primed.
+    expect(all.filter((m) => !m.frustumCulled).length).toBe(48);
+    expect(all[99]!.frustumCulled).toBe(true);
+    for (const m of [...primed, all[99]!]) {
+      expect(m.geometry.getAttribute('position').array.length).toBe(0);
+      expect(m.geometry.getAttribute('position').count).toBe(4); // draw range intact
+      expect(m.geometry.index!.array).toBeInstanceOf(Uint32Array);
+      expect(m.geometry.index!.count).toBe(6);
+    }
+    expect(all[50]!.geometry.getAttribute('position').array.length).toBe(12);
+  });
+
+  it('a geometry replaced after its first draw is not released by mistake', () => {
+    const be = readyBackend();
+    const i = internals(be);
+    be.setSectionMesh(1, 0, 0, 0, mesh());
+    const m = i.sections.get(1)!.meshes[0]!;
+    draw(m);
+    be.setSectionMesh(1, 0, 0, 0, mesh()); // remeshed between frames: new geometry, not uploaded yet
+    i.releaseUploaded();
+    expect(m.geometry.getAttribute('position').array.length).toBe(12);
+    draw(m);
+    i.releaseUploaded();
+    expect(m.geometry.getAttribute('position').array.length).toBe(0);
   });
 });

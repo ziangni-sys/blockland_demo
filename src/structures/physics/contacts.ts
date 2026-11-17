@@ -97,6 +97,8 @@ export const FIX_CONFLICT = 3;
 /** F_PIN values. */
 export const PIN_PINNED = 1; // its (ship, rotor) pair is pinned this sub-step
 export const PIN_STALE = 2; // rotor contact deeper than ROTOR_STALE_DEPTH (see below)
+export const PIN_BLOCKED = 3; // rotor contact driving the ship straight into its supports (dynamics.ts)
+export const PIN_REDIRECTED = 4; // active, normal replaced by the blade's motion along the supports, no positional bias
 
 export class ContactSet {
   count = 0;
@@ -106,7 +108,12 @@ export class ContactSet {
     this.count = 0;
   }
 
-  /** Append a zeroed record and return its base offset. */
+  /**
+   * Append a record and return its base offset. The generator's fields are zeroed (body, kind,
+   * point, normal, depth, obstacle velocity, friction, cell data, flags); the solver's fields
+   * (F_RA .. F_BIAS) are left as they are: prepareContacts writes every one of them it reads.
+   * Most generated contacts are dropped again by the manifold reduction, so this matters.
+   */
   push(): number {
     const n = this.count;
     if ((n + 1) * STRIDE > this.f.length) {
@@ -115,7 +122,9 @@ export class ContactSet {
       this.f = g;
     }
     const base = n * STRIDE;
-    this.f.fill(0, base, base + STRIDE);
+    const f = this.f;
+    for (let i = base, e = base + F_RA; i < e; i++) f[i] = 0;
+    for (let i = base + F_MU, e = base + STRIDE; i < e; i++) f[i] = 0;
     this.count = n + 1;
     return base;
   }
@@ -154,6 +163,8 @@ const SWEEP_SPEED_MIN = 0.25;
  * blade is deepest in for destruction.
  */
 export const ROTOR_STALE_DEPTH = 0.5;
+/** Rank offset that puts stale contacts after all active ones in manifold reduction. */
+const STALE_RANK = 1e6;
 
 /**
  * Picks the exit face of a penetrated cell. Works in the TARGET's local frame (the grid whose
@@ -170,6 +181,11 @@ export class Prober {
   cellZ = 0;
   /** align[g*6 + d] = (target face normal g) . (-intruder normal d). */
   private readonly align = new Float64Array(36);
+  /**
+   * byMask[mask*6 + g] = best alignment of target face g with any normal in `mask` (1 for an
+   * empty mask). Tabulated per frame: the prober asks it for every penetrating point.
+   */
+  private readonly byMask = new Float64Array(64 * 6);
 
   setFrame(C: Mat3): void {
     const a = this.align;
@@ -182,18 +198,21 @@ export class Prober {
         a[g * 6 + d] = -sd * sg * C[ag * 3 + ad]!;
       }
     }
-  }
-
-  private alignment(g: number, mask: number): number {
-    if (mask === 0) return 1;
-    const a = this.align;
-    let best = -2;
-    for (let d = 0; d < 6; d++) {
-      if ((mask & (1 << d)) === 0) continue;
-      const v = a[g * 6 + d]!;
-      if (v > best) best = v;
+    // a mask's best = max(best of the mask without its lowest bit, that bit's alignment)
+    const t = this.byMask;
+    for (let g = 0; g < 6; g++) t[g] = 1;
+    for (let mask = 1; mask < 64; mask++) {
+      const low = 31 - Math.clz32(mask & -mask);
+      const rest = mask & (mask - 1);
+      for (let g = 0; g < 6; g++) {
+        const v = a[g * 6 + low]!;
+        if (rest === 0) t[mask * 6 + g] = v;
+        else {
+          const r = t[rest * 6 + g]!;
+          t[mask * 6 + g] = v > r ? v : r;
+        }
+      }
     }
-    return best;
   }
 
   /**
@@ -214,8 +233,10 @@ export class Prober {
     let bestAlign = 1;
     let fallback = 0;
     let fallbackAlign = -Infinity;
+    const tab = this.byMask;
+    const row = (mask & 63) * 6;
     for (let g = 0; g < 6; g++) {
-      const al = this.alignment(g, mask);
+      const al = tab[row + g]!;
       if (al > fallbackAlign) {
         fallbackAlign = al;
         fallback = g;
@@ -331,6 +352,8 @@ export class ContactGenerator {
   private keep = new Uint8Array(256);
   private order = new Int32Array(256);
   private keys = new Float64Array(256);
+  private top = new Int32Array(64);
+  private topKey = new Float64Array(64);
 
   constructor() {
     for (let i = 0; i < 6; i++) this.idx.push(new Int32Array(64));
@@ -496,6 +519,10 @@ export class ContactGenerator {
       this.order = new Int32Array(total * 2);
       this.keys = new Float64Array(total * 2);
     }
+    if (this.top.length < cap) {
+      this.top = new Int32Array(cap);
+      this.topKey = new Float64Array(cap);
+    }
     const keep = this.keep;
     keep.fill(1, 0, total);
     for (let bk = 0; bk < 6; bk++) {
@@ -524,7 +551,9 @@ export class ContactGenerator {
       keep[iv1 - start] = 1;
       let kept = 0;
       for (let k = 0; k < cnt; k++) kept += keep[list[k]! - start]!;
-      // then the deepest of the rest: stable sort of the remaining by depth (descending)
+      // then the deepest of the rest: stable sort of the remaining by depth (descending). Stale
+      // rotor contacts (inert, the deepest by definition) rank after every active one, so they
+      // never crowd out the constraints that do the work.
       const order = this.order;
       const keys = this.keys;
       let m = 0;
@@ -532,26 +561,29 @@ export class ContactGenerator {
         const i = list[k]!;
         if (keep[i - start] === 1) continue;
         order[m] = i;
-        keys[m] = a[i * STRIDE + F_DEPTH]!;
+        const d = a[i * STRIDE + F_DEPTH]!;
+        keys[m] = a[i * STRIDE + F_PIN] === PIN_STALE ? d - STALE_RANK : d;
         m++;
       }
-      // partial selection: pick the (cap - kept) largest, ties by generation order
+      // the (cap - kept) largest keys, ties by generation order: one pass keeping a sorted top
+      // list (descending; a later entry must be strictly larger to displace an earlier one)
       const want = Math.min(cap - kept, m);
-      for (let p = 0; p < want; p++) {
-        let bi = p;
-        for (let q = p + 1; q < m; q++) {
-          if (keys[q]! > keys[bi]! || (keys[q] === keys[bi] && order[q]! < order[bi]!)) bi = q;
+      const top = this.top;
+      const topKey = this.topKey;
+      let tn = 0;
+      for (let q = 0; q < m; q++) {
+        const kq = keys[q]!;
+        if (tn === want && !(kq > topKey[tn - 1]!)) continue;
+        let p = tn < want ? tn++ : tn - 1;
+        while (p > 0 && kq > topKey[p - 1]!) {
+          top[p] = top[p - 1]!;
+          topKey[p] = topKey[p - 1]!;
+          p--;
         }
-        if (bi !== p) {
-          const to = order[p]!;
-          order[p] = order[bi]!;
-          order[bi] = to;
-          const tk = keys[p]!;
-          keys[p] = keys[bi]!;
-          keys[bi] = tk;
-        }
-        keep[order[p]! - start] = 1;
+        top[p] = order[q]!;
+        topKey[p] = kq;
       }
+      for (let p = 0; p < tn; p++) keep[top[p]! - start] = 1;
     }
     let w = start;
     for (let i = start; i < set.count; i++) {

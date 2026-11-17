@@ -18,7 +18,7 @@ import * as THREE from 'three/webgpu';
 import {
   abs,
   attribute,
-  cameraWorldMatrix,
+  cameraPosition,
   clamp,
   dFdx,
   dFdy,
@@ -37,7 +37,7 @@ import {
   modelWorldMatrix,
   normalize,
   positionLocal,
-  positionView,
+  positionWorld,
   pow,
   reflect,
   renderGroup,
@@ -57,7 +57,7 @@ import {
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import { AMBIENT_FLOOR, FACE_BOTTOM, FACE_TOP, FACE_X, FACE_Z, LIGHT_CURVE_K, type FogParams, type SkyState } from './lighting';
-import { animOrigin, BOB_OFFSET, BOB_WAVES, RIPPLE_WAVES, SWAY_PHASES } from './waves';
+import { BOB_OFFSET, BOB_WAVES, RIPPLE_WAVES, SWAY_PHASES } from './waves';
 import { DRY_THRESHOLD } from './drymask';
 
 /** Number of structures whose dry volumes cut world water at the same time. */
@@ -92,17 +92,10 @@ export class SharedUniforms {
   readonly fogDensity = uniform(0).setGroup(renderGroup);
   /** Multiplicative surface tint of the medium the camera is in ((1,1,1) in air). */
   readonly mediumTint = uniform(new THREE.Vector3(1, 1, 1)).setGroup(renderGroup);
-  /**
-   * Origin of the animation fields (waves.ts): the camera snapped to WAVE_PERIOD, an integer
-   * vector, so section translations minus it stay exact in float32.
-   */
-  readonly animOrigin = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
-  /** Camera position minus animOrigin, computed in float64 on the CPU (small, precise). */
-  readonly cameraAnim = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
   /** Tile layers of world water (still, flow): only those fragments are cut by dry volumes. */
   readonly waterLayers = uniform(new THREE.Vector2(-1, -1)).setGroup(renderGroup);
   readonly dryCount = uniform(0).setGroup(renderGroup);
-  /** Camera-relative position -> mask uvw, one per slot (pose.ts dryVolumeMatrix with the camera as origin). */
+  /** Camera-relative position -> mask uvw, one per slot (pose.ts dryVolumeMatrix, camera as origin). */
   readonly dryMatrices: THREE.UniformNode<"mat4", THREE.Matrix4>[] = [];
   /** Layer count (DryVolume.sy) of each slot's mask, slot i in component i. */
   readonly dryLayers = uniform(new THREE.Vector4(1, 1, 1, 1)).setGroup(renderGroup);
@@ -155,15 +148,6 @@ export class SharedUniforms {
     this.fogDensity.value = f.density;
     this.mediumTint.value.set(f.tint.r, f.tint.g, f.tint.b);
   }
-
-  /** Rebases the animation fields near the camera (call whenever the camera moves). */
-  applyCamera(x: number, y: number, z: number): void {
-    const ax = animOrigin(x);
-    const ay = animOrigin(y);
-    const az = animOrigin(z);
-    this.animOrigin.value.set(ax, ay, az);
-    this.cameraAnim.value.set(x - ax, y - ay, z - az);
-  }
 }
 
 // ------------------------------------------------------------------ shared graph pieces
@@ -213,13 +197,12 @@ export function skyGradientNode(u: SharedUniforms, dir: N<'vec3'>): N<'vec3'> {
 }
 
 /**
- * Fragment position relative to the camera (world - camera). Built from the view-space
- * position, which the renderer computes with a CPU float64 model-view matrix (highPrecision),
- * so it stays exact far from the world origin where `positionWorld` (float32 world matrix
- * times vertex) loses whole fractions of a block. Fragment stage.
+ * Fragment position relative to the camera (world - camera). The backend renders in a
+ * floating RENDER SPACE (world minus an integer origin near the camera, see backend.ts), so
+ * both terms are small and the difference is precise anywhere in the world. Fragment stage.
  */
 export function cameraRelativePosition(): N<'vec3'> {
-  return cameraWorldMatrix.mul(vec4(positionView, 0)).xyz;
+  return positionWorld.sub(cameraPosition);
 }
 
 /**
@@ -264,7 +247,7 @@ function decodeVertexLight(obj: N<'vec4'>): VertexLight {
   };
 }
 
-/** Sum of travelling waves (waves.ts) at anim-space xz, time t. */
+/** Sum of travelling waves (waves.ts) at render-space xz, time t. */
 function waveSum(waves: readonly { kx: number; kz: number; w: number; a: number }[], xz: N<'vec2'>, t: N<'float'>): N<'float'> {
   let h: N<'float'> = float(0);
   for (const wv of waves) h = h.add(sin(xz.x.mul(wv.kx).add(xz.y.mul(wv.kz)).add(t.mul(wv.w))).mul(wv.a));
@@ -272,16 +255,14 @@ function waveSum(waves: readonly { kx: number; kz: number; w: number; a: number 
 }
 
 /**
- * Vertex position in ANIMATION space (world - animOrigin), before any displacement. The
- * object's translation minus the integer animOrigin is computed first: for world sections both
- * are integers, so the result and the sum with the (exact) local position are exact in
- * float32 at any distance from the world origin. Coincident vertices of neighbouring sections
- * therefore get bit-identical wave heights and the liquid surface stays watertight.
+ * Vertex position in render space before any displacement. Render space is also the
+ * ANIMATION space of waves.ts: its origin is a multiple of WAVE_PERIOD, so every field is
+ * seamless when the origin moves. World sections have integer translations there, so the
+ * result is exact in float32 and coincident vertices of neighbouring sections get
+ * bit-identical wave heights (the liquid surface stays watertight).
  */
-function animSpacePosition(u: SharedUniforms): N<'vec3'> {
-  // M * (0,0,0,1) is the translation column, exactly (products with 0 and 1 are exact).
-  const t = modelWorldMatrix.mul(vec4(0, 0, 0, 1)).xyz;
-  return t.sub(u.animOrigin).add(modelWorldMatrix.mul(vec4(positionLocal, 0)).xyz);
+function animSpacePosition(): N<'vec3'> {
+  return modelWorldMatrix.mul(vec4(positionLocal, 1)).xyz;
 }
 
 /**
@@ -291,7 +272,7 @@ function animSpacePosition(u: SharedUniforms): N<'vec3'> {
  */
 function animatedPosition(u: SharedUniforms, vl: VertexLight): N<'vec3'> {
   const p = positionLocal;
-  const a = animSpacePosition(u);
+  const a = animSpacePosition();
   const t = u.time;
   const bob = waveSum(BOB_WAVES, a.xz, t).add(BOB_OFFSET).mul(vl.liquid);
   const ph = SWAY_PHASES.map((s) => a.x.mul(s.kx).add(a.z.mul(s.kz)));
@@ -399,11 +380,11 @@ export function createVoxelMaterials(
         const albedo = tex;
         const light = lightColor(u, vl, nW);
         const V = normalize(rel.negate());
-        // Ripple normal for upward WATER faces (analytic gradient of travelling waves, in
-        // anim space so it is precise and seamless anywhere, see waves.ts).
+        // Ripple normal for upward WATER faces (analytic gradient of travelling waves in
+        // render space, which is precise and seamless anywhere, see waves.ts).
         const up = smoothstep(0.5, 0.9, nW.y).mul(water);
         const t = u.time;
-        const p = rel.add(u.cameraAnim).xz;
+        const p = positionWorld.xz;
         const phases = RIPPLE_WAVES.map((wv) => p.x.mul(wv.kx).add(p.y.mul(wv.kz)).add(t.mul(wv.w)));
         let dhx: N<'float'> = float(0);
         let dhz: N<'float'> = float(0);

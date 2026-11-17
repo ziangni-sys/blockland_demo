@@ -35,6 +35,7 @@ import {
 } from '../ui/model';
 import { TerrainGenerator } from '../worldgen/generator';
 import type { GenErrorResponse, GenResponse } from '../worldgen/protocol';
+import { debugLines } from './debug';
 import { describeError, Faults } from './faults';
 import { InputState, type InputCommand, type LookSettings } from './input';
 import { InputBinder, type InputHost } from './inputdom';
@@ -939,36 +940,34 @@ export class Game implements InputHost {
   }
 
   private buildDebug(s: WorldSession): string[] {
-    const sim = s.sim;
-    const p = sim.player;
     const st = this.stats;
     const rs = this.backend.stats();
-    const deg = (r: number): string => ((r * 180) / Math.PI).toFixed(1);
-    const yawDeg = (((this.input.yaw * 180) / Math.PI) % 360 + 360) % 360;
-    const facing = ['north', 'west', 'south', 'east'][Math.round(yawDeg / 90) % 4];
     const ms = s.mesher.stats;
     const cs = s.streamer.stats;
-    const ships = sim.structures.ships().length;
-    const rotors = sim.structures.rotors().length;
-    const t = sim.view.target;
-    const day = sim.world.time % DAY_TICKS;
-    const hh = Math.floor(((day / DAY_TICKS) * 24 + 6) % 24);
-    const mm = Math.floor((((day / DAY_TICKS) * 24 * 60) % 60));
-    const lines = [
-      `Blocklands ${this.version} · ${this.backendInfo?.detail ?? '?'}`,
-      `${st.fps.toFixed(0)} fps · frame ${st.frameMs.toFixed(1)} ms · tick ${st.tickMs.toFixed(2)} ms · work ${st.workMs.toFixed(1)} ms · render ${st.renderMs.toFixed(1)} ms`,
-      `xyz ${p.pos.x.toFixed(2)} / ${p.pos.y.toFixed(2)} / ${p.pos.z.toFixed(2)} · chunk ${Math.floor(p.pos.x) >> 4}, ${Math.floor(p.pos.z) >> 4}`,
-      `facing ${facing} (yaw ${deg(this.input.yaw)}°, pitch ${deg(this.input.pitch)}°)${p.flying ? ' · flying' : ''}${p.carrierId ? ` · on #${p.carrierId}` : ''}`,
-      `chunks ${sim.world.chunks.size} · gen ${cs.inFlight} in flight, ${cs.waiting} waiting · provide ${cs.provideMs.toFixed(1)} ms`,
-      `sections ${s.mesher.meshedCount} meshed · queue ${ms.queued} · jobs ${ms.inFlight} · drawn ${rs.sections}`,
-      `structures ${sim.structures.all().length} (${ships} ships, ${rotors} rotors) · entities ${sim.entities.all().length}`,
-      `draw calls ${rs.drawCalls} · triangles ${(rs.triangles / 1000).toFixed(0)}k`,
-      t ? `target ${t.gridId === 0 ? 'world' : `#${t.gridId}`} ${t.x} ${t.y} ${t.z} face ${t.face}` : 'target —',
-      `time ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')} (tick ${sim.world.time}) · ${sim.mode}`,
-      `storage ${this.storagePersistent ? 'IndexedDB' : `memory (${this.storageReason || '…'})`} · workers ${this.workerModes.terrain} / ${this.workerModes.mesh}`,
-    ];
-    for (const f of this.faults.recent) lines.push(`! ${f.what}: ${f.message}${f.count > 1 ? ` ×${f.count}` : ''}`);
-    return lines;
+    const workers = this.workerModes;
+    return debugLines(s.sim, {
+      version: this.version,
+      rendererDetail: this.backendInfo?.detail ?? '?',
+      fps: st.fps,
+      frameMs: st.frameMs,
+      tickMs: st.tickMs,
+      workMs: st.workMs,
+      renderMs: st.renderMs,
+      yaw: this.input.yaw,
+      pitch: this.input.pitch,
+      drawCalls: rs.drawCalls,
+      triangles: rs.triangles,
+      sectionsDrawn: rs.sections,
+      sectionsMeshed: s.mesher.meshedCount,
+      meshQueued: ms.queued,
+      meshJobs: ms.inFlight,
+      chunksInFlight: cs.inFlight,
+      chunksWaiting: cs.waiting,
+      provideMs: cs.provideMs,
+      storage: this.storagePersistent ? 'IndexedDB' : `memory (${this.storageReason || '…'})`,
+      workers: `${workers.terrain} / ${workers.mesh}`,
+      faults: this.faults.recent,
+    });
   }
 
   // ================================================================== debug helpers
@@ -1001,12 +1000,17 @@ export class Game implements InputHost {
         workers: this.workerModes,
       };
     },
-    /** Set the world clock (0..1 of a day, 0 = sunrise) — night screenshots. */
+    /**
+     * Jump the world clock forward to the next moment of day `t` (0..1, 0 = sunrise) — for
+     * night screenshots. Debug only: block ticks scheduled inside the skipped span never fire.
+     */
     setDayTime: (t: number): void => {
       const sim = this.sim;
       if (!sim || !Number.isFinite(t)) return;
-      const day = Math.floor(sim.world.time / DAY_TICKS);
-      sim.world.time = Math.max(0, Math.floor((day + (((t % 1) + 1) % 1)) * DAY_TICKS));
+      const now = sim.world.time;
+      let target = Math.floor(now / DAY_TICKS) * DAY_TICKS + Math.floor((((t % 1) + 1) % 1) * DAY_TICKS);
+      if (target < now) target += DAY_TICKS;
+      sim.world.time = target;
       this.renderDirty = true;
     },
     /** Point the view (radians). */

@@ -3,11 +3,11 @@
  * stay precise and seamless arbitrarily far from the world origin. No three.js import: the
  * TSL graphs in shading.ts are built from these tables, and the CPU mirror below is tested.
  *
- * float32 cannot hold world coordinates like 1 048 576.3 precisely, so the shaders evaluate
- * every field relative to an ANIMATION ORIGIN: the camera position snapped down to a multiple
- * of WAVE_PERIOD. Every wave vector component is a whole number of cycles per WAVE_PERIOD, so
- * each field is exactly WAVE_PERIOD-periodic in x and z: moving the origin by a multiple of
- * the period (when the camera crosses a period boundary) changes nothing on screen.
+ * float32 cannot hold world coordinates like 1 048 576.3 precisely, so the backend draws in a
+ * floating render space whose origin is a multiple of WAVE_PERIOD near the camera, and the
+ * shaders evaluate every field in that space. Every wave vector component is a whole number
+ * of cycles per WAVE_PERIOD, so each field is exactly WAVE_PERIOD-periodic in x and z: moving
+ * the origin by a multiple of the period changes nothing on screen.
  */
 
 /** Period (blocks) of every animation field along x and z; also the origin snapping step. */
@@ -63,7 +63,7 @@ export const SWAY_PHASES: readonly Readonly<{ kx: number; kz: number }>[] = Obje
   Object.freeze({ kx: k(38), kz: k(23) }),
 ]);
 
-/** Animation origin for a camera coordinate: snapped down to a multiple of WAVE_PERIOD. */
+/** A coordinate snapped down to a multiple of WAVE_PERIOD (render-space origins, overlay anchors). */
 export function animOrigin(c: number): number {
   return Math.floor(c / WAVE_PERIOD) * WAVE_PERIOD;
 }

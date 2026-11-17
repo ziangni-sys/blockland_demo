@@ -1,10 +1,8 @@
 /**
- * Adversarial review (correctness lens): DynamicsOptions.waterDensity is a documented tuning option
- * ("Density of water on the BlockDef.density scale"), but several places assume it equals 1:
- * the float/sink verdict (mass < maxDisplacement), the "floating at equilibrium" sleep test
- * (|submerged - mass|), wetness / thrust effectiveness and the adaptive damping estimate.
- *
- * Expected to FAIL against the current implementation.
+ * Regression tests from the adversarial review (correctness lens): DynamicsOptions.waterDensity is
+ * a documented tuning option, but several places assumed it equals 1 — the float / sink verdict
+ * (mass < maxDisplacement), the "floating at equilibrium" sleep test (|submerged - mass|), wetness
+ * and thrust effectiveness, and the adaptive damping estimate. All of them scale with it now.
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';

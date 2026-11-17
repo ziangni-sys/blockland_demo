@@ -1,6 +1,11 @@
 /**
  * GeometryData (mesher output) -> THREE.BufferGeometry, zero-copy wherever the backend
  * allows it, with bounds supplied by the caller instead of scanning vertices.
+ *
+ * Ownership: the attributes wrap the caller's typed arrays, and three reads them when the
+ * geometry is first drawn (possibly frames later). The backend therefore owns MeshData arrays
+ * once they are handed over: callers must not modify, recycle or transfer them. After the
+ * first draw the backend drops its references (backend.ts releaseGeometryArrays).
  */
 import * as THREE from 'three/webgpu';
 import type { GeometryData } from '../../mesh/types';

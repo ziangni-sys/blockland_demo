@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { makeCell } from '../../src/blocks/cell';
+import { liquidState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { NZ, PZ } from '../../src/core/dirs';
+import { NZ, PY, PZ } from '../../src/core/dirs';
+import { I } from '../../src/blocks/items';
 import { BREAK_COOLDOWN, CREATIVE_BREAK_INTERVAL } from '../../src/sim/interact';
 import { EventLog, FLAT_TOP, flatSim, idAt, items } from './helpers';
 
@@ -143,5 +144,36 @@ describe('mining', () => {
     sim.advance(10);
     expect(idAt(sim.world, 0, Y, -2)).toBe(B.AIR);
     void NZ;
+  });
+
+  it('with a bucket in hand, a left-click digs through water like with any other item; the outline follows the dig', () => {
+    const sim = flatSim({ mode: 'survival' });
+    const T = FLAT_TOP;
+    sim.advance(2);
+    sim.world.setCell(0, T - 1, -1, makeCell(B.WATER, liquidState(0, false))); // a source in a one-cell pit
+    sim.hold(I.BUCKET, 1);
+    sim.lookAtCell(0, T - 2, -1, PY); // the dirt under the water, right in front of the feet
+    sim.tick();
+    // The bucket's use ray stops at the source (what a right-click would scoop).
+    expect(sim.view.target).toMatchObject({ gridId: 0, x: 0, y: T - 1, z: -1 });
+    const m = sim.interaction.raycastMining();
+    expect(m && [m.grid.gridId, m.x, m.y, m.z]).toEqual([0, 0, T - 2, -1]); // the left-click's ray does not
+    sim.player.input.attack = true;
+    sim.attack();
+    sim.advance(5);
+    expect(sim.view.hint?.key).not.toBe('hint.unbreakable');
+    expect(sim.view.target).toMatchObject({ gridId: 0, x: 0, y: T - 2, z: -1, face: PY });
+    expect(sim.view.breakProgress).toBeGreaterThan(0);
+    sim.advance(10); // dirt: 0.5 s
+    sim.player.input.attack = false;
+    expect(idAt(sim.world, 0, T - 2, -1)).not.toBe(B.DIRT); // (the water runs down into the hole)
+    expect(items(sim, B.DIRT).entities).toBe(1);
+    // The scripted helper digs with the same ray: the stone under the next pit, bucket in hand.
+    sim.world.setCell(1, T - 1, -1, makeCell(B.WATER, liquidState(0, false)));
+    sim.world.setCell(1, T - 2, -1, makeCell(B.STONE));
+    sim.tick();
+    expect(sim.mine(1, T - 2, -1, PY)).toBe(true);
+    expect(sim.targetCell()).not.toMatchObject({ x: 1, y: T - 2, z: -1 }); // the bucket's ray stops at the water
+    expect(sim.world.getCell(1, T - 2, -1) & 1023).not.toBe(B.STONE);
   });
 });

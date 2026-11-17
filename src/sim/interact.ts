@@ -16,7 +16,21 @@
  *   bearing         running rotor: stop; else preview -> start
  *   blast crate     light it (unless holding a block item)
  *   block item      place
- * Sneaking with a block item in hand places it even against a world helm or a bearing.
+ * Sneaking with a block item in hand places it against ANY helm (world or ship) or bearing:
+ * building while sneaking along a deck must never dock the whole ship by accident. Docking
+ * from the helm therefore takes sneak + right-click with an empty hand or a non-block item;
+ * from the wheel (steering) sneak + right-click docks whatever is in hand.
+ *
+ * TWO RAYS. The use ray (outline, right-click, glue) is the bucket ray while a bucket is held:
+ * it stops at liquid sources, except world liquid displaced by a ship's hull (the water the
+ * renderer cuts out of a floating hold) — DESIGN 结构体里没有液体: a bucket never reaches world
+ * water inside or behind a structure. The mining ray never stops at liquid: a left-click with
+ * a bucket in hand digs the block under the water like any other.
+ *
+ * STALE HITS. Both rays are cast before the right-click runs. The right-click may remove what
+ * they hit (docking turns the ship into world blocks, a crate is lit), so they are checked again
+ * before the left-click and the glue step use them: a hit on a structure that is gone, or on a
+ * cell that is no longer targetable, is dropped for this tick.
  *
  * All state is on the instance; nothing here is saved (pending glue, previews and mining
  * progress do not survive a reload by design).
@@ -37,15 +51,24 @@ import { B } from '../blocks/defs';
 import { I, isBlockItem } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID, type BlockDef } from '../blocks/registry';
 import { TICK_DT, WORLD_HEIGHT } from '../core/constants';
-import { DIR_X, DIR_Y, DIR_Z, dirAxis, nearestDir, type Dir } from '../core/dirs';
+import { DIR_X, DIR_Y, DIR_Z, NX, NY, NZ, PX, PY, PZ, dirAxis, nearestDir, type Dir } from '../core/dirs';
 import { aabb, clamp, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
 import { Player } from '../entities/entity';
 import type { EntityEvent } from '../entities/host';
 import { axisValue, finiteAngle } from '../entities/input';
+import { analyzeHull, isDryCell, type HullInfo } from '../structures/hull';
 import { canGlue } from '../structures/stick';
 import { Ship, type Structure } from '../structures/structure';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
-import { placementCell, raycastGrids, targetable, targetableOrLiquidSource, type GridHit } from '../voxel/raycast';
+import {
+  placementCell,
+  raycastGrid,
+  raycastGrids,
+  targetable,
+  targetableOrLiquidSource,
+  type CellPredicate,
+  type GridHit,
+} from '../voxel/raycast';
 import { CONTACT_EPS, boxOverlapsSolid } from '../voxel/shape';
 import type { StructureGrid } from '../voxel/sgrid';
 import { spawnBlockDrop } from './drops';
@@ -72,6 +95,16 @@ export const GRID_OVERLAP_TOLERANCE = 0.1;
 
 /** Cell value the overlap probe reports for its one cell (any HARD block). */
 const PROBE_CELL = makeCell(B.STONE);
+/**
+ * Spacing (blocks) of the points at which the bucket ray tests whether the world liquid it
+ * crosses is displaced by a hull. Hull cells are a block wide, so a sliver of visible water
+ * thinner than this is the most that can be missed.
+ */
+const HULL_SAMPLE = 1 / 16;
+/** Hidden liquid cells the bucket ray may skip; a REACH-long ray crosses far fewer cells. */
+const MAX_HIDDEN_SKIPS = 32;
+/** The bucket ray resumes this far past the exit of a hidden liquid cell. */
+const SKIP_EPS = 1e-7;
 
 /**
  * A VoxelGrid view of ONE hard cell of another grid: same transform, nothing else in it.
@@ -215,8 +248,10 @@ function gridVersionOf(grid: VoxelGrid): number {
 }
 
 export class Interaction {
-  /** What the player pointed at during this tick's actions. */
+  /** What the use ray (outline, right-click, glue) hit during this tick's actions. */
   private hit: GridHit | null = null;
+  /** What the mining ray hit during this tick's actions (the same object unless a bucket is held). */
+  private mineHit: GridHit | null = null;
   private lastSlot = -1;
 
   // ---- mining
@@ -245,6 +280,17 @@ export class Interaction {
   private readonly eye: Vec3 = vec3();
   private readonly dir: Vec3 = vec3();
   private readonly tmp: Vec3 = vec3();
+  // bucket ray scratch
+  private readonly rayFrom: Vec3 = vec3();
+  private readonly sample: Vec3 = vec3();
+  private readonly sampleLocal: Vec3 = vec3();
+  private exitT = 0;
+  private exitFace: Dir = PX;
+  /**
+   * Hull analyses of ships whose own ship.hull is missing or older than their cells (ships
+   * without dynamics, or edited this tick), keyed by object; recomputed when grid.version moves.
+   */
+  private readonly hulls = new WeakMap<Ship, HullInfo | null>();
 
   constructor(private readonly sim: Simulation) {}
 
@@ -270,6 +316,7 @@ export class Interaction {
   /** Forget every pending action (death, loading a save). */
   reset(): void {
     this.hit = null;
+    this.mineHit = null;
     this.resetMining();
     this.breakCooldown = 0;
     this.preview = null;
@@ -281,10 +328,18 @@ export class Interaction {
 
   // ================================================================== queries
 
-  /** The cell the player is looking at right now (reach REACH), with the predicate for the held item. */
+  /**
+   * The cell the player is looking at right now (reach REACH) with the use ray of the held
+   * item — what a right-click would act on and what the outline shows.
+   */
   raycast(): GridHit | null {
     const p = this.sim.player;
     return this.castRay(p, isBucket(this.heldItem(p)));
+  }
+
+  /** The cell a left-click would mine right now (never a liquid, whatever is held). */
+  raycastMining(): GridHit | null {
+    return this.castRay(this.sim.player, false);
   }
 
   // ================================================================== tick
@@ -319,9 +374,16 @@ export class Interaction {
     }
     this.validate();
     this.steer(p);
-    this.hit = this.castRay(p, isBucket(held));
+    const bucket = isBucket(held);
+    this.hit = this.castRay(p, bucket);
+    this.mineHit = bucket ? this.castRay(p, false) : this.hit;
     this.previewLifetime();
-    if (usePressed) this.onUse(p, held);
+    if (usePressed) {
+      this.onUse(p, held);
+      // See STALE HITS in the header.
+      this.hit = this.recheck(this.hit, bucket ? targetableOrLiquidSource : targetable);
+      this.mineHit = bucket ? this.recheck(this.mineHit, targetable) : this.hit;
+    }
     this.updateGlueOp(p);
     this.updateMining(p, attackPressed);
   }
@@ -332,15 +394,21 @@ export class Interaction {
     const p = sim.entities.player;
     if (p === null || p.dead || p.removed) return v;
     const held = this.heldItem(p);
+    const bucket = isBucket(held);
     // Cast again: structures and the player moved since the actions ran, and the outline and
     // hint must match what is on screen now.
-    const h = this.castRay(p, isBucket(held));
+    const h = this.castRay(p, bucket);
     this.validate();
-    if (h !== null) {
-      v.target = { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face };
-      if (this.mineGrid === h.grid && this.mineX === h.x && this.mineY === h.y && this.mineZ === h.z) {
-        v.breakProgress = clamp(this.mineProgress, 0, 1);
-      }
+    // The outline shows what a right-click would act on — except while the player digs with a
+    // bucket in hand, when it follows the block being dug (under the water) so the cracks show.
+    let shown = h;
+    if (bucket && this.mineGrid !== null) {
+      const m = this.castRay(p, false);
+      if (m !== null && this.isMineCell(m)) shown = m;
+    }
+    if (shown !== null) {
+      v.target = { gridId: shown.grid.gridId, x: shown.x, y: shown.y, z: shown.z, face: shown.face };
+      if (this.isMineCell(shown)) v.breakProgress = clamp(this.mineProgress, 0, 1);
     }
     const pv = this.preview;
     if (pv !== null) v.preview = { gridId: pv.grid.gridId, kind: pv.kind, cells: pv.cells };
@@ -378,7 +446,168 @@ export class Interaction {
     d.x = -Math.sin(p.yaw) * cp;
     d.y = Math.sin(p.pitch);
     d.z = -Math.cos(p.yaw) * cp;
-    return raycastGrids(this.sim.grids(), eye, d, REACH, bucket ? targetableOrLiquidSource : targetable);
+    return bucket ? this.bucketRay(eye, d) : raycastGrids(this.sim.grids(), eye, d, REACH, targetable);
+  }
+
+  /**
+   * The bucket's ray: the nearest structure block, world block or world liquid SOURCE within
+   * REACH — where world liquid displaced by a ship's hull (inside one of its HARD cells or its
+   * dry hold; LESSONS 船舱里冒出水面: that water is never deleted, only hidden) does not count:
+   * the ray goes on through it, to the hull or to whatever lies beyond. Where a structure block
+   * and world liquid start at the same distance, the structure wins. World blocks keep the tie
+   * rule of raycastGrids (the world first).
+   */
+  private bucketRay(eye: Vec3, dir: Vec3): GridHit | null {
+    const sim = this.sim;
+    // Structures hold no liquid: for them the bucket ray is the plain ray.
+    let best: GridHit | null = null;
+    let limit = REACH;
+    const structures = sim.structures.all();
+    for (let i = 0; i < structures.length; i++) {
+      const h = raycastGrid(structures[i]!.grid, eye, dir, limit, targetable);
+      if (h !== null && (best === null || h.dist < best.dist)) {
+        best = h;
+        limit = h.dist;
+      }
+    }
+    const world = sim.world;
+    const o = this.rayFrom;
+    let from = 0;
+    for (let skips = 0; skips <= MAX_HIDDEN_SKIPS; skips++) {
+      o.x = eye.x + dir.x * from;
+      o.y = eye.y + dir.y * from;
+      o.z = eye.z + dir.z * from;
+      const w = raycastGrid(world, o, dir, limit - from, targetableOrLiquidSource);
+      if (w === null) return best;
+      if (from > 0) {
+        if (w.dist === 0) {
+          // Resumed inside this cell right behind the skipped one: it was entered through the
+          // face the ray left the skipped cell by (raycastGrid cannot know that from inside).
+          w.face = this.exitFace;
+          w.dist = this.exitT;
+        } else {
+          w.dist += from;
+        }
+        w.point.x = eye.x + dir.x * w.dist;
+        w.point.y = eye.y + dir.y * w.dist;
+        w.point.z = eye.z + dir.z * w.dist;
+      }
+      if (LIQUID[w.cell & ID_MASK] === 0) return w;
+      this.cellExit(eye, dir, w.x, w.y, w.z, w.dist);
+      const exit = this.exitT;
+      const end = best !== null && best.dist < exit ? best.dist : exit;
+      if (this.liquidVisible(eye, dir, w.dist, end)) return w;
+      if (exit >= limit) return best;
+      from = exit + SKIP_EPS;
+    }
+    return best;
+  }
+
+  /** exitT / exitFace = where the ray leaves world cell (x,y,z) (entered at `entry`), and the next cell's entry face. */
+  private cellExit(eye: Vec3, dir: Vec3, x: number, y: number, z: number, entry: number): void {
+    let t = Infinity;
+    let face: Dir = PX;
+    let slope = -1;
+    // On an exact edge or corner exit, the steepest of the tied axes names the face (as raycastGrid does).
+    if (dir.x !== 0) {
+      const tx = ((dir.x > 0 ? x + 1 : x) - eye.x) / dir.x;
+      if (tx < t || (tx === t && Math.abs(dir.x) > slope)) {
+        t = tx;
+        face = dir.x > 0 ? NX : PX;
+        slope = Math.abs(dir.x);
+      }
+    }
+    if (dir.y !== 0) {
+      const ty = ((dir.y > 0 ? y + 1 : y) - eye.y) / dir.y;
+      if (ty < t || (ty === t && Math.abs(dir.y) > slope)) {
+        t = ty;
+        face = dir.y > 0 ? NY : PY;
+        slope = Math.abs(dir.y);
+      }
+    }
+    if (dir.z !== 0) {
+      const tz = ((dir.z > 0 ? z + 1 : z) - eye.z) / dir.z;
+      if (tz < t || (tz === t && Math.abs(dir.z) > slope)) {
+        t = tz;
+        face = dir.z > 0 ? NZ : PZ;
+      }
+    }
+    this.exitT = t > entry ? t : entry;
+    this.exitFace = face;
+  }
+
+  /** Is the world liquid on the ray between t0 and t1 visible somewhere, i.e. not all displaced by hulls? */
+  private liquidVisible(eye: Vec3, dir: Vec3, t0: number, t1: number): boolean {
+    if (!(t1 > t0)) return false; // a structure starts where the liquid does
+    const ships = this.sim.structures.ships();
+    if (ships.length === 0) return true;
+    const n = Math.max(1, Math.ceil((t1 - t0) / HULL_SAMPLE));
+    const step = (t1 - t0) / n;
+    const p = this.sample;
+    for (let i = 0; i < n; i++) {
+      const t = t0 + (i + 0.5) * step;
+      p.x = eye.x + dir.x * t;
+      p.y = eye.y + dir.y * t;
+      p.z = eye.z + dir.z * t;
+      if (!this.displacedByHull(p)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Is the world point inside a HARD cell or a dry cell of a ship (where the hull keeps world
+   * liquid out)? The same rule as for bodies (entities/fluids) and blast rays (explosion).
+   */
+  private displacedByHull(p: Vec3): boolean {
+    const ships = this.sim.structures.ships();
+    const l = this.sampleLocal;
+    for (let i = 0; i < ships.length; i++) {
+      const ship = ships[i]!;
+      const g = ship.grid;
+      const b = g.cellBounds();
+      if (b === null) continue;
+      g.toLocal(p, l);
+      const x = Math.floor(l.x);
+      const y = Math.floor(l.y);
+      const z = Math.floor(l.z);
+      // Dry cells lie inside the hull's box, so nothing outside it is displaced.
+      if (x < b.minX || y < b.minY || z < b.minZ || x >= b.maxX || y >= b.maxY || z >= b.maxZ) continue;
+      if (SOLID[g.getCell(x, y, z) & ID_MASK] === 1) return true;
+      const hull = this.hullOf(ship);
+      if (hull !== null && isDryCell(hull, x, y, z)) return true;
+    }
+    return false;
+  }
+
+  /** The ship's hull analysis for its current cells. */
+  private hullOf(ship: Ship): HullInfo | null {
+    const own = ship.hull;
+    if (own !== null && own.version === ship.grid.version) return own;
+    const cached = this.hulls.get(ship);
+    if (cached !== undefined && (cached === null ? ship.grid.count === 0 : cached.version === ship.grid.version)) return cached;
+    const h = analyzeHull(ship.grid);
+    this.hulls.set(ship, h);
+    return h;
+  }
+
+  /** The world, or the grid of a structure that is still live. */
+  private isLive(grid: VoxelGrid): boolean {
+    return grid.isWorld || this.sim.structures.structureOf(grid) !== null;
+  }
+
+  /** A hit taken before the right-click, if it still stands: its grid is live, its cell still matches `pred`. */
+  private recheck(h: GridHit | null, pred: CellPredicate): GridHit | null {
+    if (h === null || !this.isLive(h.grid)) return null;
+    const cell = h.grid.getCell(h.x, h.y, h.z);
+    if (cell === h.cell) return h;
+    if (!pred(cell)) return null;
+    h.cell = cell;
+    return h;
+  }
+
+  /** Is `h` the cell being mined? */
+  private isMineCell(h: GridHit): boolean {
+    return this.mineGrid === h.grid && this.mineX === h.x && this.mineY === h.y && this.mineZ === h.z;
   }
 
   /** Drop state that no longer refers to anything valid. */
@@ -459,15 +688,10 @@ export class Interaction {
     const id = hit.cell & ID_MASK;
     const holdingBlock = held >= 0 && isBlockItem(held);
     const forcePlace = input.sneak && holdingBlock;
-    if (id === B.HELM) {
-      if (!hit.grid.isWorld) {
-        this.shipHelmClick(p, hit);
-        return;
-      }
-      if (!forcePlace) {
-        this.worldHelmClick(p, hit);
-        return;
-      }
+    if (id === B.HELM && !forcePlace) {
+      if (hit.grid.isWorld) this.worldHelmClick(p, hit);
+      else this.shipHelmClick(p, hit);
+      return;
     }
     if (id === B.BEARING && !forcePlace) {
       this.bearingClick(hit);
@@ -676,8 +900,9 @@ export class Interaction {
     let x: number;
     let y: number;
     let z: number;
-    if (grid.isWorld && REPLACEABLE[hitId] === 1 && LIQUID[hitId] === 0) {
-      // Clicking soft cover (a grass tuft, snow) puts the block in its place.
+    if (REPLACEABLE[hitId] === 1 && LIQUID[hitId] === 0) {
+      // Clicking soft cover (a grass tuft, snow) puts the block in its place — in the world and
+      // on structures alike (snow cover stacks on a deck too).
       x = hit.x;
       y = hit.y;
       z = hit.z;
@@ -689,17 +914,20 @@ export class Interaction {
     }
     if (grid.isWorld && (y < 0 || y >= WORLD_HEIGHT || !sim.world.isLoaded(x, z))) return;
     const cur = grid.getCell(x, y, z);
+    const curId = cur & ID_MASK;
+    // Structures never hold liquid, so "replaceable" means air or soft cover there.
+    if (REPLACEABLE[curId] !== 1) return;
     let cell: number;
-    if (item === B.SNOW_LAYER && (cur & ID_MASK) === B.SNOW_LAYER) {
+    if (item === B.SNOW_LAYER && curId === B.SNOW_LAYER) {
       // Snow cover stacks; eight layers make a packed snow block.
       const layers = stateLayers(cellState(cur)) + 1;
       cell = layers >= 8 ? makeCell(B.SNOW_BLOCK) : makeCell(B.SNOW_LAYER, layersState(layers));
     } else {
-      if (grid.isWorld ? REPLACEABLE[cur & ID_MASK] !== 1 : cur !== AIR) return;
       // A torch or a flower put into water would be washed away on the spot.
-      if (!def.solid && LIQUID[cur & ID_MASK] !== 0) return;
+      if (!def.solid && LIQUID[curId] !== 0) return;
       cell = makeCell(item, this.placementState(def, hit, p));
     }
+    if (curId === AIR && !grid.isWorld && this.structureFull(grid)) return;
     if (!supportOk(def, grid.getCell(x, y - 1, z))) {
       this.toastKey('toast.place.support', 'warn');
       return;
@@ -711,6 +939,21 @@ export class Interaction {
     if (!grid.setCell(x, y, z, cell)) return;
     if (p.mode !== 'creative') p.inventory.consumeSelected(1);
     sim.events.emit({ type: 'blockPlaced', gridId: grid.gridId, x, y, z, cell });
+  }
+
+  /**
+   * Is the structure owning `grid` at its assembly limit (DESIGN: ship 4000, rotor 400 cells)?
+   * Shows the limit and refuses: a ship built past it could never be assembled again after docking.
+   */
+  private structureFull(grid: VoxelGrid): boolean {
+    const sim = this.sim;
+    const s = sim.structures.structureOf(grid);
+    if (s === null) return false;
+    const ship = s instanceof Ship;
+    const max = ship ? sim.shipMaxCells : sim.rotorMaxCells;
+    if (s.grid.count < max) return false;
+    this.toast(failMessage(ship ? 'ship' : 'rotor', 'too_big', { max }), 'warn');
+    return true;
   }
 
   /** State bits of a newly placed block, in the target grid's local frame. */
@@ -841,6 +1084,16 @@ export class Interaction {
     if (y < 0 || y >= WORLD_HEIGHT || !world.isLoaded(x, z)) return;
     const cur = world.getCell(x, y, z);
     if (REPLACEABLE[cur & ID_MASK] !== 1) return;
+    // Nor is liquid poured into a hull: a world source where a ship's hard cells or dry hold are
+    // would be hidden inside it now and left floating on the sea once it sails away.
+    const c = this.tmp;
+    c.x = x + 0.5;
+    c.y = y + 0.5;
+    c.z = z + 0.5;
+    if (this.displacedByHull(c)) {
+      this.toastKey('toast.bucket.structure', 'warn');
+      return;
+    }
     const source = makeCell(held === I.BUCKET_WATER ? B.WATER : B.LAVA, liquidState(0, false));
     if (!world.setCell(x, y, z, source)) return;
     if (p.mode !== 'creative') this.swapHeld(p, I.BUCKET);
@@ -948,6 +1201,7 @@ export class Interaction {
       h.x !== op.bx ||
       h.y !== op.by ||
       h.z !== op.bz ||
+      !this.isLive(op.grid) ||
       this.locked(op.grid) !== null ||
       !canGlue(h.cell)
     ) {
@@ -962,6 +1216,7 @@ export class Interaction {
 
   private applyGlue(p: Player, grid: VoxelGrid, x: number, y: number, z: number, dir: Dir, remove: boolean): void {
     const sim = this.sim;
+    if (!this.isLive(grid)) return; // the structure was docked or destroyed meanwhile
     const glue = sim.structures.glueFor(grid);
     if (remove) {
       if (glue.remove(x, y, z, dir)) this.toastKey('toast.glue.removed');
@@ -991,7 +1246,7 @@ export class Interaction {
 
   private updateMining(p: Player, pressed: boolean): void {
     const input = p.input;
-    const hit = this.hit;
+    const hit = this.mineHit;
     if (this.breakCooldown > 0) this.breakCooldown--;
     this.attackingUnbreakable = false;
     if (!(input.attack || pressed) || hit === null) {
@@ -1038,6 +1293,8 @@ export class Interaction {
   private breakBlock(hit: GridHit): void {
     const sim = this.sim;
     const grid = hit.grid;
+    // A grid whose structure is gone is detached: its cells are already back in the world.
+    if (!this.isLive(grid)) return;
     const { x, y, z } = hit;
     const cell = grid.getCell(x, y, z);
     if (cell === AIR) return;
@@ -1070,9 +1327,9 @@ export class Interaction {
     const forcePlace = p.input.sneak && holdingBlock;
     const pv = this.preview;
     const isPreviewed = pv !== null && pv.grid === h.grid && pv.x === h.x && pv.y === h.y && pv.z === h.z;
-    if (id === B.HELM && !isBucket(held)) {
-      if (!h.grid.isWorld) return msg('hint.helm.steer');
-      if (!forcePlace) return isPreviewed && pv.kind === 'ship' ? msg('hint.helm.assemble', { count: pv.count }) : msg('hint.helm.preview');
+    if (id === B.HELM && !forcePlace && !isBucket(held)) {
+      if (!h.grid.isWorld) return msg(holdingBlock ? 'hint.helm.steerPlace' : 'hint.helm.steer');
+      return isPreviewed && pv.kind === 'ship' ? msg('hint.helm.assemble', { count: pv.count }) : msg('hint.helm.preview');
     }
     if (id === B.BEARING && !forcePlace && !isBucket(held)) {
       if (sim.structures.rotorAtBearing(h.grid, h.x, h.y, h.z) !== null) return msg('hint.bearing.stop');

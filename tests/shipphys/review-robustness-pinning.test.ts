@@ -1,31 +1,21 @@
 /**
- * Adversarial review (robustness lens): rotor pinning and rotor-driven ship/ship contacts.
+ * Regression tests from the adversarial review (robustness lens): rotor pinning and rotor-driven
+ * ship/ship contacts. Both failed before the fixes:
  *
- * These tests FAIL against the current implementation; they are left in place for the fixer.
+ *  1. A blade sweeping a boat DIAGONALLY along a long quay wall (blade velocity 30-55 degrees off
+ *     the wall normal, outside the 25-degree "almost exactly opposed" cone) destroyed a hull cell
+ *     every tick while the boat slid 10-20 blocks along the wall (LESSONS 能动的船被误判压坏). The
+ *     pin test fed condition (2) the direction of the post-solve RELATIVE velocity, which points
+ *     into the wall once the boat slides at the blade's tangential speed, and an unconverged
+ *     friction-jammed solve kept condition (1) true. Now: (2) uses the blade's own motion, terrain
+ *     a pressing blade drives the ship into is frictionless (so outside the cone the ship really
+ *     slides), and blade face points push along the blade's face normal.
  *
- *  1. A blade sweeping a boat DIAGONALLY along a long quay wall (blade velocity 35-55 degrees
- *     away from the wall normal, far outside the 25-degree "almost exactly opposed" cone) must
- *     not count as pinned: the boat slides freely along the wall (it travels 10-20 blocks), yet
- *     the current code destroys a hull cell every tick (9-12 of the boat's 18 cells). This is
- *     exactly LESSONS "能动的船被误判压坏". Root cause (traced): the sequential-impulse solve has
- *     not converged in this wedge configuration (terrain gets the last word, the boat ends with a
- *     tangential speed well below what the 38-degree blade face demands), so condition (1) sees a
- *     large residual press; condition (2) then uses the direction of the RELATIVE velocity, which
- *     points almost straight into the wall once the boat slides along it, and so is "opposed" by
- *     the wall normal. The push direction (the contact normal, about 38 degrees from the wall
- *     normal) is never compared with the terrain normal.
- *     Checked in a patched scratch copy of the module: feeding condition (2) the blade's OWN
- *     velocity direction at the contact (F_VO / |F_VO|) instead of the relative velocity removes
- *     every false pin here (0 cells lost for starts 110/120/130 deg) while the corner-pinning
- *     cases of rotor.test.ts still break cells (14 at 1 rad/s, 18 at 0.1 rad/s). Using the contact
- *     normal instead only reduces the damage (9 -> 6..9 cells), because rotor-corner-in-hull
- *     contacts carry the hull's face normal, which points straight into the wall.
- *
- *  2. A blade pushing an outer boat against an inner boat that is moored at a wall drives the
- *     outer hull ~0.9 block into the inner one (the module's own ship/ship test bounds overlap at
- *     0.3). Pinning only counts terrain and other rotors as support, never a ship that terrain
- *     holds, and rotor contacts are solved before ship contacts, so the infinitely strong blade
- *     squeezes the two hulls into each other.
+ *  2. A blade pushing an outer boat against an inner boat moored at a wall drove the outer hull
+ *     ~0.9 block into the inner one: ship supports did not count for pinning, and in Gauss-Seidel
+ *     the chain blade -> outer -> inner -> wall shared every correction with the inner boat only for
+ *     the wall to take it back. Now a ship held along the push counts as support, and the solver
+ *     treats it as immovable for the driven ship's contacts.
  */
 import { describe, expect, it } from 'vitest';
 import { ID_MASK } from '../../src/blocks/cell';
