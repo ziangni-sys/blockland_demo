@@ -23,8 +23,9 @@
  * The site is found by a deterministic search outward from the player's spawn: a rectangle of
  * open water (every column water at least two deep with air above) as big as the boat plus a
  * margin, with the whole boat between MIN_DISTANCE and MAX_DISTANCE blocks from the spawn. The
- * bow points along the longest run of open water from the boat's centre. Missing chunks are
- * generated synchronously, at most SEARCH_CHUNK_RADIUS chunks around the spawn.
+ * bow points along the longest run of open water from the boat's centre, and a site with a long
+ * run is preferred over a slightly nearer one (findSite). Missing chunks are generated
+ * synchronously, at most SEARCH_CHUNK_RADIUS chunks around the spawn.
  *
  * Simulation layer: no DOM, no clocks, no randomness; all state is in the Simulation.
  */
@@ -64,6 +65,10 @@ export const WINDMILL_TOP_Y = MAST_TOP_Y + 2;
 const HALF = (SHIP_WIDTH - 1) / 2;
 /** How far the open-water run toward each candidate bow direction is measured. */
 const RUN_LIMIT = 48;
+/** A run this long from the boat's centre (some 27 blocks clear ahead of the bow) is good enough. */
+const GOOD_RUN = 32;
+/** Rings searched past the first site that fits, for one with a longer run. */
+const EXTRA_RINGS = 8;
 const HORIZONTAL: readonly Dir[] = [PX, NX, PZ, NZ];
 
 const PLANKS = makeCell(B.PLANKS_OAK);
@@ -218,15 +223,23 @@ interface Site {
 }
 
 /**
- * Nearest site on square rings around the spawn column. At each candidate centre the bow
- * directions are tried longest open-water run first (ties in Dir order); the first one that
- * fits wins. Deterministic: depends only on the world and the spawn.
+ * Site search on square rings around the spawn column, nearest first. At each candidate centre
+ * the bow directions are tried longest open-water run first (ties in Dir order); the first that
+ * fits is that centre's site, scored by its run (capped at GOOD_RUN). The first site with a
+ * GOOD_RUN wins at once; otherwise the search goes on for EXTRA_RINGS rings past the first site
+ * that fits and takes the best score (the nearest among equals): a boat moored in a cove whose
+ * bow faces a shore 15 blocks away is a poor first voyage when open sea lies a few blocks off.
+ * Deterministic: depends only on the world and the spawn.
  */
 function findSite(s: Search): Site | null {
   const cx0 = Math.floor(s.sx);
   const cz0 = Math.floor(s.sz);
   const order: Array<{ d: Dir; run: number }> = [];
-  for (let r = 0; r <= MAX_DISTANCE; r++) {
+  const back = (SHIP_LENGTH - 1) / 2;
+  let best: Site | null = null;
+  let bestScore = -1;
+  let lastRing = MAX_DISTANCE;
+  for (let r = 0; r <= lastRing; r++) {
     for (let dz = -r; dz <= r; dz++) {
       const edge = dz === -r || dz === r;
       // The ring's top and bottom rows in full, the rows between only at both ends.
@@ -238,18 +251,25 @@ function findSite(s: Search): Site | null {
         order.length = 0;
         for (const d of HORIZONTAL) order.push({ d, run: waterRun(s, cx, cz, d) });
         order.sort((a, b) => b.run - a.run || a.d - b.d);
-        for (const { d } of order) {
+        // Only a direction that could beat the best so far is worth a fit test.
+        for (const { d, run } of order) {
+          const score = Math.min(run, GOOD_RUN);
+          if (score <= bestScore) break;
           const f = frameOf(d);
           // Stern centre: half a boat behind the centre cell.
-          const back = (SHIP_LENGTH - 1) / 2;
           const ox = cx - f.fx * back;
           const oz = cz - f.fz * back;
-          if (fits(s, f, ox, oz)) return { frame: f, ox, oz };
+          if (!fits(s, f, ox, oz)) continue;
+          if (best === null) lastRing = Math.min(MAX_DISTANCE, r + EXTRA_RINGS);
+          best = { frame: f, ox, oz };
+          bestScore = score;
+          if (score >= GOOD_RUN) return best;
+          break;
         }
       }
     }
   }
-  return null;
+  return best;
 }
 
 /** Write the boat. Returns the helm's world cell. */

@@ -127,6 +127,11 @@ describe('example windmill boat (new worlds)', () => {
         expect(w.getCell(c.x, FLOOR_Y, c.z) & ID_MASK).toBe(B.WATER);
         expect(w.getCell(c.x, DECK_Y, c.z) & ID_MASK).toBe(B.AIR);
       }
+      // The bow faces open water: a clear stretch ahead of it.
+      for (let k = 1; k <= 12; k++) {
+        const c = at(0, 8 + k, FLOOR_Y);
+        expect(w.getCell(c.x, FLOOR_Y, c.z) & ID_MASK, `seed ${seed}: ${k} ahead of the bow`).toBe(B.WATER);
+      }
       // The two glued faces: mast foot to the floor, hub to the bearing.
       const foot = at(0, MAST_V, DECK_Y);
       expect(sim.worldGlue.has(foot.x, foot.y, foot.z, NY)).toBe(true);
