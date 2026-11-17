@@ -19,6 +19,7 @@ import { I } from '../blocks/items';
 import { openBestStorage } from '../save/idb';
 import { SAVE_VERSION, type WorldMeta } from '../save/codec';
 import { formatMessage } from '../sim/messages';
+import { placeExampleShip } from '../sim/exampleShip';
 import { exportSave, importSave } from '../sim/persist';
 import { Simulation } from '../sim/simulation';
 import type { Message, SimEvent } from '../sim/view';
@@ -597,6 +598,8 @@ export class Game implements InputHost {
       const generator = new TerrainGenerator(seed);
       const sim = new Simulation({ seed, mode, generator, loadRadius: loadRadiusFor(this.settings.renderDistance) });
       giveStarterKit(sim);
+      // A windmill boat moored near the spawn, as blocks (new worlds only, never on load).
+      placeExampleShip(sim);
       const id = makeWorldId(Date.now(), Math.random);
       const meta = newWorldMeta(id, name.slice(0, 64), seedText, seed, mode, Date.now());
       this.startSession(sim, meta, generator, true);
