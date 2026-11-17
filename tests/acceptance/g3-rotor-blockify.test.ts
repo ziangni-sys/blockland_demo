@@ -770,3 +770,56 @@ describe('14. 轴心和轴承之间的胶，在风车启动再停下之后仍然
     expect(sim.worldGlue.size).toBe(1);
   });
 });
+
+// =====================================================================================
+// 10 + glue: a stop never glues a blade to the terrain that stopped its neighbour
+// =====================================================================================
+
+describe('10 与胶：风车停在地形里时，叶片不会和挡住它的地形粘在一起（结构体移动不会产生新的胶连接）。', () => {
+  it('two blade cells glued together; after a half turn the outer one lands in a stone and drops: the inner one is not glued to the stone, and the restarted windmill leaves the stone in the world', () => {
+    const sim = flatWorld('creative', { x: 2.5, y: T, z: -1.5 }, 16);
+    const w = sim.world;
+    const Y = T + 4;
+    const Z = -4;
+    // Bearing (0, Y, Z) facing east on a stone-brick post; canvas hub (1, Y, Z), up arm (1, Y+1..Y+2), down arm (1, Y-1).
+    fill(w, -1, T, Z, -1, Y, Z, B.STONE_BRICKS);
+    set(w, 0, Y, Z, B.BEARING, facingState(PX));
+    for (const dy of [0, 1, 2, -1]) set(w, 1, Y + dy, Z, B.CANVAS);
+    sim.advance(2);
+    // The player glues the top of the up arm and puts a third canvas on it: two glued blade cells.
+    sim.teleport(3.5, Y + 2, Z + 0.5);
+    sim.player.flying = true;
+    sim.tick();
+    sim.hold(I.GLUE);
+    expect(sim.useOn(1, Y + 2, Z, PY)).toBe(true);
+    sim.hold(B.CANVAS);
+    expect(sim.useOn(1, Y + 2, Z, PY)).toBe(true);
+    expect(idAt(w, 1, Y + 3, Z)).toBe(B.CANVAS);
+    expect(sim.worldGlue.has(1, Y + 2, Z, PY)).toBe(true);
+    sim.teleport(2.5, T, -1.5);
+    sim.player.flying = false;
+    sim.advance(2);
+    sim.emptyHand();
+    sim.setMode('survival'); // so the cell that lands in the stone shows up as a drop
+
+    const rotor = startByPlayer(sim, 0, Y, Z, PZ);
+    expect(rotor.grid.count).toBe(5);
+    expect(rotor.glue.has(1, Y + 2, Z, PY)).toBe(true);
+    spinUntil(sim, rotor, Math.PI - 0.25, Math.PI - 0.15);
+    // A half turn about +X puts the up arm at (1, Y-1..Y-3): its tip lands in this stone.
+    set(w, 1, Y - 3, Z, B.STONE);
+    sim.tick();
+    expect(sim.useOn(0, Y, Z, PZ)).toBe(true);
+    expect(rotor.removed).toBe(true);
+    expect(idAt(w, 1, Y - 2, Z)).toBe(B.CANVAS);
+    expect(idAt(w, 1, Y - 3, Z)).toBe(B.STONE);
+    expect(dropped(sim, B.CANVAS)).toBe(1); // the tip
+    expect(sim.worldGlue.has(1, Y - 2, Z, NY)).toBe(false); // blade and stone are not joined
+    expect(sim.worldGlue.size).toBe(0);
+
+    const again = startByPlayer(sim, 0, Y, Z, PZ);
+    expect(again.grid.count).toBe(4); // hub, two blade cells of the old up arm, the old down arm
+    expect(gridCells(again.grid, [B.STONE])).toEqual([]);
+    expect(idAt(w, 1, Y - 3, Z)).toBe(B.STONE);
+  });
+});

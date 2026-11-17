@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { ID_MASK, facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
+import { I } from '../../src/blocks/items';
 import { NX, NY, NZ, PX, PY, PZ } from '../../src/core/dirs';
 import { FALL_DELAY } from '../../src/sim/blockupdates';
 import type { Simulation } from '../../src/sim/simulation';
@@ -882,5 +883,108 @@ describe('9. 甲板上没粘的沙子在组装后会掉落；落到船上变成�
     drops = itemDrops(sim, B.SAND);
     expect(drops.entities).toBe(1);
     expect(drops.list[0]!.carrierId).toBe(ship.id);
+  });
+});
+
+// ==================================================================== 6 + 8 with glue: docking never glues a ship to a pier
+
+describe('6、8 与胶：停靠不会把船和码头粘在一起（结构体移动不会产生新的胶连接）。', () => {
+  /** Rubble or plank pier west of the raft: posts x -3..-2, z -1..1 up to the deck's top, and one block reaching east to (-1, SEA_TOP, 0). */
+  function buildPier(sim: Simulation, id: number): number {
+    fill(sim, -3, SEA_FLOOR, -1, -2, SEA_TOP, 1, id);
+    sim.world.setCell(-1, SEA_TOP, 0, makeCell(id));
+    return countWorld(sim, id, -4, SEA_FLOOR, -2, -1, SEA_TOP + 1, 2);
+  }
+
+  /** Where the raft's (0, SEA_TOP, 0) lands when it docks now: unmoved, unturned. */
+  function expectDocksInPlace(ship: Ship): void {
+    const exp = expectedDock(ship);
+    expect(exp.k).toBe(0);
+    expect(destOf(exp, 2, SEA_TOP, 4)).toEqual({ x: 2, y: SEA_TOP, z: 4 });
+  }
+
+  for (const [name, pierId] of [['rubble', B.COBBLE], ['plank', B.PLANKS_PINE]] as const) {
+    it(`a raft carrying an open glued face docks with it against a ${name} pier: assembled again it has the same blocks, and the pier stays whole`, () => {
+      const sim = raftScene({ glued: true, pier: false });
+      // The player glues the felt's open west face, and leaves it open.
+      sim.teleport(-2.5, SEA_TOP + 1, 0.5);
+      sim.player.flying = true;
+      sim.tick();
+      sim.hold(I.GLUE);
+      expect(sim.useOn(0, SEA_TOP, 0, NX)).toBe(true);
+      expect(sim.worldGlue.has(0, SEA_TOP, 0, NX)).toBe(true);
+      sim.teleport(2.5, SEA_TOP, 5.5);
+      sim.player.flying = false;
+      sim.advance(2);
+      sim.emptyHand();
+      const ship = assembleRaft(sim);
+      expect(ship.grid.count).toBe(33);
+      expect(ship.glue.size).toBe(3);
+      expect(ship.glue.has(0, SEA_TOP, 0, NX)).toBe(true); // the open face rides along
+      // Someone builds a pier beside the floating raft, touching the felt's glued face.
+      const pierCells = buildPier(sim, pierId);
+      sim.tick();
+      expectDocksInPlace(ship);
+      sneakClick(sim); // dock from the wheel
+      expect(ship.removed).toBe(true);
+      expect(idAt(sim, 0, SEA_TOP, 0)).toBe(B.WOOL_WHITE);
+      expect(idAt(sim, -1, SEA_TOP, 0)).toBe(pierId);
+      expect(sim.worldGlue.has(0, SEA_TOP, 0, NX)).toBe(false); // felt and pier are not joined
+      expect(sim.worldGlue.size).toBe(2);
+      // Assembled again at the helm: the same 33 blocks, none of the pier.
+      const again = assembleRaft(sim);
+      expect(again).not.toBe(ship);
+      expect(again.grid.count).toBe(33);
+      expect(again.glue.size).toBe(2);
+      let pierInShip = 0;
+      again.grid.forEachCell((_x, _y, _z, c) => {
+        if ((c & ID_MASK) === pierId) pierInShip++;
+      });
+      expect(pierInShip).toBe(0);
+      expect(countWorld(sim, pierId, -4, SEA_FLOOR, -2, -1, SEA_TOP + 1, 2)).toBe(pierCells);
+    });
+  }
+
+  it('a pier block with an open glued face: a ship docks with a plank against it; the pier is not taken and the face has no glue', () => {
+    const sim = raftScene({ pier: false });
+    const pierCells = buildPier(sim, B.COBBLE); // its east end is diagonal to the deck corner: not touching the raft
+    sim.advance(2);
+    // The player glues the pier's open east face, over the raft's north-west corner.
+    sim.teleport(1.5, SEA_TOP, 1.5);
+    sim.advance(2);
+    sim.hold(I.GLUE);
+    expect(sim.useOn(-1, SEA_TOP, 0, PX)).toBe(true);
+    expect(sim.worldGlue.has(-1, SEA_TOP, 0, PX)).toBe(true);
+    sim.teleport(2.5, SEA_TOP, 5.5);
+    sim.advance(2);
+    sim.emptyHand();
+    const ship = assembleRaft(sim);
+    expect(ship.grid.count).toBe(31);
+    expect(sim.worldGlue.has(-1, SEA_TOP, 0, PX)).toBe(true); // stays on the pier
+    click(sim); // let go of the wheel
+    // The player puts a plank on the ship's deck corner, right beside the glued pier face. It is a
+    // ship block: the world's glue does not reach it.
+    sim.teleport(1.5, SEA_TOP, 1.5);
+    sim.advance(2);
+    sim.hold(B.PLANKS_OAK);
+    expect(sim.useOn(0, DECK, 0, PY, ship.id)).toBe(true);
+    expect(ship.grid.getCell(0, SEA_TOP, 0) & ID_MASK).toBe(B.PLANKS_OAK);
+    expect(ship.grid.count).toBe(32);
+    sim.emptyHand();
+    sim.teleport(2.5, SEA_TOP, 5.5);
+    sim.advance(2);
+    expectDocksInPlace(ship);
+    sim.player.input.sneak = true;
+    expect(sim.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true); // dock from the helm
+    sim.player.input.sneak = false;
+    expect(ship.removed).toBe(true);
+    expect(idAt(sim, 0, SEA_TOP, 0)).toBe(B.PLANKS_OAK);
+    expect(sim.worldGlue.has(-1, SEA_TOP, 0, PX)).toBe(false); // the pier's face, now against the plank
+    expect(sim.worldGlue.size).toBe(0);
+    const again = assembleRaft(sim);
+    expect(again.grid.count).toBe(32);
+    expect(again.grid.getCell(-1, SEA_TOP, 0)).toBe(0);
+    expect(idAt(sim, -1, SEA_TOP, 0)).toBe(B.COBBLE);
+    expect(countWorld(sim, B.COBBLE, -4, SEA_FLOOR, -2, -1, SEA_TOP + 1, 2)).toBe(pierCells);
   });
 });

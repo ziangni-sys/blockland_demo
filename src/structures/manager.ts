@@ -12,7 +12,8 @@
  * HOOKS. Every cell change of every grid goes through one listener per grid:
  *  - glue: when a cell changes block id, by whatever path (bulk structure moves included), the
  *    glue lifetime rule runs on its faces (pruneGlueAt: a glued face stays while one side is a
- *    glueable block);
+ *    glueable block); when a chunk is added to the world, it runs on the world's faces in and on
+ *    the border of that chunk (pruneGlueInBox), whose cells were unknown until then;
  *  - bearings: when the bearing of a running rotor is removed or replaced, by whatever path
  *    (mining, explosion, physics damage ...), the rotor blockifies in place — immediately, or at
  *    endBatch() inside a batch (LESSONS: 先等冲击波处理完所有结构体，再把转子方块化，最后统一重算);
@@ -27,11 +28,12 @@
  */
 import { cellState, ID_MASK, stateFacing } from '../blocks/cell';
 import { B } from '../blocks/defs';
-import { TICK_DT } from '../core/constants';
+import { CHUNK_SIZE, TICK_DT, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
 import { aabb, qidentity, qrotate, qtoMat3, vec3, vset, type AABB } from '../core/math';
 import type { ByteReader, ByteWriter } from '../save/bytes';
 import type { VoxelGrid } from '../voxel/grid';
+import type { Chunk } from '../voxel/chunk';
 import type { World } from '../voxel/world';
 import {
   blockifyGrid,
@@ -45,13 +47,14 @@ import {
   transferCells,
   type BlockifyReport,
   type DockPlan,
+  type GridFace,
 } from './assembly';
 import { CellSet, collectRotor, collectShip, type CollectReason, type CollectResult } from './collect';
 import type { GlueStore } from './glue';
 import { analyzeHull, type HullInfo } from './hull';
 import { advanceRotor, applyRotorPose, holdRotor } from './rotor';
 import { readStructures, writeStructures } from './serialize';
-import { cellFunc, isSailCell, pruneGlueAt } from './stick';
+import { cellFunc, isSailCell, pruneGlueAt, pruneGlueInBox } from './stick';
 import { Rotor, Ship, type ShipDynamics, type Structure, type StructureHost } from './structure';
 
 export type { BlockifyReport } from './assembly';
@@ -159,6 +162,7 @@ export class StructureManager {
   /** Rotors that lost their bearing inside a batch, in the order it happened. */
   private readonly pending: Rotor[] = [];
   private unsubWorld: (() => void) | null = null;
+  private unsubChunks: (() => void) | null = null;
   // Scratch for the per-tick box maths only (never used across a call that can re-enter).
   private readonly mat = new Float64Array(9);
   private readonly tmp = vec3();
@@ -168,6 +172,7 @@ export class StructureManager {
     this.world = host.world;
     this.dynamics = dynamics;
     this.unsubWorld = host.world.onCellChange(this.onWorldCell);
+    this.unsubChunks = host.world.onChunkAdd(this.onWorldChunk);
   }
 
   // ------------------------------------------------------------ queries
@@ -347,11 +352,19 @@ export class StructureManager {
     const dst: VoxelGrid = ship !== null ? ship.grid : this.world;
     const dstGlue = ship !== null ? ship.glue : this.host.worldGlue;
     const t = rotorSnap(rotor.grid);
+    // The face between the bearing and the hub's place keeps the glue the parent already holds
+    // on it (it stayed on the bearing when the rotor started: ACCEPTANCE 14). Read before the
+    // writes: a bearing that is gone, or replaced, has no such face.
+    const bearing = dst.getCell(rotor.bearingX, rotor.bearingY, rotor.bearingZ);
+    const bearingFace: GridFace | null =
+      (bearing & ID_MASK) === BEARING_ID
+        ? { x: rotor.bearingX, y: rotor.bearingY, z: rotor.bearingZ, dir: stateFacing(cellState(bearing)) }
+        : null;
     // Unregister first: the writes below run the parent grid's hooks (and any listener the
     // host attached), which must no longer see this rotor as running.
     this.detachRotor(rotor);
     this.unregister(rotor);
-    const out = blockifyGrid(this.host, rotor.grid, rotor.glue, dst, dstGlue, t, ship !== null);
+    const out = blockifyGrid(this.host, rotor.grid, rotor.glue, dst, dstGlue, t, ship !== null, bearingFace);
     if (ship !== null) {
       if (this.isLive(ship)) this.dynamics?.wake(ship);
     } else {
@@ -516,6 +529,10 @@ export class StructureManager {
       this.unsubWorld();
       this.unsubWorld = null;
     }
+    if (this.unsubChunks !== null) {
+      this.unsubChunks();
+      this.unsubChunks = null;
+    }
     for (const e of this.entries.values()) {
       e.unsub();
       e.unsub = noop;
@@ -545,6 +562,19 @@ export class StructureManager {
         }
       }
     }
+  };
+
+  /**
+   * A chunk arrived (generated or restored): glue kept on its border while it was unloaded, or
+   * restored with a save before its cells, now meets the real cells. Nothing to do on an empty
+   * store; otherwise one box query over the chunk's columns.
+   */
+  private readonly onWorldChunk = (chunk: Chunk): void => {
+    const glue = this.host.worldGlue;
+    if (glue.size === 0) return;
+    const x0 = chunk.cx * CHUNK_SIZE;
+    const z0 = chunk.cz * CHUNK_SIZE;
+    pruneGlueInBox(this.world, glue, x0, 0, z0, x0 + CHUNK_SIZE - 1, WORLD_HEIGHT - 1, z0 + CHUNK_SIZE - 1);
   };
 
   private watchShip(ship: Ship): () => void {

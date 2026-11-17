@@ -105,7 +105,7 @@ export function holdsGlue(cell: number): boolean {
  * The glue lifetime rule at one cell of `grid`, whose value is now `cell`: every glued face of
  * the cell stays when the cell or the neighbour across that face holdsGlue(), and is removed
  * otherwise. Returns the number of faces removed. The grids' change hooks call it on every
- * write (bulk structure moves included), the movers on their destination cells after moveTo.
+ * write (bulk structure moves included), assembly into a new structure on its cells after moveTo.
  * Costs one size check when the store is empty and six lookups when the cell carries no glue.
  */
 export function pruneGlueAt(grid: VoxelGrid, glue: GlueStore, x: number, y: number, z: number, cell: number): number {
@@ -119,6 +119,37 @@ export function pruneGlueAt(grid: VoxelGrid, glue: GlueStore, x: number, y: numb
     if (glue.remove(x, y, z, d as Dir)) n++;
   }
   return n;
+}
+
+/**
+ * The glue lifetime rule on every glued face of `grid` with at least one end cell inside the
+ * box [x0..x1] x [y0..y1] x [z0..z1] (cell coordinates, inclusive): a face with no side that
+ * holdsGlue() is removed (through the store, so its listeners hear of it). The world runs it
+ * on a chunk when the chunk is added: glue kept beside an unloaded column, now that the
+ * column's cells are known, may turn out to have no glueable side at all. A face whose other
+ * side is still unloaded is kept (the sentinel holds glue). Returns the number of faces removed.
+ * Costs one size check on an empty store, otherwise one box query on the store.
+ */
+export function pruneGlueInBox(
+  grid: VoxelGrid,
+  glue: GlueStore,
+  x0: number,
+  y0: number,
+  z0: number,
+  x1: number,
+  y1: number,
+  z1: number,
+): number {
+  if (glue.size === 0) return 0;
+  const dead: number[] = [];
+  glue.forEachInBox(x0, y0, z0, x1, y1, z1, (x, y, z, axis) => {
+    if (holdsGlue(grid.getCell(x, y, z))) return;
+    if (holdsGlue(grid.getCell(axis === 0 ? x + 1 : x, axis === 1 ? y + 1 : y, axis === 2 ? z + 1 : z))) return;
+    dead.push(x, y, z, axis);
+  });
+  // Canonical cell + axis: the other end lies in the positive direction of the axis (Dir = axis * 2).
+  for (let i = 0; i < dead.length; i += 4) glue.remove(dead[i]!, dead[i + 1]!, dead[i + 2]!, (dead[i + 3]! << 1) as Dir);
+  return dead.length / 4;
 }
 
 /** Functional block (helm, bearing, propeller). These never become part of a rotor. */

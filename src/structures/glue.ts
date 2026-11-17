@@ -25,7 +25,9 @@
  *
  * LIFETIME. The store does not know cells. The rule "a glued face stays while at least one
  * side is a glueable block" (DESIGN 强力胶) is applied by the grids' change hooks through
- * pruneGlueAt (stick.ts), and by the structure moves (moveTo, then a prune at the destination).
+ * pruneGlueAt (stick.ts), on the world's faces around a chunk when it is added (pruneGlueInBox),
+ * and by the structure moves (moveTo, then the destination's rules: assembly.ts, which also
+ * removes every face a blockify or dock would turn into a joint no player made).
  *
  * EVENTS. onChange() reports every face that is added or removed, by any method (bulk ones
  * included: moveTo on both stores, clear, fromArray has no listeners yet), so a mirror kept
@@ -383,8 +385,8 @@ export class GlueStore {
    * ORDER RELATIVE TO THE CELL WRITES. The grids' change hooks apply the lifetime rule on every
    * write, bulk moves included, so a mover writes the destination cells, THEN calls moveTo,
    * THEN clears the source cells (clearing first would leave faces between two moved cells with
-   * no glueable side, and the hook would delete them), and finally applies the lifetime rule
-   * to the destination cells (pruneGlueAt), since faces arrive there after the cells did.
+   * no glueable side, and the hook would delete them), and finally applies the destination's
+   * glue rules to the destination cells (assembly.ts), since faces arrive there after the cells did.
    * `inSet` and `stays` read the source grid while its cells are still there.
    */
   moveTo(
