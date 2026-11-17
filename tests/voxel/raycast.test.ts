@@ -424,28 +424,28 @@ describe('raycastGrid — exact edge and corner crossings', () => {
   it('a 45-degree ray through a lattice edge sees neither of the two edge-only cells (mirror symmetric)', () => {
     const d = unit(1, 1, 0);
     for (const cell of [
-      [0, 1, 0],
-      [1, 0, 0],
+      [0, 21, 0],
+      [1, 20, 0],
     ] as const) {
       const w = emptyWorld();
       w.setCell(cell[0], cell[1], cell[2], STONE);
-      expect(raycastGrid(w, vec3(0.5, 0.5, 0.5), d, 5)).toBeNull();
+      expect(raycastGrid(w, vec3(0.5, 20.5, 0.5), d, 5)).toBeNull();
     }
     // The diagonal cell beyond the edge is entered at the edge point, through the face of the
     // steeper axis (x before y on equal slopes).
     const w = emptyWorld();
-    w.setCell(1, 1, 0, STONE);
-    const h = raycastGrid(w, vec3(0.5, 0.5, 0.5), d, 5)!;
-    expect([h.x, h.y, h.z, h.face]).toEqual([1, 1, 0, NX]);
+    w.setCell(1, 21, 0, STONE);
+    const h = raycastGrid(w, vec3(0.5, 20.5, 0.5), d, 5)!;
+    expect([h.x, h.y, h.z, h.face]).toEqual([1, 21, 0, NX]);
     expect(h.dist).toBeCloseTo(Math.SQRT1_2, 15);
     // Same in the -x/-y octant, with negative coordinates across a chunk border.
     const w2 = emptyWorld();
-    w2.setCell(-17, 3, 5, STONE); // edge-only
-    w2.setCell(-16, 2, 5, STONE); // edge-only
-    expect(raycastGrid(w2, vec3(-15.5, 3.5, 5.5), unit(-1, -1, 0), 5)).toBeNull();
-    w2.setCell(-17, 2, 5, STONE);
-    const h2 = raycastGrid(w2, vec3(-15.5, 3.5, 5.5), unit(-1, -1, 0), 5)!;
-    expect([h2.x, h2.y, h2.z, h2.face]).toEqual([-17, 2, 5, PX]);
+    w2.setCell(-17, 23, 5, STONE); // edge-only
+    w2.setCell(-16, 22, 5, STONE); // edge-only
+    expect(raycastGrid(w2, vec3(-15.5, 23.5, 5.5), unit(-1, -1, 0), 5)).toBeNull();
+    w2.setCell(-17, 22, 5, STONE);
+    const h2 = raycastGrid(w2, vec3(-15.5, 23.5, 5.5), unit(-1, -1, 0), 5)!;
+    expect([h2.x, h2.y, h2.z, h2.face]).toEqual([-17, 22, 5, PX]);
   });
 
   it('a body-diagonal ray through a lattice corner skips all six corner/edge-only cells', () => {
@@ -461,7 +461,7 @@ describe('raycastGrid — exact edge and corner crossings', () => {
     for (const [x, y, z] of touched) w.setCell(x, 20 + y, z, STONE);
     const d = unit(1, 1, 1);
     const o = vec3(0.5, 20.5, 0.5);
-    expect(raycastGrid(w, o, d, 1.5)).toBeNull(); // reaches (1,21,1) only at 0.866 + ... no: stops before 1.73
+    expect(raycastGrid(w, o, d, 5)).toBeNull();
     w.setCell(1, 21, 1, STONE);
     const h = raycastGrid(w, o, d, 5)!;
     expect([h.x, h.y, h.z, h.face]).toEqual([1, 21, 1, NX]);
@@ -472,14 +472,14 @@ describe('raycastGrid — exact edge and corner crossings', () => {
   });
 
   it('mixed-sign edge crossing: the cell holding only the crossing point is not hit', () => {
-    // Points (0.5 + s, 1.5 - s): at s = 0.5 the ray is exactly at the lattice edge (1, 1).
-    // Half-open cells would put that single point in cell (1,1,0); it holds no length.
+    // Points (0.5 + s, 21.5 - s): at s = 0.5 the ray is exactly at the lattice edge (1, 21).
+    // Half-open cells would put that single point in cell (1,21,0); it holds no length.
     const w = emptyWorld();
-    w.setCell(1, 1, 0, STONE);
-    expect(raycastGrid(w, vec3(0.5, 1.5, 0.5), unit(1, -1, 0), 5)).toBeNull();
-    w.setCell(1, 0, 0, STONE);
-    const h = raycastGrid(w, vec3(0.5, 1.5, 0.5), unit(1, -1, 0), 5)!;
-    expect([h.x, h.y, h.z, h.face]).toEqual([1, 0, 0, NX]);
+    w.setCell(1, 21, 0, STONE);
+    expect(raycastGrid(w, vec3(0.5, 21.5, 0.5), unit(1, -1, 0), 5)).toBeNull();
+    w.setCell(1, 20, 0, STONE);
+    const h = raycastGrid(w, vec3(0.5, 21.5, 0.5), unit(1, -1, 0), 5)!;
+    expect([h.x, h.y, h.z, h.face]).toEqual([1, 20, 0, NX]);
     expect(h.dist).toBeCloseTo(Math.SQRT1_2, 15);
   });
 
