@@ -304,8 +304,11 @@ export function blockifyGrid(
     snapCell(t, x, y, z, d);
     let hard = isHardDestination(dst, d.x, d.y, d.z);
     if (!hard && inShip) {
+      // The cell is written into the ship, so only a HARD world block at its centre matters
+      // (above the build height the world is air; unloaded chunks count as hard: unknown
+      // terrain might be rock, and a frozen ship must not wake up inside it).
       dst.toWorld(vset(tmp, d.x + 0.5, d.y + 0.5, d.z + 0.5), tmp);
-      hard = isHardDestination(world, Math.floor(tmp.x), Math.floor(tmp.y), Math.floor(tmp.z));
+      hard = isSolidCell(world.getCell(Math.floor(tmp.x), Math.floor(tmp.y), Math.floor(tmp.z)));
     }
     if (hard) {
       report.dropped++;

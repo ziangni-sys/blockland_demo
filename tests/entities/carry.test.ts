@@ -13,11 +13,11 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     const b = new Bench();
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     b.drive(ship, (t) => ({
-      p: vec3(0.5 + 2.2 * t * DT, 60.5 + 0.15 * Math.sin(t * 0.21), 0.5 + 1.1 * t * DT),
+      p: vec3(0.5 + 1.2 * t * DT, 60.5 + 0.15 * Math.sin(t * 0.21), 0.5 - 0.7 * t * DT), // stays inside the loaded area
       q: qfromYaw(0.35 * t * DT + 0.05 * Math.sin(t * 0.13)),
     }));
     const p = b.entities.createPlayer('survival', 3.2, 61.02, 1.7);
-    b.tick(5);
+    b.tick(30); // the deck slid under the player before it attached: let that slip die out
     expect(p.carrierId).toBe(ship.id);
     const l0 = local({ ship }, p.pos);
     const yaw0 = p.yaw;
@@ -43,13 +43,11 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     const ship = b.ship(1, deck(-8, -8, 8, 8, 60), vec3(0.5, 60.5, 0.5));
     b.drive(ship, (t) => ({ p: vec3(0.5 + 3 * t * DT, 60.5, 0.5), q: qfromYaw(0.2 * t * DT) }));
     const p = b.entities.createPlayer('survival', 0.5, 61, 4.5);
-    b.tick(5);
+    b.tick(30);
     const l0 = local({ ship }, p.pos);
+    // Look toward deck-north; from now on the simulation turns the look with the deck.
+    p.input.yaw = 0.2 * b.ticks * DT;
     p.input.forward = 1;
-    // walk toward deck-north: keep the look aligned with the deck as it turns
-    b.motions.push(() => {
-      p.input.yaw = 0.2 * b.ticks * DT;
-    });
     b.tick(40);
     const l1 = local({ ship }, p.pos);
     // ~4.3 b/s for 2 s along local -Z, minus the spin-up
@@ -64,7 +62,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     b.drive(ship, (t) => ({ p: vec3(0.5 + 4 * t * DT, 60.5 + 0.1 * Math.sin(t * 0.3), 0.5 - 2 * t * DT), q: qfromYaw(0.4 * t * DT) }));
     const p = b.entities.createPlayer('survival', 2.5, 61, -1.5);
-    b.tick(5);
+    b.tick(30);
     const l0 = local({ ship }, p.pos);
     p.input.jump = true;
     b.tick();
@@ -103,7 +101,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     expect(p.pos.x).toBeLessThan(6.5); // detached as soon as the pier is underfoot
     b.tick(10);
     p.input.forward = 0;
-    b.tick(5);
+    b.tick(40);
     const x = p.pos.x;
     const pz = p.pos.z;
     moving = true;
@@ -168,14 +166,14 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     }
   });
 
-  it('walking along a world wall while standing on a ship that is not grid-aligned costs no health', () => {
+  it.each([0.17, -0.17, 0.4])('walking along a world wall on a ship yawed by %f rad costs no health', (shipYaw) => {
     const b = new Bench();
     const cells = deck(-6, -6, 6, 6, 60);
     for (let x = -6; x <= 6; x++) for (let z = -6; z <= 6; z++) if (Math.abs(x) === 6 || Math.abs(z) === 6) cells.push([x, 61, z, B.PLANKS_OAK]);
     const ship = b.ship(1, cells, vec3(0.5, 60.5, 0.5));
     b.drive(ship, (t) => ({
       p: vec3(0.5, 60.5 + 0.04 * Math.sin(t * 0.3), 0.5),
-      q: qfromYaw(0.17 + 0.02 * Math.sin(t * 0.07)),
+      q: qfromYaw(shipYaw + 0.02 * Math.sin(t * 0.07)),
     }));
     // World wall whose south face (z = -4) cuts across the deck, through the rotated gunwale.
     fill(b.world, -20, 61, -6, 20, 63, -5, B.STONE);

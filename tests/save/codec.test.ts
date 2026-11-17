@@ -8,6 +8,7 @@ import { ByteWriter, SaveFormatError } from '../../src/save/bytes';
 import {
   BLOB_MAGIC,
   SAVE_VERSION,
+  SaveVersionError,
   beginBlob,
   decodeChunk,
   decodeMeta,
@@ -15,6 +16,7 @@ import {
   encodeChunk,
   encodeMeta,
   encodeTicks,
+  isNewerSave,
   openBlob,
   sealBlob,
   validateMeta,
@@ -114,11 +116,44 @@ describe('blob envelope', () => {
     expect(() => openBlob(good, 'OTHR')).toThrow(/wrong blob type/);
     expect(() => openBlob(new Uint8Array(3), 'TEST')).toThrow(/too short/);
     expect(() => openBlob(craft('TEST', (w) => w.u32(5), SAVE_VERSION + 1), 'TEST')).toThrow(/newer version/);
-    expect(() => openBlob(craft('TEST', (w) => w.u32(5), 0), 'TEST')).toThrow(/unsupported format version 0/);
+    expect(() => openBlob(craft('TEST', (w) => w.u32(5), 0), 'TEST')).toThrow(/invalid format version 0/);
     const bad = good.slice();
     bad[6] ^= 1;
     expect(() => openBlob(bad, 'TEST')).toThrow(/checksum/);
     expect(() => beginBlob('TOOLONG')).toThrow(RangeError);
+  });
+
+  it('reports intact newer data as SaveVersionError, distinct from corruption', () => {
+    const newer = craft('TEST', (w) => w.u32(5), SAVE_VERSION + 2);
+    let caught: unknown = null;
+    try {
+      openBlob(newer, 'TEST');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(SaveVersionError);
+    expect(caught).toBeInstanceOf(SaveFormatError); // generic handlers still catch it
+    expect((caught as SaveVersionError).version).toBe(SAVE_VERSION + 2);
+    expect((caught as Error).name).toBe('SaveVersionError');
+    // Corruption is never mistaken for a newer version: not even a corrupted version byte,
+    // because the checksum is verified before the version is trusted.
+    const good = sealBlob(beginBlob('TEST').u32(5));
+    for (const v of [0, 2, 3, 0x7f, 0x80]) {
+      const bad = good.slice();
+      bad[4] = v;
+      expect(() => openBlob(bad, 'TEST')).toThrow(/checksum/);
+      try {
+        openBlob(bad, 'TEST');
+      } catch (e) {
+        expect(e).not.toBeInstanceOf(SaveVersionError);
+      }
+    }
+  });
+
+  it('isNewerSave flags worlds written by a newer build', () => {
+    expect(isNewerSave({ version: SAVE_VERSION })).toBe(false);
+    expect(isNewerSave({ version: 1 })).toBe(false);
+    expect(isNewerSave({ version: SAVE_VERSION + 1 })).toBe(true);
   });
 });
 
@@ -237,7 +272,12 @@ describe('chunk codec', () => {
     const c = terrainChunk(0, 0);
     const bytes = encodeChunk(c);
     const newer = craft(BLOB_MAGIC.chunk, (w) => w.raw(bytes.subarray(5, bytes.length - 4)), SAVE_VERSION + 6);
-    expect(() => decodeChunk(newer)).toThrow(/unsupported format version 7/);
+    expect(() => decodeChunk(newer)).toThrow(SaveVersionError);
+    expect(() => decodeChunk(newer)).toThrow(/newer version of the game \(format 7/);
+    // The reviewer's case: a corrupted version byte in a real chunk is corruption, not "newer".
+    const flipped = bytes.slice();
+    flipped[4] = 3;
+    expect(() => decodeChunk(flipped)).toThrow(/checksum/);
     expect(() => decodeChunk(encodeTicks([], 0))).toThrow(/wrong blob type/);
     expect(() => decodeChunk(encodeMeta(meta()))).toThrow(SaveFormatError);
   });

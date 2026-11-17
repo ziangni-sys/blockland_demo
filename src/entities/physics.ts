@@ -26,6 +26,7 @@ import {
   MAX_SUBSTEP,
   MAX_SUBSTEPS,
   MIN_PUSH_PROJECTION_SQ,
+  PREFER_MIN_DEPTH,
   PREFER_MIN_SPEED,
   PREFER_WEIGHT,
   PUSH_SKIN,
@@ -105,6 +106,9 @@ export class Mover {
   private movedZ = 0;
   private groundStep = false;
   private ceilingStep = false;
+  /** overlapRec holds the overlap state of the body as it is now (set by revertOwnMotion). */
+  private overlapValid = false;
+  private overlapRec: StructRec | null = null;
   // sneak guard output
   private clipX = 0;
   private clipZ = 0;
@@ -138,6 +142,7 @@ export class Mover {
     this.contactNx = 0;
     this.contactNz = 0;
     this.pushBlocked = false;
+    this.overlapValid = false;
     const n = this.near.length;
     if (this.beforeOverlap.length < n) {
       this.beforeOverlap = new Int8Array(n * 2);
@@ -159,14 +164,23 @@ export class Mover {
       const ax = e.pos.x;
       const ay = e.pos.y;
       const az = e.pos.z;
-      this.sweepWorld(e, rel, sx, sy, sz);
+      this.groundStep = false;
+      this.ceilingStep = false;
+      this.overlapValid = false;
+      this.sweepWorldY(e, rel, sy);
+      // Structure support BEFORE the horizontal sweeps: the vertical step may have sunk the
+      // feet a little into a deck, and a world block level with that deck (a pier) must not
+      // turn into a wall for those few hundredths of a block.
+      const resolvedY = n !== 0 && this.movedY !== 0;
+      if (resolvedY) this.resolveStructures(e, rel);
+      this.sweepWorldXZ(e, rel, sx, sz);
       if (this.blockedX) sx = 0;
       if (this.blockedY) sy = 0;
       if (this.blockedZ) sz = 0;
       if (n === 0) continue;
-      this.groundStep = false;
-      this.ceilingStep = false;
-      this.resolveStructures(e, rel);
+      // A second pass only when something can have changed since the first (it is the
+      // structure queries that cost, so none is issued without a reason).
+      if (!resolvedY || this.movedX !== 0 || this.movedZ !== 0) this.resolveStructures(e, rel);
       if (this.groundStep && sy < 0) sy = 0;
       if (this.ceilingStep && sy > 0) sy = 0;
       const reverted = this.revertOwnMotion(e, rel, ax, ay, az);
@@ -176,8 +190,12 @@ export class Mover {
     }
   }
 
-  /** First near structure whose solid cells still overlap the body, or null. */
+  /**
+   * First near structure whose solid cells still overlap the body, or null. Right after
+   * move() this reuses the overlap scan of its last sub-step.
+   */
   findOverlap(e: Entity): StructRec | null {
+    if (this.overlapValid) return this.overlapRec;
     const b = e.box(this.box);
     const near = this.near;
     for (let k = 0; k < near.length; k++) {
@@ -207,27 +225,29 @@ export class Mover {
 
   // ------------------------------------------------------------ b. world
 
-  private sweepWorld(e: Entity, rel: Vec3, dx: number, dy: number, dz: number): void {
+  private sweepWorldY(e: Entity, rel: Vec3, dy: number): void {
+    this.blockedY = false;
+    this.movedY = 0;
+    if (dy === 0) return;
+    const b = e.box(this.box);
+    const m = sweepAxis(this.world, b, 1, dy);
+    if (m !== dy) {
+      this.blockedY = true;
+      if (dy < 0) this.onWorldGround = true;
+      // World blocks are static: the WORLD velocity along the blocked axis becomes 0.
+      rel.y = -e.carrierVel.y;
+    }
+    e.pos.y += m;
+    this.movedY = m;
+  }
+
+  private sweepWorldXZ(e: Entity, rel: Vec3, dx: number, dz: number): void {
     const world = this.world;
     const b = e.box(this.box);
     this.blockedX = false;
-    this.blockedY = false;
     this.blockedZ = false;
     this.movedX = 0;
-    this.movedY = 0;
     this.movedZ = 0;
-    if (dy !== 0) {
-      const m = sweepAxis(world, b, 1, dy);
-      if (m !== dy) {
-        this.blockedY = true;
-        if (dy < 0) this.onWorldGround = true;
-        // World blocks are static: the WORLD velocity along the blocked axis becomes 0.
-        rel.y = -e.carrierVel.y;
-      }
-      e.pos.y += m;
-      translateAxis(b, 1, m);
-      this.movedY = m;
-    }
     // Larger horizontal component first: moving the minor axis first is what snags corners.
     const xFirst = Math.abs(dx) >= Math.abs(dz);
     for (let k = 0; k < 2; k++) {
@@ -262,15 +282,23 @@ export class Mover {
 
   private resolveStructures(e: Entity, rel: Vec3): void {
     const near = this.near;
-    for (let pass = 0; pass < 2; pass++) {
+    // A second pass settles pushes that moved the body into ANOTHER structure's reach.
+    const passes = near.length > 1 ? 2 : 1;
+    for (let pass = 0; pass < passes; pass++) {
       let moved = false;
       for (let k = 0; k < near.length; k++) {
         const r = near[k]!;
         for (let it = 0; it < MAX_PUSH_ITERATIONS; it++) {
           const b = e.box(this.box);
           if (!boxNearRec(b, r, 0)) break;
-          const pen = deepestPenetration(r.grid, b, this.preferFor(e, rel, r, b));
+          let pen = deepestPenetration(r.grid, b);
           if (pen === null || !(pen.depth > 0)) break;
+          if (pen.depth >= PREFER_MIN_DEPTH) {
+            // Deep intrusion: lean toward the structure's motion so the body ends up in front
+            // of a fast blade, not behind it.
+            const opts = this.preferFor(e, rel, r, b);
+            if (opts !== undefined) pen = deepestPenetration(r.grid, b, opts) ?? pen;
+          }
           const nx = pen.nx;
           const ny = pen.ny;
           const nz = pen.nz;
@@ -479,6 +507,7 @@ export class Mover {
     this.startOverlap.fill(-1, 0, near.length);
     const b = e.box(this.box);
     let own = false;
+    let first: StructRec | null = null;
     for (let k = 0; k < near.length; k++) {
       const r = near[k]!;
       if (!boxNearRec(b, r, 0) || !boxOverlapsSolid(r.grid, b)) continue;
@@ -486,8 +515,14 @@ export class Mover {
         own = true;
         break;
       }
+      if (first === null) first = r;
     }
-    if (!own) return 0;
+    if (!own) {
+      // Every remaining overlap was there before the own motion: the structure's doing.
+      this.overlapValid = true;
+      this.overlapRec = first;
+      return 0;
+    }
     const px = e.pos.x;
     const py = e.pos.y;
     const pz = e.pos.z;

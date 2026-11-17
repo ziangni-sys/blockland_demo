@@ -369,6 +369,9 @@ describe('ByteReader rejects malformed input', () => {
     expect(() => new ByteReader(huge).count(1)).toThrow(SaveFormatError);
     // A count that fits exactly is fine
     expect(new ByteReader(new ByteWriter().varuint(2).u16(1).u16(2).finish()).count(2)).toBe(2);
+    // A per-element minimum below 1 would accept any count (a 2^50-iteration loop): misuse.
+    expect(() => new ByteReader(huge).count(0)).toThrow(RangeError);
+    expect(() => new ByteReader(huge).count(NaN)).toThrow(RangeError);
   });
 
   it('skip and rawView are bounds-checked', () => {

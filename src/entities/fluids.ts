@@ -17,6 +17,8 @@ import { curToLocal, type StructRec } from './structs';
 
 /** Vertical sample spacing through the body. */
 const SAMPLE_SPACING = 0.25;
+/** Small bodies still get this many samples, so floating settles smoothly. */
+const MIN_SAMPLES = 4;
 
 export class FluidSampler {
   /** Share of the body in lava from the last sample(). */
@@ -31,7 +33,7 @@ export class FluidSampler {
 
   /** Fill e.wet, e.headWet, e.inLava (and this.lavaShare) from the body's centre line. */
   sample(e: Entity, near: readonly StructRec[]): void {
-    const n = Math.max(2, Math.ceil(e.height / SAMPLE_SPACING));
+    const n = Math.max(MIN_SAMPLES, Math.ceil(e.height / SAMPLE_SPACING));
     let water = 0;
     let lava = 0;
     const x = e.pos.x;

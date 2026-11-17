@@ -14,6 +14,7 @@ import {
   nightFactor,
   shadedBrightness,
   srgbToLinear,
+  linearToSrgb,
   sunDirection,
   twilightFactor,
 } from '../../src/render/three/lighting';
@@ -146,6 +147,9 @@ describe('day / night', () => {
     expect(srgbToLinear(0)).toBe(0);
     expect(srgbToLinear(1)).toBeCloseTo(1, 9);
     expect(srgbToLinear(0.5)).toBeCloseTo(0.214, 3);
+    for (let i = 0; i <= 20; i++) expect(linearToSrgb(srgbToLinear(i / 20))).toBeCloseTo(i / 20, 9);
+    expect(linearToSrgb(-1)).toBe(0);
+    expect(linearToSrgb(2)).toBeCloseTo(1, 9);
     const c = hexToLinear(0xff8000);
     expect(c.r).toBeCloseTo(1, 9);
     expect(c.g).toBeCloseTo(srgbToLinear(128 / 255), 9);

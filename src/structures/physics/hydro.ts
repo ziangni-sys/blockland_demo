@@ -68,7 +68,7 @@ export function applyHydrodynamics(body: Body, o: ResolvedOptions, dt: number): 
       const target = throttle > 0 ? throttle * top : throttle * top * o.reverseSpeedFactor;
       // Feed-forward of the drag at the current speed + proportional control: steady state is
       // exactly the target speed; the force limit keeps acceleration believable.
-      const drag = (o.forwardDrag * vf + o.forwardDragQuadratic * Math.abs(vf) * vf) * wet;
+      const drag = (o.forwardDrag * vf + o.forwardDragQuadratic * Math.abs(vf) * vf) * wet + o.airDrag * vf;
       const aMax = o.forwardDrag * top + o.forwardDragQuadratic * top * top + o.thrustReserve;
       let a = drag + o.throttleResponse * (target - vf);
       if (a > aMax) a = aMax;

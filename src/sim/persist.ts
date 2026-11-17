@@ -8,8 +8,8 @@
  *   importSave(sim, bundle)    -> call right after `new Simulation(...)`, before the first tick
  *
  * Blob names: 'sim' (clock, rng), 'ticks' (pending block ticks), 'glue' (world glue),
- * 'structures', 'entities' (incl. the player and inventory), 'chunkIndex' (keys of the
- * saved chunks, so a loader can fetch them without a "list" operation).
+ * 'structures', 'entities' (incl. the player and inventory).
+ * A loader finds the saved chunks with SaveStorage.listChunkKeys().
  */
 import { ByteReader, ByteWriter } from '../save/bytes';
 import { decodeTicks, encodeTicks } from '../save/codec';
@@ -49,21 +49,7 @@ export function exportSave(sim: Simulation): SaveBundle {
   sim.entities.serialize(e);
   blobs.push(['entities', e.finish()]);
 
-  const idx = new ByteWriter();
-  idx.varuint(chunks.length);
-  for (const [key] of chunks) idx.f64(key);
-  blobs.push(['chunkIndex', idx.finish()]);
-
   return { chunks, blobs };
-}
-
-/** Keys of the chunks listed in a 'chunkIndex' blob. */
-export function readChunkIndex(bytes: Uint8Array): number[] {
-  const r = new ByteReader(bytes);
-  const n = r.varuint();
-  const out: number[] = [];
-  for (let i = 0; i < n; i++) out.push(r.f64());
-  return out;
 }
 
 export function importSave(sim: Simulation, bundle: SaveBundle): void {

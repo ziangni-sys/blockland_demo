@@ -199,6 +199,15 @@ describe('rotors on ships', () => {
     expect(cellMap(pair.ship.grid).get(`${BX + 1},${BY},${BZ + 1}`)).toBe(c(B.PLANKS_OAK));
   });
 
+  it('above the build height the world is air: a ship rotor stopping up there keeps every cell', () => {
+    const s = scene();
+    const { ship, rotor } = shipThenMill(s);
+    poseShip(ship, 0, vec3(0, 70, 0)); // windmill now around y = 133..137
+    expect(worldCentre(rotor.grid, BX, BY, BZ + 1).y).toBeGreaterThan(128);
+    expect(s.mgr.stopRotor(rotor)).toEqual({ placed: MILL_CELLS, dropped: 0, overwritten: 0 });
+    expect(s.host.drops).toEqual([]);
+  });
+
   it('mining a ship bearing blockifies its rotor onto the ship immediately', () => {
     const s = scene();
     const { ship, rotor } = shipThenMill(s);

@@ -58,6 +58,29 @@ describe('review: re-entrant cell-change listeners', () => {
     expect(heightmapErrors(world)).toEqual([]);
   });
 
+  it('a listener subscribed before the engine that replaces a placed lamp leaves no ghost emitter light', () => {
+    const world = new World(1);
+    let replacing = false;
+    world.onCellChange((x, y, z, _oldCell, newCell) => {
+      // E.g. a rule that turns lamps placed under water into glass.
+      if (!replacing && (newCell & ID_MASK) === B.LAMP) {
+        replacing = true;
+        world.setCell(x, y, z, makeCell(B.GLASS));
+        replacing = false;
+      }
+    });
+    const engine = new LightEngine(world);
+    engine.attach();
+    addLit(world, engine, makeFlatChunk(0, 0, 20));
+    world.setCell(8, 25, 8, LAMP);
+    expect(world.getCell(8, 25, 8)).toBe(makeCell(B.GLASS));
+    expect(engine.update()).toBe(true);
+    expect(world.getBlockLight(8, 25, 8), 'block light of the glass that replaced the lamp').toBe(0);
+    expect(world.getBlockLight(9, 25, 8)).toBe(0);
+    const m = diffAgainstReference(world);
+    expect(m.length, describeMismatches(m)).toBe(0);
+  });
+
   it('a listener subscribed before the engine that reverts a placement keeps the heightmap right', () => {
     const world = new World(1);
     let reverting = false;

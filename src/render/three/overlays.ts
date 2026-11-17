@@ -12,7 +12,7 @@ import { abs, Discard, float, Fn, max, sin, smoothstep, texture, uniform, uv, ve
 import type { OverlayCell, OverlayFace, OverlayState } from '../backend';
 import { boxEdges } from './boxgeom';
 import { crackLayer, crackStage, tileLayer } from './blocktiles';
-import type { SharedUniforms } from './shading';
+import { encodeOutput, type SharedUniforms } from './shading';
 
 /** Resolves the parent object of a structure id (0 = world overlay root); null = unknown structure. */
 export type ParentResolver = (structureId: number) => THREE.Object3D | null;
@@ -194,6 +194,36 @@ class InstancedCellLayer {
   }
 }
 
+/** 12 square bars of thickness `t` along the edges of the box [lo, hi]^3, merged into one geometry. */
+function frameGeometry(lo: number, hi: number, t: number): THREE.BufferGeometry {
+  const len = hi - lo + t;
+  const mid = (lo + hi) / 2;
+  const pos: number[] = [];
+  const nrm: number[] = [];
+  const idx: number[] = [];
+  for (let axis = 0; axis < 3; axis++) {
+    for (let k = 0; k < 4; k++) {
+      const b = k & 1 ? hi : lo;
+      const c = k & 2 ? hi : lo;
+      const size = [t, t, t];
+      size[axis] = len;
+      const center = axis === 0 ? [mid, b, c] : axis === 1 ? [b, mid, c] : [b, c, mid];
+      const g = new THREE.BoxGeometry(size[0], size[1], size[2]);
+      g.translate(center[0]!, center[1]!, center[2]!);
+      const base = pos.length / 3;
+      pos.push(...(g.getAttribute('position').array as Float32Array));
+      nrm.push(...(g.getAttribute('normal').array as Float32Array));
+      for (const i of g.getIndex()!.array as ArrayLike<number> as number[]) idx.push(base + i);
+      g.dispose();
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nrm), 3));
+  geo.setIndex(new THREE.BufferAttribute(new Uint16Array(idx), 1));
+  return geo;
+}
+
 function nextPow2(n: number): number {
   let p = 1;
   while (p < n) p <<= 1;
@@ -226,7 +256,7 @@ export class OverlayLayer {
   private readonly outlineGeo: THREE.BufferGeometry;
   private readonly anchorGeo: THREE.BufferGeometry;
   private readonly outline: THREE.LineSegments;
-  private readonly anchor: THREE.LineSegments;
+  private readonly anchor: THREE.Mesh;
   private readonly crack: THREE.Mesh;
   private readonly preview: InstancedCellLayer;
   private readonly conflicts: InstancedCellLayer;
@@ -249,14 +279,14 @@ export class OverlayLayer {
       m.transparent = true;
       m.depthWrite = false;
       const c = new THREE.Color(hex);
-      const tint = vec3(c.r, c.g, c.b);
+      const tint = vec3(c.r, c.g, c.b); // linear (Color converts the sRGB hex)
       m.colorNode = Fn(() => {
         const q = uv();
         const e = max(abs(q.x.sub(0.5)), abs(q.y.sub(0.5))).mul(2);
         const rim = smoothstep(0.8, 0.96, e);
         const pulse = sin(u.time.mul(4.2)).mul(0.22).add(0.78);
         const a = float(base).add(rim.mul(edge)).mul(pulse);
-        return vec4(tint.mul(rim.mul(0.6).add(1)), a);
+        return vec4(encodeOutput(tint.mul(rim.mul(0.6).add(1))), a);
       })();
       this.materials.push(m);
       return m;
@@ -276,7 +306,7 @@ export class OverlayLayer {
       tileNodes.push(tex);
       m.colorNode = Fn(() => {
         Discard(tex.a.lessThan(0.04));
-        return vec4(tex.rgb.mul(brighten), tex.a.mul(alpha));
+        return vec4(encodeOutput(tex.rgb.mul(brighten)), tex.a.mul(alpha));
       })();
       this.materials.push(m);
       return m;
@@ -293,8 +323,10 @@ export class OverlayLayer {
     this.crack.visible = false;
 
     const lineMat = (hex: number, opacity: number): THREE.LineBasicNodeMaterial => {
-      const m = new THREE.LineBasicNodeMaterial({ color: hex, transparent: opacity < 1, opacity, depthWrite: false });
+      const m = new THREE.LineBasicNodeMaterial({ transparent: opacity < 1, opacity, depthWrite: false });
       m.fog = false;
+      // Written straight to the sRGB canvas: use the hex's sRGB components as they are.
+      m.colorNode = vec3(((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255);
       this.materials.push(m);
       return m;
     };
@@ -306,15 +338,20 @@ export class OverlayLayer {
     this.outline.matrixAutoUpdate = false;
     this.outline.visible = false;
 
-    // The anchor is drawn as two nested boxes so it reads thicker than the 1 px target outline.
-    const a1 = boxEdges(-0.01, -0.01, -0.01, 1.01, 1.01, 1.01);
-    const a2 = boxEdges(-0.025, -0.025, -0.025, 1.025, 1.025, 1.025);
-    const both = new Float32Array(a1.length + a2.length);
-    both.set(a1, 0);
-    both.set(a2, a1.length);
-    this.anchorGeo = new THREE.BufferGeometry();
-    this.anchorGeo.setAttribute('position', new THREE.BufferAttribute(both, 3));
-    this.anchor = new THREE.LineSegments(this.anchorGeo, lineMat(0xffd23a, 1));
+    // The anchor is a solid frame of 12 thin bars (1 px lines vanish against the block faces),
+    // bright and gently pulsing so the first pick of a glue operation is easy to find again.
+    this.anchorGeo = frameGeometry(-0.02, 1.02, 0.045);
+    const anchorMat = new THREE.NodeMaterial();
+    anchorMat.name = 'overlay-anchor';
+    anchorMat.lights = false;
+    anchorMat.fog = false;
+    const gold = new THREE.Color(0xffc93a);
+    anchorMat.colorNode = Fn(() => {
+      const pulse = sin(u.time.mul(5)).mul(0.15).add(0.95);
+      return vec4(encodeOutput(vec3(gold.r, gold.g, gold.b).mul(pulse)), 1);
+    })();
+    this.materials.push(anchorMat);
+    this.anchor = new THREE.Mesh(this.anchorGeo, anchorMat);
     this.anchor.renderOrder = ORDER_LINES;
     this.anchor.matrixAutoUpdate = false;
     this.anchor.visible = false;
@@ -341,7 +378,7 @@ export class OverlayLayer {
   warmupObjects(): THREE.Object3D[] {
     const crack = new THREE.Mesh(this.crackBox, this.crack.material);
     const outline = new THREE.LineSegments(this.outlineGeo, this.outline.material);
-    const anchor = new THREE.LineSegments(this.anchorGeo, this.anchor.material);
+    const anchor = new THREE.Mesh(this.anchorGeo, this.anchor.material);
     return [crack, outline, anchor, this.preview.warmupMesh(), this.conflicts.warmupMesh(), this.glue.warmupMesh()];
   }
 

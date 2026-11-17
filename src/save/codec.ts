@@ -8,10 +8,15 @@
  *     payload  ...             format depends on magic + version
  *     crc      u32 LE          CRC-32 of every byte before it
  *
- * Decoders check magic, then version (so a newer save is reported as "newer version", not
- * as corruption), then the checksum, then parse the payload strictly and require that it is
- * consumed exactly. Any failure is a SaveFormatError. Future codecs (structures, glue,
- * entities, player) should use beginBlob / sealBlob / openBlob with their own magic.
+ * The envelope itself is frozen: every version of every blob with these magics keeps exactly
+ * this framing (a future change of framing would need new magics). That is what lets the
+ * decoder verify the checksum BEFORE trusting the version byte, so:
+ *  - any corruption, including a flipped version byte, is a SaveFormatError ("corrupted");
+ *  - an intact blob from a newer build is a SaveVersionError ("update the game"), which the
+ *    orchestrator must treat differently: never regenerate or overwrite such data.
+ * The payload is then parsed strictly and must be consumed exactly. Future codecs
+ * (structures, glue, entities, player) should use beginBlob / sealBlob / openBlob with
+ * their own magic.
  *
  * Pure module (simulation layer): no DOM, no clock, no randomness.
  */
@@ -27,6 +32,31 @@ import { crc32 } from './crc32';
  * Bump it when any blob layout changes; decoders keep reading every older version.
  */
 export const SAVE_VERSION = 1;
+
+/**
+ * Intact data written by a newer build of the game (its format version is above
+ * SAVE_VERSION). It extends SaveFormatError so generic handlers still catch it, but unlike
+ * corruption it must never be "repaired": do not regenerate, overwrite or delete the data,
+ * tell the player to update instead.
+ */
+export class SaveVersionError extends SaveFormatError {
+  override readonly name: string = 'SaveVersionError';
+  /** The format version found in the data (> SAVE_VERSION). */
+  readonly version: number;
+  constructor(message: string, version: number) {
+    super(message);
+    this.version = version;
+  }
+}
+
+/**
+ * True when the world was last saved by a newer build (meta.version > SAVE_VERSION). Such a
+ * world can be listed but must not be loaded or saved by this build; storage adapters also
+ * refuse writes that would downgrade it (see SaveStorage).
+ */
+export function isNewerSave(meta: Pick<WorldMeta, 'version'>): boolean {
+  return meta.version > SAVE_VERSION;
+}
 
 /**
  * Blob type tags. Reserved for upcoming codecs (pick these so tags never collide):
@@ -84,7 +114,9 @@ export interface OpenedBlob {
 }
 
 /**
- * Verify a blob's magic, version and checksum, and return a reader over its payload.
+ * Verify a blob's magic, checksum and version (in that order, see the file comment) and
+ * return a reader over its payload.
+ * Throws SaveVersionError for an intact blob from a newer build, SaveFormatError otherwise.
  * @param label names the blob in error messages (defaults to the magic).
  */
 export function openBlob(bytes: Uint8Array, magic: string, label: string = magic): OpenedBlob {
@@ -97,19 +129,20 @@ export function openBlob(bytes: Uint8Array, magic: string, label: string = magic
       throw new SaveFormatError(`${label}: wrong blob type (expected "${magic}", found "${showMagic(bytes)}")`);
     }
   }
-  const reader = new ByteReader(bytes.subarray(0, n - CRC_BYTES), label);
-  reader.skip(MAGIC_BYTES);
-  const version = reader.varuint();
-  if (version < 1 || version > SAVE_VERSION) {
-    throw new SaveFormatError(
-      `${label}: unsupported format version ${version} (this build reads 1..${SAVE_VERSION}; ` +
-        `${version > SAVE_VERSION ? 'it was saved by a newer version of the game' : 'invalid'})`,
-    );
-  }
   const stored = (bytes[n - 4]! | (bytes[n - 3]! << 8) | (bytes[n - 2]! << 16) | (bytes[n - 1]! << 24)) >>> 0;
   if (stored !== crc32(bytes, 0, n - CRC_BYTES)) {
     throw new SaveFormatError(`${label}: checksum mismatch, the data is corrupted`);
   }
+  const reader = new ByteReader(bytes.subarray(0, n - CRC_BYTES), label);
+  reader.skip(MAGIC_BYTES);
+  const version = reader.varuint();
+  if (version > SAVE_VERSION) {
+    throw new SaveVersionError(
+      `${label}: saved by a newer version of the game (format ${version}; this build reads 1..${SAVE_VERSION})`,
+      version,
+    );
+  }
+  if (version < 1) reader.fail(`invalid format version ${version}`);
   return { reader, version };
 }
 
@@ -240,7 +273,10 @@ export function encodeChunk(chunk: Chunk): Uint8Array {
   return sealBlob(w);
 }
 
-/** Inverse of encodeChunk. Throws SaveFormatError on any malformed, corrupted or newer data. */
+/**
+ * Inverse of encodeChunk. Throws SaveFormatError on malformed or corrupted data and
+ * SaveVersionError (a SaveFormatError) on data from a newer build.
+ */
 export function decodeChunk(bytes: Uint8Array): DecodedChunk {
   const { reader: r } = openBlob(bytes, BLOB_MAGIC.chunk, 'chunk');
   const cx = r.varint();
@@ -373,7 +409,10 @@ export interface WorldMeta {
   createdAt: number;
   /** ms since epoch, supplied by the client. */
   lastPlayed: number;
-  /** SAVE_VERSION the world was last written with. */
+  /**
+   * SAVE_VERSION the world was last written with. Write SAVE_VERSION; a stored value above
+   * it means a newer build saved the world (isNewerSave): list it, but do not load or save it.
+   */
   version: number;
   /** World tick. */
   time: number;

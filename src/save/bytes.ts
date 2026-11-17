@@ -25,9 +25,13 @@
  * faster for the short strings saves contain).
  */
 
-/** Thrown for any malformed, truncated, corrupted or unsupported save data. */
+/**
+ * Thrown for any malformed, truncated, corrupted or unsupported save data. Data written by a
+ * newer build throws the subclass SaveVersionError (codec.ts), so a generic catch still works.
+ */
 export class SaveFormatError extends Error {
-  override readonly name = 'SaveFormatError';
+  // Typed `string` (not the literal) so subclasses can name themselves.
+  override readonly name: string = 'SaveFormatError';
 }
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER; // 2^53 - 1
@@ -482,6 +486,8 @@ export class ByteReader {
    * Pair with ByteWriter.varuint(count).
    */
   count(minBytesEach = 1): number {
+    // With 0 the bound would accept any count and a corrupted one could spin a 2^53 loop.
+    if (!(minBytesEach >= 1)) throw new RangeError(`count: minBytesEach must be >= 1, got ${describeValue(minBytesEach)}`);
     const at = this.pos;
     const n = this.varuint();
     const left = this.end - this.pos;

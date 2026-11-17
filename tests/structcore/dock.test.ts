@@ -184,6 +184,29 @@ describe('dockShip (ACCEPTANCE 8)', () => {
     expect(third.ok && third.structure.glue.size).toBe(glue);
   });
 
+  it('a hub-glued windmill running on a docked ship gets its hub glue back in the WORLD when it stops', () => {
+    const s = scene();
+    millShip(s.world, s.host.worldGlue, true);
+    const sr = s.mgr.assembleShip(HX, HY, HZ);
+    if (!sr.ok) throw new Error(sr.reason);
+    const ship = sr.structure;
+    const rr = s.mgr.startRotor(ship.grid, BX, BY, BZ);
+    if (!rr.ok) throw new Error(rr.reason);
+    const rotor = rr.structure;
+    expect(rotor.hubGlue).toBe(true);
+    for (let i = 0; i < 11; i++) s.mgr.step();
+    poseExact(ship, -Math.PI / 2, vec3(3, 62, 7));
+    expect(s.mgr.dockShip(ship).ok).toBe(true);
+    const b = vec3(rotor.bearingX, rotor.bearingY, rotor.bearingZ);
+    expect(s.mgr.startRotor(s.world, b.x, b.y, b.z)).toEqual({ ok: false, reason: 'has_rotor' });
+    const glueBefore = s.host.worldGlue.size;
+    s.mgr.stopRotor(rotor);
+    const f = yawDir(4, 3);
+    expect(s.host.worldGlue.has(b.x, b.y, b.z, f)).toBe(true);
+    expect(s.host.worldGlue.size).toBe(glueBefore + 1);
+    expect(s.world.getCell(b.x + DIR_X[f]!, b.y, b.z + DIR_Z[f]!)).toBe(c(B.CANVAS));
+  });
+
   it('refuses a ship leaning more than 45 degrees', () => {
     const s = scene();
     const { ship } = shipWithRunningMill(s);

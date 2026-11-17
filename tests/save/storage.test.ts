@@ -10,10 +10,11 @@ import {
   encodeChunk,
   encodeMeta,
   encodeTicks,
+  isNewerSave,
   type WorldMeta,
 } from '../../src/save/codec';
 import { MemoryStorage, SaveStorageError, type SaveStorage } from '../../src/save/storage';
-import { IdbStorage, openBestStorage } from '../../src/save/idb';
+import { IdbStorage, openBestStorage, type BestStorage } from '../../src/save/idb';
 
 function meta(id: string, lastPlayed: number, over: Partial<WorldMeta> = {}): WorldMeta {
   return {
@@ -61,6 +62,58 @@ function rawCount(db: IDBDatabase, store: string): Promise<number> {
 
 let dbCounter = 0;
 const freshDbName = (): string => `blocklands-test-${++dbCounter}`;
+
+/**
+ * Watches every connection opened through the global factory: how many were opened, and
+ * which of them were closed. Hooks only public API (factory.open, IDBDatabase.close).
+ */
+interface ConnectionTracker {
+  readonly opened: IDBDatabase[];
+  readonly closed: Set<IDBDatabase>;
+  /** Connections opened and not closed. */
+  readonly live: number;
+  /** Called with each connection the moment its open request succeeds, before anyone else sees it. */
+  onOpen: ((db: IDBDatabase) => void) | null;
+  restore(): void;
+}
+function trackConnections(): ConnectionTracker {
+  const factory = indexedDB as IDBFactory & { open: IDBFactory['open'] };
+  const realOpen = factory.open;
+  const proto = (globalThis as unknown as { IDBDatabase: { prototype: IDBDatabase } }).IDBDatabase.prototype;
+  const realClose = proto.close;
+  const tracker: ConnectionTracker = {
+    opened: [],
+    closed: new Set(),
+    get live() {
+      return this.opened.filter((db) => !this.closed.has(db)).length;
+    },
+    onOpen: null,
+    restore() {
+      factory.open = realOpen;
+      proto.close = realClose;
+    },
+  };
+  factory.open = function (this: IDBFactory, name: string, version?: number) {
+    const req = realOpen.call(this, name, version);
+    // Registered before the caller assigns req.onsuccess, so this listener runs first.
+    req.addEventListener('success', () => {
+      tracker.opened.push(req.result);
+      tracker.onOpen?.(req.result);
+    });
+    return req;
+  } as IDBFactory['open'];
+  proto.close = function (this: IDBDatabase) {
+    tracker.closed.add(this);
+    return realClose.call(this);
+  };
+  return tracker;
+}
+
+const settle = (p: Promise<unknown>): Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }> =>
+  p.then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
 
 // ====================================================================== shared behaviour
 
@@ -304,6 +357,82 @@ function storageSuite(label: string, make: () => Promise<SaveStorage>): void {
       expect(decodeTicks((await s.getBlob('e2e', 'ticks'))!, 0)).toEqual([{ x: -30, y: 41, z: 50, id: 40, at: 10 }]);
     });
 
+    it('listChunkKeys lists exactly one world\'s stored chunks, ascending', async () => {
+      expect(await s.listChunkKeys('w')).toEqual([]);
+      await s.putChunks('w', [
+        [K3, bytes(3)],
+        [K1, bytes(1)],
+      ]);
+      await s.putAll('w', meta('w', 1), [[K2, bytes(2)]], [['glue', bytes(9)]]);
+      await s.putChunks('w1', [[chunkKey(7, 7), bytes(7)]]); // id sharing a prefix
+      await s.putChunks('v', [[K1, bytes(1)]]);
+      await s.putBlob('x', 'glue', bytes(1)); // blobs are not chunks
+      expect(await s.listChunkKeys('w')).toEqual([K1, K2, K3].sort((a, b) => a - b));
+      expect(await s.listChunkKeys('w1')).toEqual([chunkKey(7, 7)]);
+      expect(await s.listChunkKeys('v')).toEqual([K1]);
+      expect(await s.listChunkKeys('x')).toEqual([]);
+      await s.deleteWorld('w');
+      expect(await s.listChunkKeys('w')).toEqual([]);
+      expect(await s.listChunkKeys('w1')).toEqual([chunkKey(7, 7)]);
+      // Many chunks, including the extreme corners of the chunk key space.
+      const keys: number[] = [chunkKey(-524288, -524288), chunkKey(524287, 524287)];
+      for (let i = 0; i < 150; i++) keys.push(chunkKey(i - 75, (i * 7) % 11));
+      await s.putChunks('big', keys.map((k) => [k, bytes(1)] as [number, Uint8Array]));
+      expect(await s.listChunkKeys('big')).toEqual([...new Set(keys)].sort((a, b) => a - b));
+    });
+
+    it('listWorldIds finds every world with any record, sorted by code units', async () => {
+      expect(await s.listWorldIds()).toEqual([]);
+      await s.putMeta(meta('meta-only', 1));
+      await s.putChunks('chunks-only', [[K1, bytes(1)]]);
+      await s.putBlob('blob-only', 'glue', bytes(1));
+      const odd = ['Zed', 'zed', 'é', '\u{1d538}', '￯', 'a b', 'w', 'w1'];
+      for (const id of odd) await s.putAll(id, meta(id, 1), [[K2, bytes(2)]], [['ticks', bytes(3)]]);
+      const all = ['meta-only', 'chunks-only', 'blob-only', ...odd];
+      expect(await s.listWorldIds()).toEqual([...all].sort());
+      // listWorlds only shows worlds with meta
+      expect((await s.listWorlds()).map((m) => m.id).sort()).toEqual(['meta-only', ...odd].sort());
+      for (const id of ['chunks-only', 'blob-only', 'w']) await s.deleteWorld(id);
+      expect(await s.listWorldIds()).toEqual(all.filter((id) => !['chunks-only', 'blob-only', 'w'].includes(id)).sort());
+    });
+
+    it('refuses writes that would downgrade a world saved by a newer build', async () => {
+      const newer = SAVE_VERSION + 1;
+      await s.putAll('n', meta('n', 5, { version: newer }), [[K1, bytes(1)]], [['glue', bytes(1)]]);
+      await s.putAll('ok', meta('ok', 1), [[K1, bytes(1)]], []);
+      expect(isNewerSave((await s.listWorlds()).find((m) => m.id === 'n')!)).toBe(true);
+      const refused: Array<() => Promise<void>> = [
+        () => s.putAll('n', meta('n', 9), [[K1, bytes(9)], [K2, bytes(9)]], [['glue', bytes(9)], ['ticks', bytes(9)]]),
+        () => s.putMeta(meta('n', 9)),
+        () => s.putChunks('n', [[K1, bytes(9)], [K2, bytes(9)]]),
+        () => s.putBlob('n', 'glue', bytes(9)),
+      ];
+      for (const write of refused) {
+        const err = await write().then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(err).toBeInstanceOf(SaveStorageError);
+        expect((err as SaveStorageError).code).toBe('newer-version');
+        expect((err as Error).message).toMatch(/newer version of the game/);
+        // nothing at all was written
+        expect(await s.getMeta('n')).toEqual(meta('n', 5, { version: newer }));
+        expect(await s.getChunks('n', [K1, K2])).toEqual([bytes(1), null]);
+        expect(await s.getBlob('n', 'glue')).toEqual(bytes(1));
+        expect(await s.getBlob('n', 'ticks')).toBeNull();
+      }
+      // Writing the same or a newer version is fine (the newer build itself, or a later one).
+      await s.putMeta(meta('n', 6, { version: newer }));
+      await s.putAll('n', meta('n', 7, { version: newer + 1 }), [[K2, bytes(2)]], []);
+      expect(await s.getChunk('n', K2)).toEqual(bytes(2));
+      // Other worlds are unaffected, and an explicit delete is always allowed.
+      await s.putChunks('ok', [[K2, bytes(2)]]);
+      await s.deleteWorld('n');
+      expect(await s.listWorldIds()).toEqual(['ok']);
+      await s.putAll('n', meta('n', 8), [[K1, bytes(8)]], []);
+      expect(await s.getChunk('n', K1)).toEqual(bytes(8));
+    });
+
     it('rejects (never throws synchronously) on invalid arguments', async () => {
       const calls: Array<() => Promise<unknown>> = [
         () => s.getMeta(''),
@@ -317,6 +446,8 @@ function storageSuite(label: string, make: () => Promise<SaveStorage>): void {
         () => s.putMeta({ id: 'x' } as WorldMeta),
         () => s.deleteWorld(5 as unknown as string),
         () => s.getMeta('x'.repeat(129)),
+        () => s.listChunkKeys(''),
+        () => s.listChunkKeys(undefined as unknown as string),
       ];
       for (const call of calls) {
         let promise: Promise<unknown> | undefined;
@@ -449,7 +580,9 @@ describe('IdbStorage specifics', () => {
     const newer = await rawOpen(name, 2);
     newer.close();
     await expect(s.getBlob('w', 'glue')).rejects.toThrow(/newer version of the game/);
-    await expect(s.getBlob('w', 'glue')).rejects.toThrow(SaveStorageError);
+    const err = await s.getBlob('w', 'glue').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SaveStorageError);
+    expect((err as SaveStorageError).code).toBe('newer-version');
   });
 
   it('recovers when another tab deletes the database', async () => {
@@ -480,6 +613,65 @@ describe('IdbStorage specifics', () => {
       req.onerror = () => reject(req.error);
     });
     await expect(IdbStorage.open(name)).rejects.toThrow(/no "meta" store/);
+    expect(((await IdbStorage.open(name).catch((e: unknown) => e)) as SaveStorageError).code).toBe('incompatible');
+  });
+
+  it('reports a quota failure with code quota', async () => {
+    const s = await IdbStorage.open(freshDbName());
+    const proto = (globalThis as unknown as { IDBObjectStore: { prototype: IDBObjectStore } }).IDBObjectStore.prototype;
+    const realPut = proto.put;
+    proto.put = function () {
+      throw Object.assign(new Error('The quota has been exceeded.'), { name: 'QuotaExceededError' });
+    } as typeof proto.put;
+    let err: unknown;
+    try {
+      err = await s.putChunks('w', [[K1, bytes(1)]]).catch((e: unknown) => e);
+    } finally {
+      proto.put = realPut;
+    }
+    expect(err).toBeInstanceOf(SaveStorageError);
+    expect((err as SaveStorageError).code).toBe('quota');
+    expect((err as Error).message).toMatch(/quota exceeded/);
+    s.close();
+  });
+
+  it('a world with an unreadable meta record stays discoverable and deletable', async () => {
+    const name = freshDbName();
+    const s = await IdbStorage.open(name);
+    await s.putAll('good', meta('good', 1), [[K1, bytes(1)]], []);
+    await s.putAll('bad', meta('bad', 1), [[K1, bytes(1)], [K2, bytes(2)]], [['glue', bytes(3)]]);
+    const raw = await rawOpen(name);
+    await rawTx(raw, 'meta', (st) => st.put({ id: 'bad', name: 7 })); // corrupt it
+    raw.close();
+    expect((await s.listWorlds()).map((m) => m.id)).toEqual(['good']); // hidden from the list ...
+    expect(await s.listWorldIds()).toEqual(['bad', 'good']); // ... but not lost
+    expect(await s.listChunkKeys('bad')).toEqual([K1, K2].sort((a, b) => a - b));
+    // A damaged record never blocks a repair (it has no usable version) ...
+    await s.putMeta(meta('bad', 2));
+    expect(await s.getMeta('bad')).toEqual(meta('bad', 2));
+    // ... and the leftovers can be removed through the API.
+    await s.deleteWorld('bad');
+    expect(await s.listWorldIds()).toEqual(['good']);
+    s.close();
+    const check = await rawOpen(name);
+    expect(await rawCount(check, 'chunks')).toBe(1);
+    expect(await rawCount(check, 'blobs')).toBe(0);
+    check.close();
+  });
+
+  it('the downgrade guard reads the stored record inside the write transaction', async () => {
+    // A newer build (another tab) writes its meta behind our back; our next write must see it.
+    const name = freshDbName();
+    const s = await IdbStorage.open(name);
+    await s.putAll('w', meta('w', 1), [[K1, bytes(1)]], []);
+    const raw = await rawOpen(name);
+    await rawTx(raw, 'meta', (st) => st.put(meta('w', 2, { version: SAVE_VERSION + 1 })));
+    raw.close();
+    const err = await s.putAll('w', meta('w', 3), [[K1, bytes(9)]], []).catch((e: unknown) => e);
+    expect((err as SaveStorageError).code).toBe('newer-version');
+    expect(await s.getChunk('w', K1)).toEqual(bytes(1));
+    expect((await s.getMeta('w'))!.version).toBe(SAVE_VERSION + 1);
+    s.close();
   });
 
   it('opens lazily once for concurrent first calls', async () => {
@@ -520,17 +712,187 @@ describe('IdbStorage specifics', () => {
     again.close();
   });
 
-  it('close() during the initial open discards that connection', async () => {
-    const s = new IdbStorage(freshDbName());
-    const pending = s.getMeta('w');
-    s.close();
-    await expect(pending).rejects.toThrow(/closed while opening/);
-    expect(await s.getMeta('w')).toBeNull(); // the next call opens normally
-    s.close();
-  });
 
   it('validates the database name', () => {
     expect(() => new IdbStorage('')).toThrow(TypeError);
+  });
+});
+
+// ====================================================================== close() semantics
+//
+// Regression tests for two review findings: close() must be authoritative in both
+// directions. A call made BEFORE close() completes on the old connection and never reopens
+// the database; a call made AFTER close() opens a fresh connection and never inherits the
+// old one. And no connection may be left open behind the caller's back.
+
+describe('IdbStorage close() semantics', () => {
+  let tracker: ConnectionTracker | null = null;
+  afterEach(() => {
+    tracker?.restore();
+    tracker = null;
+  });
+
+  it('a call made after close() during the initial open opens a fresh connection', async () => {
+    tracker = trackConnections();
+    const s = new IdbStorage(freshDbName());
+    const before = s.getMeta('w'); // starts the lazy open
+    s.close(); // retires that open
+    const after = s.getMeta('w'); // must not inherit the retired open
+    expect(await settle(after)).toEqual({ ok: true, value: null });
+    // The call made before close() is not punished for it either: it completes.
+    expect(await settle(before)).toEqual({ ok: true, value: null });
+    expect(tracker.opened).toHaveLength(2);
+    s.close();
+    expect(tracker.live).toBe(0); // the retired connection was closed once its call started
+  });
+
+  it('an abandoned warm-up call followed by close() does not poison the next write', async () => {
+    tracker = trackConnections();
+    const s = new IdbStorage(freshDbName());
+    void s.ping().catch(() => undefined);
+    s.close();
+    await expect(s.putBlob('w', 'glue', bytes(1))).resolves.toBeUndefined();
+    expect(await s.getBlob('w', 'glue')).toEqual(bytes(1));
+    s.close();
+    expect(tracker.live).toBe(0);
+  });
+
+  it('a call made just before close() completes and does not reopen the database', async () => {
+    const name = freshDbName();
+    const s = await IdbStorage.open(name);
+    tracker = trackConnections();
+    const pending = s.putMeta(meta('w', 1)); // made BEFORE close()
+    s.close();
+    expect(await settle(pending)).toEqual({ ok: true, value: undefined });
+    expect(tracker.opened).toHaveLength(0); // nothing reopened behind the caller's back
+    // The write really landed (checked on a separate connection).
+    const other = await IdbStorage.open(name);
+    expect(await other.getMeta('w')).toEqual(meta('w', 1));
+    other.close();
+  });
+
+  it('a fire-and-forget save followed by close() is not lost, even while still opening', async () => {
+    tracker = trackConnections();
+    const name = freshDbName();
+    const s = new IdbStorage(name); // not opened yet
+    void s.putAll('w', meta('w', 1), [[K1, bytes(1)]], [['glue', bytes(2)]]);
+    s.close();
+    const check = await IdbStorage.open(name);
+    expect(await check.getMeta('w')).toEqual(meta('w', 1));
+    expect(await check.getChunk('w', K1)).toEqual(bytes(1));
+    expect(await check.getBlob('w', 'glue')).toEqual(bytes(2));
+    check.close();
+    expect(tracker.live).toBe(0);
+  });
+
+  it('calls made while the database opens apply in call order', async () => {
+    tracker = trackConnections();
+    const s = new IdbStorage(freshDbName());
+    let second: Promise<void> | null = null;
+    // Make the second write at the most dangerous moment: the connection is already known
+    // to the storage (it is installing its handlers) while the first write is still queued
+    // behind the open. It must still go after the first write.
+    tracker.onOpen = (db) => {
+      let handler: unknown = null;
+      Object.defineProperty(db, 'onversionchange', {
+        configurable: true,
+        get: () => handler,
+        set: (fn: unknown) => {
+          handler = fn;
+          second ??= s.putBlob('w', 'glue', bytes(2));
+        },
+      });
+    };
+    const first = s.putBlob('w', 'glue', bytes(1));
+    await first;
+    expect(second).not.toBeNull(); // the hook fired, so the race was really exercised
+    await second;
+    expect(await s.getBlob('w', 'glue')).toEqual(bytes(2));
+    s.close();
+  });
+
+  /** Make the next `n` db.transaction() calls throw like a connection the browser closed. */
+  function breakTransactions(n: number): () => void {
+    const proto = (globalThis as unknown as { IDBDatabase: { prototype: IDBDatabase } }).IDBDatabase.prototype;
+    const real = proto.transaction;
+    let left = n;
+    proto.transaction = function (this: IDBDatabase, ...args: Parameters<IDBDatabase['transaction']>) {
+      // fake-indexeddb runs schema upgrades through transaction(..., 'versionchange'): leave those alone.
+      if (left > 0 && (args[1] as string | undefined) !== 'versionchange') {
+        left--;
+        throw Object.assign(new Error('The database connection is closing.'), { name: 'InvalidStateError' });
+      }
+      return real.apply(this, args);
+    } as IDBDatabase['transaction'];
+    return () => {
+      proto.transaction = real;
+    };
+  }
+
+  it('replaces a connection that died between calls (once), closing the dead one', async () => {
+    const s = await IdbStorage.open(freshDbName());
+    tracker = trackConnections();
+    const restore = breakTransactions(1);
+    try {
+      await s.putBlob('w', 'glue', bytes(1));
+    } finally {
+      restore();
+    }
+    expect(tracker.opened).toHaveLength(1); // one replacement connection
+    expect(await s.getBlob('w', 'glue')).toEqual(bytes(1));
+    s.close();
+    expect(tracker.live).toBe(0);
+  });
+
+  it('does not reopen for a call made before close() when its connection dies', async () => {
+    tracker = trackConnections();
+    const s = new IdbStorage(freshDbName());
+    const pending = s.putBlob('w', 'glue', bytes(1)); // queued behind the open
+    s.close();
+    const restore = breakTransactions(1);
+    let result: Awaited<ReturnType<typeof settle>>;
+    try {
+      result = await settle(pending);
+    } finally {
+      restore();
+    }
+    expect(result.ok).toBe(false);
+    const err = (result as { error: unknown }).error;
+    expect(err).toBeInstanceOf(SaveStorageError);
+    expect((err as SaveStorageError).code).toBe('closed');
+    expect(tracker.opened).toHaveLength(1); // only the original open, no reconnect
+    expect(tracker.live).toBe(0);
+  });
+
+  it('gives up with a clear error when a fresh connection cannot start transactions either', async () => {
+    const s = await IdbStorage.open(freshDbName());
+    tracker = trackConnections();
+    const restore = breakTransactions(2);
+    let err: unknown;
+    try {
+      err = await s.putBlob('w', 'glue', bytes(1)).catch((e: unknown) => e);
+    } finally {
+      restore();
+    }
+    expect(err).toBeInstanceOf(SaveStorageError);
+    expect((err as Error).message).toMatch(/cannot start a transaction/);
+    expect(tracker.live).toBe(0); // both broken connections were dropped
+    expect(await s.getBlob('w', 'glue')).toBeNull(); // and the next call works again
+    s.close();
+  });
+
+  it('close() is idempotent and the storage stays usable', async () => {
+    tracker = trackConnections();
+    const s = new IdbStorage(freshDbName());
+    s.close();
+    s.close();
+    await s.putBlob('w', 'glue', bytes(1));
+    s.close();
+    s.close();
+    expect(await s.getBlob('w', 'glue')).toEqual(bytes(1));
+    s.close();
+    expect(tracker.opened).toHaveLength(2);
+    expect(tracker.live).toBe(0);
   });
 });
 
@@ -551,6 +913,7 @@ function scriptedFactory(onOpen: (req: Record<string, unknown>) => void): unknow
   };
 }
 const fire = (req: Record<string, unknown>, ev: string): void => (req[ev] as (() => void) | undefined)?.();
+const reasonOf = (r: BestStorage): string | null => (r.persistent ? null : r.reason);
 
 describe('openBestStorage', () => {
   let saved: PropertyDescriptor | undefined;
@@ -565,9 +928,11 @@ describe('openBestStorage', () => {
   };
 
   it('uses IndexedDB when it works', async () => {
-    const { storage, persistent } = await openBestStorage(freshDbName());
+    const r = await openBestStorage(freshDbName());
+    const { storage, persistent } = r;
     expect(persistent).toBe(true);
     expect(storage).toBeInstanceOf(IdbStorage);
+    expect('reason' in r).toBe(false);
     await storage.putBlob('w', 'glue', bytes(1));
     expect(await storage.getBlob('w', 'glue')).toEqual(bytes(1));
     (storage as IdbStorage).close();
@@ -575,9 +940,15 @@ describe('openBestStorage', () => {
 
   it('falls back to memory when indexedDB is undefined', async () => {
     setIdb({ value: undefined, writable: true });
-    const { storage, persistent } = await openBestStorage();
+    const r = await openBestStorage();
+    const { storage, persistent } = r;
     expect(persistent).toBe(false);
     expect(storage).toBeInstanceOf(MemoryStorage);
+    if (r.persistent) throw new Error('unreachable');
+    expect(r.reason).toBe('unavailable');
+    expect(r.error).toBeInstanceOf(SaveStorageError);
+    expect(r.error.code).toBe('unavailable');
+    expect(r.error.message).toMatch(/not available/);
     await storage.putMeta(meta('m', 1));
     expect(await storage.listWorlds()).toHaveLength(1);
     await expect(IdbStorage.open(freshDbName())).rejects.toThrow(/not available/);
@@ -592,6 +963,7 @@ describe('openBestStorage', () => {
     const r = await openBestStorage();
     expect(r.persistent).toBe(false);
     expect(r.storage).toBeInstanceOf(MemoryStorage);
+    expect(reasonOf(r)).toBe('unavailable');
   });
 
   it('falls back when open() throws synchronously', async () => {
@@ -603,7 +975,9 @@ describe('openBestStorage', () => {
       },
       writable: true,
     });
-    expect((await openBestStorage()).persistent).toBe(false);
+    const r = await openBestStorage();
+    expect(r.persistent).toBe(false);
+    expect(reasonOf(r)).toBe('unavailable');
     await expect(IdbStorage.open('x')).rejects.toThrow(/storage access is not allowed/);
   });
 
@@ -617,7 +991,9 @@ describe('openBestStorage', () => {
       }),
       writable: true,
     });
-    expect((await openBestStorage()).persistent).toBe(false);
+    const r = await openBestStorage();
+    expect(r.persistent).toBe(false);
+    expect(reasonOf(r)).toBe('unavailable');
   });
 
   it('rejects a blocked open, and closes the connection if it arrives later', async () => {
@@ -634,7 +1010,9 @@ describe('openBestStorage', () => {
     request!.result = { close: () => closed++, objectStoreNames: { contains: () => true } };
     fire(request!, 'onsuccess');
     expect(closed).toBe(1);
-    expect((await openBestStorage('x')).persistent).toBe(false);
+    const r = await openBestStorage('x');
+    expect(r.persistent).toBe(false);
+    expect(reasonOf(r)).toBe('blocked');
   });
 
   it('falls back when opening works but the first read fails, closing every connection', async () => {
@@ -656,6 +1034,7 @@ describe('openBestStorage', () => {
     });
     const r = await openBestStorage();
     expect(r.persistent).toBe(false);
+    expect(reasonOf(r)).toBe('failed');
     expect(connections.length).toBeGreaterThanOrEqual(1);
     for (const c of connections) expect(c.closed).toBeGreaterThanOrEqual(1);
     await expect(IdbStorage.open('x').then((s) => s.ping())).rejects.toThrow(/backend failed.*UnknownError: backend broken/);
@@ -678,6 +1057,7 @@ describe('openBestStorage', () => {
     const r = await pending;
     expect(r.persistent).toBe(false);
     expect(r.storage).toBeInstanceOf(MemoryStorage);
+    expect(reasonOf(r)).toBe('timeout');
     // The connection finally opens after we gave up: it must be released, not leaked.
     request!.result = {
       objectStoreNames: { contains: () => true },
@@ -701,6 +1081,31 @@ describe('openBestStorage', () => {
       setIdb({ value, writable: true });
       const r = await openBestStorage();
       expect(r.persistent).toBe(false);
+      expect(typeof reasonOf(r)).toBe('string');
     }
+    // A programming error (bad name) still resolves, as 'failed'.
+    setIdb(saved!);
+    expect(reasonOf(await openBestStorage(''))).toBe('failed');
+  });
+
+  it('tells a database from a newer build apart from unavailable storage', async () => {
+    // The reviewer's repro: the database was upgraded by a newer build of the game.
+    const name = freshDbName();
+    const s = await IdbStorage.open(name);
+    await s.putMeta(meta('w', 1));
+    s.close();
+    const newer = await rawOpen(name, 2);
+    newer.close();
+    const r = await openBestStorage(name);
+    expect(r.persistent).toBe(false);
+    expect(r.storage).toBeInstanceOf(MemoryStorage);
+    if (r.persistent) throw new Error('unreachable');
+    expect(r.reason).toBe('newer-version');
+    expect(r.error.message).toMatch(/newer version of the game/);
+    // Nothing was touched: the newer build still finds its world.
+    const raw = await rawOpen(name);
+    expect(raw.version).toBe(2);
+    expect(await rawCount(raw, 'meta')).toBe(1);
+    raw.close();
   });
 });

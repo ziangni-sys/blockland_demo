@@ -410,8 +410,8 @@ export class StructureManager {
       } finally {
         this.endBatch();
       }
-    } else {
-      this.removeDestroyed();
+    } else if (this.batchDepth === 0) {
+      this.removeDestroyed(); // inside a caller's batch, its endBatch() does this
     }
     const ents = this.shipEntries;
     for (let i = 0; i < ents.length; i++) this.computeShipBox(ents[i]!);

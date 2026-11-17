@@ -45,26 +45,45 @@ interface Quad {
   overlay?: boolean;
 }
 
-/** Shaded copies of tiles, local to one icon render (keyed by name and shade). */
+/**
+ * Shaded copies of tiles, local to one icon render. Each tile is painted once per render and
+ * every shade is derived from that one paint (a cube needs three shades of the same tile,
+ * a see-through block four). Shading works per distinct colour: tiles are palette-quantized,
+ * so a 256-texel tile has only a handful of colours and the OKLab maths runs a handful of times.
+ */
 class TileSource {
-  private readonly cache = new Map<string, Uint8Array>();
+  private readonly painted = new Map<string, Uint8Array>();
+  private readonly shaded = new Map<string, Uint8Array>();
 
   get(name: string, shade: number): Uint8Array {
     const key = `${name}@${shade}`;
-    let tex = this.cache.get(key);
-    if (!tex) {
-      tex = paintTile(name);
-      if (shade < 1) {
-        for (let i = 0; i < tex.length; i += 4) {
-          if (tex[i + 3] === 0) continue;
-          const c = shadeColor([tex[i]!, tex[i + 1]!, tex[i + 2]!], shade);
-          tex[i] = c[0];
-          tex[i + 1] = c[1];
-          tex[i + 2] = c[2];
-        }
-      }
-      this.cache.set(key, tex);
+    let tex = this.shaded.get(key);
+    if (tex) return tex;
+    let base = this.painted.get(name);
+    if (!base) {
+      base = paintTile(name);
+      this.painted.set(name, base);
     }
+    if (shade >= 1) {
+      tex = base;
+    } else {
+      tex = new Uint8Array(base);
+      const memo = new Map<number, number>();
+      for (let i = 0; i < tex.length; i += 4) {
+        if (tex[i + 3] === 0) continue;
+        const rgb = (tex[i]! << 16) | (tex[i + 1]! << 8) | tex[i + 2]!;
+        let out = memo.get(rgb);
+        if (out === undefined) {
+          const c = shadeColor([tex[i]!, tex[i + 1]!, tex[i + 2]!], shade);
+          out = (c[0] << 16) | (c[1] << 8) | c[2];
+          memo.set(rgb, out);
+        }
+        tex[i] = out >> 16;
+        tex[i + 1] = (out >> 8) & 255;
+        tex[i + 2] = out & 255;
+      }
+    }
+    this.shaded.set(key, tex);
     return tex;
   }
 }

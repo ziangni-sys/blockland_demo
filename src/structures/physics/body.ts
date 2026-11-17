@@ -135,6 +135,16 @@ export class Body {
   pinY = 0;
   pinZ = 0;
 
+  /** Grid pose as last written by the dynamics (external-change detection for sleepers). */
+  private written = false;
+  private lastX = 0;
+  private lastY = 0;
+  private lastZ = 0;
+  private lastQx = 0;
+  private lastQy = 0;
+  private lastQz = 0;
+  private lastQw = 1;
+
   private readonly tmpM: Mat3 = new Float64Array(9);
   private readonly tmpW: Vec3 = vec3();
 
@@ -287,6 +297,47 @@ export class Body {
     qintegrate(this.q, w, dt, this.q);
     this.vpx = this.vpy = this.vpz = 0;
     this.wpx = this.wpy = this.wpz = 0;
+  }
+
+  /**
+   * Did something outside the dynamics move this ship since we last wrote its pose (a teleport,
+   * a velocity set by game code)? Used to wake sleeping ships.
+   */
+  disturbedSinceWrite(): boolean {
+    const g = this.ship.grid;
+    const p = g.position;
+    const r = g.rotation;
+    const v = g.linearVelocity;
+    const w = g.angularVelocity;
+    return (
+      !this.written ||
+      p.x !== this.lastX ||
+      p.y !== this.lastY ||
+      p.z !== this.lastZ ||
+      r.x !== this.lastQx ||
+      r.y !== this.lastQy ||
+      r.z !== this.lastQz ||
+      r.w !== this.lastQw ||
+      v.x !== 0 ||
+      v.y !== 0 ||
+      v.z !== 0 ||
+      w.x !== 0 ||
+      w.y !== 0 ||
+      w.z !== 0
+    );
+  }
+
+  /** Remember the grid pose as ours (after a write-back or a refresh that moved the pivot). */
+  rememberPose(): void {
+    const g = this.ship.grid;
+    this.written = true;
+    this.lastX = g.position.x;
+    this.lastY = g.position.y;
+    this.lastZ = g.position.z;
+    this.lastQx = g.rotation.x;
+    this.lastQy = g.rotation.y;
+    this.lastQz = g.rotation.z;
+    this.lastQw = g.rotation.w;
   }
 
   /** Write pose and velocities back to the grid (pivot stays the COM). */

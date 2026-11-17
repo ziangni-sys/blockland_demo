@@ -46,6 +46,15 @@ export class WorldPatch implements ProbeTarget {
   flags: Uint8Array = EMPTY_U8;
   /** Any hard cell inside the patch (false in open water: terrain contacts are skipped). */
   hasSolid = false;
+  /** Inclusive cell bounds of the hard cells in the patch (valid when hasSolid). */
+  solidMinX = 0;
+  solidMinY = 0;
+  solidMinZ = 0;
+  solidMaxX = 0;
+  solidMaxY = 0;
+  solidMaxZ = 0;
+  /** One above the highest water cell in the patch (-Infinity when there is none). */
+  waterTop = -Infinity;
 
   /** Candidate world corners (integer lattice points) and their open-face masks (bit = Dir). */
   cornerCount = 0;

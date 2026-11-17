@@ -10,9 +10,11 @@
  *   aa=0             disable MSAA
  *   vd=96            view distance (blocks)
  *   time=12.5        animation clock start (seconds); freeze=1 keeps it fixed (stable screenshots)
+ *   stress=4         replicate the world's sections on a 4 x 4 grid (performance testing)
  * window.harness exposes the same controls plus stats() for scripted runs.
  */
 import { createThreeBackend } from '../../src/render/three/index';
+import type { ThreeBackend } from '../../src/render/three/backend';
 import type { BackendInfo, CameraState, EntityRenderState, EnvironmentState, OverlayState, RenderStats, StructurePose } from '../../src/render/backend';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
@@ -43,6 +45,8 @@ const state = {
   cam: { x: 48, y: 80, z: 110, yaw: 0, pitch: -30 * DEG, fov: 70 } as CameraState,
   frames: 0,
   frameMs: 0,
+  /** Mean CPU time of backend.render() over the last 120 frames. */
+  avgMs: 0,
   info: null as BackendInfo | null,
 };
 
@@ -193,6 +197,7 @@ function environment(): EnvironmentState {
   return { dayTime: state.dayTime, submerged: state.submerged === '' ? 'none' : state.submerged, viewDistance: state.viewDistance, time: state.time };
 }
 
+const msRing = new Float64Array(120);
 let last = performance.now();
 function frame(now: number): void {
   const dt = Math.min(0.1, (now - last) / 1000);
@@ -210,7 +215,13 @@ function frame(now: number): void {
   const t0 = performance.now();
   backend.render();
   state.frameMs = performance.now() - t0;
+  msRing[state.frames % msRing.length] = state.frameMs;
   state.frames++;
+  if (state.frames >= msRing.length) {
+    let sum = 0;
+    for (let i = 0; i < msRing.length; i++) sum += msRing[i]!;
+    state.avgMs = sum / msRing.length;
+  }
   if (state.frames % 15 === 0) {
     const s = backend.stats();
     hud.textContent = `${state.info?.api ?? '?'} | ${state.info?.detail ?? ''}\ncalls ${s.drawCalls} tris ${s.triangles} sections ${s.sections} structures ${s.structures}\nday ${state.dayTime.toFixed(3)} cpu ${state.frameMs.toFixed(1)} ms`;
@@ -231,13 +242,23 @@ async function start(): Promise<BackendInfo> {
   backend.setTiles(makeTiles());
   const t0 = performance.now();
   let sections = 0;
+  const stress = Math.max(1, Math.floor(num('stress', 1)));
+  const half = Math.floor(stress / 2);
   for (let sy = 0; sy < WORLD_Y / 16; sy++) {
     for (let sz = 0; sz < WORLD_Z / 16; sz++) {
       for (let sx = 0; sx < WORLD_X / 16; sx++) {
         const mesh = meshRegion({ box: world, x0: sx * 16, y0: sy * 16, z0: sz * 16, sx: 16, sy: 16, sz: 16, lit: true });
         if (!mesh.opaque && !mesh.cutout && !mesh.translucent) continue;
-        backend.setSectionMesh(sectionKey(sx, sy, sz), sx * 16, sy * 16, sz * 16, mesh);
-        sections++;
+        // Stress mode: the same section meshes repeated on a grid of world copies (the backend
+        // owns nothing of the MeshData, so sharing the typed arrays is fine).
+        for (let gz = -half; gz < stress - half; gz++) {
+          for (let gx = -half; gx < stress - half; gx++) {
+            const cx = sx + gx * (WORLD_X / 16);
+            const cz = sz + gz * (WORLD_Z / 16);
+            backend.setSectionMesh(sectionKey(cx, sy, cz), cx * 16, sy * 16, cz * 16, mesh);
+            sections++;
+          }
+        }
       }
     }
   }
@@ -260,6 +281,7 @@ interface Harness {
   setSubmerged(s: 'none' | 'water' | 'lava'): void;
   setTime(t: number, frozen?: boolean): void;
   stats(): RenderStats & { frames: number; frameMs: number };
+  counters(): ReturnType<ThreeBackend['debugCounters']>;
   /** Removes / restores every structure (exercises structure teardown). */
   toggleStructures(on: boolean): void;
 }
@@ -286,6 +308,7 @@ const harness: Harness = {
     if (frozen !== undefined) state.frozen = frozen;
   },
   stats: () => ({ ...backend.stats(), frames: state.frames, frameMs: state.frameMs }),
+  counters: () => (backend as ThreeBackend).debugCounters(),
   toggleStructures: (on) => {
     if (on) {
       backend.setStructureMesh(SHIP, ship.ox, ship.oy, ship.oz, ship.mesh);

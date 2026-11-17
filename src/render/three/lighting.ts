@@ -72,6 +72,12 @@ export function srgbToLinear(c: number): number {
   return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
 }
 
+/** Inverse of srgbToLinear (the standard sRGB OETF). */
+export function linearToSrgb(c: number): number {
+  const x = c <= 0 ? 0 : c >= 1 ? 1 : c;
+  return x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(x, 1 / 2.4) - 0.055;
+}
+
 export function hexToLinear(hex: number): RGB {
   return {
     r: srgbToLinear(((hex >> 16) & 255) / 255),

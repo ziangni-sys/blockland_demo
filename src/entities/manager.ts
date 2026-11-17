@@ -84,7 +84,7 @@ import { StructureCache, boxNearRec, carryPoint, curToWorld, pointVelocity, type
 
 const DT = TICK_DT;
 const SAVE_VERSION = 1;
-const KIND_TAG: Record<EntityKind, number> = { player: 1, item: 2, falling: 3, tnt: 4, rabbit: 5 };
+const KIND_TAG: Readonly<Record<EntityKind, number>> = Object.freeze({ player: 1, item: 2, falling: 3, tnt: 4, rabbit: 5 });
 /** Margin around a body when collecting the structures it may touch this tick. */
 const NEAR_MARGIN = 0.5;
 /** A carrier that moves a rider farther than this in one tick was re-gridded / teleported: let go. */
@@ -117,6 +117,7 @@ export class EntityManager {
   private readonly box1: AABB = aabb();
   private readonly box2: AABB = aabb();
   private readonly grids: VoxelGrid[] = [];
+  private readonly items: ItemEntity[] = [];
 
   constructor(host: EntityHost) {
     this.host = host;
@@ -618,6 +619,12 @@ export class EntityManager {
       copyVec(e.carrierVel, cvel);
       e.yaw = yaw;
       e.pitch = pitch;
+      if (e instanceof Player) {
+        // The look is driven by input.yaw / pitch: seed it, or the first tick after loading
+        // would snap the view to 0 until the client writes its own.
+        e.input.yaw = yaw;
+        e.input.pitch = pitch;
+      }
       e.onGround = onGround;
       e.wet = wet;
       e.headWet = headWet;
@@ -1347,17 +1354,29 @@ export class EntityManager {
   }
 
   private merges(): void {
-    const list = this.list;
+    // Only drops take part; each one looks around every MERGE_INTERVAL_TICKS (staggered by id).
+    const items = this.items;
+    items.length = 0;
+    let due = false;
+    for (let i = 0; i < this.list.length; i++) {
+      const e = this.list[i]!;
+      if (e instanceof ItemEntity && !e.removed) {
+        items.push(e);
+        if ((e.age + e.id) % MERGE_INTERVAL_TICKS === 0) due = true;
+      }
+    }
+    if (!due) return;
     const ba = this.box1;
     const bb = this.box2;
-    for (let i = 0; i < list.length; i++) {
-      const a = list[i]!;
-      if (!(a instanceof ItemEntity) || a.removed || (a.age + a.id) % MERGE_INTERVAL_TICKS !== 0) continue;
+    for (let i = 0; i < items.length; i++) {
+      const a = items[i]!;
+      if (a.removed || (a.age + a.id) % MERGE_INTERVAL_TICKS !== 0) continue;
       const max = maxStackOf(a.stack.item);
+      if (a.stack.count >= max) continue;
       a.box(ba);
-      for (let j = 0; j < list.length; j++) {
-        const b = list[j]!;
-        if (b === a || !(b instanceof ItemEntity) || b.removed || b.stack.item !== a.stack.item) continue;
+      for (let j = 0; j < items.length; j++) {
+        const b = items[j]!;
+        if (b === a || b.removed || b.stack.item !== a.stack.item) continue;
         b.box(bb);
         if (bb.minX - MERGE_REACH >= ba.maxX || bb.maxX + MERGE_REACH <= ba.minX) continue;
         if (bb.minY - MERGE_REACH >= ba.maxY || bb.maxY + MERGE_REACH <= ba.minY) continue;

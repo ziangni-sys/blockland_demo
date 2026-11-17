@@ -33,7 +33,7 @@ import {
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import { makeCloudNoise } from './noise';
-import { skyGradientNode, type SharedUniforms } from './shading';
+import { encodeOutput, skyGradientNode, type SharedUniforms } from './shading';
 
 /** Render order after every opaque / cutout object but before transparent ones. */
 export const SKY_RENDER_ORDER = 50;
@@ -135,7 +135,7 @@ export function createSky(u: SharedUniforms): Sky {
 
     // Under water / lava everything beyond a few blocks is fog.
     col = mix(col, u.fogColor, u.fogFixed);
-    return vec4(max(col, vec3(0, 0, 0)), 1);
+    return vec4(encodeOutput(max(col, vec3(0, 0, 0))), 1);
   })();
 
   const geo = new THREE.SphereGeometry(1, 32, 16);

@@ -33,7 +33,7 @@ import { BLOCKS } from '../../blocks/registry';
 import { buildBox } from './boxgeom';
 import { EntityAssets, EntityLayer } from './entities';
 import { computeBoundsFromPositions, setBoxBounds, toBufferGeometry, type GeometryOptions } from './geometry';
-import { computeFog, computeSkyState, createFogParams, createSkyState, SUN_TILT } from './lighting';
+import { computeFog, computeSkyState, createFogParams, createSkyState, linearToSrgb, SUN_TILT } from './lighting';
 import { createModelMaterial } from './models';
 import { OverlayLayer } from './overlays';
 import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix } from './pose';
@@ -168,7 +168,8 @@ export class ThreeBackend implements RenderBackend {
   private readonly skyState = createSkyState();
   private readonly fog = createFogParams();
   private envTime = 0;
-  private viewDistance = 128;
+  /** -1 until the first setEnvironment, so the far plane is always fitted once. */
+  private viewDistance = -1;
   private readonly clearColor = new THREE.Color(0, 0, 0);
   private width = 1;
   private height = 1;
@@ -218,8 +219,9 @@ export class ThreeBackend implements RenderBackend {
           const adapter = await gpu.requestAdapter({ powerPreference: this.opts.powerPreference ?? 'high-performance' });
           if (!adapter) forceWebGL = true;
           else {
-            const ai = adapter.info;
-            adapterDetail = [ai.vendor, ai.architecture, ai.device, ai.description].filter((s) => s && s.length > 0).join(' ');
+            // GPUAdapter.info is missing in older Chromium builds; it is only cosmetic here.
+            const ai = (adapter as { info?: GPUAdapterInfo }).info;
+            if (ai) adapterDetail = [ai.vendor, ai.architecture, ai.device, ai.description].filter((s) => s && s.length > 0).join(' ');
           }
         } catch {
           forceWebGL = true;
@@ -238,7 +240,10 @@ export class ThreeBackend implements RenderBackend {
     this.renderer = renderer;
     renderer.setClearColor(0x000000, 1);
     renderer.toneMapping = THREE.NoToneMapping;
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    // Output space == working space: three then renders straight into the canvas with no
+    // RGBA16F framebuffer and no conversion pass; the materials encode sRGB themselves
+    // (shading.ts encodeOutput). Saves a full-screen pass and lets MSAA resolve to 8-bit.
+    renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 
     const backend = renderer.backend as unknown as { isWebGPUBackend?: boolean; gl?: WebGL2RenderingContext };
     const isWebGPU = backend.isWebGPUBackend === true;
@@ -300,6 +305,8 @@ export class ThreeBackend implements RenderBackend {
     this.camera.updateMatrixWorld();
     await renderer.compileAsync(g, this.camera, this.scene);
     await renderer.compileAsync(this.scene, this.camera);
+    // One frame while loading: configures the canvas / MSAA targets before the first game frame.
+    renderer.render(this.scene, this.camera);
   }
 
   setTiles(tiles: TileTextureData): void {
@@ -318,6 +325,9 @@ export class ThreeBackend implements RenderBackend {
   // ------------------------------------------------------------------ world sections
 
   setSectionMesh(key: number, ox: number, oy: number, oz: number, mesh: MeshData | null): void {
+    const mats = this.materials;
+    // Meshes only make sense after init() (the contract orders init -> setTiles -> meshes).
+    if (!mats) return;
     let rec = this.sections.get(key);
     if (!mesh || (!mesh.opaque && !mesh.cutout && !mesh.translucent)) {
       if (rec) {
@@ -330,8 +340,6 @@ export class ThreeBackend implements RenderBackend {
       rec = { meshes: [null, null, null] };
       this.sections.set(key, rec);
     }
-    const mats = this.materials;
-    if (!mats) return;
     for (let i = 0; i < 3; i++) {
       const data: GeometryData | null = mesh[GROUPS[i]!];
       const old = rec.meshes[i]!;
@@ -489,11 +497,15 @@ export class ThreeBackend implements RenderBackend {
     this.u.applyFog(this.fog);
     if (env.viewDistance !== this.viewDistance) {
       this.viewDistance = env.viewDistance;
-      this.camera.far = Math.max(160, env.viewDistance * 1.25 + 48);
+      // Fog reaches full strength at 0.98 x viewDistance (radial), so anything beyond the far
+      // plane is invisible anyway: fitting far to the view distance lets frustum culling drop
+      // fully fogged sections (draw calls are the main CPU cost) and tightens depth precision.
+      this.camera.far = Math.max(64, env.viewDistance + 24);
       this.camera.updateProjectionMatrix();
     }
+    // The canvas holds sRGB values (see init), so the clear colour is stored pre-encoded.
     const c = this.fog.fixedColor > 0 ? this.fog.color : this.skyState.horizon;
-    this.clearColor.setRGB(c.r, c.g, c.b, THREE.LinearSRGBColorSpace);
+    this.clearColor.setRGB(linearToSrgb(c.r), linearToSrgb(c.g), linearToSrgb(c.b), THREE.LinearSRGBColorSpace);
   }
 
   setOverlays(o: OverlayState): void {
@@ -573,6 +585,24 @@ export class ThreeBackend implements RenderBackend {
   /** Debug info of the active backend (also returned by init). */
   backendInfo(): BackendInfo {
     return this.info;
+  }
+
+  /**
+   * Debug counters: render pipelines / shader programs alive in three's caches. Used by the
+   * harness to verify the warm-up (no new pipeline when the first water / structure / entity
+   * appears) and that steady-state frames never create pipelines.
+   */
+  debugCounters(): { pipelines: number; programs: number; geometries: number; textures: number } {
+    const r = this.renderer as unknown as {
+      _pipelines?: { caches?: Map<string, unknown> };
+      info: { memory: { programs: number; geometries: number; textures: number } };
+    } | null;
+    return {
+      pipelines: r?._pipelines?.caches?.size ?? 0,
+      programs: r?.info.memory.programs ?? 0,
+      geometries: r?.info.memory.geometries ?? 0,
+      textures: r?.info.memory.textures ?? 0,
+    };
   }
 
   dispose(): void {

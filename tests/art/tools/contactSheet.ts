@@ -151,8 +151,78 @@ function sceneSheet(dir: string): string {
   return save(dir, 'scene.png', img);
 }
 
+/** A rectangle of a tile (texel columns x0..x1-1, rows y0..y1-1) as its own RGBA image. */
+function crop(px: Uint8Array, x0: number, y0: number, x1: number, y1: number): { w: number; h: number; data: Uint8Array } {
+  const w = x1 - x0;
+  const h = y1 - y0;
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) data.set(px.subarray(((y0 + y) * T + x0) * 4, ((y0 + y) * T + x1) * 4), y * w * 4);
+  return { w, h, data };
+}
+
+/**
+ * How tiles look where the world mesher samples only part of them (the tile-art table in
+ * src/mesh/mesher.ts), and how the mining-crack overlay reads on light and dark blocks:
+ *  - focus tiles x12 (torch, helm parts, blade, snow, lava);
+ *  - torch post: the side strip (columns 7..8, rows 6..15) and the top cap (rows 6..7);
+ *  - helm pedestal: side window (columns 4..11, rows 6..15) and top window (rows 4..11);
+ *  - crack stages 0..7 over several blocks, composited like the overlay material
+ *    (rgb * 0.9, alpha * 0.9, source-over).
+ */
+function worldSheet(dir: string): string {
+  const img = new Image(1180, 1010, [44, 46, 54]);
+  const focus = ['torch', 'helm_wheel', 'helm_base', 'propeller_blade', 'snow', 'lava_still', 'lava_flow'];
+  const z = 10;
+  focus.forEach((name, i) => {
+    const x = 8 + i * (T * z + 8);
+    img.checker(x, 8, T * z, T * z, 20);
+    img.blit(paintTile(name), T, T, x, 8, z);
+    img.text(name, x, 8 + T * z + 4, 2);
+  });
+  let y = 8 + T * z + 24;
+  const torch = paintTile('torch');
+  const side = crop(torch, 7, 6, 9, 16);
+  const cap = crop(torch, 7, 6, 9, 8);
+  img.checker(8, y, 2 * 16, 10 * 16, 16);
+  img.blit(side.data, side.w, side.h, 8, y, 16);
+  img.checker(56, y, 2 * 16, 2 * 16, 16);
+  img.blit(cap.data, cap.w, cap.h, 56, y, 16);
+  img.text('torch post side / cap', 8, y + 10 * 16 + 4, 2);
+  const helm = paintTile('helm_base');
+  const hs = crop(helm, 4, 6, 12, 16);
+  const ht = crop(helm, 4, 4, 12, 12);
+  img.blit(hs.data, hs.w, hs.h, 220, y, 16);
+  img.blit(ht.data, ht.w, ht.h, 360, y, 16);
+  img.text('helm pedestal side / top', 220, y + 10 * 16 + 4, 2);
+  y += 10 * 16 + 24;
+  const bases = ['stone', 'obsidian', 'wool_black', 'sand', 'snow', 'planks_oak', 'log_pine_side', 'turf_top'];
+  const cz = 4;
+  bases.forEach((b, row) => {
+    const base = paintTile(b);
+    for (let k = 0; k < 8; k++) {
+      const crack = paintTile(`crack_${k}`);
+      const out = new Uint8Array(base);
+      for (let o = 0; o < out.length; o += 4) {
+        const a = (crack[o + 3]! / 255) * 0.9;
+        for (let ch = 0; ch < 3; ch++) out[o + ch] = Math.round(out[o + ch]! * (1 - a) + crack[o + ch]! * 0.9 * a);
+      }
+      img.blit(out, T, T, 8 + k * (T * cz + 6), y + row * (T * cz + 6), cz);
+    }
+    img.text(b, 8 + 8 * (T * cz + 6), y + row * (T * cz + 6) + 28, 2);
+  });
+  return save(dir, 'world.png', img);
+}
+
 /** Writes every sheet into `dir` and returns the file paths. */
 export function writeContactSheets(dir: string): string[] {
   mkdirSync(dir, { recursive: true });
-  return [...tileSheets(dir), ...seamSheets(dir), distanceSheet(dir), ...iconSheets(dir), iconZoomSheet(dir), sceneSheet(dir)];
+  return [
+    ...tileSheets(dir),
+    ...seamSheets(dir),
+    distanceSheet(dir),
+    ...iconSheets(dir),
+    iconZoomSheet(dir),
+    sceneSheet(dir),
+    worldSheet(dir),
+  ];
 }

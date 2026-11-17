@@ -7,7 +7,7 @@ import * as THREE from 'three/webgpu';
 import { attribute, Fn, mix, positionWorld, vec3, vec4 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import { hexToLinear } from './lighting';
-import { applyFogNode, modelLightNode, worldNormal, type SharedUniforms } from './shading';
+import { applyFogNode, encodeOutput, modelLightNode, worldNormal, type SharedUniforms } from './shading';
 
 /** Vertex-coloured, per-object lit material for box models. */
 export function createModelMaterial(u: SharedUniforms, obj: Node<'vec4'>): THREE.NodeMaterial {
@@ -19,7 +19,7 @@ export function createModelMaterial(u: SharedUniforms, obj: Node<'vec4'>): THREE
     const col = attribute('color', 'vec3');
     const lit = col.mul(modelLightNode(u, obj, worldNormal()));
     const flashed = mix(lit, vec3(1, 1, 1), obj.z);
-    return vec4(applyFogNode(u, flashed, positionWorld), 1);
+    return vec4(encodeOutput(applyFogNode(u, flashed, positionWorld)), 1);
   })();
   return m;
 }

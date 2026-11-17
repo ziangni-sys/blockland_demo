@@ -6,18 +6,33 @@
  * Shared contract of every adapter (tests run one behavioural suite against all of them):
  *  - Every method returns a Promise and reports failures by REJECTING it, never by throwing
  *    synchronously. Invalid arguments reject with TypeError; corrupted stored records with
- *    SaveFormatError; backend failures with SaveStorageError.
+ *    SaveFormatError; backend failures with SaveStorageError (see its `code`).
  *  - Bytes are snapshotted when the call is made: mutating the caller's array afterwards —
  *    even before the promise settles — does not change what is stored. Returned arrays are
  *    fresh copies the caller owns.
+ *  - Calls take effect in the order they are made.
  *  - Writes are upserts. putAll in particular commits exactly the records passed (meta,
  *    modified chunks, blobs) atomically and leaves the world's other records alone.
+ *  - Writes never downgrade a world (see SaveStorage): a world saved by a newer build is
+ *    protected from an older build still running in another tab.
  */
 import { isUint8Array } from './bytes';
-import { META_MAX_ID_LENGTH, copyMeta, validateMeta, type WorldMeta } from './codec';
+import { META_MAX_ID_LENGTH, SAVE_VERSION, copyMeta, validateMeta, type WorldMeta } from './codec';
 
+/**
+ * Persistent storage for saved worlds.
+ *
+ * Downgrade guard: putMeta and putAll reject with SaveStorageError code 'newer-version', and
+ * write nothing, when the world's STORED meta has a higher `version` than the meta being
+ * written; putChunks and putBlob do the same when it is higher than SAVE_VERSION (the format
+ * this build's codecs write). Worlds without stored meta are never guarded. deleteWorld is
+ * always allowed (an explicit player action).
+ */
 export interface SaveStorage {
-  /** All worlds, newest lastPlayed first. */
+  /**
+   * Every world with a readable meta record, newest lastPlayed first (ties: newest createdAt,
+   * then id). Includes worlds saved by newer builds — check isNewerSave(meta).
+   */
   listWorlds(): Promise<WorldMeta[]>;
   getMeta(worldId: string): Promise<WorldMeta | null>;
   putMeta(meta: WorldMeta): Promise<void>;
@@ -38,11 +53,50 @@ export interface SaveStorage {
     chunks: ReadonlyArray<readonly [number, Uint8Array]>,
     blobs: ReadonlyArray<readonly [string, Uint8Array]>,
   ): Promise<void>;
+  /**
+   * Keys (chunkKey) of every chunk stored for the world, ascending. This is the source of
+   * truth for "which chunks does this save have": no separate index blob is needed.
+   */
+  listChunkKeys(worldId: string): Promise<number[]>;
+  /**
+   * Id of every world that has ANY stored record (meta, chunk or blob), sorted by UTF-16
+   * code units. Unlike listWorlds it includes worlds whose meta is missing or unreadable, so
+   * such leftovers can be found and removed with deleteWorld.
+   */
+  listWorldIds(): Promise<string[]>;
 }
 
-/** A storage backend failed (quota, connection closed, blocked upgrade, aborted transaction ...). */
+/**
+ * Machine-readable kind of a SaveStorageError, so the client can pick a message or a
+ * recovery without parsing text:
+ *  - 'unavailable'   storage cannot be used here (no IndexedDB, sandboxed iframe, private mode).
+ *  - 'newer-version' the database or the world belongs to a newer build: ask the player to
+ *                    update (reload); never overwrite or delete anything because of it.
+ *  - 'blocked'       a database upgrade is blocked by another open tab of an older build.
+ *  - 'incompatible'  a database with this name exists but is not a Blocklands save database.
+ *  - 'quota'         the browser's storage quota is exhausted.
+ *  - 'closed'        the connection broke after close() was called, and close() forbids reopening.
+ *  - 'timeout'       openBestStorage only: the caller's giveUp settled before IndexedDB answered.
+ *  - 'failed'        any other backend failure.
+ */
+export type SaveStorageErrorCode =
+  | 'unavailable'
+  | 'newer-version'
+  | 'blocked'
+  | 'incompatible'
+  | 'quota'
+  | 'closed'
+  | 'timeout'
+  | 'failed';
+
+/** A storage backend failed. `code` says how; the message says it for humans. */
 export class SaveStorageError extends Error {
-  override readonly name = 'SaveStorageError';
+  override readonly name: string = 'SaveStorageError';
+  readonly code: SaveStorageErrorCode;
+  constructor(message: string, options: { code?: SaveStorageErrorCode; cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.code = options.code ?? 'failed';
+  }
 }
 
 export const BLOB_NAME_MAX_LENGTH = 128;
@@ -70,6 +124,23 @@ export function checkBlobName(name: unknown, op: string): asserts name is string
   if (typeof name !== 'string' || name.length < 1 || name.length > BLOB_NAME_MAX_LENGTH) {
     throw new TypeError(`${op}: blob name must be a string of 1..${BLOB_NAME_MAX_LENGTH} characters`);
   }
+}
+
+/**
+ * The downgrade guard (see SaveStorage): the error to reject a write with when the world's
+ * stored meta record `stored` (whatever the backend holds, possibly corrupted or absent) has
+ * a higher version than `written`, else null. A record without a numeric version never
+ * blocks a write, so a damaged meta record can still be repaired by overwriting it.
+ */
+export function downgradeError(stored: unknown, written: number, worldId: string, op: string): SaveStorageError | null {
+  if (stored === null || typeof stored !== 'object') return null;
+  const version = (stored as { version?: unknown }).version;
+  if (typeof version !== 'number' || !(version > written)) return null;
+  return new SaveStorageError(
+    `${op}: world "${worldId}" was saved by a newer version of the game (format ${version}, this write is ` +
+      `format ${written}); refusing to overwrite it`,
+    { code: 'newer-version' },
+  );
 }
 
 /**
@@ -138,7 +209,8 @@ export class MemoryStorage implements SaveStorage {
   private readonly blobs = new Map<string, Map<string, Uint8Array>>();
 
   // Methods are `async` so argument errors become rejections, and so callers cannot come
-  // to depend on synchronous completion. All copying happens before the first await.
+  // to depend on synchronous completion. All checking and copying happens before anything
+  // is mutated, so a rejected call has written nothing.
 
   async listWorlds(): Promise<WorldMeta[]> {
     const out: WorldMeta[] = [];
@@ -154,6 +226,7 @@ export class MemoryStorage implements SaveStorage {
 
   async putMeta(meta: WorldMeta): Promise<void> {
     const m = snapshotMeta(meta, 'putMeta');
+    this.guard(m.id, m.version, 'putMeta');
     this.metas.set(m.id, m);
   }
 
@@ -185,7 +258,9 @@ export class MemoryStorage implements SaveStorage {
   async putChunks(worldId: string, entries: ReadonlyArray<readonly [number, Uint8Array]>): Promise<void> {
     checkWorldId(worldId, 'putChunks');
     const copies = snapshotChunks(entries, 'putChunks');
-    if (copies.length > 0) this.writeChunks(worldId, copies);
+    if (copies.length === 0) return;
+    this.guard(worldId, SAVE_VERSION, 'putChunks');
+    this.writeChunks(worldId, copies);
   }
 
   async getBlob(worldId: string, name: string): Promise<Uint8Array | null> {
@@ -198,7 +273,9 @@ export class MemoryStorage implements SaveStorage {
   async putBlob(worldId: string, name: string, bytes: Uint8Array): Promise<void> {
     checkWorldId(worldId, 'putBlob');
     checkBlobName(name, 'putBlob');
-    this.writeBlobs(worldId, [[name, snapshotBytes(bytes, 'putBlob', 'bytes')]]);
+    const copy = snapshotBytes(bytes, 'putBlob', 'bytes');
+    this.guard(worldId, SAVE_VERSION, 'putBlob');
+    this.writeBlobs(worldId, [[name, copy]]);
   }
 
   async putAll(
@@ -213,9 +290,29 @@ export class MemoryStorage implements SaveStorage {
     if (m.id !== worldId) throw new TypeError(`putAll: meta.id "${m.id}" does not match world id "${worldId}"`);
     const chunkCopies = snapshotChunks(chunks, 'putAll');
     const blobCopies = snapshotBlobs(blobs, 'putAll');
+    this.guard(worldId, m.version, 'putAll');
     this.metas.set(worldId, m);
     if (chunkCopies.length > 0) this.writeChunks(worldId, chunkCopies);
     if (blobCopies.length > 0) this.writeBlobs(worldId, blobCopies);
+  }
+
+  async listChunkKeys(worldId: string): Promise<number[]> {
+    checkWorldId(worldId, 'listChunkKeys');
+    const world = this.chunks.get(worldId);
+    return world ? [...world.keys()].sort((a, b) => a - b) : [];
+  }
+
+  async listWorldIds(): Promise<string[]> {
+    const ids = new Set<string>(this.metas.keys());
+    for (const id of this.chunks.keys()) ids.add(id);
+    for (const id of this.blobs.keys()) ids.add(id);
+    return [...ids].sort();
+  }
+
+  /** Throw the downgrade-guard error when writing format `written` into `worldId` is refused. */
+  private guard(worldId: string, written: number, op: string): void {
+    const error = downgradeError(this.metas.get(worldId), written, worldId, op);
+    if (error) throw error;
   }
 
   private writeChunks(worldId: string, entries: ReadonlyArray<readonly [number, Uint8Array]>): void {

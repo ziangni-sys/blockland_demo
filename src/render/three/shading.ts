@@ -44,6 +44,7 @@ import {
   sin,
   cos,
   smoothstep,
+  sRGBTransferOETF,
   texture,
   texture3D,
   uniform,
@@ -140,6 +141,16 @@ export class SharedUniforms {
 }
 
 // ------------------------------------------------------------------ shared graph pieces
+
+/**
+ * The renderer draws straight into the canvas (outputColorSpace = working space, so three adds
+ * no linear->sRGB output pass and no RGBA16F framebuffer). Every material therefore shades in
+ * linear space and encodes its final colour to sRGB here. Translucent layers blend in gamma
+ * space as a consequence, which is the norm for this style of game.
+ */
+export function encodeOutput(c: N<'vec3'>): N<'vec3'> {
+  return sRGBTransferOETF(c) as N<'vec3'>;
+}
 
 /** l / (K - (K-1) l): the brightness curve of lighting.ts. */
 export function lightCurveNode(l: N<'float'>): N<'float'> {
@@ -358,7 +369,7 @@ export function createVoxelMaterials(
         const color = mix(body, reflCol, fres.mul(0.85)).add(spec);
         // Clearer looking straight down, more opaque (and sky coloured) at grazing angles.
         const alpha = clamp(mix(albedo.a.mul(0.78), float(0.96), fres).add(spec.x.mul(0.5)), 0, 1);
-        return vec4(applyFogNode(u, color, worldPos), alpha);
+        return vec4(encodeOutput(applyFogNode(u, color, worldPos)), alpha);
       })();
     } else {
       if (pass === 'cutout') m.side = THREE.DoubleSide;
@@ -371,7 +382,7 @@ export function createVoxelMaterials(
         }
         const light = lightColor(u, vl, nW);
         const lit = mix(albedo.rgb.mul(light), vec3(1, 1, 1), objUniform.z);
-        return vec4(applyFogNode(u, lit, worldPos), 1);
+        return vec4(encodeOutput(applyFogNode(u, lit, worldPos)), 1);
       })();
     }
     return m;

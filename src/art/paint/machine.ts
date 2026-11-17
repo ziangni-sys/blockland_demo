@@ -18,83 +18,97 @@ function tone(r: Ramp, t: number): Ramp[number] {
 
 // ---------------------------------------------------------------- helm
 
+/**
+ * Pedestal of the helm. The world mesher maps this tile onto a partial box (x, z in 4..12/16,
+ * height 10/16) with position-derived uvs, so only two windows of it are ever seen:
+ *   sides : columns 4..11, rows 6..15
+ *   top   : columns 4..11, rows 4..11 (the bottom face samples the same rows)
+ * The windows overlap in rows 6..11, so anything horizontal there would show on the top as
+ * a stripe. The brass band therefore sits at the foot (rows 12..14), below the top window,
+ * and rows 4..11 hold nothing but vertical staves.
+ */
 const paintHelmBase: Painter = (c, seed) => {
   const r = M.HELM_WOOD;
   const f = new Field();
   f.each((x, y) => {
     const stave = x >> 2;
     const col = x & 3;
-    // Vertical staves, grain along v.
+    // Vertical staves, grain along v. Columns 4 and 11 are a stave's lit first column and
+    // a seam, so each pedestal face gets a lit left and a shaded right edge.
     let t = 2 + (vnoise(x + stave * 3, y, 16, 3, seed + stave) - 0.5) * 1.0;
     if (col === 0) t += 0.55;
     if (col === 3) t = 0.5; // seam between staves
-    if (y === S - 1) t -= 0.9;
     return t;
   });
   paintField(c, f, r);
-  // Brass band near the top, with two rivets.
+  // Brass foot band: lit upper lip, body, shaded lower lip, then the contact shadow.
   for (let x = 0; x < S; x++) {
-    c.set(x, 2, M.BRASS[4]!);
-    c.set(x, 3, M.BRASS[hrand(x, 3, seed) > 0.75 ? 3 : 2]!);
-    c.set(x, 4, M.BRASS[1]!);
-    c.set(x, 5, r[0]!); // band shadow on the wood
+    c.set(x, 12, M.BRASS[3]!);
+    c.set(x, 13, M.BRASS[hrand(x, 13, seed) > 0.8 ? 3 : 2]!);
+    c.set(x, 14, M.BRASS[1]!);
+    c.set(x, 15, r[0]!);
   }
-  for (const x of [3, 11]) {
-    c.set(x, 3, M.BRASS[4]!);
-    c.set(x + 1, 3, M.BRASS[0]!);
+  // Rivets, symmetric inside both the mesher's (4..11) and the icon's (5..10) column window.
+  for (const x of [6, 9]) {
+    c.set(x, 13, M.BRASS[4]!);
+    c.set(x, 14, M.BRASS[0]!);
   }
 };
 
 /**
- * Ship's wheel, 15 px across, centred on pixel (7, 7) so spokes are exact pixel lines:
- * a 1-px rim of radius 5, eight spokes, handles sticking out past the rim, brass hub.
+ * Which part of the ship's wheel a texel belongs to, from its distance to the tile centre
+ * (a >= b >= 0, half-integers: the design is defined on one octant and mirrored 8 ways).
+ * The rim is the classic 12-px pixel circle; axis spokes are 2 px wide (centred on a texel
+ * corner they cannot be 1 px), diagonal spokes the 1-px diagonals through the centre.
+ */
+type WheelPart = 'hub' | 'rim' | 'axis' | 'axisHandle' | 'diag' | 'diagHandle' | null;
+function wheelPart(a: number, b: number): WheelPart {
+  if (a <= 1.5 && !(a === 1.5 && b === 1.5)) return 'hub';
+  if ((a === 5.5 && b <= 1.5) || (a === 4.5 && (b === 2.5 || b === 3.5))) return 'rim';
+  if (b === 0.5) return a <= 4.5 ? 'axis' : a >= 6.5 ? 'axisHandle' : null;
+  if (a === b) return a <= 3.5 ? 'diag' : a <= 5.5 ? 'diagHandle' : null;
+  return null;
+}
+
+/**
+ * Ship's wheel on a transparent background, symmetric about the tile centre (8, 8): the
+ * mesher maps the whole tile onto a quad centred on the wheel's axle, so the hub must sit
+ * exactly at uv (0.5, 0.5) or the wheel would hang off-centre (and wobble if it ever turns).
+ * Eight spokes, handles past the rim with dark knob ends, a round brass hub; lit from the
+ * top-left like every other tile.
  */
 const paintHelmWheel: Painter = (c) => {
   c.clear();
   const wood = M.HELM_WOOD;
-  const cx = 7;
-  const cy = 7;
-  // Spokes and handles: axis spokes reach radius 7, diagonal ones 5 steps (about 7.1).
-  const dirs: ReadonlyArray<readonly [number, number, number]> = [
-    [1, 0, 7],
-    [-1, 0, 7],
-    [0, 1, 7],
-    [0, -1, 7],
-    [1, 1, 5],
-    [-1, 1, 5],
-    [1, -1, 5],
-    [-1, -1, 5],
-  ];
-  for (const [dx, dy, n] of dirs) {
-    for (let k = 2; k <= n; k++) {
-      const r = Math.hypot(dx * k, dy * k);
-      const handle = r > 5.5;
-      // Handles are lit on their top-left facing side; the outermost pixel is a dark knob end.
-      let t = handle ? 3 : 2.2;
-      if (k === n) t = 1.2;
-      if (handle && dx + dy > 0) t -= 0.6;
-      c.set(cx + dx * k, cy + dy * k, wood[toneIndex(t, wood.length)]!);
-    }
-  }
-  // Rim: pixels whose centre lies within half a pixel of radius 5.
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
-      const ox = x - cx;
-      const oy = y - cy;
+      const [ox, oy] = centreOffset(x, y);
+      const ax = Math.abs(ox);
+      const ay = Math.abs(oy);
+      const part = wheelPart(Math.max(ax, ay), Math.min(ax, ay));
+      if (!part) continue;
+      if (part === 'hub') {
+        const s = ox + oy;
+        c.set(x, y, M.BRASS[s < -1 ? 4 : s < 0 ? 3 : s < 1.5 ? 2 : 1]!);
+        continue;
+      }
       const r = Math.sqrt(ox * ox + oy * oy);
-      if (Math.abs(r - 5) > 0.55) continue;
       const light = -(ox + oy) / r; // +1 toward the top-left
-      c.set(x, y, wood[toneIndex(2.2 + light * 1.3, wood.length)]!);
+      let t: number;
+      if (part === 'rim') t = 2.1 + light * 1.4;
+      else if (part === 'axis' || part === 'axisHandle') {
+        // Of the two texels across a 2-px spoke, the one nearer the top-left is lit.
+        const lit = ax < ay ? ox < 0 : oy < 0;
+        t = part === 'axis' ? (lit ? 2.6 : 1.5) : lit ? 3.2 : 2;
+        if (Math.max(ax, ay) === 7.5) t = lit ? 1.6 : 0.8; // knob end
+      } else {
+        t = part === 'diag' ? 2 + light * 0.5 : 2.7 + light * 0.6;
+        if (Math.max(ax, ay) === 5.5) t = 1.1; // knob end
+      }
+      c.set(x, y, wood[toneIndex(t, wood.length)]!);
     }
   }
-  // Brass hub.
-  for (let y = cy - 1; y <= cy + 1; y++) {
-    for (let x = cx - 1; x <= cx + 1; x++) {
-      const t = x - cx + y - cy;
-      c.set(x, y, M.BRASS[t < 0 ? 4 : t > 0 ? 1 : 3]!);
-    }
-  }
-  c.set(cx, cy, M.BRASS[2]!);
+  c.set(8, 8, M.BRASS[0]!); // axle cap, in the hub's shaded quarter
 };
 
 // ---------------------------------------------------------------- bearing
@@ -234,7 +248,11 @@ const paintPropellerHub: Painter = (c, seed) => {
   }
 };
 
-/** One blade, root at the bottom centre, tip at the top, on a transparent background. */
+/**
+ * One blade, root at the bottom centre, tip at the top, on a transparent background. The
+ * mesher maps the whole tile onto each blade quad with the radial axis at u = 0.5, so the
+ * root is centred on x = 8 exactly (2 px wide, columns 7..8); the sweep only bends the tip.
+ */
 const paintPropellerBlade: Painter = (c) => {
   c.clear();
   const inside = (x: number, y: number): boolean => {
@@ -242,7 +260,7 @@ const paintPropellerBlade: Painter = (c) => {
     const s = (S - (y + 0.5)) / S; // 0 at the root .. 1 at the tip
     let w = 1.05 + 2.6 * Math.min(1, s / 0.62) * (2 - Math.min(1, s / 0.62));
     if (s > 0.8) w *= Math.sqrt(Math.max(0, 1 - ((s - 0.8) / 0.2) ** 2));
-    const xc = 8 + s * 0.9 - 0.4; // slight sweep
+    const xc = 8 + s * s * 0.9; // slight sweep toward the tip
     return Math.abs(x + 0.5 - xc) <= w;
   };
   for (let y = 0; y < S; y++) {
@@ -286,32 +304,47 @@ const paintPropellerBack: Painter = (c, seed) => {
 
 // ---------------------------------------------------------------- torch
 
+/**
+ * Torch. Two views share this tile:
+ *  - the world mesher's post (src/mesh/mesher.ts tile-art table): a 2/16 x 10/16 stick whose
+ *    sides sample columns 7..8 of rows 6..15 and whose top cap samples rows 6..7. That window
+ *    alone must read as a torch: a glowing 2x2 head (rows 6..7) on an ember-tipped stick;
+ *  - flat sprites (item icon, dropped item): the full tile, where a flame tongue rises from
+ *    the head (rows 2..5, plus a halo in columns 6 and 9). Those texels are never sampled by
+ *    the post, so they cost nothing in the world.
+ */
 const paintTorch: Painter = (c) => {
   c.clear();
-  // The stick is exactly two pixels wide in the centre columns (7, 8): the mesher maps those
-  // columns onto a thin post.
-  for (let y = 8; y < S; y++) {
-    c.set(7, y, M.TORCH_STICK[2]!);
-    c.set(8, y, M.TORCH_STICK[1]!);
-  }
-  c.set(7, 7, M.TORCH_STICK[0]!);
-  c.set(8, 7, M.TORCH_STICK[0]!);
-  c.set(8, S - 1, M.TORCH_STICK[0]!);
   const F = M.FLAME;
+  const W = M.TORCH_STICK;
+  // Stick: lit column 7, shaded column 8, a darker butt at the very bottom.
+  for (let y = 9; y < S; y++) {
+    c.set(7, y, W[2]!);
+    c.set(8, y, W[1]!);
+  }
+  c.set(8, S - 1, W[0]!);
+  // Charred, ember-lit tip of the stick right under the head.
+  c.set(7, 8, F[0]!);
+  c.set(8, 8, W[0]!);
+  // [x, y, flame tone]: head (rows 6..7, the post's top cap) first, then the sprite-only tongue.
   const flame: ReadonlyArray<readonly [number, number, number]> = [
-    [8, 2, 0],
-    [7, 3, 1],
-    [8, 3, 1],
+    [7, 6, 3],
+    [8, 6, 3],
+    [7, 7, 2],
+    [8, 7, 2],
+    [6, 6, 1],
+    [9, 6, 0],
+    [6, 5, 1],
+    [7, 5, 2],
+    [8, 5, 3],
+    [9, 5, 1],
     [6, 4, 0],
     [7, 4, 2],
-    [8, 4, 1],
+    [8, 4, 2],
     [9, 4, 0],
-    [6, 5, 1],
-    [7, 5, 3],
-    [8, 5, 2],
-    [9, 5, 1],
-    [7, 6, 3],
-    [8, 6, 2],
+    [7, 3, 1],
+    [8, 3, 2],
+    [8, 2, 1],
     [9, 1, 0],
   ];
   for (const [x, y, t] of flame) c.set(x, y, F[t]!);

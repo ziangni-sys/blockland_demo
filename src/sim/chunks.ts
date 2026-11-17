@@ -39,6 +39,8 @@ export class ChunkManager {
   onUnload: ((cx: number, cz: number) => void) | null = null;
   /** Called after a chunk was added and lit. */
   onLoad: ((chunk: Chunk) => void) | null = null;
+  /** Keys of stashed chunks that could not be decoded and were regenerated instead. */
+  readonly corrupted: number[] = [];
   /** Extra chunks kept beyond an anchor's radius before unloading (hysteresis). */
   unloadMargin = 2;
 
@@ -98,11 +100,7 @@ export class ChunkManager {
     const result: ChunkRequest[] = [];
     for (const c of out) {
       const key = chunkKey(c.cx, c.cz);
-      const saved = this.stash.get(key);
-      if (saved) {
-        this.restore(key, saved);
-        continue;
-      }
+      if (this.tryRestore(key)) continue;
       if (result.length >= max) continue;
       this.pending.add(key);
       result.push({ cx: c.cx, cz: c.cz });
@@ -124,16 +122,27 @@ export class ChunkManager {
     const key = chunkKey(cx, cz);
     this.pending.delete(key);
     if (this.world.getChunk(cx, cz)) return null;
-    const saved = this.stash.get(key);
-    if (saved) return this.restore(key, saved);
-    return this.insert(new Chunk(cx, cz, cells));
+    return this.tryRestore(key) ?? this.insert(new Chunk(cx, cz, cells));
   }
 
-  private restore(key: number, bytes: Uint8Array): Chunk {
-    const dec = decodeChunk(bytes);
+  /**
+   * Restore a column from the stash. Returns null when there is nothing stashed, or when
+   * the stashed bytes are unreadable — a corrupted chunk must not throw in the middle of
+   * a tick; it is dropped (recorded in `corrupted`) and the column is regenerated.
+   */
+  private tryRestore(key: number): Chunk | null {
+    const bytes = this.stash.get(key);
+    if (!bytes) return null;
+    this.stash.delete(key);
+    let dec: { cx: number; cz: number; cells: Uint16Array };
+    try {
+      dec = decodeChunk(bytes);
+    } catch {
+      this.corrupted.push(key);
+      return null;
+    }
     const chunk = new Chunk(dec.cx, dec.cz, dec.cells);
     chunk.modified = true;
-    this.stash.delete(key);
     this.pending.delete(key);
     return this.insert(chunk);
   }
@@ -166,8 +175,8 @@ export class ChunkManager {
   loadColumn(generator: ChunkGenerator, cx: number, cz: number): Chunk | null {
     if (this.world.getChunk(cx, cz)) return null;
     const key = chunkKey(cx, cz);
-    const saved = this.stash.get(key);
-    if (saved) return this.restore(key, saved);
+    const restored = this.tryRestore(key);
+    if (restored) return restored;
     this.pending.delete(key);
     return this.insert(new Chunk(cx, cz, generator.generate(cx, cz)));
   }

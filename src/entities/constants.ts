@@ -71,6 +71,12 @@ export const MAX_SUBSTEPS = 32;
 export const PREFER_MIN_SPEED = 0.5;
 /** Strength of that bias (blocks of depth per unit of alignment; see PushOptions.preferWeight). */
 export const PREFER_WEIGHT = 0.3;
+/**
+ * The bias only applies when the minimal push is at least this deep (a blade that jumped well
+ * into the body this tick). A graze is always resolved by the minimal push: biasing it would
+ * pick a face many times deeper and fling the body (LESSONS 叶片侧面擦过船时船被猛踢).
+ */
+export const PREFER_MIN_DEPTH = 0.2;
 /** Free-spot search radius after a crush. */
 export const CRUSH_SEARCH_RADIUS = 3;
 /** Free-spot search radius for a body stuck inside world blocks. */
@@ -158,8 +164,8 @@ export const SPLASH_SPEED = 4;
 
 export const ITEM_GRAVITY = 16;
 export const ITEM_TERMINAL_SPEED = 40;
-/** Upward acceleration of a fully submerged item (floats with most of it under water). */
-export const ITEM_BUOYANCY = 18;
+/** Upward acceleration of a fully submerged item (floats with about 3/4 of it under water). */
+export const ITEM_BUOYANCY = 22;
 export const ITEM_GROUND_FRICTION = 0.6;
 export const ITEM_AIR_DRAG = 0.98;
 export const ITEM_WATER_DRAG = 0.85;
