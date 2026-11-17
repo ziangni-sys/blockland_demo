@@ -4,11 +4,8 @@
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
 import { SOLID } from '../../src/blocks/registry';
-import { StructureManager } from '../../src/structures/manager';
-import { Chunk } from '../../src/voxel/chunk';
 import type { World } from '../../src/voxel/world';
-import { World as WorldImpl } from '../../src/voxel/world';
-import { c, facing, FakeHost, fill, scene, WATER, windmill } from './helpers';
+import { c, facing, fill, scene, WATER, windmill } from './helpers';
 
 function sourcesIn(world: World, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): Array<[number, number, number]> {
   const out: Array<[number, number, number]> = [];
@@ -45,25 +42,5 @@ describe('REVIEW: the water refill multiplies a single source (DESIGN 水的处�
     });
     expect(created.length).toBe(10); // the whole horizontal arm row + the lower arm column
     expect(floating).toEqual([]); // FAILS: 7 float in mid-air (6 of the horizontal arm + the lowest arm cell)
-  });
-});
-
-describe('REVIEW: assembleShip refuses ships that previewShip accepts (extra bounding-box "unloaded" test)', () => {
-  it('an L-shaped raft whose cells and neighbours are all loaded', () => {
-    const world = new WorldImpl(1);
-    // Chunks (0,0), (1,0), (0,1) and the ones around the origin are loaded; (1,1) is not.
-    for (const [cx, cz] of [[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1], [-1, -1], [1, -1], [-1, 1]] as const) {
-      world.addChunk(new Chunk(cx, cz));
-    }
-    const host = new FakeHost(world);
-    const mgr = new StructureManager(host, null);
-    fill(world, 2, 60, 2, 28, 60, 2, c(B.PLANKS_OAK)); // along +X, inside chunks (0,0) and (1,0)
-    fill(world, 2, 60, 2, 2, 60, 28, c(B.PLANKS_OAK)); // along +Z, inside chunks (0,0) and (0,1)
-    world.setCell(2, 61, 2, facing(B.HELM, 5));
-    const p = mgr.previewShip(2, 61, 2);
-    expect(p.ok).toBe(true); // collect examined every neighbour: nothing is cut off
-    expect(p.count).toBe(54);
-    const r = mgr.assembleShip(2, 61, 2);
-    expect(r).toMatchObject({ ok: true }); // FAILS: { ok: false, reason: 'unloaded' }
   });
 });

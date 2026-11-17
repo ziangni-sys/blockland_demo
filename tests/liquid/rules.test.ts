@@ -550,7 +550,8 @@ describe('scheduling contract', () => {
 
   it('attach() is idempotent and its unsubscribe stops all scheduling', () => {
     const { world, fluids } = buildWorld(undefined, undefined, false);
-    world.setCell(2, SURFACE, 2, water());
+    // Far from every later edit: a source within slope reach of one would rightly be woken.
+    world.setCell(-12, SURFACE, -12, water());
     expect(world.ticks.size).toBe(0); // not attached yet
     const off = fluids.attach();
     expect(fluids.attach()).toBe(off);

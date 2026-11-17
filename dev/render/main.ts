@@ -103,6 +103,10 @@ const PRESETS: Record<string, () => { cam: CameraState; sub: 'none' | 'water' | 
     updateEntities(state.time);
     return { cam: lookAt({ x: r.x + 1.3, y: r.y + 0.9, z: r.z + 1.3 }, { x: r.x, y: r.y + 0.25, z: r.z }), sub: 'none' };
   },
+  anchor: () => {
+    const t = state.time;
+    return { cam: lookAt(shipToWorld(0.2, 5.6, 5.8, t), shipToWorld(2.5, 3.8, 3.2, t)), sub: 'none' };
+  },
   deck: () => {
     const t = state.time;
     return { cam: lookAt(shipToWorld(-1.5, 7, 6.5, t), shipToWorld(4, 3, 3, t)), sub: 'none' };
@@ -198,8 +202,10 @@ function environment(): EnvironmentState {
 }
 
 const msRing = new Float64Array(120);
+let stopped = false;
 let last = performance.now();
 function frame(now: number): void {
+  if (stopped) return;
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   if (!state.frozen) state.time += dt;
@@ -284,6 +290,8 @@ interface Harness {
   counters(): ReturnType<ThreeBackend['debugCounters']>;
   /** Removes / restores every structure (exercises structure teardown). */
   toggleStructures(on: boolean): void;
+  /** Stops the loop and releases every GPU resource. */
+  dispose(): void;
 }
 
 const harness: Harness = {
@@ -309,6 +317,10 @@ const harness: Harness = {
   },
   stats: () => ({ ...backend.stats(), frames: state.frames, frameMs: state.frameMs }),
   counters: () => (backend as ThreeBackend).debugCounters(),
+  dispose: () => {
+    stopped = true;
+    backend.dispose();
+  },
   toggleStructures: (on) => {
     if (on) {
       backend.setStructureMesh(SHIP, ship.ox, ship.oy, ship.oz, ship.mesh);

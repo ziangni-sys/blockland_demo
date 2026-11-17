@@ -692,6 +692,45 @@ export class LightEngine {
   }
 
   /**
+   * True when a present neighbour other than the cell itself gives cell `i` (opacity `op`,
+   * known to be < 15) at least `level` and is strictly brighter than it. "Strictly brighter"
+   * leaves out a same-level cell straight above a clear cell: in a removal wave that one is
+   * almost always part of the same wave, and counting it would keep cells that the wave then
+   * has to come back for.
+   */
+  private supported(c: Chunk, i: number, x: number, y: number, z: number, op: number, sky: boolean, level: number): boolean {
+    const shift = sky ? 4 : 0;
+    const light = c.light;
+    // A neighbour must hold at least `need` to give `level` with a normal step.
+    const need = level + stepCost(op);
+    if (need > MAX_LIGHT && !(sky && op === 0)) return false;
+    if (y < TOP_Y) {
+      const v = (light[i + DY]! >> shift) & 15;
+      if (v >= need || (sky && op === 0 && v > level)) return true;
+    }
+    if (need > MAX_LIGHT) return false;
+    if (y > 0 && ((light[i - DY]! >> shift) & 15) >= need) return true;
+    const lx = x & EDGE;
+    const lz = z & EDGE;
+    const cx = x >> CHUNK_SHIFT;
+    const cz = z >> CHUNK_SHIFT;
+    let n: Chunk | null;
+    if (lx > 0) {
+      if (((light[i - 1]! >> shift) & 15) >= need) return true;
+    } else if ((n = this.chunkAt(cx - 1, cz)) && ((n.light[i + WRAP_X]! >> shift) & 15) >= need) return true;
+    if (lx < EDGE) {
+      if (((light[i + 1]! >> shift) & 15) >= need) return true;
+    } else if ((n = this.chunkAt(cx + 1, cz)) && ((n.light[i - WRAP_X]! >> shift) & 15) >= need) return true;
+    if (lz > 0) {
+      if (((light[i - DZ]! >> shift) & 15) >= need) return true;
+    } else if ((n = this.chunkAt(cx, cz - 1)) && ((n.light[i + WRAP_Z]! >> shift) & 15) >= need) return true;
+    if (lz < EDGE) {
+      if (((light[i + DZ]! >> shift) & 15) >= need) return true;
+    } else if ((n = this.chunkAt(cx, cz + 1)) && ((n.light[i - WRAP_Z]! >> shift) & 15) >= need) return true;
+    return false;
+  }
+
+  /**
    * Process queued incremental work. budget = max cells to visit this call (default:
    * unlimited). Returns true when nothing is pending.
    *
@@ -927,7 +966,7 @@ export class LightEngine {
     // Could the removed level have supported this cell? An opaque cell receives nothing, so
     // any light it holds above its source is unsupported anyway.
     if (op < OPAQUE_LEVEL && (down && sky && op === 0 ? nl > o : nl > o - stepCost(op))) return nl;
-    if (this.pull(c, idx, x, y, z, op, sky) >= nl) return nl;
+    if (this.supported(c, idx, x, y, z, op, sky, nl)) return nl;
     c.light[idx] = sky ? (lb & 0x0f) | (src << 4) : (lb & 0xf0) | src;
     this.touch(c, idx);
     rem.push(nl, x, y, z);
