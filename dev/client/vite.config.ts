@@ -11,7 +11,7 @@ export default defineConfig({
   root,
   base: './',
   cacheDir: 'node_modules/.vite-client',
-  define: { __ARTIFACT__: 'false' },
+  define: { __ARTIFACT__: 'false', __BUILD_ID__: JSON.stringify(`dev-${Date.now()}`) },
   worker: { format: 'es' as const },
   // No HMR: other modules in this checkout are edited while the game runs, and a full page
   // reload in the middle of a scripted play-through only gets in the way. Reload by hand.

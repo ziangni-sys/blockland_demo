@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('../..', import.meta.url));
 export default defineConfig({
   root,
   cacheDir: 'node_modules/.vite-render',
-  define: { __ARTIFACT__: 'false' },
+  define: { __ARTIFACT__: 'false', __BUILD_ID__: JSON.stringify(`dev-${Date.now()}`) },
   server: { host: '127.0.0.1', port: 5181, strictPort: true },
   logLevel: 'info',
 });
