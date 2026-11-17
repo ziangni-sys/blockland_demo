@@ -85,9 +85,28 @@ export function setHidden(el: HTMLElement, hidden: boolean): void {
   if (el.hidden !== hidden) el.hidden = hidden;
 }
 
-/** Restart a CSS animation bound to `cls` (forces one style flush; call on change only). */
-export function restartAnimation(el: HTMLElement, cls: string): void {
-  el.classList.remove(cls);
-  void el.offsetWidth;
-  el.classList.add(cls);
+/**
+ * Replays a one-shot CSS animation without reading layout. The stylesheet defines the same
+ * animation under two class names, `<base>-a` and `<base>-b`; each fire() swaps the class,
+ * which changes animation-name and so starts a fresh run on the next style pass. (The usual
+ * remove-class / read offsetWidth / add-class trick forces a synchronous style and layout
+ * flush in the middle of update(), ~0.5 ms each time the held item changes.)
+ */
+export class Retrigger {
+  private flip = false;
+
+  constructor(
+    private readonly el: Element,
+    private readonly base: string,
+  ) {}
+
+  fire(): void {
+    this.flip = !this.flip;
+    this.el.classList.remove(`${this.base}-${this.flip ? 'b' : 'a'}`);
+    this.el.classList.add(`${this.base}-${this.flip ? 'a' : 'b'}`);
+  }
+
+  stop(): void {
+    this.el.classList.remove(`${this.base}-a`, `${this.base}-b`);
+  }
 }

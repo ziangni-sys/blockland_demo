@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CHUNK_VOLUME } from '../../src/core/constants';
 import { TerrainGenerator } from '../../src/worldgen/generator';
-import { GenService, type GenRequest } from '../../src/worldgen/protocol';
+import { GenService, MAX_GENERATORS, type GenRequest } from '../../src/worldgen/protocol';
 import { startGenWorker, type GenWorkerScope } from '../../src/worldgen/worker';
 import { chunkHash } from './helpers';
 
@@ -20,13 +20,31 @@ describe('generation worker protocol', () => {
     expect(service.generator(43)).not.toBe(service.generator(42));
   });
 
-  it('evicts the least recently used seed', () => {
+  it('evicts the least recently used seed and stays bounded', () => {
+    expect(MAX_GENERATORS).toBe(4);
     const service = new GenService();
-    const first = service.generator(1);
-    for (let s = 2; s <= 4; s++) service.generator(s);
-    expect(service.generator(1)).toBe(first); // touch 1 so 2 is now the oldest
-    service.generator(5);
-    expect(service.generator(1)).toBe(first);
+    const gens = new Map<number, TerrainGenerator>();
+    for (let s = 1; s <= 4; s++) gens.set(s, service.generator(s));
+    expect(service.size).toBe(4);
+    expect(service.generator(1)).toBe(gens.get(1)); // touch 1: recency is now 2, 3, 4, 1
+    service.generator(5); // evicts 2, the least recently used
+    expect(service.size).toBe(4);
+    // Recency is now 3, 4, 1, 5. Checking 3, 4 and 1 refreshes them in that order...
+    expect(service.generator(3)).toBe(gens.get(3));
+    expect(service.generator(4)).toBe(gens.get(4));
+    expect(service.generator(1)).toBe(gens.get(1));
+    expect(service.size).toBe(4);
+    // ...so 2 comes back as a NEW generator (it was evicted), which in turn evicts 5.
+    const two = service.generator(2);
+    expect(two).not.toBe(gens.get(2));
+    expect(two.seed).toBe(2);
+    expect(service.size).toBe(4);
+    expect(service.generator(3)).toBe(gens.get(3));
+    expect(service.generator(4)).toBe(gens.get(4));
+    expect(service.generator(1)).toBe(gens.get(1));
+    expect(service.generator(2)).toBe(two);
+    for (let s = 10; s < 30; s++) service.generator(s);
+    expect(service.size).toBe(MAX_GENERATORS);
   });
 
   it('reports malformed requests instead of throwing', () => {

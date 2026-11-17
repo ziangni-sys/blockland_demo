@@ -1,7 +1,8 @@
 /**
  * Adversarial review probes for the light engine (robustness / integration lens).
- * Failing tests here document verified defects; passing ones pin behaviour that was probed
- * and found correct.
+ * Every test here documented a verified defect; all are FIXED and kept as regression tests
+ * (cellChanged now reads the cell's current state; departed chunks are detected by the
+ * engine itself and their neighbours' border light is orphaned).
  */
 import { describe, expect, it } from 'vitest';
 import { ID_MASK, makeCell } from '../../src/blocks/cell';

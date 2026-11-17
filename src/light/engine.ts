@@ -38,10 +38,13 @@
  *    stale when another listener rewrote the cell first) and computes what the cell's own
  *    source and its neighbours give it. If that does not lower the cell, raise and flood fill.
  *    Otherwise reset the cell to its bare source and queue a removal.
- *  - Removal (classic removal BFS): every neighbour the removed level could have supported is
- *    reset to its source and removed in turn; every other lit neighbour is re-seeded so the
- *    hole refills. Removing too much is always safe (supporters are re-seeded); too little
- *    never happens. That is what makes budgeted, interleaved processing safe.
+ *  - Removal BFS: a neighbour the removed level could have supported is reset to its source
+ *    and removed in turn, unless a strictly brighter neighbour still supports it (then it
+ *    keeps its light; if that supporter turns out to be stale too, its own removal comes back
+ *    for the cell). A reset cell that a neighbour which kept its light could raise is queued
+ *    once as a refill request in the addition queue. Removing too much is always safe (the
+ *    hole refills from what is left); too little never happens (the invariant above). That is
+ *    what makes budgeted, interleaved processing safe.
  *  - Raising a column's heightmap removes the open-sky status of every cell between the old
  *    top and the new block; each of those cells is reset and removed explicitly. Lowering it
  *    needs nothing special: the cell that changed becomes a 15 source and its flood fill falls
@@ -53,12 +56,13 @@
  *    light that the chunk used to feed them is never pulled back in.
  *
  * QUEUES. Both additions and removals use bucket queues keyed by light level, processed from
- * 15 down. For additions this makes the BFS behave like Dijkstra (most cells are settled on
- * their first visit even with mixed costs). For removals it means a wave is reset in order of
- * decreasing level, so a lit neighbour is only ever re-seeded once the brighter cells that
- * could have fed it have been reset (with a stack, depth-first order kept re-seeding cells
- * that were about to be removed anyway). All queues are growable flat Int32Array stacks of
- * (x, y, z) world coordinates owned by the engine instance; there are no per-cell objects.
+ * 15 down. For additions (and refill requests, which share the queue) this makes the BFS
+ * behave like Dijkstra: most cells are settled on their first visit even with mixed costs.
+ * For removals it means a wave is reset in order of decreasing level, so by the time a cell's
+ * support is judged the brighter cells of the wave are already reset. (The first version used
+ * a stack and re-seeded every surviving neighbour; closing a skylight in a high roof took
+ * 87k visits for 20k changed bytes, now 43k.) All queues are growable flat Int32Array stacks
+ * of (x, y, z) world coordinates owned by the engine instance; there are no per-cell objects.
  * Chunks are resolved through a small direct-mapped cache, so inner loops do no Map lookups.
  *
  * DIRTY MARKING. Light is written straight into chunk.light. Which mesh sections that makes
@@ -222,7 +226,10 @@ export class LightEngine {
   /** Light bytes of a chunk being re-initialised, to mark exactly the cells that changed. */
   private reinitBefore: Uint8Array | null = null;
 
-  /** Every chunk this engine has lit, by chunk key. A chunk only exists for lighting while it is here AND still the world's chunk. */
+  /**
+   * Every chunk this engine has lit, by chunk key. A chunk only exists for lighting while it
+   * is here AND still the world's chunk at its position.
+   */
   private readonly litChunks = new Map<number, Chunk>();
   /** Scratch for syncChunks(): coordinates of chunks found gone (pairs). */
   private readonly goneCoords: number[] = [];
@@ -465,15 +472,17 @@ export class LightEngine {
    */
   private syncChunks(): void {
     const gone = this.goneCoords;
-    for (const [key, c] of this.litChunks) {
-      const present = this.world.getChunk(c.cx, c.cz) === c;
-      if (present && c.lit) continue;
+    const worldChunks = this.world.chunks; // keyed by chunkKey, like litChunks
+    // forEach rather than for..of over entries: no [key, value] array per chunk per call.
+    this.litChunks.forEach((c, key) => {
+      const present = worldChunks.get(key) === c;
+      if (present && c.lit) return;
       // A chunk object that left the world keeps no maintained light: if it is ever added
       // again it must go through initChunk.
       if (!present) c.lit = false;
       this.litChunks.delete(key);
       gone.push(c.cx, c.cz);
-    }
+    });
     this.gen++;
     if (gone.length === 0) return;
     for (let k = 0; k < gone.length; k += 2) {
@@ -955,7 +964,17 @@ export class LightEngine {
    * Visit neighbour `idx` of a removed cell that held level `o`; `down` = the neighbour is
    * below it. Resets the neighbour if `o` could have supported it. Returns its level after.
    */
-  private unlight(c: Chunk, idx: number, x: number, y: number, z: number, o: number, sky: boolean, down: boolean, rem: LevelQueue): number {
+  private unlight(
+    c: Chunk,
+    idx: number,
+    x: number,
+    y: number,
+    z: number,
+    o: number,
+    sky: boolean,
+    down: boolean,
+    rem: LevelQueue,
+  ): number {
     const lb = c.light[idx]!;
     const nl = sky ? lb >> 4 : lb & 15;
     if (nl === 0) return 0;
@@ -1053,7 +1072,9 @@ export class LightEngine {
         if (ty < 0 || ty >= SECTIONS_PER_CHUNK) continue;
         // An interior cell of the target section marks exactly that section.
         const half = SECTION_SIZE >> 1;
-        this.world.markDirty(((cx + BIT_DX[b]!) << CHUNK_SHIFT) + half, ty * SECTION_SIZE + half, ((cz + BIT_DZ[b]!) << CHUNK_SHIFT) + half);
+        const wx = ((cx + BIT_DX[b]!) << CHUNK_SHIFT) + half;
+        const wz = ((cz + BIT_DZ[b]!) << CHUNK_SHIFT) + half;
+        this.world.markDirty(wx, ty * SECTION_SIZE + half, wz);
       }
     }
   }

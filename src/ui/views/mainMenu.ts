@@ -12,6 +12,9 @@ import { h, svg, TextSlot } from '../dom';
 import { focusInto, type ScreenView } from './screen';
 import { buildLogo, button, ICON_SLIDERS, ICON_TRASH, keyTable, Segmented } from './widgets';
 
+/** How long world actions stay latched when the client neither switches screen nor updates the list. */
+const LATCH_MS = 2000;
+
 /** Side elevation of a raft with a four-sail rotor, drawn like a shipwright's plan. */
 function draftMarkup(): string {
   let wave = 'M0 322';
@@ -55,6 +58,16 @@ export class MainMenuView implements ScreenView {
   private worlds: readonly WorldSummary[] | null = null;
   private confirmId: string | null = null;
   private listLang: string | null = null;
+  /**
+   * Set after newWorld / loadWorld / deleteWorld until the request visibly lands (the screen
+   * changes or the world list changes) or LATCH_MS passes. Saves live in IndexedDB, so the
+   * client may switch screens a few frames later; without the latch the second click of a
+   * double-click would create a second world or load the same one twice.
+   */
+  private busy = false;
+  private busyTimer = 0;
+  /** A create was submitted: clear the form once the screen actually changes (kept on refusal). */
+  private clearFormOnHide = false;
 
   constructor(private readonly ctx: UiContext) {
     const d = ctx.doc;
@@ -152,7 +165,9 @@ export class MainMenuView implements ScreenView {
   }
 
   update(s: UiState): void {
-    if (this.worlds === null || !worldsEq(this.worlds, s.worlds) || this.listLang !== this.ctx.lang) {
+    const changed = this.worlds !== null && !worldsEq(this.worlds, s.worlds);
+    if (changed) this.setBusy(false); // the client answered a delete (or anything else)
+    if (this.worlds === null || changed || this.listLang !== this.ctx.lang) {
       // Copy: the client may mutate and re-send the same array.
       this.worlds = s.worlds.map((w) => ({ ...w }));
       if (this.confirmId !== null && !s.worlds.some((w) => w.id === this.confirmId)) this.confirmId = null;
@@ -169,6 +184,12 @@ export class MainMenuView implements ScreenView {
   onHide(): void {
     this.confirmId = null;
     this.listLang = null; // re-render (and drop any confirm row) next time
+    this.setBusy(false);
+    if (this.clearFormOnHide) {
+      this.clearFormOnHide = false;
+      this.nameInput.value = '';
+      this.seedInput.value = '';
+    }
   }
 
   relocalize(): void {
@@ -177,6 +198,7 @@ export class MainMenuView implements ScreenView {
   }
 
   dispose(): void {
+    this.setBusy(false);
     this.el.remove();
   }
 
@@ -188,13 +210,30 @@ export class MainMenuView implements ScreenView {
     this.modeHint.textContent = this.ctx.t(m === 'creative' ? 'menu.modeCreativeHint' : 'menu.modeSurvivalHint');
   }
 
+  /** Latch / release the menu's world actions (see `busy`). */
+  private setBusy(on: boolean): void {
+    const win = this.ctx.doc.defaultView;
+    if (this.busyTimer && win) win.clearTimeout(this.busyTimer);
+    this.busyTimer = 0;
+    this.busy = on;
+    if (on) {
+      this.el.dataset.busy = '1';
+      // A request the client turned down (it stays on the menu, list unchanged) must not leave
+      // the menu dead: release after a while so the player can try again.
+      if (win) this.busyTimer = win.setTimeout(() => this.setBusy(false), LATCH_MS);
+    } else {
+      delete this.el.dataset.busy;
+    }
+  }
+
   private create(): void {
+    if (this.busy) return;
     const name = this.nameInput.value.trim() || this.ctx.t('menu.defaultWorldName');
     const seed = this.seedInput.value.trim();
     this.nameInput.blur();
     this.seedInput.blur();
-    this.nameInput.value = '';
-    this.seedInput.value = '';
+    this.clearFormOnHide = true;
+    this.setBusy(true);
     this.ctx.actions.newWorld({ name, seed, mode: this.mode });
   }
 
@@ -203,8 +242,13 @@ export class MainMenuView implements ScreenView {
     if (!target) return;
     const id = target.closest<HTMLElement>('[data-id]')?.dataset.id;
     if (id === undefined) return;
-    switch (target.dataset.act) {
+    const act = target.dataset.act;
+    // While a request is in flight every row action is inert: the second click of a
+    // double-click on "Delete forever" would otherwise land on the re-rendered row's Play.
+    if (this.busy && act !== 'cancel') return;
+    switch (act) {
       case 'play':
+        this.setBusy(true);
         this.ctx.actions.loadWorld(id);
         break;
       case 'delete':
@@ -212,6 +256,7 @@ export class MainMenuView implements ScreenView {
         break;
       case 'confirm':
         this.confirmId = null;
+        this.setBusy(true);
         this.ctx.actions.deleteWorld(id);
         this.renderList();
         break;

@@ -10,7 +10,7 @@ import { Rng } from '../../src/core/rng';
 import { LightEngine } from '../../src/light/engine';
 import { Chunk } from '../../src/voxel/chunk';
 import { World } from '../../src/voxel/world';
-import { makeTerrainChunk } from './terrain';
+import { makeFlatChunk, makeTerrainChunk } from './terrain';
 
 /** Chunk coordinates in rings around the origin, the order a streaming client loads them. */
 function spiral(radius: number): Array<[number, number]> {
@@ -107,7 +107,70 @@ describe('light engine performance', () => {
     }
     console.log(`[light perf] open/close a shaft into a 40x40x8 cavern: ${holeTimes.map(fmt).join(', ')}`);
 
+    // update() with nothing queued still checks the lit-chunk registry for unloaded chunks.
+    const idle: number[] = [];
+    for (let k = 0; k < 200; k++) {
+      const t0 = performance.now();
+      engine.update();
+      idle.push(performance.now() - t0);
+    }
+    const ids = stats(idle.slice(20));
+    console.log(`[light perf] idle update() with ${world.chunks.size} lit chunks: median ${fmt(ids.median)}, max ${fmt(ids.max)}`);
+
+    // Unloading: the next update() relights the departed chunks' neighbours without them.
+    const unloadTimes: number[] = [];
+    for (const cx of [-5, 5]) {
+      for (let cz = -5; cz <= 5; cz += 2) world.removeChunk(cx, cz);
+      const t0 = performance.now();
+      engine.update();
+      unloadTimes.push(performance.now() - t0);
+    }
+    console.log(`[light perf] update() after unloading 6 edge chunks: ${unloadTimes.map(fmt).join(', ')}`);
+
     expect(is.mean).toBeLessThan(40);
     expect(es.median).toBeLessThan(2);
+    expect(ids.median).toBeLessThan(1);
+  });
+
+  it('building and opening a high roof (deep lossless sky columns)', () => {
+    // The worst common case for sky light: every roof block at y = 120 shades a 115-cell column.
+    const world = new World(3);
+    const engine = new LightEngine(world);
+    engine.attach();
+    for (let cz = -1; cz <= 2; cz++) {
+      for (let cx = -1; cx <= 2; cx++) {
+        const c = makeFlatChunk(cx, cz, 4);
+        world.addChunk(c);
+        engine.initChunk(c);
+      }
+    }
+    const stone = makeCell(B.STONE);
+    const build: number[] = [];
+    for (let x = 4; x < 28; x++) {
+      for (let z = 4; z < 28; z++) {
+        const t0 = performance.now();
+        world.setCell(x, 120, z, stone);
+        engine.update();
+        build.push(performance.now() - t0);
+      }
+    }
+    const bs = stats(build.slice(50));
+    const holes: number[] = [];
+    for (let k = 0; k < 4; k++) {
+      let t0 = performance.now();
+      world.setCell(16, 120, 16, 0);
+      engine.update();
+      holes.push(performance.now() - t0);
+      t0 = performance.now();
+      world.setCell(16, 120, 16, stone);
+      engine.update();
+      holes.push(performance.now() - t0);
+    }
+    console.log(
+      `[light perf] roof block at y=120 over ground at y=4 x${build.length - 50}: ` +
+        `median ${fmt(bs.median)}, p95 ${fmt(bs.p95)}, max ${fmt(bs.max)}`,
+    );
+    console.log(`[light perf] open/close a skylight in the 24x24 roof: ${holes.map(fmt).join(', ')}`);
+    expect(bs.median).toBeLessThan(2);
   });
 });

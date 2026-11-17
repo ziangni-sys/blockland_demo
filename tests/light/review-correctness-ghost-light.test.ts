@@ -1,6 +1,9 @@
 /**
  * Adversarial review (correctness): permanent ghost light when a removal chain is cut by
- * re-initialising or unloading a chunk.
+ * re-initialising or unloading a chunk. FIXED: these are regression tests now. The engine
+ * notices departed / re-initialised chunks (update() and initChunk() check its lit-chunk
+ * registry against the world) and orphans the border light of their neighbours; the
+ * "Engine: ..." notes below record what the original engine produced.
  *
  * The removal BFS only reaches stale cells by walking strictly decreasing light from the
  * removed source. Two things cut that walk:

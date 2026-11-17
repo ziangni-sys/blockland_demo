@@ -10,7 +10,8 @@
  *   sky        far-plane dome drawn after the opaque world
  *
  * Render order: opaque (renderOrder 0, front to back) -> cutout (1) -> sky (50) ->
- * transparent list (water 0, overlays 60+).
+ * transparent list (water 0, overlays 60+). Every voxel pass culls back faces (mesh
+ * contract). Rendering goes straight to the canvas; materials encode sRGB themselves.
  */
 import * as THREE from 'three/webgpu';
 import { renderGroup, uniform } from 'three/tsl';

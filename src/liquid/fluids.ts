@@ -71,6 +71,23 @@ import type { Chunk } from '../voxel/chunk';
 import { SET_NO_NEIGHBOR_UPDATE } from '../voxel/grid';
 import { posKey, type World } from '../voxel/world';
 
+// Imported values used on hot paths, bound once to module constants. Under the test runner
+// (vite's SSR module transform) every use of an imported name is a property read on a module
+// namespace object; with thousands of liquid ticks per world tick that made them 2-3x slower
+// in headless runs. Bundled builds are unaffected either way.
+const CELL_ID = ID_MASK;
+const STATE_POS = STATE_SHIFT;
+const IS_SOLID: Uint8Array = SOLID;
+const LIQUID_KIND: Uint8Array = LIQUID;
+const WATER_ID = B.WATER;
+const LAVA_ID = B.LAVA;
+const UNLOADED_ID = B.UNLOADED;
+const LOCAL_MASK = CHUNK_MASK;
+const LOCAL_SHIFT = CHUNK_SHIFT;
+const NO_NEIGHBOR_UPDATE = SET_NO_NEIGHBOR_UPDATE;
+const amountOf = liquidAmount;
+const cellOf = makeCell;
+
 // ------------------------------------------------------------------ tuning (docs/DESIGN.md 液体)
 
 /** Ticks between updates of a water cell. */
@@ -111,7 +128,7 @@ interface LiquidProps {
 }
 
 const WATER: LiquidProps = Object.freeze({
-  id: B.WATER,
+  id: WATER_ID,
   bit: WATER_BIT,
   delay: WATER_TICK_DELAY,
   dropOff: WATER_DROP_OFF,
@@ -121,7 +138,7 @@ const WATER: LiquidProps = Object.freeze({
   hardens: false,
 });
 const LAVA: LiquidProps = Object.freeze({
-  id: B.LAVA,
+  id: LAVA_ID,
   bit: LAVA_BIT,
   delay: LAVA_TICK_DELAY,
   dropOff: LAVA_DROP_OFF,
@@ -132,7 +149,7 @@ const LAVA: LiquidProps = Object.freeze({
 });
 
 function liquidProps(blockId: number): LiquidProps | null {
-  return blockId === B.WATER ? WATER : blockId === B.LAVA ? LAVA : null;
+  return blockId === WATER_ID ? WATER : blockId === LAVA_ID ? LAVA : null;
 }
 
 // ------------------------------------------------------------------ cell helpers
@@ -153,22 +170,22 @@ const CONTACT = 1;
 /** No loaded neighbour is water, but an unloaded one might be. */
 const CONTACT_UNKNOWN = 2;
 
-const CELL_OBSIDIAN = makeCell(B.OBSIDIAN);
-const CELL_RUBBLE = makeCell(B.COBBLE);
+const CELL_OBSIDIAN = cellOf(B.OBSIDIAN);
+const CELL_RUBBLE = cellOf(B.COBBLE);
 
 /** Number of set bits of a 4-bit mask. */
 const POP4: readonly number[] = Object.freeze([0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4]);
 
 function liquidStateOf(cell: number): number {
-  return (cell >>> STATE_SHIFT) & LIQUID_STATE_BITS;
+  return (cell >>> STATE_POS) & LIQUID_STATE_BITS;
 }
 
 function isUnloaded(cell: number): boolean {
-  return (cell & ID_MASK) === B.UNLOADED;
+  return (cell & CELL_ID) === UNLOADED_ID;
 }
 
 function isSourceOf(cell: number, id: number): boolean {
-  return (cell & ID_MASK) === id && liquidStateOf(cell) === SOURCE;
+  return (cell & CELL_ID) === id && liquidStateOf(cell) === SOURCE;
 }
 
 /**
@@ -178,12 +195,12 @@ function isSourceOf(cell: number, id: number): boolean {
  * and the deeprock below y = 0), never sources, never the other liquid.
  */
 function canFlowInto(cell: number, id: number, amount: number): boolean {
-  const cid = cell & ID_MASK;
-  if (SOLID[cid] === 1) return false;
-  if (LIQUID[cid] === 0) return true;
+  const cid = cell & CELL_ID;
+  if (IS_SOLID[cid] === 1) return false;
+  if (LIQUID_KIND[cid] === 0) return true;
   if (cid !== id) return false;
   const s = liquidStateOf(cell);
-  return s !== SOURCE && liquidAmount(s) < amount;
+  return s !== SOURCE && amountOf(s) < amount;
 }
 
 /**
@@ -191,8 +208,8 @@ function canFlowInto(cell: number, id: number, amount: number): boolean {
  * of the same liquid (classic canPassThrough), independent of amounts.
  */
 function isPassable(cell: number, id: number): boolean {
-  const cid = cell & ID_MASK;
-  return SOLID[cid] === 0 && !(cid === id && liquidStateOf(cell) === SOURCE);
+  const cid = cell & CELL_ID;
+  return IS_SOLID[cid] === 0 && !(cid === id && liquidStateOf(cell) === SOURCE);
 }
 
 /**
@@ -203,7 +220,7 @@ function isPassable(cell: number, id: number): boolean {
  * liquid (contact turns it hard, which wakes everything that looked at it).
  */
 function isHole(below: number): boolean {
-  return SOLID[below & ID_MASK] === 0;
+  return IS_SOLID[below & CELL_ID] === 0;
 }
 
 /**
@@ -213,19 +230,19 @@ function isHole(below: number): boolean {
  * everything else (passable hole).
  */
 function slopeChange(oldCell: number, newCell: number): number {
-  const o = oldCell & ID_MASK;
-  const n = newCell & ID_MASK;
-  if (SOLID[o] !== SOLID[n]) return BOTH_KINDS;
-  if (SOLID[o] === 1) return 0;
+  const o = oldCell & CELL_ID;
+  const n = newCell & CELL_ID;
+  if (IS_SOLID[o] !== IS_SOLID[n]) return BOTH_KINDS;
+  if (IS_SOLID[o] === 1) return 0;
   let kinds = 0;
-  if (isSourceOf(oldCell, B.WATER) !== isSourceOf(newCell, B.WATER)) kinds |= WATER_BIT;
-  if (isSourceOf(oldCell, B.LAVA) !== isSourceOf(newCell, B.LAVA)) kinds |= LAVA_BIT;
+  if (isSourceOf(oldCell, WATER_ID) !== isSourceOf(newCell, WATER_ID)) kinds |= WATER_BIT;
+  if (isSourceOf(oldCell, LAVA_ID) !== isSourceOf(newCell, LAVA_ID)) kinds |= LAVA_BIT;
   return kinds;
 }
 
 /** A neighbour that keeps `source` at rest: a hard block or the very same source cell. */
 function holdsSource(neighbour: number, source: number): boolean {
-  return neighbour === source || SOLID[neighbour & ID_MASK] === 1;
+  return neighbour === source || IS_SOLID[neighbour & CELL_ID] === 1;
 }
 
 // ------------------------------------------------------------------ direction tables
@@ -253,6 +270,9 @@ const BLOCKED = -1;
 const UNKNOWN = -1;
 /** settleLevel() result: no answer at this level yet, search on. */
 const SEARCH_ON = -2;
+
+/** Size of the "verified at rest" memo (direct-mapped, power of two). */
+const REST_MEMO_SIZE = 4096;
 
 interface DeferredCell {
   readonly x: number;
@@ -286,6 +306,16 @@ export class Fluids {
   private readonly unloadedFront = new Uint8Array(SLOPE_CELLS);
   private stamp = 0;
 
+  // Cells wakeSlopeArea() found at rest, valid while `restGen` stays the same: any world write
+  // (seen by the change hook, hence only while attached), chunk insert or world tick starts a
+  // new generation. Bulk callers wake thousands of cells whose slope areas overlap almost
+  // entirely (a hull assembled in a lake): without the memo every resting lake cell nearby is
+  // re-checked once per call. Direct-mapped: a collision only costs a re-check.
+  private readonly restKey = new Float64Array(REST_MEMO_SIZE);
+  private readonly restStamp = new Float64Array(REST_MEMO_SIZE);
+  private restGen = 1;
+  private restTime = 0;
+
   constructor(world: World) {
     this.world = world;
   }
@@ -310,7 +340,7 @@ export class Fluids {
 
   /** True for block ids handled here (B.WATER, B.LAVA). */
   handles(blockId: number): boolean {
-    return blockId === B.WATER || blockId === B.LAVA;
+    return blockId === WATER_ID || blockId === LAVA_ID;
   }
 
   /** Number of cells waiting for an unloaded chunk (diagnostics and tests). */
@@ -328,7 +358,7 @@ export class Fluids {
     if (!L) return;
     const world = this.world;
     const cell = world.getCell(x, y, z);
-    if ((cell & ID_MASK) !== L.id) return;
+    if ((cell & CELL_ID) !== L.id) return;
     if (this.deferred.size !== 0) this.deferred.delete(posKey(x, y, z));
     const nb = this.tickNb;
     let unknown = this.readNeighbours(x, y, z, nb);
@@ -360,7 +390,7 @@ export class Fluids {
         return;
       }
       if (next !== state) {
-        const nextCell = makeCell(L.id, next);
+        const nextCell = cellOf(L.id, next);
         world.setCell(x, y, z, nextCell);
         // Another change listener may have replaced the cell, or its surroundings, synchronously.
         if (world.getCell(x, y, z) !== nextCell) return;
@@ -383,7 +413,7 @@ export class Fluids {
    */
   wakeAround(x: number, y: number, z: number): void {
     const c = this.world.getCell(x, y, z);
-    if (LIQUID[c & ID_MASK] !== 0) this.scheduleCell(x, y, z, c);
+    if (LIQUID_KIND[c & CELL_ID] !== 0) this.scheduleCell(x, y, z, c);
     this.wakeNeighbours(x, y, z);
     // The previous content is unknown here: assume both kinds of search saw a difference.
     this.wakeSlopeArea(x, y, z, BOTH_KINDS);
@@ -401,7 +431,8 @@ export class Fluids {
   rescheduleChunk(chunk: Chunk): void {
     const world = this.world;
     if (world.getChunk(chunk.cx, chunk.cz) !== chunk) return; // not (or no longer) in the world
-    this.scanColumns(chunk, 0, CHUNK_MASK, 0, CHUNK_MASK);
+    this.restGen++; // cells next to the new chunk read different neighbours now
+    this.scanColumns(chunk, 0, LOCAL_MASK, 0, LOCAL_MASK);
     // Border columns of loaded neighbours facing this chunk: until now they saw unloaded
     // (hard) space here, so their at-rest status may have changed.
     for (let d = 0; d < 4; d++) {
@@ -411,14 +442,14 @@ export class Fluids {
       if (!n) continue;
       // n lies in direction d, so the face touching `chunk` is n's border on the opposite side.
       if (dx !== 0) {
-        const lx = dx === 1 ? 0 : CHUNK_MASK;
-        this.scanColumns(n, lx, lx, 0, CHUNK_MASK);
+        const lx = dx === 1 ? 0 : LOCAL_MASK;
+        this.scanColumns(n, lx, lx, 0, LOCAL_MASK);
       } else {
-        const lz = dz === 1 ? 0 : CHUNK_MASK;
-        this.scanColumns(n, 0, CHUNK_MASK, lz, lz);
+        const lz = dz === 1 ? 0 : LOCAL_MASK;
+        this.scanColumns(n, 0, LOCAL_MASK, lz, lz);
       }
     }
-    this.wakeDeferred(chunk.cx << CHUNK_SHIFT, chunk.cz << CHUNK_SHIFT);
+    this.wakeDeferred(chunk.cx << LOCAL_SHIFT, chunk.cz << LOCAL_SHIFT);
   }
 
   /**
@@ -431,29 +462,29 @@ export class Fluids {
   private scanColumns(chunk: Chunk, lx0: number, lx1: number, lz0: number, lz1: number): void {
     const world = this.world;
     const cells = chunk.cells;
-    const x0 = chunk.cx << CHUNK_SHIFT;
-    const z0 = chunk.cz << CHUNK_SHIFT;
+    const x0 = chunk.cx << LOCAL_SHIFT;
+    const z0 = chunk.cz << LOCAL_SHIFT;
     // Neighbour arrays for border reads; a missing neighbour reads as unloaded (hard).
     const east = world.getChunk(chunk.cx + 1, chunk.cz)?.cells ?? null;
     const west = world.getChunk(chunk.cx - 1, chunk.cz)?.cells ?? null;
     const south = world.getChunk(chunk.cx, chunk.cz + 1)?.cells ?? null;
     const north = world.getChunk(chunk.cx, chunk.cz - 1)?.cells ?? null;
     const ROW = CHUNK_SIZE;
-    const FLIP_X = CHUNK_MASK; // index distance between lx = 15 and lx = 0 of the same row
-    const FLIP_Z = CHUNK_MASK * ROW;
+    const FLIP_X = LOCAL_MASK; // index distance between lx = 15 and lx = 0 of the same row
+    const FLIP_Z = LOCAL_MASK * ROW;
     for (let y = 0; y < WORLD_HEIGHT; y++) {
       const layer = y << 8;
       for (let lz = lz0; lz <= lz1; lz++) {
         for (let lx = lx0; lx <= lx1; lx++) {
-          const i = layer | (lz << CHUNK_SHIFT) | lx;
+          const i = layer | (lz << LOCAL_SHIFT) | lx;
           const c = cells[i]!;
-          const id = c & ID_MASK;
-          if (LIQUID[id] === 0) continue;
-          if (id === B.WATER && liquidStateOf(c) === SOURCE) {
+          const id = c & CELL_ID;
+          if (LIQUID_KIND[id] === 0) continue;
+          if (id === WATER_ID && liquidStateOf(c) === SOURCE) {
             const below = y > 0 ? cells[i - 256]! : CELL_BELOW_WORLD;
-            const e = lx < CHUNK_MASK ? cells[i + 1]! : east ? east[i - FLIP_X]! : CELL_UNLOADED;
+            const e = lx < LOCAL_MASK ? cells[i + 1]! : east ? east[i - FLIP_X]! : CELL_UNLOADED;
             const w = lx > 0 ? cells[i - 1]! : west ? west[i + FLIP_X]! : CELL_UNLOADED;
-            const s = lz < CHUNK_MASK ? cells[i + ROW]! : south ? south[i - FLIP_Z]! : CELL_UNLOADED;
+            const s = lz < LOCAL_MASK ? cells[i + ROW]! : south ? south[i - FLIP_Z]! : CELL_UNLOADED;
             const n = lz > 0 ? cells[i - ROW]! : north ? north[i + FLIP_Z]! : CELL_UNLOADED;
             if (
               holdsSource(below, c) &&
@@ -481,8 +512,9 @@ export class Fluids {
     newCell: number,
     flags: number,
   ): void => {
-    if (LIQUID[newCell & ID_MASK] !== 0) this.scheduleCell(x, y, z, newCell);
-    if ((flags & SET_NO_NEIGHBOR_UPDATE) !== 0) return;
+    this.restGen++;
+    if (LIQUID_KIND[newCell & CELL_ID] !== 0) this.scheduleCell(x, y, z, newCell);
+    if ((flags & NO_NEIGHBOR_UPDATE) !== 0) return;
     this.wakeNeighbours(x, y, z);
     const kinds = slopeChange(oldCell, newCell);
     if (kinds !== 0) this.wakeSlopeArea(x, y, z, kinds);
@@ -507,6 +539,13 @@ export class Fluids {
    */
   private wakeSlopeArea(x: number, y: number, z: number, kinds: number): void {
     const world = this.world;
+    if (world.time !== this.restTime || this.detachFn === null) {
+      this.restTime = world.time;
+      this.restGen++;
+    }
+    const gen = this.restGen;
+    const keys = this.restKey;
+    const stamps = this.restStamp;
     const r = (kinds & WATER_BIT) !== 0 ? WATER.reach : LAVA.reach;
     const top = Math.min(y + 1, WORLD_HEIGHT - 1);
     for (let ly = y; ly <= top; ly++) {
@@ -518,9 +557,19 @@ export class Fluids {
           const dist = adz + (dx < 0 ? -dx : dx);
           if (dist < nearest) continue;
           const c = world.getCell(x + dx, ly, z + dz);
-          const L = liquidProps(c & ID_MASK);
+          const L = liquidProps(c & CELL_ID);
           if (!L || (kinds & L.bit) === 0 || dist > L.reach) continue;
-          if (this.isRestless(x + dx, ly, z + dz, c, L)) this.scheduleCell(x + dx, ly, z + dz, c);
+          const qx = x + dx;
+          const qz = z + dz;
+          const key = posKey(qx, ly, qz);
+          const slot = (qx * 73 + qz * 179 + ly * 31) & (REST_MEMO_SIZE - 1);
+          if (stamps[slot] === gen && keys[slot] === key) continue;
+          if (this.isRestless(qx, ly, qz, c, L)) {
+            this.scheduleCell(qx, ly, qz, c);
+          } else {
+            keys[slot] = key;
+            stamps[slot] = gen;
+          }
         }
       }
     }
@@ -528,19 +577,19 @@ export class Fluids {
 
   private scheduleIfLiquid(x: number, y: number, z: number): void {
     const c = this.world.getCell(x, y, z);
-    if (LIQUID[c & ID_MASK] !== 0) this.scheduleCell(x, y, z, c);
+    if (LIQUID_KIND[c & CELL_ID] !== 0) this.scheduleCell(x, y, z, c);
   }
 
   /** Schedule the tick of a liquid cell; lava already touching water reacts right away. */
   private scheduleCell(x: number, y: number, z: number, cell: number): void {
-    const L = liquidProps(cell & ID_MASK);
+    const L = liquidProps(cell & CELL_ID);
     if (!L) return;
     const delay = L.hardens && this.waterContact(x, y, z) === CONTACT ? CONTACT_TICK_DELAY : L.delay;
     this.world.scheduleTick(x, y, z, L.id, delay);
   }
 
   private scheduleIfRestless(x: number, y: number, z: number, cell: number): void {
-    const L = liquidProps(cell & ID_MASK);
+    const L = liquidProps(cell & CELL_ID);
     if (L && this.isRestless(x, y, z, cell, L)) this.scheduleCell(x, y, z, cell);
   }
 
@@ -562,7 +611,7 @@ export class Fluids {
     if (state !== SOURCE && this.nextState(L, nb, unknown, world.getCell(x, y + 1, z), below) !== state) return true;
     if (canFlowInto(below, id, 8)) return true;
     if (state !== SOURCE && isHole(below)) return false;
-    const side = liquidAmount(state) - L.dropOff;
+    const side = amountOf(state) - L.dropOff;
     if (side <= 0) return false;
     for (let d = 0; d < 4; d++) {
       if ((unknown & (1 << d)) === 0 && canFlowInto(nb[d]!, id, side)) return true;
@@ -585,18 +634,18 @@ export class Fluids {
     for (let d = 0; d < 4; d++) {
       if ((unknown & (1 << d)) !== 0) continue;
       const c = nb[d]!;
-      if ((c & ID_MASK) !== id) continue;
+      if ((c & CELL_ID) !== id) continue;
       const s = liquidStateOf(c);
       if (s === SOURCE) sources++;
-      const a = liquidAmount(s);
+      const a = amountOf(s);
       if (a > best) best = a;
     }
     const missing = POP4[unknown]!;
-    if (L.infinite && (SOLID[below & ID_MASK] === 1 || isSourceOf(below, id))) {
+    if (L.infinite && (IS_SOLID[below & CELL_ID] === 1 || isSourceOf(below, id))) {
       if (sources >= 2) return SOURCE;
       if (sources + missing >= 2) return UNDECIDED;
     }
-    if ((above & ID_MASK) === id) return FALLING;
+    if ((above & CELL_ID) === id) return FALLING;
     // A missing neighbour could only matter by being stronger than every known one.
     if (missing !== 0 && best < 8) return UNDECIDED;
     const amount = best - L.dropOff;
@@ -617,7 +666,7 @@ export class Fluids {
     const id = L.id;
     if (canFlowInto(below, id, 8)) {
       // Over a hole liquid only falls (classic rule).
-      let target = makeCell(id, FALLING);
+      let target = cellOf(id, FALLING);
       if (L.hardens) {
         const contact = this.waterContact(x, y - 1, z);
         if (contact === CONTACT_UNKNOWN) {
@@ -632,7 +681,7 @@ export class Fluids {
     }
     if (state !== SOURCE && isHole(below)) return;
 
-    const side = liquidAmount(state) - L.dropOff;
+    const side = amountOf(state) - L.dropOff;
     if (side <= 0) return;
     // Cheap exit before the slope search: most ticks of settled liquid end here. An unloaded
     // neighbour is never a receiver (nothing may be written there); when its chunk arrives,
@@ -659,7 +708,7 @@ export class Fluids {
         }
       }
     }
-    const flowing = makeCell(id, 8 - side);
+    const flowing = cellOf(id, 8 - side);
     for (let d = 0; d < 4; d++) {
       if ((dirs & (1 << d)) === 0) continue;
       const nx = x + HDX[d]!;
@@ -693,11 +742,11 @@ export class Fluids {
   private slopeDirections(x: number, y: number, z: number, L: LiquidProps, receivers: number): number {
     const id = L.id;
     // Most of the search area lies in the searching cell's own chunk: read that one directly.
-    const home = this.world.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
+    const home = this.world.getChunk(x >> LOCAL_SHIFT, z >> LOCAL_SHIFT);
     if (!home) return UNKNOWN; // unreachable: the cell itself was just read from it
     const hc = home.cells;
-    const hx = home.cx << CHUNK_SHIFT;
-    const hz = home.cz << CHUNK_SHIFT;
+    const hx = home.cx << LOCAL_SHIFT;
+    const hz = home.cz << LOCAL_SHIFT;
     const seen = this.seen;
     const level = this.level;
     const mask = this.dirMask;
@@ -810,21 +859,21 @@ export class Fluids {
   private peek(cells: Uint16Array, hx: number, hz: number, qx: number, qy: number, qz: number): number {
     const lx = qx - hx;
     const lz = qz - hz;
-    if (((lx | lz) & ~CHUNK_MASK) === 0 && qy >= 0) return cells[lx | (lz << CHUNK_SHIFT) | (qy << 8)]!;
+    if (((lx | lz) & ~LOCAL_MASK) === 0 && qy >= 0) return cells[lx | (lz << LOCAL_SHIFT) | (qy << 8)]!;
     return this.world.getCell(qx, qy, qz);
   }
 
   /** Is water among the 6 neighbours of (x,y,z)? CONTACT, NO_CONTACT or CONTACT_UNKNOWN. */
   private waterContact(x: number, y: number, z: number): number {
     const w = this.world;
-    if ((w.getCell(x, y + 1, z) & ID_MASK) === B.WATER || (w.getCell(x, y - 1, z) & ID_MASK) === B.WATER) {
+    if ((w.getCell(x, y + 1, z) & CELL_ID) === WATER_ID || (w.getCell(x, y - 1, z) & CELL_ID) === WATER_ID) {
       return CONTACT;
     }
     let unknown = false;
     for (let d = 0; d < 4; d++) {
-      const id = w.getCell(x + HDX[d]!, y, z + HDZ[d]!) & ID_MASK;
-      if (id === B.WATER) return CONTACT;
-      if (id === B.UNLOADED) unknown = true;
+      const id = w.getCell(x + HDX[d]!, y, z + HDZ[d]!) & CELL_ID;
+      if (id === WATER_ID) return CONTACT;
+      if (id === UNLOADED_ID) unknown = true;
     }
     return unknown ? CONTACT_UNKNOWN : NO_CONTACT;
   }

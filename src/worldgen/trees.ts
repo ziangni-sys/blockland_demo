@@ -244,31 +244,40 @@ function stampConiferLeaves(cells: Uint16Array, x0: number, z0: number, t: TreeS
   }
 }
 
-function stampLogs(cells: Uint16Array, x0: number, z0: number, t: TreeSpec): void {
-  const conifer = t.kind === TREE_CONIFER;
-  const log = conifer ? PINE_LOG : OAK_LOG;
+function stampTrunk(cells: Uint16Array, x0: number, z0: number, t: TreeSpec): void {
+  const log = t.kind === TREE_CONIFER ? PINE_LOG : OAK_LOG;
   for (let k = 1; k <= t.trunk; k++) putLog(cells, x0, z0, t.x, t.ground + k, t.z, log);
-  if (!conifer && t.radius >= LOBE_MIN_RADIUS) {
-    // Branches feeding the two side lobes (see stampBroadleafLeaves).
-    const top = t.ground + t.trunk;
-    for (let k = 0; k < 2; k++) {
-      const d = lobeDir(t, k);
-      const dx = LOBE_DX[d]!;
-      const dz = LOBE_DZ[d]!;
-      const branch = dx !== 0 ? OAK_LOG_X : OAK_LOG_Z;
-      putLog(cells, x0, z0, t.x + dx, top - 2, t.z + dz, branch);
-      putLog(cells, x0, z0, t.x + 2 * dx, top - 2, t.z + 2 * dz, branch);
-    }
-  }
   // The turf under a trunk would be smothered; make it dirt.
   const gi = chunkIndex(x0, z0, t.x, t.ground, t.z);
   if (gi >= 0 && cells[gi] === TURF) cells[gi] = DIRT;
 }
 
 /**
+ * Branches feeding the two side lobes of a large broadleaf (see stampBroadleafLeaves).
+ * Branches only reach 2 cells sideways, from top - 2 >= ground + 4 of a trunk of 6+ logs,
+ * while the slope test keeps the 4 neighbouring columns within 2 of the ground: the first
+ * branch cell is therefore always air or leaves, and the branch never floats.
+ */
+function stampBranches(cells: Uint16Array, x0: number, z0: number, t: TreeSpec): void {
+  if (t.kind === TREE_CONIFER || t.radius < LOBE_MIN_RADIUS) return;
+  const top = t.ground + t.trunk;
+  for (let k = 0; k < 2; k++) {
+    const d = lobeDir(t, k);
+    const dx = LOBE_DX[d]!;
+    const dz = LOBE_DZ[d]!;
+    const branch = dx !== 0 ? OAK_LOG_X : OAK_LOG_Z;
+    putLog(cells, x0, z0, t.x + dx, top - 2, t.z + dz, branch);
+    putLog(cells, x0, z0, t.x + 2 * dx, top - 2, t.z + 2 * dz, branch);
+  }
+}
+
+/**
  * Stamp the parts of all trees in `trees` that fall inside the chunk with corner column
- * (x0, z0). Leaves of all trees first, then logs, so a trunk is never interrupted by a
- * neighbouring crown, independently of tree order.
+ * (x0, z0), in three passes over ALL trees: leaves (into air only), trunks (over air and
+ * leaves), branches (over air and leaves). Trunks can stand only 2 cells apart, exactly a
+ * branch's reach, so the passes are what keeps a neighbour's branch out of a trunk and a
+ * crown from interrupting one, whatever the tree order. (Two branches meeting in one cell
+ * resolve by list order, which is a world order and the same for every chunk.)
  */
 export function stampTrees(cells: Uint16Array, x0: number, z0: number, trees: TreeList): void {
   for (let k = 0; k < trees.count; k++) {
@@ -276,5 +285,6 @@ export function stampTrees(cells: Uint16Array, x0: number, z0: number, trees: Tr
     if (t.kind === TREE_CONIFER) stampConiferLeaves(cells, x0, z0, t);
     else stampBroadleafLeaves(cells, x0, z0, t);
   }
-  for (let k = 0; k < trees.count; k++) stampLogs(cells, x0, z0, trees.items[k]!);
+  for (let k = 0; k < trees.count; k++) stampTrunk(cells, x0, z0, trees.items[k]!);
+  for (let k = 0; k < trees.count; k++) stampBranches(cells, x0, z0, trees.items[k]!);
 }

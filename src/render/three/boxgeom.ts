@@ -107,26 +107,32 @@ export function buildBox(o: BoxOptions): GeometryData {
 
 /**
  * A square quad in the XY plane centred on the origin, facing +Z, side `size`, one tile.
- * Used for flat item icons (drawn double-sided) and glue decals (instanced, oriented per face).
+ * With `twoSided` a back copy facing -Z follows (reversed winding, mirrored u so the image is
+ * not flipped when seen from behind): the voxel materials cull back faces in every pass, as
+ * the mesh contract requires, so two-sided things carry both faces. Used for item icons.
  */
-export function buildQuad(size: number, tile: number, flags = 0): GeometryData {
-  const g = emptyGeometry(1);
+export function buildQuad(size: number, tile: number, flags = 0, twoSided = false): GeometryData {
+  const g = emptyGeometry(twoSided ? 2 : 1);
   const h = size * 0.5;
   const xs = [-h, h, h, -h];
   const ys = [-h, -h, h, h];
-  for (let k = 0; k < 4; k++) {
-    g.positions[k * 3] = xs[k]!;
-    g.positions[k * 3 + 1] = ys[k]!;
-    g.positions[k * 3 + 2] = 0;
-    g.normals[k * 3 + 2] = 127;
-    g.uvs[k * 2] = QUAD_UV[k * 2]!;
-    g.uvs[k * 2 + 1] = QUAD_UV[k * 2 + 1]!;
-    g.layers[k] = tile;
-    g.light[k * 4] = 255;
-    g.light[k * 4 + 2] = 255;
-    g.light[k * 4 + 3] = flags;
+  for (let side = 0; side < (twoSided ? 2 : 1); side++) {
+    for (let k = 0; k < 4; k++) {
+      // The back copy walks the corners in reverse x order: (h,-h), (-h,-h), (-h,h), (h,h).
+      const v = side * 4 + k;
+      g.positions[v * 3] = side === 0 ? xs[k]! : -xs[k]!;
+      g.positions[v * 3 + 1] = ys[k]!;
+      g.positions[v * 3 + 2] = 0;
+      g.normals[v * 3 + 2] = side === 0 ? 127 : -127;
+      g.uvs[v * 2] = QUAD_UV[k * 2]!;
+      g.uvs[v * 2 + 1] = QUAD_UV[k * 2 + 1]!;
+      g.layers[v] = tile;
+      g.light[v * 4] = 255;
+      g.light[v * 4 + 2] = 255;
+      g.light[v * 4 + 3] = flags;
+    }
+    writeQuadIndices(g, side);
   }
-  writeQuadIndices(g, 0);
   return g;
 }
 

@@ -83,9 +83,10 @@ export function classifySurface(r: ColumnRegion, i: number, x: number, z: number
   const slope = columnSlope(r, i);
   const biome = r.biome[i]!;
   if (slope >= 4 + (jit < 0.5 ? 0 : 1)) return SURF_STONE; // cliff faces
-  // Packed snow caps only on high, bare summits; snowy lowlands keep turf (with snow cover
-  // and conifers) so cold regions read as snowy forest rather than flat white sheets.
-  if (top >= r.snowLine[i]! + 3 && top >= SNOW_CAP_MIN_Y && slope <= 2) return SURF_SNOW;
+  // Packed snow caps only on high, bare summits, where the snow cover (generator.ts) is
+  // already near certain; snowy lowlands keep turf (with snow cover and conifers) so cold
+  // regions read as snowy forest rather than flat white sheets.
+  if (top >= r.snowLine[i]! + 6 + 4 * jit && top >= SNOW_CAP_MIN_Y && slope <= 2) return SURF_SNOW;
   if (r.rock[i]! > 0.42 + 0.4 * jit) return SURF_STONE;
   if (r.dry[i]! > 0.22 + 0.5 * jit) return SURF_SAND;
   if (biome === BIOME.SHORE) {

@@ -33,25 +33,25 @@ export const ICON_RESPAWN = '<svg viewBox="0 0 24 24"><path d="M5 12a7 7 0 1 0 2
 const logoMark = (id: string): string => `
 <svg viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="${id}-top" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff1c9"/><stop offset="1" stop-color="#e2bb6b"/></linearGradient>
-    <linearGradient id="${id}-left" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c99a45"/><stop offset="1" stop-color="#8c6829"/></linearGradient>
-    <linearGradient id="${id}-right" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a5d8c"/><stop offset="1" stop-color="#172b47"/></linearGradient>
+    <linearGradient id="${id}-top" x1="0" y1="0" x2="0" y2="1"><stop class="bl-lg-top-hi" offset="0"/><stop class="bl-lg-top-lo" offset="1"/></linearGradient>
+    <linearGradient id="${id}-left" x1="0" y1="0" x2="1" y2="1"><stop class="bl-lg-left-hi" offset="0"/><stop class="bl-lg-left-lo" offset="1"/></linearGradient>
+    <linearGradient id="${id}-right" x1="0" y1="0" x2="1" y2="1"><stop class="bl-lg-right-hi" offset="0"/><stop class="bl-lg-right-lo" offset="1"/></linearGradient>
   </defs>
-  <g fill="none" stroke="#9cc8f0" stroke-width="0.5" stroke-dasharray="1.5 1.5" opacity="0.6">
+  <g class="bl-lg-construct" stroke-width="0.5" stroke-dasharray="1.5 1.5" opacity="0.6">
     <path d="M32 6 L32 0.5 M8 19 L1.5 15.5 M56 19 L62.5 15.5 M32 58 L32 63.5"/>
   </g>
   <path d="M32 6 L56 19 L32 32 L8 19 Z" fill="url(#${id}-top)"/>
   <path d="M8 19 L32 32 L32 58 L8 45 Z" fill="url(#${id}-left)"/>
   <path d="M32 32 L56 19 L56 45 L32 58 Z" fill="url(#${id}-right)"/>
-  <path d="M32 6 L56 19 L56 45 L32 58 L8 45 L8 19 Z M8 19 L32 32 L56 19 M32 32 L32 58" fill="none" stroke="#fff1c9" stroke-width="1" stroke-linejoin="round"/>
-  <path d="M14 22.3 L26 28.8 M20 16 L44 3.1" fill="none" stroke="#5b431a" stroke-width="0.6" opacity="0.5"/>
-  <g fill="#f2e7cf" stroke="#d5a957" stroke-width="0.5" stroke-linejoin="round">
+  <path class="bl-lg-edge" d="M32 6 L56 19 L56 45 L32 58 L8 45 L8 19 Z M8 19 L32 32 L56 19 M32 32 L32 58" stroke-width="1" stroke-linejoin="round"/>
+  <path class="bl-lg-shade" d="M14 22.3 L26 28.8 M20 16 L44 3.1" stroke-width="0.6" opacity="0.5"/>
+  <g class="bl-lg-sail" stroke-width="0.5" stroke-linejoin="round">
     <path d="M44 36.5 L44 27.5 L47.1 25.8 L47.1 34.8 Z"/>
     <path d="M45.8 37.5 L53.7 33.3 L53.7 36.8 L45.8 41 Z"/>
     <path d="M44 40.5 L44 49.5 L40.9 51.2 L40.9 42.2 Z"/>
     <path d="M42.2 39.5 L34.3 43.7 L34.3 40.2 L42.2 36 Z"/>
   </g>
-  <circle cx="44" cy="38.5" r="1.9" fill="#ebc77a" stroke="#5b431a" stroke-width="0.6"/>
+  <circle class="bl-lg-hub" cx="44" cy="38.5" r="1.9" stroke-width="0.6"/>
 </svg>`;
 
 /** Logotype: mark + "BLOCKLANDS" + 方块大陆 set as a drafting dimension line. */
@@ -104,7 +104,13 @@ export interface SegOption<T extends string> {
   label: StringKey | { literal: string };
 }
 
-/** Radio-group of buttons; arrow keys move the choice, as for native radios. */
+/**
+ * Radio-group of buttons; arrow keys move the choice, as for native radios.
+ *
+ * `controlled`: the value belongs to the client (a setting, the game mode). A pick only
+ * reports the request; the control changes when the next UiState says so, so a change the
+ * client refuses is never shown as made. Uncontrolled groups (local form state) update at once.
+ */
 export class Segmented<T extends string> {
   readonly el: HTMLElement;
   private readonly buttons: HTMLButtonElement[] = [];
@@ -115,6 +121,7 @@ export class Segmented<T extends string> {
     private readonly options: ReadonlyArray<SegOption<T>>,
     labelKey: StringKey,
     private readonly onPick: (v: T) => void,
+    private readonly controlled = false,
   ) {
     const d = ctx.doc;
     this.el = h(d, 'div', 'bl-seg-ctl', { role: 'radiogroup' });
@@ -131,16 +138,18 @@ export class Segmented<T extends string> {
       const dir = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
       if (dir === 0) return;
       e.preventDefault();
-      const cur = Math.max(0, this.options.findIndex((o) => o.value === this.value));
+      // Step from the focused option (in a controlled group it may not be the checked one yet).
+      const focused = this.buttons.indexOf(e.target as HTMLButtonElement);
+      const cur = focused >= 0 ? focused : Math.max(0, this.options.findIndex((o) => o.value === this.value));
       const next = (cur + dir + this.options.length) % this.options.length;
       this.pick(this.options[next]!.value, true);
     });
   }
 
   private pick(v: T, focus: boolean): void {
-    this.set(v);
+    if (!this.controlled) this.set(v);
     if (focus) this.buttons[this.options.findIndex((o) => o.value === v)]?.focus();
-    this.onPick(v);
+    if (v !== this.value || !this.controlled) this.onPick(v);
   }
 
   /** Reflect the current value (no callback). */
@@ -163,6 +172,11 @@ export class Segmented<T extends string> {
 
 // ------------------------------------------------------------------ switch
 
+/**
+ * On/off switch for a client-owned setting. Controlled: a click only requests the flip; the
+ * switch moves when the next UiState carries the new value (one frame later), so a change the
+ * client refuses never shows as applied.
+ */
 export class Switch {
   readonly el: HTMLButtonElement;
   private readonly text: HTMLElement;
@@ -179,11 +193,7 @@ export class Switch {
       h(d, 'span', 'bl-switch-track'),
       this.text,
     ]);
-    this.el.addEventListener('click', () => {
-      const v = !this.checked;
-      this.set(v);
-      this.onToggle(v);
-    });
+    this.el.addEventListener('click', () => this.onToggle(!this.checked));
   }
 
   set(v: boolean, force = false): void {
@@ -323,6 +333,11 @@ export class SlotWidget {
       const name = item < 0 ? this.ctx.t('inv.slotEmpty') : count > 1 ? this.ctx.t('inv.slotLabel', { name: itemName(item, this.ctx.lang), n: count }) : itemName(item, this.ctx.lang);
       setAttr(this.el, 'aria-label', this.num !== null ? `${this.num} · ${name}` : name);
     }
+  }
+
+  /** Re-render the icon at the context's current icon size (after a devicePixelRatio change). */
+  repaint(): void {
+    if (this.item >= 0) this.ctx.icons.paint(this.canvas, this.item, this.ctx.iconSize);
   }
 
   setSelected(on: boolean): void {

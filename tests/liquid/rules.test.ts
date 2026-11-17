@@ -290,6 +290,84 @@ describe('falling liquid', () => {
   });
 });
 
+/**
+ * Pinned classic FlowingFluid behaviour (docs/DESIGN.md asks for the original rules) where a
+ * literal reading of the module brief would differ: a cell over the same liquid in any state
+ * — or over the other liquid — is a hole, and slope reach counts beyond the first neighbour.
+ */
+describe('classic hole and reach rules', () => {
+  /** Platform whose floor cell (hx, FLOOR_Y, 8) holds `pit`, with stone under it. */
+  const pitWorld =
+    (pit: number, hx = 11): CellFn =>
+    (x, y, z) => {
+      if (y === FLOOR_Y - 1) return STONE;
+      if (y === FLOOR_Y) return x === hx && z === 8 ? pit : STONE;
+      return AIR;
+    };
+
+  it('a cell over a water-filled pit is a hole: a source 3 away runs straight to it and nowhere else', () => {
+    const fw = buildWorld(pitWorld(water()));
+    const { world } = fw;
+    world.setCell(8, SURFACE, 8, water());
+    pumpUntilQuiet(fw);
+    const top = liquidCells(world).filter((c) => c.y === SURFACE);
+    expect(top.map((c) => `${c.x},${c.z}:${liquidAmount(c.state)}`)).toEqual(['8,8:8', '9,8:7', '10,8:6', '11,8:5']);
+    // The flowing cell over the pit's source neither falls (a source is full) nor spreads.
+    expect(isSourceAt(world, 11, FLOOR_Y, 8, B.WATER)).toBe(true);
+    expect(countLiquid(world)).toBe(5);
+  });
+
+  it('a source placed on top of a pool spreads one cell each way and leaves no film', () => {
+    const pool: CellFn = (x, y, z) => {
+      if (y === FLOOR_Y) return STONE;
+      if (y === SURFACE) return x >= 0 && x <= 16 && z >= 0 && z <= 16 ? water() : STONE;
+      return AIR;
+    };
+    const fw = buildWorld(pool);
+    fw.world.setCell(8, SURFACE + 1, 8, water());
+    pumpUntilQuiet(fw);
+    const above = liquidCells(fw.world).filter((c) => c.y === SURFACE + 1);
+    expect(above.map((c) => `${c.x},${c.z}`)).toEqual(['8,7', '7,8', '8,8', '9,8', '8,9']);
+  });
+
+  it('slope reach: a hole at Manhattan distance 5 still draws the flow, one at distance 6 does not', () => {
+    for (const [hx, cells] of [
+      [13, 2],
+      [14, 5],
+    ] as const) {
+      const fw = buildWorld((x, y, z) => (y === 4 ? STONE : y === FLOOR_Y ? (x === hx && z === 8 ? AIR : STONE) : AIR));
+      fw.world.setCell(8, SURFACE, 8, water());
+      pumpTicks(fw.world, fw.fluids, WATER_TICK_DELAY);
+      expect(countLiquid(fw.world), `hole at x = ${hx}`).toBe(cells);
+    }
+  });
+
+  it('water is drawn to a lava pit (the other liquid counts as a hole), hardens it, then spreads normally', () => {
+    const fw = buildWorld(pitWorld(lava()));
+    const { world, fluids } = fw;
+    world.setCell(8, SURFACE, 8, water());
+    pumpTicks(world, fluids, WATER_TICK_DELAY);
+    expect(liquidCells(world, B.WATER).map((c) => `${c.x},${c.z}`)).toEqual(['8,8', '9,8']);
+    pumpUntilQuiet(fw);
+    expect(world.getCell(11, FLOOR_Y, 8)).toBe(OBSIDIAN);
+    // Once the pit is hard, nothing draws the water any more: the plain diamond.
+    const cells = liquidCells(world);
+    expect(cells.length).toBe(113);
+    const shape = diamond(8, 8, 7);
+    for (const c of cells) expect(shape.has(`${c.x},${c.z}`) && c.y === SURFACE).toBe(true);
+  });
+
+  it('lava over a water pit: the lava flowing above it hardens, the pit stays water', () => {
+    const fw = buildWorld(pitWorld(water(), 10));
+    const { world } = fw;
+    world.setCell(8, SURFACE, 8, lava());
+    pumpUntilQuiet(fw);
+    expect(world.getCell(10, SURFACE, 8)).toBe(RUBBLE);
+    expect(isSourceAt(world, 10, FLOOR_Y, 8, B.WATER)).toBe(true);
+    expect(isSourceAt(world, 8, SURFACE, 8, B.LAVA)).toBe(true);
+  });
+});
+
 describe('infinite water source', () => {
   it('two sources one cell apart over solid ground create a third', () => {
     const fw = buildWorld();

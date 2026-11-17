@@ -221,6 +221,19 @@ describe('box geometry', () => {
     expect(q.vertexCount).toBe(4);
     expect(Math.max(...q.positions)).toBeCloseTo(0.25, 6);
     expect(q.layers[3]).toBe(9);
+    // Two-sided icon: a back copy with opposite normal and opposite (CCW from behind) winding.
+    const d = buildQuad(0.5, 9, 0, true);
+    expect(d.vertexCount).toBe(8);
+    expect(d.indexCount).toBe(12);
+    const windingZ = (g: typeof d, quad: number): number => {
+      const i = (k: number) => g.indices[quad * 6 + k]!;
+      const p = (v: number) => [g.positions[v * 3]!, g.positions[v * 3 + 1]!];
+      const [a, b, c] = [p(i(0)), p(i(1)), p(i(2))];
+      return (b[0]! - a[0]!) * (c[1]! - a[1]!) - (b[1]! - a[1]!) * (c[0]! - a[0]!);
+    };
+    expect(windingZ(d, 0)).toBeGreaterThan(0);
+    expect(windingZ(d, 1)).toBeLessThan(0);
+    expect(d.normals[4 * 3 + 2]).toBe(-127);
     const e = boxEdges(0, 0, 0, 1, 1, 1);
     expect(e.length).toBe(72);
   });

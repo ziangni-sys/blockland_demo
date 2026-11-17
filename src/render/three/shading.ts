@@ -260,6 +260,7 @@ function lightColor(u: SharedUniforms, vl: VertexLight, n: N<'vec3'>): N<'vec3'>
   const b = lightCurveNode(vl.block);
   const tinted = max(u.skyTint.mul(s), u.blockTint.mul(b));
   const floored = tinted.mul(1 - AMBIENT_FLOOR).add(AMBIENT_FLOOR);
+  // The contract delivers AO as linear openness (level * 85); the soft response is ours.
   const ao = mix(float(0.45), float(1), vl.ao);
   const lit = floored.mul(ao).mul(faceShadeNode(n));
   // Emissive faces ignore darkness; keep a whisper of the face term so a glowing cube still reads as a cube.
@@ -333,9 +334,8 @@ export function createVoxelMaterials(
       const cut = objUniform.w.greaterThan(0.5).and(isWater).and(dry.greaterThan(DRY_THRESHOLD));
       m.transparent = true;
       m.depthWrite = false;
-      m.side = THREE.DoubleSide;
-      // Single pass: three otherwise draws double-sided transparent objects twice (back, front).
-      m.forceSinglePass = true;
+      // FrontSide in every pass (mesh contract): faces visible from both sides, such as liquid
+      // surfaces seen from below, arrive twice from the mesher as front and back copies.
       m.colorNode = Fn(() => {
         If(cut, () => {
           Discard();
@@ -372,7 +372,6 @@ export function createVoxelMaterials(
         return vec4(encodeOutput(applyFogNode(u, color, worldPos)), alpha);
       })();
     } else {
-      if (pass === 'cutout') m.side = THREE.DoubleSide;
       m.colorNode = Fn(() => {
         const albedo = tex;
         if (pass === 'cutout') {

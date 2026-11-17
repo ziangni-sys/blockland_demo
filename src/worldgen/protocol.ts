@@ -36,11 +36,16 @@ export interface GenErrorResponse {
 }
 
 /** How many seeds keep a live generator (a new world rarely comes back to an old seed). */
-const MAX_GENERATORS = 4;
+export const MAX_GENERATORS = 4;
 
 /** Serves GenRequests, keeping one TerrainGenerator per seed (most recently used first). */
 export class GenService {
   private readonly generators = new Map<number, TerrainGenerator>();
+
+  /** Number of seeds with a live generator (at most MAX_GENERATORS). */
+  get size(): number {
+    return this.generators.size;
+  }
 
   /** The generator for `seed`, created on first use. */
   generator(seed: number): TerrainGenerator {

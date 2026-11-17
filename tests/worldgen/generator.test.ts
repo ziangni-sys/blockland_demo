@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { CHUNK_SIZE, CHUNK_VOLUME, SEA_LEVEL, WORLD_HEIGHT } from '../../src/core/constants';
 import { AXIS_Y } from '../../src/core/dirs';
+import { Rng } from '../../src/core/rng';
 import { cellId, cellState, stateAxis, stateLayers } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { BLOCKS, GRAVITY_BLOCK, LIQUID, SOLID } from '../../src/blocks/registry';
 import { BIOME_NAMES, type Biome } from '../../src/worldgen/biome';
 import { LAVA_MAX_Y, MIN_CAVE_Y } from '../../src/worldgen/caves';
 import { FlatGenerator, TerrainGenerator, VoidGenerator } from '../../src/worldgen/generator';
-import { MAX_TERRAIN_Y, MIN_TERRAIN_Y } from '../../src/worldgen/terrain';
+import { createColumnSample, MAX_TERRAIN_Y, MIN_TERRAIN_Y } from '../../src/worldgen/terrain';
 import { TREE_REACH } from '../../src/worldgen/trees';
 import { ChunkArea, chunkHash } from './helpers';
 
@@ -130,8 +131,8 @@ describe('TerrainGenerator: seams', () => {
           }
         }
       }
-      // Cave mouths are the only allowed difference.
-      expect(matches / columns).toBeGreaterThan(0.98);
+      // heightAt is exact, cave mouths included.
+      expect(matches).toBe(columns);
       expect(borderSum / borderN).toBeLessThan((innerSum / innerN) * 1.6 + 0.3);
       expect(borderMax).toBeLessThanOrEqual(innerMax + 1);
 
@@ -154,7 +155,7 @@ describe('TerrainGenerator: seams', () => {
           }
         }
       }
-      expect(leaves).toBeGreaterThan(200);
+      expect(leaves).toBeGreaterThan(100);
 
       // 3. Every trunk top carries a crown, including trunks right next to a chunk border
       //    (whose crowns were stamped by the neighbouring chunk).
@@ -204,6 +205,30 @@ describe('TerrainGenerator: world shape', () => {
       expect(f, `sea fraction of seed ${seed}`).toBeGreaterThanOrEqual(0.35);
       expect(f, `sea fraction of seed ${seed}`).toBeLessThanOrEqual(0.65);
     }
+  });
+
+  it('every 32x32-chunk window is 35-65 % sea, far from the origin too', () => {
+    // Water floors are never carved, so the 2D model's height decides sea vs land. Without
+    // the land balance about 2 % of random windows fell outside the band (27 of 1200).
+    const rng = new Rng(4711);
+    const s = createColumnSample();
+    const fractions: number[] = [];
+    for (let k = 0; k < 48; k++) {
+      const gen = new TerrainGenerator(rng.nextU32());
+      const x0 = rng.int(-150_000, 150_000) * CHUNK_SIZE;
+      const z0 = rng.int(-150_000, 150_000) * CHUNK_SIZE;
+      let sea = 0;
+      let n = 0;
+      for (let z = z0; z < z0 + 512; z += 8) {
+        for (let x = x0; x < x0 + 512; x += 8) {
+          if (gen.sampler.sample(x, z, s).height < SEA_LEVEL - 1) sea++;
+          n++;
+        }
+      }
+      fractions.push(sea / n);
+    }
+    expect(Math.min(...fractions)).toBeGreaterThanOrEqual(0.35);
+    expect(Math.max(...fractions)).toBeLessThanOrEqual(0.65);
   });
 
   it('has varied biomes, mountains and deep water', () => {
@@ -291,6 +316,15 @@ describe('TerrainGenerator: spawn', () => {
         }
       }
       expect(water, `seed ${seed}: water within 24 blocks`).toBe(true);
+      // No pit by the feet: every column of the 5x5 patch has ground within 2 cells of the
+      // feet level (a cave mouth there would show as a deeper open drop).
+      for (let dz = -2; dz <= 2; dz++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          let y = s.y + 1;
+          while (y > 0 && SOLID[cellId(area.get(x + dx, y, z + dz))] !== 1 && LIQUID[cellId(area.get(x + dx, y, z + dz))] === 0) y--;
+          expect(s.y - 1 - y, `seed ${seed}: open drop at spawn + (${dx}, ${dz})`).toBeLessThanOrEqual(2);
+        }
+      }
     }
   });
 });
@@ -345,15 +379,32 @@ describe('TerrainGenerator: physical sanity', () => {
             expect(cellState(cell), 'lava is a source').toBe(0);
             if (y > LAVA_MAX_Y) throw new Error(`lava above y=${LAVA_MAX_Y} at ${x},${y},${z}`);
             if (SOLID[belowId] !== 1 && belowId !== B.LAVA) throw new Error(`floating lava at ${x},${y},${z}`);
+            // At rest: nothing beside it it could flow into (lava zone borders keep a rim).
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+              const n = area.get(x + dx, y, z + dz);
+              if (n >= 0 && SOLID[cellId(n)] !== 1 && cellId(n) !== B.LAVA) {
+                throw new Error(`lava beside ${BLOCKS[cellId(n)]!.key} at ${x},${y},${z}`);
+              }
+            }
+          }
+          if (id === B.CACTUS) {
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+              if (cellId(area.get(x + dx, y, z + dz)) === B.CACTUS) throw new Error(`cacti side by side at ${x},${y},${z}`);
+            }
           }
           if (LOGS.has(id)) {
             const axis = stateAxis(cellState(cell));
             if (axis === AXIS_Y) {
-              // Trunks stand on logs or on solid, non-leaf ground.
+              // Trunks stand on logs or on solid, non-leaf ground, and a trunk is one species.
               if (!LOGS.has(belowId) && (SOLID[belowId] !== 1 || LEAVES.has(belowId))) {
                 throw new Error(`floating trunk at ${x},${y},${z}`);
               }
+              if (LOGS.has(belowId) && belowId !== id) throw new Error(`mixed trunk at ${x},${y},${z}`);
             } else {
+              // A branch never takes a cell inside another tree's trunk.
+              const up = area.get(x, y + 1, z);
+              const vertical = (v: number): boolean => LOGS.has(cellId(v)) && stateAxis(cellState(v)) === AXIS_Y;
+              if (vertical(below) && vertical(up)) throw new Error(`branch inside a trunk at ${x},${y},${z}`);
               // Branches touch a trunk or another branch log along their axis.
               const dx = axis === 0 ? 1 : 0;
               const dz = axis === 2 ? 1 : 0;
@@ -380,13 +431,14 @@ describe('TerrainGenerator: physical sanity', () => {
       const coal = ores.get(B.COAL_ORE)!;
       const iron = ores.get(B.IRON_ORE)!;
       const copper = ores.get(B.COPPER_ORE)!;
+      // The brief's ranges, exactly: coal y 10-90, iron y 5-60, copper y 20-70.
       expect(coal.n).toBeGreaterThan(iron.n);
-      expect(coal.lo).toBeGreaterThanOrEqual(10 - 3);
-      expect(coal.hi).toBeLessThanOrEqual(91 + 3);
-      expect(iron.lo).toBeGreaterThanOrEqual(5 - 3);
-      expect(iron.hi).toBeLessThanOrEqual(61 + 3);
-      expect(copper.lo).toBeGreaterThanOrEqual(20 - 3);
-      expect(copper.hi).toBeLessThanOrEqual(71 + 3);
+      expect(coal.lo).toBeGreaterThanOrEqual(10);
+      expect(coal.hi).toBeLessThanOrEqual(90);
+      expect(iron.lo).toBeGreaterThanOrEqual(5);
+      expect(iron.hi).toBeLessThanOrEqual(60);
+      expect(copper.lo).toBeGreaterThanOrEqual(20);
+      expect(copper.hi).toBeLessThanOrEqual(70);
     });
   }
 

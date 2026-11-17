@@ -28,7 +28,7 @@ import { cellState, ID_MASK, stateFacing } from '../blocks/cell';
 import { B } from '../blocks/defs';
 import { TICK_DT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
-import { aabb, qidentity, qtoMat3, vec3, vset, type AABB } from '../core/math';
+import { aabb, qidentity, qrotate, qtoMat3, vec3, vset, type AABB } from '../core/math';
 import type { ByteReader, ByteWriter } from '../save/bytes';
 import { SET_STRUCTURE_MOVE, type VoxelGrid } from '../voxel/grid';
 import type { World } from '../voxel/world';
@@ -52,22 +52,35 @@ import type { GlueStore } from './glue';
 import { analyzeHull, type HullInfo } from './hull';
 import { advanceRotor, applyRotorPose, holdRotor } from './rotor';
 import { readStructures, writeStructures } from './serialize';
-import { isSailCell } from './stick';
+import { cellFunc, isSailCell } from './stick';
 import { Rotor, Ship, type ShipDynamics, type Structure, type StructureHost } from './structure';
 
 export type { BlockifyReport } from './assembly';
 
 /**
- * Why an assembly was refused: a CollectResult reason, or
+ * Why startRotor / previewRotor refuse a bearing before looking at any cell:
  *  - 'not_world'    the grid is neither this manager's world nor one of its live ships;
  *  - 'nested_rotor' the bearing is inside a rotor (rotors never carry rotors);
- *  - 'has_rotor'    a rotor already runs on that bearing;
- *  - 'unloaded'     the structure touches a chunk that is not loaded, so part of it might be
- *                   missing (collect never crosses into unloaded chunks).
+ *  - 'has_rotor'    a rotor already runs on that bearing.
  */
-export type AssembleFailure = CollectReason | 'not_world' | 'has_rotor' | 'nested_rotor' | 'unloaded';
+export type RotorRefusal = 'not_world' | 'nested_rotor' | 'has_rotor';
+
+/**
+ * Why an assembly was refused: a CollectResult reason ('unloaded' included: the structure
+ * touches a chunk that is not loaded, so part of it might be missing) or a RotorRefusal.
+ */
+export type AssembleFailure = CollectReason | RotorRefusal;
 
 export type AssembleResult<T> = { ok: true; structure: T } | { ok: false; reason: AssembleFailure };
+
+/**
+ * What previewRotor returns: a CollectResult whose reason may also be a RotorRefusal (then
+ * `cells` is empty). previewShip / previewRotor always agree with assembleShip / startRotor
+ * on ok and reason as long as nothing changes in between.
+ */
+export interface AssemblyPreview extends Omit<CollectResult, 'reason'> {
+  reason: CollectReason | RotorRefusal;
+}
 
 /** A world cell that blocks docking (painted red by the client). */
 export interface DockConflict {
@@ -91,8 +104,20 @@ interface Entry {
   readonly s: Structure;
   /** Unsubscribes the structure's grid listener. */
   unsub: () => void;
-  /** World-space box: ships' hull box, refreshed every step (wake / freeze tests). */
+  /**
+   * World-space box. Ships: the world AABB of the oriented cell box, refreshed every step
+   * (wake / freeze tests). World rotors: the box of everything they sweep (freeze test).
+   */
   readonly box: AABB;
+  /**
+   * Rotors only: the cylinder swept by the cells about the spin axis, in rotor-local terms —
+   * extent along the axis's positive direction relative to the pivot [sweepA0, sweepA1] and
+   * radius about the axis line. Valid while grid.version === sweepVersion.
+   */
+  sweepVersion: number;
+  sweepA0: number;
+  sweepA1: number;
+  sweepRadius: number;
 }
 type ShipEntry = Entry & { readonly s: Ship };
 
@@ -100,6 +125,10 @@ function noop(): void {}
 
 function fail<T>(reason: AssembleFailure): AssembleResult<T> {
   return { ok: false, reason };
+}
+
+function refusedPreview(reason: RotorRefusal): AssemblyPreview {
+  return { ok: false, reason, cells: new Int32Array(0), count: 0, sails: 0, bounds: null };
 }
 
 /** The DockResult a plan stands for (a successful plan reports what docking would do). */
@@ -134,7 +163,6 @@ export class StructureManager {
   // Scratch for the per-tick box maths only (never used across a call that can re-enter).
   private readonly mat = new Float64Array(9);
   private readonly tmp = vec3();
-  private readonly tmpBox = aabb();
 
   constructor(host: StructureHost, dynamics: ShipDynamics | null = null) {
     this.host = host;
@@ -196,8 +224,13 @@ export class StructureManager {
   previewShip(x: number, y: number, z: number): CollectResult {
     return collectShip(this.world, this.host.worldGlue, x, y, z);
   }
-  /** What a bearing at (x,y,z) of `grid` (the world or a ship) would spin. Changes nothing. */
-  previewRotor(grid: VoxelGrid, x: number, y: number, z: number): CollectResult {
+  /**
+   * What a bearing at (x,y,z) of `grid` (the world or a live ship) would spin. Changes
+   * nothing and never throws: a grid startRotor would refuse gets the same refusal here.
+   */
+  previewRotor(grid: VoxelGrid, x: number, y: number, z: number): AssemblyPreview {
+    const refusal = this.rotorRefusal(grid, x, y, z);
+    if (refusal !== null) return refusedPreview(refusal);
     return collectRotor(grid, this.glueFor(grid), x, y, z);
   }
 
@@ -211,9 +244,10 @@ export class StructureManager {
   assembleShip(x: number, y: number, z: number): AssembleResult<Ship> {
     const world = this.world;
     const host = this.host;
+    // collectShip is the whole verdict (previewShip must agree): its 'unloaded' is exact, it is
+    // reported whenever a face neighbour of a collected cell lies in an unloaded chunk.
     const res = collectShip(world, host.worldGlue, x, y, z);
     if (!res.ok) return fail(res.reason);
-    if (!this.collectedLoaded(res)) return fail('unloaded');
 
     const ship = new Ship(this.nextId++, world);
     ship.helmX = x;
@@ -235,20 +269,20 @@ export class StructureManager {
     this.register(ship);
 
     const dyn = this.dynamics;
+    let hull: HullInfo | null;
     if (dyn !== null) {
       dyn.refresh(ship);
+      hull = this.currentHull(ship);
     } else {
-      const h = analyzeHull(ship.grid);
-      if (h !== null) {
-        ship.grid.pivot.x = h.com.x;
-        ship.grid.pivot.y = h.com.y;
-        ship.grid.pivot.z = h.com.z;
-      }
+      // Analysed once here and reused for the cavities below: on a ship with a large box the
+      // analysis is the most expensive part of assembling. ship.hull stays null so a dynamics
+      // injected later still sees the ship as never refreshed.
+      hull = analyzeHull(ship.grid);
+      if (hull !== null) vset(ship.grid.pivot, hull.com.x, hull.com.y, hull.com.z);
       ship.grid.setPoseImmediate(ship.grid.pivot, qidentity());
     }
 
     // DESIGN 水的处理: the vacated footprint and the hull's cavities refill from the sea.
-    const hull = this.currentHull(ship);
     const cavities = hull !== null ? hullCavityCells(hull) : new Int32Array(0);
     const candidates = new Int32Array(res.count * 3 + cavities.length);
     candidates.set(res.cells.subarray(0, res.count * 3));
@@ -264,18 +298,13 @@ export class StructureManager {
    * The rotor starts at angle 0 with pose identity and spins up on the following ticks.
    */
   startRotor(grid: VoxelGrid, x: number, y: number, z: number): AssembleResult<Rotor> {
-    let ship: Ship | null = null;
-    if (grid !== this.world) {
-      const s = this.structureOf(grid);
-      if (s instanceof Rotor) return fail('nested_rotor');
-      if (!(s instanceof Ship)) return fail('not_world');
-      ship = s;
-    }
-    if (this.rotorAtBearing(grid, x, y, z) !== null) return fail('has_rotor');
+    // Same checks in the same order as previewRotor, so the two always agree.
+    const refusal = this.rotorRefusal(grid, x, y, z);
+    if (refusal !== null) return fail(refusal);
+    const ship = grid === this.world ? null : (this.structureOf(grid) as Ship);
     const glue = this.glueFor(grid);
     const res = collectRotor(grid, glue, x, y, z);
     if (!res.ok) return fail(res.reason);
-    if (ship === null && !this.collectedLoaded(res)) return fail('unloaded');
 
     const facing = stateFacing(cellState(grid.getCell(x, y, z)));
     const rotor = new Rotor(this.nextId++, grid);
@@ -363,14 +392,19 @@ export class StructureManager {
     this.unregister(ship);
     const out = commitDock(host, ship, plan.t, hull);
     ship.children.length = 0;
+    const orphans: Rotor[] = [];
     for (let i = 0; i < children.length; i++) {
       const r = children[i]!;
       if (!this.isLive(r)) continue;
       remountRotor(r, plan.t, this.world);
       r.parent = null;
       this.worldRotors.push(r);
+      // The bearing was written like every other cell; should it have dropped after all
+      // (commitDock's defensive path) the rotor lost its bearing and must stop like any other.
+      if (cellFunc(this.world.getCell(r.bearingX, r.bearingY, r.bearingZ)) !== 'bearing') orphans.push(r);
     }
     this.blockUpdateAll(out.touched, out.touched.length / 3);
+    for (let i = 0; i < orphans.length; i++) this.loseBearing(orphans[i]!);
     return { ok: true, report: out.report };
   }
 
@@ -548,20 +582,35 @@ export class StructureManager {
     for (let i = 0; i < list.length; i++) {
       const r = list[i]!;
       if (r.bearingX !== x || r.bearingY !== y || r.bearingZ !== z) continue;
-      if (this.batchDepth > 0) {
-        if (!this.pending.includes(r)) this.pending.push(r);
-      } else {
-        this.stopRotor(r);
-      }
+      this.loseBearing(r);
       return; // one rotor per bearing; `list` may have changed under us
     }
+  }
+
+  /** A rotor's bearing is gone: blockify it now, or at the outermost endBatch() in a batch. */
+  private loseBearing(r: Rotor): void {
+    if (this.batchDepth > 0) {
+      if (!this.pending.includes(r)) this.pending.push(r);
+    } else {
+      this.stopRotor(r);
+    }
+  }
+
+  /** Why a rotor cannot be started on the bearing at (x,y,z) of `grid`; null when it may. */
+  private rotorRefusal(grid: VoxelGrid, x: number, y: number, z: number): RotorRefusal | null {
+    if (grid !== this.world) {
+      const s = this.structureOf(grid);
+      if (s instanceof Rotor) return 'nested_rotor';
+      if (!(s instanceof Ship)) return 'not_world';
+    }
+    return this.rotorAtBearing(grid, x, y, z) !== null ? 'has_rotor' : null;
   }
 
   // ------------------------------------------------------------ registry
 
   private register(s: Structure): void {
     const unsub = s instanceof Ship ? this.watchShip(s) : this.watchRotor(s as Rotor);
-    const e: Entry = { s, unsub, box: aabb() };
+    const e: Entry = { s, unsub, box: aabb(), sweepVersion: -1, sweepA0: 0, sweepA1: 0, sweepRadius: 0 };
     this.entries.set(s.id, e);
     this.owners.set(s.grid, s);
     this.list = this.list.concat(s);
@@ -642,12 +691,6 @@ export class StructureManager {
     return h !== null && h.version === ship.grid.version ? h : analyzeHull(ship.grid);
   }
 
-  /** Are all chunks around a world collect result loaded (so nothing was cut off)? */
-  private collectedLoaded(res: CollectResult): boolean {
-    const b = res.bounds;
-    return b === null || this.world.isAreaLoaded(b.minX - 1, b.minZ - 1, b.maxX, b.maxZ);
-  }
-
   private blockUpdateAll(cells: Int32Array, count: number): void {
     const host = this.host;
     for (let i = 0; i < count; i++) host.blockUpdate(cells[i * 3]!, cells[i * 3 + 1]!, cells[i * 3 + 2]!);
@@ -667,7 +710,8 @@ export class StructureManager {
       if (r.parent !== null) {
         r.frozen = r.parent.frozen; // a ship rotor moves with (and stops with) its ship
       } else {
-        r.frozen = !this.boxLoaded(world, this.rotorBox(r, this.tmpBox));
+        const e = this.entries.get(r.id)!;
+        r.frozen = !this.boxLoaded(world, this.computeRotorBox(e, r));
       }
     }
   }
@@ -706,25 +750,65 @@ export class StructureManager {
     box.maxZ = t.z + ez;
   }
 
-  /** World box of everything a world rotor can sweep: a sphere about its pivot. */
-  private rotorBox(r: Rotor, out: AABB): AABB {
+  /**
+   * World box of a WORLD rotor for the freeze test: the AABB of the cylinder its cells sweep
+   * about the spin axis — exactly the union of the rotor's world cell box over a full turn,
+   * so it does not change with the angle (no frozen flicker) and a running rotor never turns
+   * a blade into an unloaded chunk. A windmill with a horizontal axis needs a thin strip of
+   * columns, not the square of a bounding sphere.
+   */
+  private computeRotorBox(e: Entry, r: Rotor): AABB {
     const g = r.grid;
-    const p = g.pivot;
-    const b = g.cellBounds();
-    let radius = 0.87;
-    if (b !== null) {
-      const dx = Math.max(Math.abs(b.minX - p.x), Math.abs(b.maxX - p.x));
-      const dy = Math.max(Math.abs(b.minY - p.y), Math.abs(b.maxY - p.y));
-      const dz = Math.max(Math.abs(b.minZ - p.z), Math.abs(b.maxZ - p.z));
-      radius = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    }
-    const c = g.toWorld(vset(this.tmp, p.x, p.y, p.z), this.tmp);
-    out.minX = c.x - radius;
-    out.minY = c.y - radius;
-    out.minZ = c.z - radius;
-    out.maxX = c.x + radius;
-    out.maxY = c.y + radius;
-    out.maxZ = c.z + radius;
-    return out;
+    if (e.sweepVersion !== g.version) this.measureSweep(e, r);
+    // Spin axis (positive direction) in the parent (= world) frame. Taken from baseRotation,
+    // not grid.rotation, so the box is bit-identical at every angle.
+    const k = r.axis >> 1;
+    const a = qrotate(r.baseRotation, vset(this.tmp, k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0), this.tmp);
+    const mid = (e.sweepA0 + e.sweepA1) * 0.5;
+    const half = (e.sweepA1 - e.sweepA0) * 0.5;
+    const rad = e.sweepRadius;
+    const p = g.position; // the pivot, in the parent frame
+    // AABB of a cylinder: per axis i, half-height * |a_i| + radius * sqrt(1 - a_i^2).
+    const ex = half * Math.abs(a.x) + rad * Math.sqrt(Math.max(0, 1 - a.x * a.x));
+    const ey = half * Math.abs(a.y) + rad * Math.sqrt(Math.max(0, 1 - a.y * a.y));
+    const ez = half * Math.abs(a.z) + rad * Math.sqrt(Math.max(0, 1 - a.z * a.z));
+    const box = e.box;
+    box.minX = p.x + a.x * mid - ex;
+    box.maxX = p.x + a.x * mid + ex;
+    box.minY = p.y + a.y * mid - ey;
+    box.maxY = p.y + a.y * mid + ey;
+    box.minZ = p.z + a.z * mid - ez;
+    box.maxZ = p.z + a.z * mid + ez;
+    return box;
+  }
+
+  /** Rotor-local swept cylinder of the cells (see Entry); recomputed when the cells change. */
+  private measureSweep(e: Entry, r: Rotor): void {
+    const g = r.grid;
+    const k = r.axis >> 1;
+    const px = g.pivot.x;
+    const py = g.pivot.y;
+    const pz = g.pivot.z;
+    let a0 = 0;
+    let a1 = 0;
+    let r2 = 0;
+    let first = true;
+    // Per cell, the corner farthest from the axis line; per axis, the farther of the two
+    // faces. Exact for the cells themselves, unlike the corner of their bounding box.
+    g.forEachCell((x, y, z) => {
+      const lo = k === 0 ? x - px : k === 1 ? y - py : z - pz;
+      if (first || lo < a0) a0 = lo;
+      if (first || lo + 1 > a1) a1 = lo + 1;
+      first = false;
+      const fx = k === 0 ? 0 : Math.max(Math.abs(x - px), Math.abs(x + 1 - px));
+      const fy = k === 1 ? 0 : Math.max(Math.abs(y - py), Math.abs(y + 1 - py));
+      const fz = k === 2 ? 0 : Math.max(Math.abs(z - pz), Math.abs(z + 1 - pz));
+      const d2 = fx * fx + fy * fy + fz * fz;
+      if (d2 > r2) r2 = d2;
+    });
+    e.sweepA0 = a0;
+    e.sweepA1 = a1;
+    e.sweepRadius = Math.sqrt(r2);
+    e.sweepVersion = g.version;
   }
 }

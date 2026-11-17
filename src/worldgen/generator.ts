@@ -26,7 +26,7 @@ import { B } from '../blocks/defs';
 import { GRAVITY_BLOCK, LIQUID, SOLID } from '../blocks/registry';
 import { biomeName, BIOME, type Biome } from './biome';
 import { CaveCarver } from './caves';
-import { deriveSeed, latticeHash2, simplex2 } from './noise';
+import { deriveSeed, latticeHash2, simplex2, smoothstep } from './noise';
 import { OreStamper } from './ores';
 import { findSpawn } from './spawn';
 import {
@@ -85,11 +85,49 @@ const WATER_CAVE_RADIUS = 2;
 /** Uncarved cells under a tree's ground cell. */
 const TREE_ROOT_MARGIN = 6;
 
+/**
+ * Carve ceiling of region column `ri` (highest y caves may carve, inclusive): caves may
+ * break the surface of dry ground, but never under loose material or clay (it would hang
+ * over air) and never within WATER_CAVE_RADIUS columns of water, keeping WATER_CAVE_MARGIN
+ * cells under its floor (which also covers horizontal adjacency). Tree roots are handled
+ * by the caller. The region must hold WATER_CAVE_RADIUS columns around `ri`.
+ */
+function caveCeiling(r: ColumnRegion, ri: number, kind: SurfaceKind, depth: number): number {
+  const top = r.height[ri]!;
+  let ceil = top;
+  if (isLooseSurface(kind) || kind === SURF_CLAY) ceil = top - depth - 2;
+  for (let dz = -WATER_CAVE_RADIUS; dz <= WATER_CAVE_RADIUS; dz++) {
+    for (let dx = -WATER_CAVE_RADIUS; dx <= WATER_CAVE_RADIUS; dx++) {
+      const h = r.height[ri + dx + dz * r.size]!;
+      if (h < SEA_LEVEL - 1 && h - WATER_CAVE_MARGIN < ceil) ceil = h - WATER_CAVE_MARGIN;
+    }
+  }
+  return ceil;
+}
+
+/**
+ * Snow cover fades in from SNOW_FADE_BELOW under the snow line to SNOW_FADE_ABOVE over it
+ * (blocks): switching it on at one contour drew hard-edged white caps on hills. Tree
+ * crowns use the same band lifted by CROWN_SNOW_LIFT.
+ */
+const SNOW_FADE_BELOW = 4;
+const SNOW_FADE_ABOVE = 8;
+const CROWN_SNOW_LIFT = 6;
+/** Amplitude (blocks) of the patch field that clusters the fade band into drifts. */
+const SNOW_PATCH = 3;
+
+/** Chance (0..1) that a column with surface `top` is snow covered. */
+function snowChance(top: number, snowLine: number): number {
+  return smoothstep(snowLine - SNOW_FADE_BELOW, snowLine + SNOW_FADE_ABOVE, top);
+}
+
 const S_TREES = 301;
 const S_PLANTS = 302;
 const S_FLOWERS = 303;
 const S_FLOWER_KIND = 304;
 const S_DEEPROCK = 305;
+const S_SNOW = 306;
+const S_SNOW_PATCH = 307;
 
 export class TerrainGenerator implements ChunkGenerator {
   readonly seed: number;
@@ -101,6 +139,8 @@ export class TerrainGenerator implements ChunkGenerator {
   private readonly flowerSeed: number;
   private readonly flowerKindSeed: number;
   private readonly deeprockSeed: number;
+  private readonly snowSeed: number;
+  private readonly snowPatchSeed: number;
   private readonly caves: CaveCarver;
   private readonly ores: OreStamper;
 
@@ -111,6 +151,9 @@ export class TerrainGenerator implements ChunkGenerator {
   private readonly ceiling = new Int16Array(256);
   private readonly surfaceY = new Int16Array(256);
   private readonly point = createColumnSample();
+  /** heightAt scratch: the 5x5 columns around a queried column, and its tree (if any). */
+  private readonly pointRegion = new ColumnRegion(2 * WATER_CAVE_RADIUS + 1);
+  private readonly pointTrees = new TreeList();
 
   private spawn: SpawnPoint | null = null;
 
@@ -123,13 +166,36 @@ export class TerrainGenerator implements ChunkGenerator {
     this.flowerSeed = deriveSeed(this.seed, S_FLOWERS);
     this.flowerKindSeed = deriveSeed(this.seed, S_FLOWER_KIND);
     this.deeprockSeed = deriveSeed(this.seed, S_DEEPROCK);
+    this.snowSeed = deriveSeed(this.seed, S_SNOW);
+    this.snowPatchSeed = deriveSeed(this.seed, S_SNOW_PATCH);
     this.caves = new CaveCarver(this.seed);
     this.ores = new OreStamper(this.seed);
   }
 
-  /** y of the top solid terrain cell at (x, z), before trees (and ignoring cave mouths). */
+  /**
+   * y of the top solid terrain cell of column (x, z) as generate() produces it, before
+   * trees and plants: where a cave breaks the surface this is the floor below the mouth.
+   * Costs about one 2D column sample plus a few cave-field samples; columns with a cave
+   * mouth (well under 1 % of land) cost ~25 column samples more.
+   */
   heightAt(x: number, z: number): number {
-    return this.sampler.sample(Math.floor(x), Math.floor(z), this.point).height;
+    const ix = Math.floor(x);
+    const iz = Math.floor(z);
+    const top = this.sampler.sample(ix, iz, this.point).height;
+    // Water floors are never carved (the ceiling keeps WATER_CAVE_MARGIN cells under them).
+    if (top < SEA_LEVEL - 1) return top;
+    if (!this.caves.carvesIgnoringCeiling(ix, top, iz, top)) return top;
+    // A cave reaches the surface cell: work out this column's ceiling exactly as generate()
+    // does (it depends on the surface kind, nearby water and a tree rooted here).
+    const r = this.pointRegion;
+    r.fill(this.sampler, ix - WATER_CAVE_RADIUS, iz - WATER_CAVE_RADIUS);
+    const ri = r.index(ix, iz);
+    const ss = this.surfaceSeeds;
+    const kind = classifySurface(r, ri, ix, iz, ss);
+    let ceil = caveCeiling(r, ri, kind, surfaceDepth(kind, ix, iz, ss));
+    findTrees(r, this.treeSeed, ss, ix, iz, ix, iz, this.pointTrees);
+    if (this.pointTrees.count > 0 && top - TREE_ROOT_MARGIN < ceil) ceil = top - TREE_ROOT_MARGIN;
+    return this.caves.topUncarved(ix, iz, top, top, ceil);
   }
 
   /** Biome label of the column at (x, z). */
@@ -184,18 +250,7 @@ export class TerrainGenerator implements ChunkGenerator {
         const depth = surfaceDepth(kind, wx, wz, ss);
         this.fillColumn(cells, ci, wx, wz, top, kind, depth);
         surfaceY[ci] = top;
-
-        // Cave ceiling: caves may break the surface of dry ground, but never under loose
-        // material (it would hang over air) and never near water.
-        let ceil = top;
-        if (isLooseSurface(kind) || kind === SURF_CLAY) ceil = top - depth - 2;
-        for (let dz = -WATER_CAVE_RADIUS; dz <= WATER_CAVE_RADIUS; dz++) {
-          for (let dx = -WATER_CAVE_RADIUS; dx <= WATER_CAVE_RADIUS; dx++) {
-            const h = r.height[ri + dx + dz * r.size]!;
-            if (h < SEA_LEVEL - 1 && h - WATER_CAVE_MARGIN < ceil) ceil = h - WATER_CAVE_MARGIN;
-          }
-        }
-        ceiling[ci] = ceil;
+        ceiling[ci] = caveCeiling(r, ri, kind, depth);
       }
     }
     // Trees must keep their footing.
@@ -266,17 +321,25 @@ export class TerrainGenerator implements ChunkGenerator {
     const ci = lx | (lz << 4);
     const surface = cells[ci | (top << 8)]!;
     const above = top + 1 < WORLD_HEIGHT ? cells[ci | ((top + 1) << 8)]! : 1;
-    const snowy = top >= r.snowLine[ri]!;
 
-    if (snowy) {
+    const snowLine = r.snowLine[ri]!;
+    const snowTop = this.snowTop(wx, wz, top, snowLine);
+    const snowRoll = latticeHash2(this.snowSeed, wx, wz) / 4294967296;
+    if (snowRoll < snowChance(snowTop, snowLine)) {
       // Snow settles on the highest solid cell of the column: ground, rock or a tree crown
-      // (possibly the crown of a tree rooted on higher ground next door).
+      // (possibly the crown of a tree rooted on higher ground next door). Crowns take snow
+      // only higher up, so the fringe of the snow zone reads as green trees on white ground
+      // rather than a white sheet over the forest.
       for (let y = WORLD_HEIGHT - 2; y >= top - 1 && y >= 1; y--) {
         const c = cells[ci | (y << 8)]!;
         if (c === AIR) continue;
-        if (SOLID[c & ID_MASK] === 1 && LIQUID[c & ID_MASK] === 0 && cells[ci | ((y + 1) << 8)] === AIR) {
-          const deep = top >= r.snowLine[ri]! + 8 || r.cold[ri]! > 0.9;
-          cells[ci | ((y + 1) << 8)] = deep && (latticeHash2(this.plantSeed, wx, wz) & 1) === 0 ? C_SNOW_2 : C_SNOW_1;
+        const id = c & ID_MASK;
+        if (SOLID[id] === 1 && LIQUID[id] === 0 && cells[ci | ((y + 1) << 8)] === AIR) {
+          const crown = id === B.LEAVES_OAK || id === B.LEAVES_PINE;
+          if (!crown || snowRoll < snowChance(snowTop, snowLine + CROWN_SNOW_LIFT)) {
+            const deep = top >= snowLine + 8 || r.cold[ri]! > 0.9;
+            cells[ci | ((y + 1) << 8)] = deep && (latticeHash2(this.plantSeed, wx, wz) & 1) === 0 ? C_SNOW_2 : C_SNOW_1;
+          }
         }
         break;
       }
@@ -322,7 +385,10 @@ export class TerrainGenerator implements ChunkGenerator {
     }
 
     if (surface === C_SAND && biome === BIOME.SCRUB) {
-      if (roll < 0.012 && this.cactusFits(cells, ri, top, lx, lz)) {
+      // Cacti grow only on even-even columns, so two cacti are never side by side (also
+      // across chunk borders, with no neighbour access); 4x the per-column chance keeps
+      // the overall density at ~1.2 %.
+      if ((wx & 1) === 0 && (wz & 1) === 0 && roll < 0.048 && this.cactusFits(ri, top)) {
         const height = 1 + (hash3(wx, top, wz, this.plantSeed) % 3);
         for (let k = 1; k <= height && top + k < WORLD_HEIGHT; k++) cells[ci | ((top + k) << 8)] = C_CACTUS;
       } else if (roll > 0.975) {
@@ -332,16 +398,24 @@ export class TerrainGenerator implements ChunkGenerator {
     }
   }
 
-  /** Cactus needs open air on all four sides (neighbour terrain no higher than its base). */
-  private cactusFits(cells: Uint16Array, ri: number, top: number, lx: number, lz: number): boolean {
+  /**
+   * Surface height as the snow sees it: shifted by up to SNOW_PATCH blocks by a patch field,
+   * so the snowy columns of the fade band cluster into drifts rather than salt-and-pepper
+   * speckle (the per-column roll stays uniform, which keeps the band its full width).
+   * Columns far from the band skip the noise: the result cannot matter there.
+   */
+  private snowTop(wx: number, wz: number, top: number, snowLine: number): number {
+    if (top < snowLine - SNOW_FADE_BELOW - SNOW_PATCH) return top;
+    if (top > snowLine + CROWN_SNOW_LIFT + SNOW_FADE_ABOVE + SNOW_PATCH) return top;
+    return top + SNOW_PATCH * simplex2(this.snowPatchSeed, wx / 11, wz / 11);
+  }
+
+  /** Cactus needs open air on all four sides: neighbour terrain no higher than its base. */
+  private cactusFits(ri: number, top: number): boolean {
     const r = this.region;
     const n = r.size;
     if (r.height[ri - 1]! > top || r.height[ri + 1]! > top) return false;
-    if (r.height[ri - n]! > top || r.height[ri + n]! > top) return false;
-    // Also keep clear of things already placed in this chunk at the base height.
-    if (lx > 0 && cells[(lx - 1) | (lz << 4) | ((top + 1) << 8)] !== AIR) return false;
-    if (lz > 0 && cells[lx | ((lz - 1) << 4) | ((top + 1) << 8)] !== AIR) return false;
-    return true;
+    return r.height[ri - n]! <= top && r.height[ri + n]! <= top;
   }
 }
 

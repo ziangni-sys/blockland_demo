@@ -1,10 +1,17 @@
 /**
  * Inventory: backpack (27) + hotbar (9) slots, the stack held by the cursor following the
  * pointer, item-name tooltips, and in creative mode a searchable, grouped palette of every
- * item. Clicking outside the panel while holding a stack drops it.
+ * item.
  *
  * Slot clicks map to UiActions.slotClick: left click (or Enter/Space) = button 0, right click
- * (or the context-menu key) = button 2, Shift held = shift.
+ * (or the context-menu key) = button 2, Shift held = shift. Pressing on one slot and releasing
+ * on another (empty cursor, left button) moves the stack: slotClick(from) then slotClick(to).
+ *
+ * Dropping (UiActions.dropCursor): a click outside the slots while holding a stack — on the
+ * backdrop, the panel's empty areas, headings and hints — where both the press and the release
+ * happened outside the slots. The slot grids themselves (gaps between slots included), the
+ * palette grids, buttons and the search field never drop, so a slightly missed slot click or
+ * a drag that ends off a slot does not throw the stack away.
  */
 import { allItems } from '../../blocks/items';
 import type { UiContext } from '../context';
@@ -18,9 +25,22 @@ import { button, ICON_CLOSE, ICON_SEARCH, SlotWidget } from './widgets';
 
 interface PaletteEntry {
   btn: HTMLButtonElement;
+  canvas: HTMLCanvasElement;
   item: number;
   haystack: string;
   group: HTMLElement;
+}
+
+/** Inside the inventory screen, clicks on these never drop the held stack. */
+const KEEP_STACK = '.bl-slot, .bl-slotgrid, .bl-pitem, .bl-pgrid, button, input, label, .bl-search';
+
+/** A press that may turn into a slot-to-slot drag or a drop. */
+interface Press {
+  target: Element;
+  slot: HTMLElement | null;
+  button: number;
+  /** The cursor was empty at the press (a drag then moves the pressed stack). */
+  emptyCursor: boolean;
 }
 
 export class InventoryView implements ScreenView {
@@ -30,6 +50,7 @@ export class InventoryView implements ScreenView {
   private readonly paletteScroll: HTMLElement;
   private readonly paletteEmpty: HTMLElement;
   private readonly search: HTMLInputElement;
+  private readonly slotsEl: HTMLElement;
   private readonly shiftHint: HTMLElement;
   private readonly bag: SlotWidget[] = [];
   private readonly hot: SlotWidget[] = [];
@@ -47,6 +68,7 @@ export class InventoryView implements ScreenView {
   private selected = -1;
   private cursor: SlotView | null = null;
   private shown = false;
+  private press: Press | null = null;
 
   // Pointer / tooltip tracking. Coordinates are viewport px.
   private px = -1;
@@ -77,6 +99,7 @@ export class InventoryView implements ScreenView {
     ctx.attr(this.search, 'placeholder', 'inv.searchPlaceholder');
     ctx.attr(this.search, 'aria-label', 'inv.search');
     this.search.addEventListener('input', () => this.applySearch());
+    this.search.addEventListener('keydown', (e) => this.onSearchKey(e));
     this.paletteEmpty = h(d, 'p', 'bl-palette-empty', { hidden: true });
     ctx.text(this.paletteEmpty, 'inv.noResults');
     this.paletteScroll = h(d, 'div', 'bl-palette-scroll', null, [this.paletteEmpty]);
@@ -108,23 +131,23 @@ export class InventoryView implements ScreenView {
       hotGrid.appendChild(s.el);
     }
     this.shiftHint = ctx.text(h(d, 'span'), 'inv.shiftHint');
-    const slotsEl = h(d, 'section', 'bl-inv-slots', null, [
+    this.slotsEl = h(d, 'section', 'bl-inv-slots', null, [
       ctx.text(h(d, 'h3', 'bl-subtitle'), 'inv.backpack'),
       bagGrid,
       ctx.text(h(d, 'h3', 'bl-subtitle'), 'inv.hotbar'),
       hotGrid,
       h(d, 'p', 'bl-inv-hint', null, [ctx.text(h(d, 'span'), 'inv.dropHint'), this.shiftHint]),
     ]);
-    slotsEl.addEventListener('click', (e) => this.onSlotEvent(e, 0));
-    slotsEl.addEventListener('contextmenu', (e) => this.onSlotEvent(e, 2));
-    slotsEl.addEventListener('keydown', (e) => this.gridKeyNav(e, '.bl-slot'));
+    this.slotsEl.addEventListener('click', (e) => this.onSlotEvent(e, 0));
+    this.slotsEl.addEventListener('contextmenu', (e) => this.onSlotEvent(e, 2));
+    this.slotsEl.addEventListener('keydown', (e) => this.gridKeyNav(e, '.bl-slot'));
 
     // ---- panel + backdrop
     const titleId = ctx.id('inv');
     const close = button(ctx, { variant: 'ghost', icon: ICON_CLOSE, aria: 'inv.close', cls: 'bl-inv-close', onClick: () => a.closeScreen() });
     this.panel = h(d, 'div', 'bl-panel bl-panel-modal bl-inv-panel', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' }, [
       h(d, 'header', 'bl-inv-head', null, [ctx.text(h(d, 'h2', 'bl-panel-title', { id: titleId }), 'inv.title'), close]),
-      h(d, 'div', 'bl-inv-body', null, [this.paletteEl, slotsEl]),
+      h(d, 'div', 'bl-inv-body', null, [this.paletteEl, this.slotsEl]),
     ]);
     this.panel.addEventListener('pointerover', (e) => this.onHover(e));
     this.panel.addEventListener('pointerout', (e) => this.onHoverOut(e));
@@ -135,13 +158,15 @@ export class InventoryView implements ScreenView {
     });
 
     this.el = h(d, 'div', 'bl-screen bl-screen--overlay bl-inv', { hidden: true, 'data-screen': 'inventory', 'data-creative': '0' }, [this.panel]);
+    this.el.addEventListener('pointerdown', (e) => this.onPress(e));
+    this.el.addEventListener('pointerup', (e) => this.onRelease(e));
+    this.el.addEventListener('pointercancel', () => (this.press = null));
     this.el.addEventListener('click', (e) => {
-      // Backdrop only (not the panel): throw away the held stack.
-      if (e.target === this.el && this.cursor) a.dropCursor();
+      if (e.button === 0) this.maybeDrop(e);
     });
     this.el.addEventListener('contextmenu', (e) => {
       if (!(e.target instanceof HTMLInputElement)) e.preventDefault();
-      if (e.target === this.el && this.cursor) a.dropCursor();
+      this.maybeDrop(e);
     });
 
     // ---- floaters (live at the UI root so they stack above every panel)
@@ -188,6 +213,7 @@ export class InventoryView implements ScreenView {
 
   onHide(): void {
     this.shown = false;
+    this.press = null;
     this.ctx.doc.removeEventListener('pointermove', this.onPointerMove);
     this.hideTip();
     setHidden(this.cursorEl, true);
@@ -197,6 +223,15 @@ export class InventoryView implements ScreenView {
   relocalize(): void {
     if (this.palette) for (const p of this.palette) p.btn.setAttribute('aria-label', itemName(p.item, this.ctx.lang));
     if (this.hoverEl) this.refreshTip(true);
+  }
+
+  /** Re-render every icon at the context's current icon size (after a devicePixelRatio change). */
+  repaintIcons(): void {
+    const size = this.ctx.iconSize;
+    for (const s of this.bag) s.repaint();
+    for (const s of this.hot) s.repaint();
+    if (this.palette) for (const p of this.palette) this.ctx.icons.paint(p.canvas, p.item, size);
+    if (this.cursor) this.ctx.icons.paint(this.cursorCanvas, this.cursor.item, size);
   }
 
   dispose(): void {
@@ -219,10 +254,12 @@ export class InventoryView implements ScreenView {
       const section = h(d, 'section', 'bl-pgroup', { 'aria-labelledby': titleId }, [ctx.text(h(d, 'h3', null, { id: titleId }), g.label), grid]);
       for (const it of g.items) {
         const canvas = h(d, 'canvas', null, { width: ctx.iconSize, height: ctx.iconSize, 'aria-hidden': 'true' });
+        // Budgeted: icons not rendered yet (prewarm still running) arrive over the next frames
+        // instead of stalling this one for every item at once.
         ctx.icons.paint(canvas, it.id, ctx.iconSize);
         const btn = h(d, 'button', 'bl-pitem', { type: 'button', 'data-item': String(it.id), 'aria-label': itemName(it.id, ctx.lang) }, [canvas]);
         grid.appendChild(btn);
-        entries.push({ btn, item: it.id, haystack: searchText(it), group: section });
+        entries.push({ btn, canvas, item: it.id, haystack: searchText(it), group: section });
       }
       this.groups.push(section);
       frag.appendChild(section);
@@ -246,14 +283,83 @@ export class InventoryView implements ScreenView {
     this.paletteScroll.scrollTop = 0;
   }
 
+  /**
+   * Esc in the search field: the first press clears the query (and stops there, so the client
+   * does not also close the screen); with an empty query it hands focus back to the dialog and
+   * lets the key through, so the same press closes the inventory as anywhere else. Without
+   * this the field would keep wantsKeyboard() true and keyboard players could never leave.
+   * ArrowDown jumps into the results.
+   */
+  private onSearchKey(e: KeyboardEvent): void {
+    if (e.isComposing) return;
+    if (e.key === 'Escape') {
+      if (this.search.value !== '') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.search.value = '';
+        this.applySearch();
+      } else {
+        focusInto(this.panel);
+      }
+    } else if (e.key === 'ArrowDown' && this.palette) {
+      const first = this.palette.find((p) => !p.btn.hidden);
+      if (first) {
+        e.preventDefault();
+        first.btn.focus();
+      }
+    }
+  }
+
   // ------------------------------------------------------------------ slots & keyboard
 
   private onSlotEvent(e: MouseEvent, button: 0 | 2): void {
     const slot = (e.target as Element).closest<HTMLElement>('.bl-slot');
     if (button === 2) e.preventDefault();
     if (!slot) return;
+    this.clickSlot(slot, button, e.shiftKey);
+  }
+
+  private clickSlot(slot: HTMLElement, button: 0 | 2, shift: boolean): void {
     const area = slot.dataset.area === 'hotbar' ? 'hotbar' : 'inventory';
-    this.ctx.actions.slotClick(area, Number(slot.dataset.index), button, e.shiftKey);
+    this.ctx.actions.slotClick(area, Number(slot.dataset.index), button, shift);
+  }
+
+  private onPress(e: PointerEvent): void {
+    const target = e.target as Element;
+    const slot = target.closest<HTMLElement>('.bl-slot');
+    this.press = { target, slot: slot && this.slotsEl.contains(slot) ? slot : null, button: e.button, emptyCursor: !this.cursor };
+  }
+
+  /**
+   * Press on one slot, release on another: the browser sends the click to their common
+   * ancestor (no slot), so the gesture is translated here into a pick-up and a put-down.
+   */
+  private onRelease(e: PointerEvent): void {
+    const p = this.press;
+    if (!p || !p.slot || p.button !== 0 || e.button !== 0 || !p.emptyCursor) return;
+    const to = (e.target as Element).closest<HTMLElement>('.bl-slot');
+    if (!to || to === p.slot || !this.slotsEl.contains(to) || p.slot.dataset.empty === '1') return;
+    this.clickSlot(p.slot, 0, e.shiftKey);
+    this.clickSlot(to, 0, e.shiftKey);
+  }
+
+  /** dropCursor for a click outside the slots, pressed and released outside them. */
+  private maybeDrop(e: MouseEvent): void {
+    const p = this.press;
+    if (e.type === 'click') this.press = null;
+    if (!this.cursor) return;
+    const target = e.target as Element;
+    if (!this.isDropTarget(target)) return;
+    // Pointer clicks: the press must also have been outside the slots (a press on a slot that
+    // ends on the backdrop is a slipped drag, not a throw). Keyboard clicks have no press.
+    if (p && (p.button !== (e.type === 'click' ? 0 : 2) || !this.isDropTarget(p.target))) return;
+    // A click on an element's own scrollbar (the scrolling screen or palette) is not a drop.
+    if (target instanceof HTMLElement && e.offsetX >= target.clientWidth && target.scrollHeight > target.clientHeight) return;
+    this.ctx.actions.dropCursor();
+  }
+
+  private isDropTarget(el: Element): boolean {
+    return this.el.contains(el) && !el.closest(KEEP_STACK);
   }
 
   /**

@@ -1,6 +1,11 @@
 /**
  * Settings: render distance, FOV, mouse sensitivity, invert Y, language, debug overlay.
  * Sliders report live (on 'input') so FOV and distance can be previewed while dragging.
+ *
+ * Every control shows the stored setting from UiState, never just the player's click: the
+ * switches and the language group are controlled (they move when the client's next state
+ * says so), and a slider the player is holding re-syncs to the stored value once released.
+ * That is also why update() may skip on settingsEq: what is on screen is always `last`.
  */
 import type { UiContext } from '../context';
 import { settingsEq } from '../diff';
@@ -112,6 +117,7 @@ export class SettingsView implements ScreenView {
       ],
       'settings.language',
       (l) => a.changeSettings({ language: l }),
+      true,
     );
     this.lang.el.setAttribute('aria-labelledby', langLbl);
     this.lang.el.classList.add('bl-field-ctl');

@@ -3,7 +3,7 @@
  * rescheduling after load, and independence from chunk load order.
  */
 import { describe, expect, it } from 'vitest';
-import { AIR, makeCell } from '../../src/blocks/cell';
+import { AIR, ID_MASK, cellState, liquidFalling, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { Rng } from '../../src/core/rng';
 import { World } from '../../src/voxel/world';
@@ -13,6 +13,8 @@ import {
   FLOOR_Y,
   STONE,
   SURFACE,
+  amountAt,
+  buildWorld,
   chunkCoords,
   cloneWorld,
   countLiquid,
@@ -130,6 +132,112 @@ describe('unloaded chunks', () => {
     pumpUntilQuiet({ world, fluids });
     expect(diamondKeys(world)).toEqual(before);
     expect(fluids.deferredCount).toBe(0);
+  });
+
+  it('a mid-air source on a border column (neighbour chunk unloaded) still falls down its own column', () => {
+    // Chunks (0,0) and (1,0) loaded; the row cz = 1 (z >= 16) is not.
+    const world = new World(1);
+    for (const cx of [0, 1]) world.addChunk(makeChunk(cx, 0, platform));
+    const fluids = new Fluids(world);
+    fluids.attach();
+    const probe = countUnloadedWrites(world);
+    world.setCell(16, 30, 15, water()); // z = 15: its +Z neighbour lies in the unloaded chunk (1, 1)
+    pumpUntilQuiet({ world, fluids });
+    // Falling is decided by the column alone, so the column fills with falling water although
+    // spreading sideways at the bottom has to wait for the neighbour.
+    for (let y = SURFACE; y < 30; y++) {
+      const c = world.getCell(16, y, 15);
+      expect(c & ID_MASK, `y = ${y}`).toBe(B.WATER);
+      expect(liquidFalling(cellState(c)), `y = ${y}`).toBe(true);
+    }
+    expect(world.getCell(16, FLOOR_Y, 15)).toBe(STONE);
+    expect(probe.count).toBe(0);
+  });
+
+  it('a waterfall at the edge of the loaded area falls, waits at the bottom, and ends as in the fully loaded world', () => {
+    const reference = buildWorld();
+    reference.world.setCell(8, 30, 15, water());
+    pumpUntilQuiet(reference);
+
+    const world = new World(1);
+    for (const [cx, cz] of chunkCoords(AROUND_ORIGIN)) if (cz !== 1) world.addChunk(makeChunk(cx, cz, platform));
+    const fluids = new Fluids(world);
+    fluids.attach();
+    const probe = countUnloadedWrites(world);
+    world.setCell(8, 30, 15, water());
+    pumpUntilQuiet({ world, fluids });
+    expect(amountAt(world, 8, SURFACE, 15)).toBe(8);
+    expect(fluids.deferredCount).toBeGreaterThan(0);
+    for (let cx = -1; cx <= 1; cx++) {
+      const chunk = makeChunk(cx, 1, platform);
+      world.addChunk(chunk);
+      fluids.rescheduleChunk(chunk);
+    }
+    pumpUntilQuiet({ world, fluids });
+    expect(probe.count).toBe(0);
+    expect(diamondKeys(world)).toEqual(diamondKeys(reference.world));
+    expect(fluids.deferredCount).toBe(0);
+  });
+
+  it('a slope search that meets unloaded cells still decides when a known hole at that distance covers them', () => {
+    // Column cx = 1 (x >= 16) unloaded. Hole under (15, ., 9); source at (14, S, 8). The cell
+    // (16, S, 8) is unloaded and as far away as the hole, but reachable only through (15, S, 8),
+    // which leads to the hole anyway: the answer {east, south} cannot change.
+    const scene: CellFn = (x, y, z) =>
+      y === 4 ? STONE : y === FLOOR_Y ? (x === 15 && z === 9 ? AIR : STONE) : AIR;
+    const partial = buildWorld(scene, { minCx: -1, maxCx: 0, minCz: -1, maxCz: 1 });
+    const full = buildWorld(scene);
+    for (const fw of [partial, full]) {
+      fw.world.setCell(14, SURFACE, 8, water());
+      pumpTicks(fw.world, fw.fluids, WATER_TICK_DELAY);
+    }
+    expect(partial.fluids.deferredCount).toBe(0);
+    expect(liquidCells(partial.world).map((c) => `${c.x},${c.z}`)).toEqual(['14,8', '15,8', '14,9']);
+    expect(diamondKeys(partial.world)).toEqual(diamondKeys(full.world));
+  });
+
+  it('lava with water directly above hardens although a horizontal neighbour chunk is missing', () => {
+    const world = new World(1);
+    world.addChunk(makeChunk(0, 0, platform));
+    const fluids = new Fluids(world);
+    fluids.attach();
+    world.setCell(8, SURFACE, 15, lava());
+    world.setCell(8, SURFACE + 1, 15, water());
+    pumpTicks(world, fluids, 1);
+    expect(world.getCell(8, SURFACE, 15)).toBe(makeCell(B.OBSIDIAN));
+  });
+
+  it('lava on a border column waits (rubble or lava would depend on the missing chunk), then resumes exactly', () => {
+    const reference = buildWorld();
+    reference.world.setCell(8, SURFACE + 3, 15, lava());
+    pumpUntilQuiet(reference);
+
+    const world = new World(1);
+    for (const [cx, cz] of chunkCoords(AROUND_ORIGIN)) if (cz !== 1) world.addChunk(makeChunk(cx, cz, platform));
+    const fluids = new Fluids(world);
+    fluids.attach();
+    world.setCell(8, SURFACE + 3, 15, lava());
+    pumpUntilQuiet({ world, fluids });
+    expect(countLiquid(world)).toBe(1); // an unloaded neighbour might hold water: not even falling
+    expect(fluids.deferredCount).toBe(1);
+    for (let cx = -1; cx <= 1; cx++) {
+      const chunk = makeChunk(cx, 1, platform);
+      world.addChunk(chunk);
+      fluids.rescheduleChunk(chunk);
+    }
+    pumpUntilQuiet({ world, fluids });
+    expect(diamondKeys(world)).toEqual(diamondKeys(reference.world));
+  });
+
+  it('a single-chunk world: water out of slope reach of unloaded space settles, the rest waits (documented limit)', () => {
+    const fw = buildWorld(platform, { minCx: 0, maxCx: 0, minCz: 0, maxCz: 0 });
+    fw.world.setCell(8, SURFACE, 8, water());
+    pumpUntilQuiet(fw);
+    // On open ground any unloaded cell within reach could be a nearer hole, so every cell
+    // within 5 columns of the chunk border that would spread waits for its neighbours.
+    expect(countLiquid(fw.world)).toBe(60);
+    expect(fw.fluids.deferredCount).toBeGreaterThan(0);
+    for (const c of liquidCells(fw.world)) expect(diamond(8, 8, 7).has(`${c.x},${c.z}`)).toBe(true);
   });
 
   it('rescheduleChunk ignores a chunk that is not in the world', () => {
@@ -283,14 +391,39 @@ describe('determinism across chunk load orders', () => {
     }
     return AIR;
   };
+  /**
+   * Water and lava meeting across chunk borders: water sources in chunk (0,0) and lava sources
+   * in (1,0), (0,1) and (1,1) whose flows touch (lava flowing next to a water pit, a lava source
+   * reached by water while still a source).
+   */
+  const contactScene: CellFn = (x, y, z) => {
+    if (y === 4) return STONE;
+    if (y === FLOOR_Y) {
+      if (x === 20 && z === 20) return water(); // a water pit (stone under the floor below)
+      return (x === 7 && z === 4) || (x === 16 && z === 12) ? AIR : STONE;
+    }
+    if (y === FLOOR_Y - 1 && x === 20 && z === 20) return STONE;
+    if (y === SURFACE) {
+      if ((x === 12 && z === 8) || (x === 15 && z === 2)) return water();
+      if ((x === 18 && z === 8) || (x === 12 && z === 18)) return lava();
+      if ((x === 22 && z === 20) || (x === 17 && z === 2)) return lava(); // (17, 2): reached by water as a source
+    }
+    return AIR;
+  };
   const coords = chunkCoords(AROUND_ORIGIN);
 
-  function run(order: Array<[number, number]>, between: number, protocol: 'self' | 'neighbours'): Map<number, Uint16Array> {
+  function run(
+    order: Array<[number, number]>,
+    between: number,
+    protocol: 'self' | 'neighbours',
+    fn: CellFn = scene,
+    minLiquid = 300,
+  ): Map<number, Uint16Array> {
     const world = new World(1);
     const fluids = new Fluids(world);
     fluids.attach();
     for (const [cx, cz] of order) {
-      const chunk = makeChunk(cx, cz, scene);
+      const chunk = makeChunk(cx, cz, fn);
       world.addChunk(chunk);
       fluids.rescheduleChunk(chunk);
       if (protocol === 'neighbours') {
@@ -302,7 +435,7 @@ describe('determinism across chunk load orders', () => {
       pumpTicks(world, fluids, between);
     }
     pumpUntilQuiet({ world, fluids }, 20_000);
-    expect(countLiquid(world)).toBeGreaterThan(300);
+    expect(countLiquid(world)).toBeGreaterThan(minLiquid);
     return snapshotCells(world);
   }
 
@@ -321,18 +454,40 @@ describe('determinism across chunk load orders', () => {
     }
   }
 
-  it('the final state does not depend on the order (or pace) in which chunks are added', () => {
-    const reference = run(coords, 0, 'self');
-    const reversed = [...coords].reverse();
+  function shuffledCoords(seed: number): Array<[number, number]> {
     const shuffled = [...coords];
-    const rng = new Rng(1234);
+    const rng = new Rng(seed);
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = rng.int(0, i);
       [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
     }
+    return shuffled;
+  }
+
+  it('without liquid contact, the final state depends neither on chunk order nor on load pace', () => {
+    // (The lava in this scene never meets the water.)
+    const reference = run(coords, 0, 'self');
+    const reversed = [...coords].reverse();
+    const shuffled = shuffledCoords(1234);
     expectSame(reference, run(coords, 7, 'neighbours'));
     expectSame(reference, run(reversed, 13, 'self'));
     expectSame(reference, run(shuffled, 3, 'self'));
     expectSame(reference, run(shuffled, 40, 'neighbours'));
   });
+
+  it('with lava meeting water, the final state does not depend on chunk order (all chunks added before ticking)', () => {
+    // Pace is a different matter once lava and water meet: which side's chunk arrives first
+    // decides where they meet, so only the order is pinned here.
+    const reference = run(coords, 0, 'self', contactScene, 100);
+    expect(snapshotHas(reference, B.OBSIDIAN)).toBe(true);
+    expect(snapshotHas(reference, B.COBBLE)).toBe(true);
+    expectSame(reference, run([...coords].reverse(), 0, 'neighbours', contactScene, 100));
+    expectSame(reference, run(shuffledCoords(99), 0, 'self', contactScene, 100));
+    expectSame(reference, run(shuffledCoords(7), 0, 'neighbours', contactScene, 100));
+  });
+
+  function snapshotHas(snap: Map<number, Uint16Array>, id: number): boolean {
+    for (const cells of snap.values()) for (let i = 0; i < cells.length; i++) if ((cells[i]! & ID_MASK) === id) return true;
+    return false;
+  }
 });

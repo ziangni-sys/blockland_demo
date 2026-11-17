@@ -11,29 +11,37 @@ const MARK =
 
 export class DeathView implements ScreenView {
   readonly el: HTMLElement;
-  private readonly respawnBtn: HTMLButtonElement;
+  private readonly card: HTMLElement;
 
   constructor(ctx: UiContext) {
     const d = ctx.doc;
     const a = ctx.actions;
     const titleId = ctx.id('death');
-    this.respawnBtn = button(ctx, { variant: 'primary', icon: ICON_RESPAWN, label: 'death.respawn', onClick: () => a.respawn() });
+    const respawn = button(ctx, { variant: 'primary', icon: ICON_RESPAWN, label: 'death.respawn', onClick: () => a.respawn() });
     const quit = button(ctx, { variant: 'ghost', icon: ICON_SAVE, label: 'pause.saveQuit', onClick: () => a.saveAndQuit() });
-    this.el = h(d, 'div', 'bl-screen bl-death', { hidden: true, 'data-screen': 'death' }, [
-      h(d, 'div', 'bl-death-card bl-panel-modal', { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId }, [
-        svg(d, MARK, 'bl-death-mark'),
-        ctx.text(h(d, 'h2', 'bl-death-title', { id: titleId }), 'death.title'),
-        ctx.text(h(d, 'p', 'bl-death-sub'), 'death.subtitle'),
-        h(d, 'div', 'bl-actions', null, [this.respawnBtn, quit]),
-      ]),
+    this.card = h(d, 'div', 'bl-death-card bl-panel-modal', { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' }, [
+      svg(d, MARK, 'bl-death-mark'),
+      ctx.text(h(d, 'h2', 'bl-death-title', { id: titleId }), 'death.title'),
+      ctx.text(h(d, 'p', 'bl-death-sub'), 'death.subtitle'),
+      h(d, 'div', 'bl-actions', null, [respawn, quit]),
     ]);
+    // Enter respawns, but only as a fresh press made while this screen is up: an auto-repeat
+    // of a key held through the moment of death is not a choice.
+    this.card.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.repeat || e.isComposing || e.target !== this.card) return;
+      e.preventDefault();
+      a.respawn();
+    });
+    this.el = h(d, 'div', 'bl-screen bl-death', { hidden: true, 'data-screen': 'death' }, [this.card]);
   }
 
   update(_s: UiState): void {}
 
   onShow(): void {
-    // Respawn is the only sensible next step; Enter / Space confirms it.
-    focusInto(this.respawnBtn);
+    // Focus the dialog, never the Respawn button: players die holding Space (swimming up,
+    // jumping) or tapping it, and a focused button turns that Space into a click, skipping the
+    // screen. Tab reaches Respawn first; Enter on the dialog respawns.
+    focusInto(this.card);
   }
   onHide(): void {}
   relocalize(): void {}

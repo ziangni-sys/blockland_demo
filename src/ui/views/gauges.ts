@@ -4,8 +4,8 @@
  * bubbles. Browser-only.
  */
 import type { UiContext } from '../context';
-import { arcDash, formatHealth, healthSegments, quantize, ratio, segmentFills } from '../format';
-import { h, restartAnimation, svg, TextSlot } from '../dom';
+import { arcDash, finite, formatHealth, healthSegments, quantize, ratio, segmentFills } from '../format';
+import { h, Retrigger, svg, TextSlot } from '../dom';
 
 const PULSE_GLYPH = '<svg viewBox="0 0 18 14"><path d="M1 7.5h3.6l1.8-4.6 2.9 9 2.2-6.2 1.3 1.8H17"/></svg>';
 
@@ -15,8 +15,10 @@ export class VitalGauge {
   private fills: HTMLElement[] = [];
   private trails: HTMLElement[] = [];
   private readonly num: TextSlot;
+  private readonly hit: Retrigger;
   private readonly fillBuf: number[] = [];
   private segCount = -1;
+  /** Last rendered (sanitized) values; NaN only before the first update. */
   private health = NaN;
   private max = NaN;
   private low: boolean | null = null;
@@ -29,9 +31,13 @@ export class VitalGauge {
     numEl.appendChild(this.num.node);
     this.el = h(d, 'div', 'bl-vital', { role: 'meter', 'aria-valuemin': '0' }, [svg(d, PULSE_GLYPH, 'bl-vital-glyph'), this.segsEl, numEl]);
     ctx.attr(this.el, 'aria-label', 'hud.health');
+    this.hit = new Retrigger(this.el, 'is-hit');
   }
 
-  update(health: number, max: number): void {
+  update(rawHealth: number, rawMax: number): void {
+    // Sanitize before the memo: NaN !== NaN would otherwise rewrite the gauge every frame.
+    const health = finite(rawHealth);
+    const max = finite(rawMax);
     if (health === this.health && max === this.max) return;
     const wasHealth = this.health;
     this.health = health;
@@ -53,7 +59,7 @@ export class VitalGauge {
       this.el.dataset.low = low ? '1' : '0';
     }
     // Flash on damage (not on the first render, not on healing).
-    if (health < wasHealth && !this.ctx.reducedMotion) restartAnimation(this.el, 'is-hit');
+    if (health < wasHealth && !this.ctx.reducedMotion) this.hit.fire();
   }
 
   private buildSegments(n: number): void {
@@ -102,7 +108,8 @@ export class BreathGauge {
   }
 
   update(air: number, maxAir: number): void {
-    const show = maxAir > 0 && air < maxAir;
+    // A non-finite reading hides the arc rather than flashing "out of air".
+    const show = maxAir > 0 && Number.isFinite(air) && air < maxAir;
     if (show !== this.shown) {
       this.shown = show;
       this.el.dataset.show = show ? '1' : '0';

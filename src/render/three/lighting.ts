@@ -3,8 +3,8 @@
  * the CPU code that feeds per-frame uniforms. No three.js import: this file is unit-tested
  * in Node.
  *
- * All colours here are LINEAR RGB (the renderer works in linear space and converts to sRGB
- * in its output pass). Authoring constants are written as sRGB hex for readability and
+ * All colours here are LINEAR RGB (the materials shade in linear space and encode to sRGB as
+ * their last step, see shading.ts encodeOutput). Authoring constants are written as sRGB hex for readability and
  * converted once at module load (immutable lookup tables).
  */
 

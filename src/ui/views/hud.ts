@@ -3,12 +3,13 @@
  * helm instrument, debug overlay and the click-to-play veil.
  *
  * Only the hotbar slots are interactive, and only in drag-to-look mode (where clicks reach
- * the DOM); everything else lets pointer events fall through to the 3D view.
+ * the DOM); everything else lets pointer events fall through to the 3D view. Where the
+ * movable widgets (helm, drag banner, toasts) sit is decided by views/layout.ts.
  */
 import type { UiContext } from '../context';
 import { HOTBAR_SIZE, type UiState } from '../model';
 import { itemName } from '../palette';
-import { h, restartAnimation, setHidden, svg, TextSlot } from '../dom';
+import { h, Retrigger, setHidden, svg, TextSlot } from '../dom';
 import { DebugOverlay } from './debug';
 import { BreathGauge, VitalGauge } from './gauges';
 import { HelmInstrument } from './helm';
@@ -24,18 +25,25 @@ const VEIL_DRAG =
 
 export class Hud {
   readonly el: HTMLElement;
-  private readonly hotbarEl: HTMLElement;
+  /** Boxes the HUD layout pass measures. */
+  readonly crosshair: SVGSVGElement;
+  readonly cluster: HTMLElement;
+  readonly hintEl: HTMLElement;
+  readonly veil: HTMLElement;
+  readonly veilCard: HTMLElement;
+  readonly helmEl: HTMLElement;
+  readonly debugEl: HTMLElement;
+
   private readonly slots: SlotWidget[] = [];
   private readonly nameEl: HTMLElement;
   private readonly name: TextSlot;
-  private readonly hintEl: HTMLElement;
+  private readonly nameFlash: Retrigger;
   private readonly hint: TextSlot;
   private readonly gaugesEl: HTMLElement;
   private readonly vital: VitalGauge;
   private readonly breath: BreathGauge;
   private readonly helm: HelmInstrument;
   private readonly debug: DebugOverlay;
-  private readonly veil: HTMLElement;
   private readonly veilMouse: SVGSVGElement;
   private readonly veilDrag: SVGSVGElement;
   private readonly veilTitle: HTMLElement;
@@ -50,15 +58,11 @@ export class Hud {
   private hintText: string | null | undefined = undefined;
   private veilShown: boolean | null = null;
   private veilDragMode: boolean | null = null;
-  private debugShown: boolean | null = null;
 
-  constructor(
-    private readonly ctx: UiContext,
-    /** The .bl-ui element, for root-level state attributes. */
-    private readonly uiRoot: HTMLElement | null = null,
-  ) {
+  constructor(private readonly ctx: UiContext) {
     const d = ctx.doc;
     this.debug = new DebugOverlay(d);
+    this.debugEl = this.debug.el;
 
     this.hint = new TextSlot(d);
     this.hintEl = h(d, 'div', 'bl-hint bl-play', { 'data-show': '0', 'aria-live': 'polite' });
@@ -67,13 +71,14 @@ export class Hud {
     this.name = new TextSlot(d);
     this.nameEl = h(d, 'div', 'bl-itemname', { 'aria-hidden': 'true' });
     this.nameEl.appendChild(this.name.node);
+    this.nameFlash = new Retrigger(this.nameEl, 'is-flash');
 
     this.vital = new VitalGauge(ctx);
     this.breath = new BreathGauge(ctx);
     this.gaugesEl = h(d, 'div', 'bl-gauges', null, [this.vital.el, this.breath.el]);
 
-    this.hotbarEl = h(d, 'div', 'bl-hotbar', { role: 'toolbar' });
-    ctx.attr(this.hotbarEl, 'aria-label', 'hud.hotbar');
+    const hotbarEl = h(d, 'div', 'bl-hotbar', { role: 'toolbar' });
+    ctx.attr(hotbarEl, 'aria-label', 'hud.hotbar');
     for (let i = 0; i < HOTBAR_SIZE; i++) {
       // Not in the tab order: during play the hotbar is driven by 1-9 / wheel, and a focused
       // button would swallow Space (jump) as a click.
@@ -81,24 +86,26 @@ export class Hud {
       slot.el.addEventListener('mousedown', (e) => e.preventDefault());
       slot.el.addEventListener('click', () => ctx.actions.selectHotbar(i));
       this.slots.push(slot);
-      this.hotbarEl.appendChild(slot.el);
+      hotbarEl.appendChild(slot.el);
     }
 
     this.helm = new HelmInstrument(ctx);
+    this.helmEl = this.helm.el;
 
     this.veilMouse = svg(d, VEIL_MOUSE, 'bl-veil-icon');
     this.veilDrag = svg(d, VEIL_DRAG, 'bl-veil-icon');
     this.veilTitle = h(d, 'div', 'bl-veil-title');
     this.veilSub = h(d, 'div', 'bl-veil-sub');
-    this.veil = h(d, 'div', 'bl-veil bl-play', { 'data-show': '0', 'data-drag': '0' }, [
-      h(d, 'div', 'bl-veil-card', null, [this.veilMouse, this.veilDrag, h(d, 'div', null, null, [this.veilTitle, this.veilSub])]),
-    ]);
+    this.veilCard = h(d, 'div', 'bl-veil-card', null, [this.veilMouse, this.veilDrag, h(d, 'div', null, null, [this.veilTitle, this.veilSub])]);
+    this.veil = h(d, 'div', 'bl-veil bl-play', { 'data-show': '0', 'data-drag': '0' }, [this.veilCard]);
 
+    this.crosshair = svg(d, CROSSHAIR, 'bl-crosshair bl-play');
+    this.cluster = h(d, 'div', 'bl-bottom bl-play', null, [this.nameEl, this.gaugesEl, hotbarEl]);
     this.el = h(d, 'div', 'bl-hud', { 'data-play': '0', 'data-drag': '0' }, [
       this.debug.el,
-      svg(d, CROSSHAIR, 'bl-crosshair bl-play'),
+      this.crosshair,
       this.hintEl,
-      h(d, 'div', 'bl-bottom bl-play', null, [this.nameEl, this.gaugesEl, this.hotbarEl]),
+      this.cluster,
       this.helm.el,
       this.veil,
     ]);
@@ -111,12 +118,6 @@ export class Hud {
   update(s: UiState, inGame: boolean, play: boolean): void {
     if (!inGame) return;
     this.debug.update(s.debug);
-    const debugShown = s.debug !== null && s.debug.length > 0;
-    if (debugShown !== this.debugShown) {
-      this.debugShown = debugShown;
-      // Lets the stylesheet move phone toasts clear of the overlay.
-      this.uiRoot?.setAttribute('data-debug', debugShown ? '1' : '0');
-    }
     if (play !== this.play) {
       this.play = play;
       this.el.dataset.play = play ? '1' : '0';
@@ -154,6 +155,11 @@ export class Hud {
     this.updateVeil(!s.pointerLocked, s.dragLook);
   }
 
+  /** Re-render the hotbar icons at the context's current icon size. */
+  repaintIcons(): void {
+    for (const s of this.slots) s.repaint();
+  }
+
   private updateItemName(s: UiState, sel: number): void {
     const slot = s.hotbar[sel];
     const item = slot && slot.count > 0 ? slot.item : -1;
@@ -163,13 +169,13 @@ export class Hud {
     this.selectedItem = item;
     this.nameLang = this.ctx.lang;
     if (item < 0) {
-      this.nameEl.classList.remove('is-flash');
+      this.nameFlash.stop();
       return;
     }
     this.name.set(itemName(item, this.ctx.lang));
     // Flash only on a real change of the held item (not on the first frame, not on a
     // language switch, which just re-labels whatever is showing).
-    if (changed && !first) restartAnimation(this.nameEl, 'is-flash');
+    if (changed && !first) this.nameFlash.fire();
   }
 
   private updateVeil(show: boolean, drag: boolean): void {

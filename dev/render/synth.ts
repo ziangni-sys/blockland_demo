@@ -289,6 +289,24 @@ class GeoBuilder {
     if (flip) this.idx.push(base + 1, base + 2, base + 3, base + 1, base + 3, base);
     else this.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
   }
+  /**
+   * Back copy of the quad just emitted (mesh contract: the renderer culls back faces in every
+   * pass, so two-sided faces such as plants and liquids are emitted twice).
+   */
+  backCopy(): void {
+    const v = this.pos.length / 3 - 4;
+    const order = [3, 2, 1, 0];
+    const base = this.pos.length / 3;
+    for (const k of order) {
+      const i = v + k;
+      this.pos.push(this.pos[i * 3]!, this.pos[i * 3 + 1]!, this.pos[i * 3 + 2]!);
+      this.nrm.push(-this.nrm[i * 3]!, -this.nrm[i * 3 + 1]!, -this.nrm[i * 3 + 2]!);
+      this.uv.push(this.uv[i * 2]!, this.uv[i * 2 + 1]!);
+      this.layer.push(this.layer[i]!);
+      this.light.push(this.light[i * 4]!, this.light[i * 4 + 1]!, this.light[i * 4 + 2]!, this.light[i * 4 + 3]!);
+    }
+    this.idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
   build(): GeometryData | null {
     const v = this.pos.length / 3;
     if (v === 0) return null;
@@ -363,7 +381,9 @@ export function meshRegion(r: MeshRegion): MeshData {
           const t = def.tileIds[0]!;
           const d = 0.15;
           G.cutout.quad([lx + d, ly, lz + d, lx + 1 - d, ly, lz + 1 - d, lx + 1 - d, ly + 1, lz + 1 - d, lx + d, ly + 1, lz + d], [0.7, 0, -0.7], t, [L, L, L, L], VFLAG_PLANT);
+          G.cutout.backCopy();
           G.cutout.quad([lx + 1 - d, ly, lz + d, lx + d, ly, lz + 1 - d, lx + d, ly + 1, lz + 1 - d, lx + 1 - d, ly + 1, lz + d], [0.7, 0, 0.7], t, [L, L, L, L], VFLAG_PLANT);
+          G.cutout.backCopy();
           continue;
         }
         const liquid = def.liquid !== 0;
@@ -428,10 +448,12 @@ export function meshRegion(r: MeshRegion): MeshData {
             g.quad(p, fn.n, faceTile(id, f), lights, emissive ? VFLAG_EMISSIVE : 0, [0, 0, 1, 0, 1, top, 0, top]);
             g.light[(base + 2) * 4 + 3] |= top < 1 ? VFLAG_LIQUID_SURFACE : 0;
             g.light[(base + 3) * 4 + 3] |= top < 1 ? VFLAG_LIQUID_SURFACE : 0;
+            g.backCopy();
             continue;
           }
           const flip = aos[0]! + aos[2]! < aos[1]! + aos[3]!;
           G[pass].quad(p, fn.n, faceTile(id, f), lights, flags, undefined, flip);
+          if (liquid) G[pass].backCopy();
         }
       }
     }

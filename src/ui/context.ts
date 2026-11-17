@@ -15,19 +15,33 @@ interface TextBinding {
   params: Params | undefined;
 }
 
+/**
+ * Key of the id counter kept on the Document object itself. Ids must be unique per document,
+ * not per UI instance: two instances in one page (HMR without dispose, a second overlay)
+ * would otherwise both mint `bl-logo-1`, so instance 2's <label for> would point at instance
+ * 1's inputs and its logo's url(#gradient) references would resolve into instance 1's hidden
+ * copy and paint nothing. Storing the counter on the document keeps it out of module state.
+ */
+const ID_SEQ = Symbol.for('blocklands.ui.idSeq');
+
 export class UiContext {
   lang: Language = 'zh';
+  /**
+   * Backing-store edge of item icons in px (accounts for devicePixelRatio). Changes when the
+   * page moves to a screen with another pixel ratio or is zoomed; views then repaint.
+   */
+  iconSize: number;
   private readonly bindings: TextBinding[] = [];
-  private idSeq = 0;
 
   constructor(
     readonly doc: Document,
     readonly actions: UiActions,
     readonly icons: IconCache,
-    /** Backing-store edge of item icons in px (accounts for devicePixelRatio). */
-    readonly iconSize: number,
+    iconSize: number,
     private readonly reducedMotionQuery: MediaQueryList | null,
-  ) {}
+  ) {
+    this.iconSize = iconSize;
+  }
 
   get reducedMotion(): boolean {
     return this.reducedMotionQuery ? this.reducedMotionQuery.matches : false;
@@ -63,9 +77,11 @@ export class UiContext {
     }
   }
 
-  /** Unique id for label / aria wiring within this UI instance. */
+  /** Id for label / aria / SVG-reference wiring, unique within the document. */
   id(prefix: string): string {
-    this.idSeq++;
-    return `bl-${prefix}-${this.idSeq.toString(36)}`;
+    const holder = this.doc as unknown as Record<symbol, number | undefined>;
+    const n = (holder[ID_SEQ] ?? 0) + 1;
+    holder[ID_SEQ] = n;
+    return `bl-${prefix}-${n.toString(36)}`;
   }
 }

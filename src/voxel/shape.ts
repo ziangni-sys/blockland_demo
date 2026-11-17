@@ -12,23 +12,44 @@
  * some separating axis) do NOT overlap. A box pushed out or swept up to a face is therefore
  * "free", which is what keeps standing, pushing and sliding stable.
  *
+ * Invalid boxes (a coordinate that is NaN, infinite or beyond ±MAX_BOX_COORD, or min > max on
+ * some axis) are treated as EMPTY by every query: they overlap nothing, have no penetration
+ * or support, are never moved by sweepAxis and have no free offset. This is what guarantees
+ * that every query terminates: a loop counter starting at -Infinity (or at any magnitude
+ * >= 2^53) can never advance, and World.getCell aliases such coordinates onto loaded chunks.
+ *
  * "Solid" always means SOLID[id] === 1 (HARD blocks).
  */
-import { WORLD_HEIGHT } from '../core/constants';
+import { CHUNK_MASK, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
 import { EPS, aabb, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
 import { ID_MASK } from '../blocks/cell';
-// Side-effect import: registering the block table is what fills SOLID (including the
+// Importing defs also registers the block table, which is what fills SOLID (including the
 // deeprock / unloaded sentinels the world returns), so queries never see an empty table.
-import '../blocks/defs';
+import { CELL_BELOW_WORLD, CELL_UNLOADED } from '../blocks/defs';
 import { SOLID } from '../blocks/registry';
+import { cellIndex } from './chunk';
 import type { CellBounds, VoxelGrid } from './grid';
+import { World } from './world';
 
 /** Overlap tolerance: separation within this distance counts as touching, not overlapping. */
 export const CONTACT_EPS = EPS;
 
 /** Default bias strength for PushOptions.prefer when preferWeight is not given. */
 export const DEFAULT_PREFER_WEIGHT = 0.25;
+
+/**
+ * Largest |coordinate| a query box may have; boxes reaching beyond are invalid (empty).
+ * Far outside anything the world can store (World.posKey supports |x|,|z| < 2^22), yet small
+ * enough that integer cell loops advance exactly and `x >> 4` chunk maths stays in int32.
+ */
+export const MAX_BOX_COORD = 2 ** 24;
+
+/** resolvePenetration never applies more pushes than this, whatever maxIterations says. */
+export const MAX_RESOLVE_ITERATIONS = 64;
+
+/** nearestFreeOffset clamps maxRadius to this (the worst case grows with radius^3). */
+export const MAX_FREE_RADIUS = 8;
 
 /** Rotation-matrix entries this close to 0 / ±1 are snapped: the rotation is axis-aligned. */
 const ALIGN_TOL = 1e-12;
@@ -37,6 +58,25 @@ const SAT_MIN_AXIS = 1e-12;
 
 function isSolid(cell: number): boolean {
   return SOLID[cell & ID_MASK] === 1;
+}
+
+/**
+ * Valid query box: every coordinate within ±MAX_BOX_COORD (which also rejects NaN and
+ * ±Infinity, since every comparison with NaN is false) and min <= max on every axis.
+ * Takes the coordinates rather than an AABB so probe boxes need not be materialised.
+ */
+function validBox(minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number): boolean {
+  return (
+    minX >= -MAX_BOX_COORD &&
+    minX <= maxX &&
+    maxX <= MAX_BOX_COORD &&
+    minY >= -MAX_BOX_COORD &&
+    minY <= maxY &&
+    maxY <= MAX_BOX_COORD &&
+    minZ >= -MAX_BOX_COORD &&
+    minZ <= maxZ &&
+    maxZ <= MAX_BOX_COORD
+  );
 }
 
 // ====================================================================== local OBB
@@ -312,9 +352,46 @@ function structureObb(
 // innermost) so a box straddling a chunk border switches chunks once per column, not once
 // per cell.
 
-/** Any solid world cell in the inclusive cell range? Integer arguments only (see note above). */
+/**
+ * Any solid world cell in the inclusive cell range (integer arguments only, see above)?
+ *
+ * For World instances this reads each column's chunk ONCE and indexes its cell array
+ * directly, reproducing World.getCell's rules (below 0: CELL_BELOW_WORLD; at or above
+ * WORLD_HEIGHT: air; unloaded column: CELL_UNLOADED). Calling getCell per cell instead was
+ * measured (node 22) to allocate ~30 bytes per call whenever the scan ran to completion, i.e.
+ * on every query for a FREE box (the common case): TurboFan's loop peeling boxes heap numbers
+ * when getCell is inlined into a y-innermost loop. The direct scan is allocation-free and
+ * about twice as fast. Any other world implementation goes through getCell.
+ */
 function worldRangeHasSolid(grid: VoxelGrid, x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): boolean {
   if (y1 >= WORLD_HEIGHT) y1 = WORLD_HEIGHT - 1;
+  if (x0 > x1 || y0 > y1 || z0 > z1) return false;
+  if (!(grid instanceof World)) return genericRangeHasSolid(grid, x0, x1, y0, y1, z0, z1);
+  if (y0 < 0) {
+    if (SOLID[CELL_BELOW_WORLD & ID_MASK] === 1) return true;
+    y0 = 0;
+    if (y0 > y1) return false;
+  }
+  for (let x = x0; x <= x1; x++) {
+    const lx = x & CHUNK_MASK;
+    for (let z = z0; z <= z1; z++) {
+      const chunk = grid.chunkAt(x, z);
+      if (chunk === undefined) {
+        if (SOLID[CELL_UNLOADED & ID_MASK] === 1) return true;
+        continue;
+      }
+      const cells = chunk.cells;
+      const lz = z & CHUNK_MASK;
+      for (let y = y0; y <= y1; y++) {
+        if (SOLID[cells[cellIndex(lx, y, lz)]! & ID_MASK] === 1) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** worldRangeHasSolid through the VoxelGrid interface (non-World world grids). */
+function genericRangeHasSolid(grid: VoxelGrid, x0: number, x1: number, y0: number, y1: number, z0: number, z1: number): boolean {
   for (let x = x0; x <= x1; x++) {
     for (let z = z0; z <= z1; z++) {
       for (let y = y0; y <= y1; y++) {
@@ -344,7 +421,7 @@ function structureHasSolid(
 /**
  * Visit every solid cell whose unit cube truly overlaps `box` (touching within CONTACT_EPS
  * does not count), in y, z, x order. `fn` returning true stops the iteration.
- * Do not modify the grid from inside `fn`.
+ * Do not modify the grid from inside `fn`. Visits nothing for an invalid box.
  */
 export function forEachSolidCellOverlapping(
   grid: VoxelGrid,
@@ -352,7 +429,7 @@ export function forEachSolidCellOverlapping(
   fn: (x: number, y: number, z: number, cell: number) => boolean | void,
 ): void {
   const { minX, minY, minZ, maxX, maxY, maxZ } = box;
-  if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return;
+  if (!validBox(minX, minY, minZ, maxX, maxY, maxZ)) return;
   if (grid.isWorld) {
     const x0 = Math.floor(minX + CONTACT_EPS);
     const x1 = Math.ceil(maxX - CONTACT_EPS) - 1;
@@ -383,11 +460,13 @@ export function forEachSolidCellOverlapping(
   }
 }
 
-/** True when `box` truly overlaps any solid cell of `grid`. Allocation-free for the world. */
+/**
+ * True when `box` truly overlaps any solid cell of `grid` (false for an invalid box).
+ * Allocation-free for the world.
+ */
 export function boxOverlapsSolid(grid: VoxelGrid, box: AABB): boolean {
   const { minX, minY, minZ, maxX, maxY, maxZ } = box;
-  // Inverted (or NaN) boxes overlap nothing.
-  if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return false;
+  if (!validBox(minX, minY, minZ, maxX, maxY, maxZ)) return false;
   if (grid.isWorld) {
     return worldRangeHasSolid(
       grid,
@@ -432,11 +511,14 @@ interface Prefer {
   w: number;
 }
 
+/** The bias to apply, or null for none. A non-finite vector or weight is ignored, not trusted:
+ * a NaN score would make every candidate face lose and report "no push" for an overlap. */
 function preferParams(opts: PushOptions | undefined): Prefer | null {
   const p = opts?.prefer;
   if (p === undefined) return null;
   const w = opts!.preferWeight ?? DEFAULT_PREFER_WEIGHT;
   if (w === 0 || !Number.isFinite(w)) return null;
+  if (!(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z))) return null;
   return { x: p.x, y: p.y, z: p.z, w };
 }
 
@@ -583,17 +665,27 @@ function newPenetration(): Penetration {
 }
 
 /**
- * The push that resolves the worst overlapping solid cell. For every truly overlapping solid
- * cell the candidate directions are its exposed local face normals (faces whose neighbour is
- * not solid); the cell picks the shallowest one, biased by `opts.prefer` (minimises
- * depth - preferWeight * dot(normal, prefer)). The cell whose true overlap (smallest push
- * over all six faces) is LARGEST wins; ties go to the smaller exposed push. The reported
- * depth is always the true geometric depth along the chosen normal. Null when no overlapping
- * cell has an exposed face (check boxOverlapsSolid to tell "free" from "fully embedded").
+ * The push that resolves the worst overlapping solid cell.
+ *
+ * Per cell: the candidate directions are the cell's EXPOSED local face normals (faces whose
+ * neighbour is not solid); the cell picks the one with the smallest depth, biased by
+ * `opts.prefer` (minimises depth - preferWeight * dot(n_world, prefer)). The depth along n is
+ * the distance the box must travel along n to clear that face (for rotated grids measured
+ * with the box's extent along the local axis). The REPORTED depth is always the true
+ * geometric depth along the chosen normal, never the biased score.
+ *
+ * Across cells: the cell whose TRUE overlap (its smallest depth over all six faces, exposed
+ * or not) is largest wins; on an exact tie the smaller exposed push wins. Ranking by exposed
+ * depth instead would let a cell that is only grazed through a solid neighbour (the deck cell
+ * under a hull wall, whose only exposed faces point out of the hull) decide the push, and
+ * shove the box out through the wall.
+ *
+ * Null when the box is invalid, overlaps nothing, or no overlapping cell has an exposed face
+ * (check boxOverlapsSolid to tell "free" from "fully embedded").
  */
 export function deepestPenetration(grid: VoxelGrid, box: AABB, opts?: PushOptions): Penetration | null {
   const { minX, minY, minZ, maxX, maxY, maxZ } = box;
-  if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return null;
+  if (!validBox(minX, minY, minZ, maxX, maxY, maxZ)) return null;
   const pref = preferParams(opts);
   const out = newPenetration();
   if (grid.isWorld) return worldPenetration(grid, box, pref, out) ? out : null;
@@ -603,7 +695,10 @@ export function deepestPenetration(grid: VoxelGrid, box: AABB, opts?: PushOption
 }
 
 export interface PenetrationResolution {
-  /** Accumulated world-space displacement to apply to the box. */
+  /**
+   * Accumulated world-space displacement. Apply it only when `resolved` is true; otherwise it
+   * is a partial result (the pushes applied before giving up).
+   */
   dx: number;
   dy: number;
   dz: number;
@@ -618,10 +713,17 @@ export interface PenetrationResolution {
 }
 
 /**
- * Repeatedly applies deepestPenetration to a copy of `box` until it is free or
- * `maxIterations` pushes were applied. Never mutates `box`. `resolved` is false when the cap
- * was hit or the remaining overlap has no exposed face (the box is embedded: callers then
- * fall back to nearestFreeOffset / crush handling).
+ * Repeatedly applies deepestPenetration to a copy of `box` until it is free, then reports the
+ * accumulated displacement. Never mutates `box`.
+ *
+ * `resolved` is false (and callers fall back to nearestFreeOffset / crush handling) when:
+ *  - the cap was hit: min(maxIterations, MAX_RESOLVE_ITERATIONS) pushes were applied
+ *    (a NaN or negative maxIterations means 0);
+ *  - the remaining overlap has no exposed face (the box is embedded);
+ *  - the next push would return the box to where the previous push started: it is wedged
+ *    between cells that undo each other's push (e.g. a tall box between two staggered
+ *    cells), which would only repeat until the cap.
+ * An invalid box is reported resolved with zero displacement (it overlaps nothing).
  */
 export function resolvePenetration(
   grid: VoxelGrid,
@@ -631,60 +733,62 @@ export function resolvePenetration(
 ): PenetrationResolution {
   const res: PenetrationResolution = { dx: 0, dy: 0, dz: 0, resolved: true, iterations: 0, nx: 0, ny: 0, nz: 0 };
   const { minX, minY, minZ, maxX, maxY, maxZ } = box;
-  if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return res;
+  if (!validBox(minX, minY, minZ, maxX, maxY, maxZ)) return res;
+  const cap = maxIterations >= 0 ? Math.min(Math.floor(maxIterations), MAX_RESOLVE_ITERATIONS) : 0;
+  const isWorld = grid.isWorld;
+  // World: a translated copy of the box. Structure: its local OBB, built once and translated.
+  const cur: AABB | null = isWorld ? { minX, minY, minZ, maxX, maxY, maxZ } : null;
+  const obb = isWorld ? null : structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  if (cur === null && obb === null) return res; // empty structure: nothing to resolve
   const pref = preferParams(opts);
   const pen = newPenetration();
   let dx = 0;
   let dy = 0;
   let dz = 0;
+  // Displacement before the latest push (NaN until one was applied).
+  let px = NaN;
+  let py = NaN;
+  let pz = NaN;
   let it = 0;
-  if (grid.isWorld) {
-    const cur: AABB = { minX, minY, minZ, maxX, maxY, maxZ };
-    for (;;) {
+  for (;;) {
+    let found: boolean;
+    if (cur !== null) {
       cur.minX = minX + dx;
       cur.minY = minY + dy;
       cur.minZ = minZ + dz;
       cur.maxX = maxX + dx;
       cur.maxY = maxY + dy;
       cur.maxZ = maxZ + dz;
-      if (!worldPenetration(grid, cur, pref, pen)) {
-        res.resolved = !boxOverlapsSolid(grid, cur);
-        break;
-      }
-      if (it >= maxIterations) {
-        res.resolved = false;
-        break;
-      }
-      dx += pen.nx * pen.depth;
-      dy += pen.ny * pen.depth;
-      dz += pen.nz * pen.depth;
-      res.nx = pen.nx;
-      res.ny = pen.ny;
-      res.nz = pen.nz;
-      it++;
+      found = worldPenetration(grid, cur, pref, pen);
+    } else {
+      obb!.setWorldOffset(dx, dy, dz);
+      found = obbPenetration(grid, obb!, pref, pen);
     }
-  } else {
-    const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
-    if (obb !== null) {
-      for (;;) {
-        obb.setWorldOffset(dx, dy, dz);
-        if (!obbPenetration(grid, obb, pref, pen)) {
-          res.resolved = !(obb.range() && obb.hasSolid(grid));
-          break;
-        }
-        if (it >= maxIterations) {
-          res.resolved = false;
-          break;
-        }
-        dx += pen.nx * pen.depth;
-        dy += pen.ny * pen.depth;
-        dz += pen.nz * pen.depth;
-        res.nx = pen.nx;
-        res.ny = pen.ny;
-        res.nz = pen.nz;
-        it++;
-      }
+    if (!found) {
+      res.resolved = cur !== null ? !boxOverlapsSolid(grid, cur) : !(obb!.range() && obb!.hasSolid(grid));
+      break;
     }
+    if (it >= cap) {
+      res.resolved = false;
+      break;
+    }
+    const ndx = dx + pen.nx * pen.depth;
+    const ndy = dy + pen.ny * pen.depth;
+    const ndz = dz + pen.nz * pen.depth;
+    if (Math.abs(ndx - px) <= CONTACT_EPS && Math.abs(ndy - py) <= CONTACT_EPS && Math.abs(ndz - pz) <= CONTACT_EPS) {
+      res.resolved = false; // two-cycle: the state would repeat until the cap
+      break;
+    }
+    px = dx;
+    py = dy;
+    pz = dz;
+    dx = ndx;
+    dy = ndy;
+    dz = ndz;
+    res.nx = pen.nx;
+    res.ny = pen.ny;
+    res.nz = pen.nz;
+    it++;
   }
   res.dx = dx;
   res.dy = dy;
@@ -722,13 +826,15 @@ function worldLayerHasSolid(
  * the box can move along world `axis` without newly entering a solid cell. Cells the box
  * already overlaps are ignored, so a box can always move out of an overlap. A blocked result
  * leaves the box touching the obstacle (within CONTACT_EPS), never overlapping it.
- * Every crossed cell layer is scanned, so large deltas cannot tunnel.
+ * Every crossed cell layer is scanned, so large deltas cannot tunnel; an infinite delta is
+ * fine (the scan stops at deeprock, the build limit or the first unloaded chunk).
+ * Returns 0 for a NaN delta and for an invalid box (a corrupt box is never moved further).
  */
 export function sweepAxis(grid: VoxelGrid, box: AABB, axis: 0 | 1 | 2, delta: number): number {
   if (!grid.isWorld) throw new Error('sweepAxis: only the world grid can be swept; use resolvePenetration for structures');
   if (delta === 0 || delta !== delta) return 0;
   const { minX, minY, minZ, maxX, maxY, maxZ } = box;
-  if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return delta;
+  if (!validBox(minX, minY, minZ, maxX, maxY, maxZ)) return 0;
   // Cross-section cells: those the box overlaps strictly on the two other axes.
   const x0 = Math.floor(minX + CONTACT_EPS);
   const x1 = Math.ceil(maxX - CONTACT_EPS) - 1;
@@ -761,7 +867,10 @@ export function sweepAxis(grid: VoxelGrid, box: AABB, axis: 0 | 1 | 2, delta: nu
       const d = kStop - maxY;
       return d > 0 ? d : 0;
     }
-    const end = minY + delta + CONTACT_EPS; // layers with k + 1 > end would be overlapped
+    // Layers with k + 1 > end would be overlapped. Nothing below -MAX_BOX_COORD needs a scan
+    // (the world stops a fall at deeprock long before; this only bounds an infinite delta).
+    let end = minY + delta + CONTACT_EPS;
+    if (end < -MAX_BOX_COORD) end = -MAX_BOX_COORD;
     let kStart = Math.floor(minY + CONTACT_EPS) - 1;
     if (kStart > WORLD_HEIGHT - 1) kStart = WORLD_HEIGHT - 1; // air above the build limit
     let kStop = -Infinity; // highest blocking layer found so far (exclusive lower scan bound)
@@ -787,8 +896,11 @@ export function sweepAxis(grid: VoxelGrid, box: AABB, axis: 0 | 1 | 2, delta: nu
   const a1 = axis === 0 ? z1 : x1;
   const lo = axis === 0 ? minX : minZ;
   const hi = axis === 0 ? maxX : maxZ;
+  // The scan never needs to pass ±MAX_BOX_COORD: the world's unloaded chunks stop it long
+  // before, and the clamp keeps an infinite delta finite on any other world grid.
   if (delta > 0) {
-    const end = hi + delta - CONTACT_EPS;
+    let end = hi + delta - CONTACT_EPS;
+    if (end > MAX_BOX_COORD) end = MAX_BOX_COORD;
     for (let k = Math.ceil(hi - CONTACT_EPS); k < end; k++) {
       if (worldLayerHasSolid(grid, axis, k, a0, a1, y0, y1)) {
         const d = k - hi;
@@ -797,7 +909,8 @@ export function sweepAxis(grid: VoxelGrid, box: AABB, axis: 0 | 1 | 2, delta: nu
     }
     return delta;
   }
-  const end = lo + delta + CONTACT_EPS;
+  let end = lo + delta + CONTACT_EPS;
+  if (end < -MAX_BOX_COORD) end = -MAX_BOX_COORD;
   for (let k = Math.floor(lo + CONTACT_EPS) - 1; k + 1 > end; k--) {
     if (worldLayerHasSolid(grid, axis, k, a0, a1, y0, y1)) {
       const d = k + 1 - lo;
@@ -842,7 +955,7 @@ function probeOverlapsSolid(grid: VoxelGrid, box: AABB, depth: number, inset: nu
   if (minZ > maxZ) minZ = maxZ = (box.minZ + box.maxZ) * 0.5;
   const maxY = box.minY;
   const minY = maxY - depth;
-  if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return false;
+  if (!validBox(minX, minY, minZ, maxX, maxY, maxZ)) return false;
   if (grid.isWorld) {
     return worldRangeHasSolid(
       grid,
@@ -860,7 +973,8 @@ function probeOverlapsSolid(grid: VoxelGrid, box: AABB, depth: number, inset: nu
 /**
  * boxOverlapsSolid(grid, supportProbe(box, maxGap, inset)). inset 0: "standing on" test;
  * inset > 0: the stricter "attach to this structure" test (attach range must be strictly
- * inside the push range, docs/LESSONS.md).
+ * inside the push range, docs/LESSONS.md). False when the probe is invalid (non-finite
+ * input, NaN or negative maxGap).
  */
 export function hasSupportBelow(grid: VoxelGrid, box: AABB, maxGap: number, inset = 0): boolean {
   return probeOverlapsSolid(grid, box, maxGap, inset);
@@ -888,13 +1002,14 @@ export const FREE_OFFSET_STEP = 0.25;
  * Smallest-3D-length offset (lattice step FREE_OFFSET_STEP, length <= maxRadius) such that
  * the translated box overlaps no solid cell of ANY grid (the same boxOverlapsSolid test the
  * push-out uses) and passes `extraTest`. Returns (0,0,0) when the box is already free, null
- * when no candidate qualifies.
+ * when no candidate qualifies or the box is invalid.
  *
  * Candidates are enumerated in exact order of increasing length, shell by shell (integer
  * squared length), with a fixed order inside a shell: higher y first, then x ascending, then
  * z ascending — fully deterministic and allocation-free per candidate. The AABB passed to
  * `extraTest` is reused between calls; do not keep it.
- * Worst case (nothing free) tests every lattice point of the ball: ~270 * maxRadius^3.
+ * maxRadius is clamped to [0, MAX_FREE_RADIUS] (NaN means 0). Worst case (nothing free)
+ * tests every lattice point of the ball: ~270 * maxRadius^3 candidates per grid.
  */
 export function nearestFreeOffset(
   grids: readonly VoxelGrid[],
@@ -903,13 +1018,13 @@ export function nearestFreeOffset(
   extraTest?: (candidate: AABB) => boolean,
 ): Vec3 | null {
   const { minX, minY, minZ, maxX, maxY, maxZ } = box;
-  if (!(maxX >= minX && maxY >= minY && maxZ >= minZ)) return null;
+  if (!validBox(minX, minY, minZ, maxX, maxY, maxZ)) return null;
   const n = grids.length;
   // Per structure: the local OBB is built once and only translated per candidate. Structures
   // the box cannot reach within maxRadius are dropped up front.
   const obbs: Array<LocalObb | null> = [];
   const list: VoxelGrid[] = [];
-  const radius = maxRadius > 0 ? maxRadius : 0;
+  const radius = maxRadius > 0 ? (maxRadius < MAX_FREE_RADIUS ? maxRadius : MAX_FREE_RADIUS) : 0;
   for (let i = 0; i < n; i++) {
     const g = grids[i]!;
     if (g.isWorld) {

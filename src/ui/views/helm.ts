@@ -5,17 +5,22 @@
  */
 import type { UiContext } from '../context';
 import { helmEq } from '../diff';
-import { formatSpeed, formatThrottle, RUDDER_MAX_DEG, rudderAngle, throttleLever } from '../format';
+import { finite, formatSpeed, formatThrottle, RUDDER_MAX_DEG, rudderAngle, throttleLever, throttleNotch, type ThrottleNotch } from '../format';
 import type { StringKey } from '../i18n';
 import type { HelmView } from '../model';
 import { h, setHidden, svg, TextSlot } from '../dom';
 
-/** Lever notches: throttle value -> label. Top of the track is full ahead. */
-const NOTCHES: ReadonlyArray<{ at: number; key: StringKey }> = [
-  { at: 1, key: 'helm.full' },
-  { at: 0.5, key: 'helm.half' },
-  { at: 0, key: 'helm.stop' },
-  { at: -1, key: 'helm.astern' },
+/**
+ * Lever notches, top (full ahead) to bottom (full astern). Symmetric like a real engine
+ * telegraph: the astern side has its own Half, told apart from the ahead one by its side of
+ * Stop and its colour, as on a brass telegraph dial.
+ */
+const NOTCHES: ReadonlyArray<{ at: number; id: ThrottleNotch; key: StringKey }> = [
+  { at: 1, id: 'full', key: 'helm.full' },
+  { at: 0.5, id: 'half', key: 'helm.half' },
+  { at: 0, id: 'stop', key: 'helm.stop' },
+  { at: -0.5, id: 'halfAstern', key: 'helm.half' },
+  { at: -1, id: 'astern', key: 'helm.astern' },
 ];
 
 const DIAL_CX = 60;
@@ -70,7 +75,7 @@ export class HelmInstrument {
 
     const scale = h(d, 'div', 'bl-lever-scale', { 'aria-hidden': 'true' });
     for (const n of NOTCHES) {
-      const span = ctx.text(h(d, 'span'), n.key);
+      const span = ctx.text(h(d, 'span', n.at < 0 ? 'is-astern' : n.at > 0 ? 'is-ahead' : null), n.key);
       span.style.top = `${((1 - (n.at + 1) / 2) * 100).toFixed(1)}%`;
       this.notchEls.push(span);
       scale.appendChild(span);
@@ -107,9 +112,11 @@ export class HelmInstrument {
     ctx.attr(this.el, 'aria-label', 'helm.title');
   }
 
-  update(v: HelmView | null): void {
+  update(raw: HelmView | null): void {
+    // Sanitize before the memo so a NaN field (0/0 upstream) does not defeat it every frame.
+    const v = raw ? { throttle: finite(raw.throttle), rudder: finite(raw.rudder), speed: finite(raw.speed), sails: finite(raw.sails) } : null;
     if (helmEq(v, this.last)) return;
-    this.last = v ? { throttle: v.throttle, rudder: v.rudder, speed: v.speed, sails: v.sails } : null;
+    this.last = v;
     setHidden(this.el, !v);
     if (!v) return;
 
@@ -117,12 +124,10 @@ export class HelmInstrument {
     if (pos !== this.leverPos) {
       this.leverPos = pos;
       this.knob.style.setProperty('--t', pos.toFixed(3));
-      this.lever.setAttribute('aria-valuenow', String(Math.round(v.throttle * 100)));
+      this.lever.setAttribute('aria-valuenow', String(Math.round(Math.max(-1, Math.min(1, v.throttle)) * 100)));
     }
-    let near = 0;
-    for (let i = 1; i < NOTCHES.length; i++) {
-      if (Math.abs(NOTCHES[i]!.at - v.throttle) < Math.abs(NOTCHES[near]!.at - v.throttle)) near = i;
-    }
+    const notch = throttleNotch(v.throttle);
+    const near = NOTCHES.findIndex((n) => n.id === notch);
     if (near !== this.near) {
       if (this.near >= 0) this.notchEls[this.near]!.classList.remove('is-near');
       this.notchEls[near]!.classList.add('is-near');

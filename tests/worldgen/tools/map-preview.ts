@@ -9,7 +9,8 @@
  *                       2 px per block vertically) showing caves (black), ores, lava, water;
  *   zoom_<seed>.png     160 x 160 blocks around the spawn at 4 px per block;
  *   peak_<seed>.png     the same around the highest land column of the map;
- *   focus_<seed>.png    the same around an optional focus column (WORLDGEN_FOCUS=x,z);
+ *   focus_<seed>.png    the same around an optional focus column (WORLDGEN_FOCUS=x,z),
+ *                       anywhere in the world (its chunks are generated for it);
  *   relief_<seed>.png   grey-scale height with a contour line every 8 blocks.
  *
  * Run (env-guarded vitest entry, see map-preview.test.ts):
@@ -110,68 +111,15 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
   const z0 = c0z * CHUNK_SIZE;
 
   // Top block + height per column; one cross-section row.
-  const topId = new Uint16Array(size * size);
-  const topY = new Int16Array(size * size);
-  const groundY = new Int16Array(size * size); // highest non-liquid solid (for water depth)
   const sectionZ = z0 + (size >> 1);
   const section = new Uint16Array(size * WORLD_HEIGHT);
-  let genMs = 0;
+  const area = scanArea(gen, c0x, c0z, chunks, sectionZ, section);
+  const { topId, topY, groundY, genMs } = area;
   let maxHeight = 0;
-  for (let cz = 0; cz < chunks; cz++) {
-    for (let cx = 0; cx < chunks; cx++) {
-      const t0 = performance.now();
-      const cells = gen.generate(c0x + cx, c0z + cz);
-      genMs += performance.now() - t0;
-      for (let lz = 0; lz < CHUNK_SIZE; lz++) {
-        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
-          const px = cx * CHUNK_SIZE + lx;
-          const pz = cz * CHUNK_SIZE + lz;
-          let y = WORLD_HEIGHT - 1;
-          while (y > 0 && cells[lx | (lz << 4) | (y << 8)] === 0) y--;
-          const id = cells[lx | (lz << 4) | (y << 8)]! & 0x3ff;
-          topId[px + pz * size] = id;
-          topY[px + pz * size] = y;
-          let g = y;
-          while (g > 0 && (cells[lx | (lz << 4) | (g << 8)]! & 0x3ff) === B.WATER) g--;
-          groundY[px + pz * size] = g;
-          if (id !== B.WATER && y > maxHeight) maxHeight = y;
-          if (z0 + pz === sectionZ) {
-            for (let yy = 0; yy < WORLD_HEIGHT; yy++) section[px + yy * size] = cells[lx | (lz << 4) | (yy << 8)]! & 0x3ff;
-          }
-        }
-      }
-    }
-  }
+  for (let i = 0; i < size * size; i++) if (topId[i] !== B.WATER && topY[i]! > maxHeight) maxHeight = topY[i]!;
 
   // ---- map
-  const map = new Uint8Array(size * size * 3);
-  let sea = 0;
-  for (let pz = 0; pz < size; pz++) {
-    for (let px = 0; px < size; px++) {
-      const i = px + pz * size;
-      const id = topId[i]!;
-      let [r, g, b] = colorOf(id);
-      if (id === B.WATER) {
-        sea++;
-        const depth = SEA_LEVEL - 1 - groundY[i]!;
-        const k = Math.min(1, depth / 26);
-        r = 70 - 50 * k;
-        g = 170 - 110 * k;
-        b = 225 - 75 * k;
-      } else {
-        // Hill shading from the north-west plus a gentle height tint.
-        const nw = px > 0 && pz > 0 ? topY[i - 1 - size]! : topY[i]!;
-        const shade = Math.max(0.55, Math.min(1.45, 1 + (topY[i]! - nw) * 0.09));
-        const tint = 0.85 + ((topY[i]! - SEA_LEVEL) / 70) * 0.3;
-        r *= shade * tint;
-        g *= shade * tint;
-        b *= shade * tint;
-      }
-      map[i * 3] = clamp255(r);
-      map[i * 3 + 1] = clamp255(g);
-      map[i * 3 + 2] = clamp255(b);
-    }
-  }
+  const { map, sea } = shadeMap(area);
   // Spawn marker (the zoom view keeps an unmarked copy, with only the spawn cell outlined).
   const sx = Math.floor(spawn.x) - x0;
   const sz = Math.floor(spawn.z) - z0;
@@ -226,7 +174,16 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
   for (let i = 0; i < size * size; i++) if (topId[i] !== B.WATER && topY[i]! > topY[peakI]!) peakI = i;
   const zoom = zoomAt(mapClean, size, sx, sz);
   const peakZoom = zoomAt(mapClean, size, peakI % size, Math.floor(peakI / size));
-  const focusZoom = opts.focus ? zoomAt(mapClean, size, opts.focus.x - x0, opts.focus.z - z0) : null;
+  // The focus may lie anywhere in the world: render its own neighbourhood rather than
+  // cropping the main map (which would come out black outside the map square).
+  let focusZoom: Uint8Array | null = null;
+  if (opts.focus) {
+    const n = Math.ceil(ZOOM_BLOCKS / CHUNK_SIZE) + 1;
+    const fc0x = Math.floor((opts.focus.x - (ZOOM_BLOCKS >> 1)) / CHUNK_SIZE);
+    const fc0z = Math.floor((opts.focus.z - (ZOOM_BLOCKS >> 1)) / CHUNK_SIZE);
+    const fa = scanArea(gen, fc0x, fc0z, n);
+    focusZoom = zoomAt(shadeMap(fa).map, fa.size, opts.focus.x - fa.x0, opts.focus.z - fa.z0);
+  }
 
   // ---- relief: terrain height (water columns show their floor), contours every 8 blocks
   const relief = new Uint8Array(size * size * 3);
@@ -280,6 +237,94 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
 
 const ZOOM_BLOCKS = 160;
 const ZOOM_SCALE = 4;
+
+/** Top block, top y and floor y (under water) of every column of a square of chunks. */
+interface AreaScan {
+  size: number;
+  x0: number;
+  z0: number;
+  topId: Uint16Array;
+  topY: Int16Array;
+  /** Highest non-water cell (the floor under water). */
+  groundY: Int16Array;
+  genMs: number;
+}
+
+/** Generate `chunks` x `chunks` chunks from (c0x, c0z); optionally copy one z row into `section`. */
+function scanArea(
+  gen: TerrainGenerator,
+  c0x: number,
+  c0z: number,
+  chunks: number,
+  sectionZ?: number,
+  section?: Uint16Array,
+): AreaScan {
+  const size = chunks * CHUNK_SIZE;
+  const x0 = c0x * CHUNK_SIZE;
+  const z0 = c0z * CHUNK_SIZE;
+  const topId = new Uint16Array(size * size);
+  const topY = new Int16Array(size * size);
+  const groundY = new Int16Array(size * size);
+  let genMs = 0;
+  for (let cz = 0; cz < chunks; cz++) {
+    for (let cx = 0; cx < chunks; cx++) {
+      const t0 = performance.now();
+      const cells = gen.generate(c0x + cx, c0z + cz);
+      genMs += performance.now() - t0;
+      for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+          const px = cx * CHUNK_SIZE + lx;
+          const pz = cz * CHUNK_SIZE + lz;
+          let y = WORLD_HEIGHT - 1;
+          while (y > 0 && cells[lx | (lz << 4) | (y << 8)] === 0) y--;
+          topId[px + pz * size] = cells[lx | (lz << 4) | (y << 8)]! & 0x3ff;
+          topY[px + pz * size] = y;
+          let g = y;
+          while (g > 0 && (cells[lx | (lz << 4) | (g << 8)]! & 0x3ff) === B.WATER) g--;
+          groundY[px + pz * size] = g;
+          if (section && z0 + pz === sectionZ) {
+            for (let yy = 0; yy < WORLD_HEIGHT; yy++) section[px + yy * size] = cells[lx | (lz << 4) | (yy << 8)]! & 0x3ff;
+          }
+        }
+      }
+    }
+  }
+  return { size, x0, z0, topId, topY, groundY, genMs };
+}
+
+/** Hill-shaded colour map of a scan; water shaded by depth. Returns the RGB image and the water column count. */
+function shadeMap(a: AreaScan): { map: Uint8Array; sea: number } {
+  const { size, topId, topY, groundY } = a;
+  const map = new Uint8Array(size * size * 3);
+  let sea = 0;
+  for (let pz = 0; pz < size; pz++) {
+    for (let px = 0; px < size; px++) {
+      const i = px + pz * size;
+      const id = topId[i]!;
+      let [r, g, b] = colorOf(id);
+      if (id === B.WATER) {
+        sea++;
+        const depth = SEA_LEVEL - 1 - groundY[i]!;
+        const k = Math.min(1, depth / 26);
+        r = 70 - 50 * k;
+        g = 170 - 110 * k;
+        b = 225 - 75 * k;
+      } else {
+        // Hill shading from the north-west plus a gentle height tint.
+        const nw = px > 0 && pz > 0 ? topY[i - 1 - size]! : topY[i]!;
+        const shade = Math.max(0.55, Math.min(1.45, 1 + (topY[i]! - nw) * 0.09));
+        const tint = 0.85 + ((topY[i]! - SEA_LEVEL) / 70) * 0.3;
+        r *= shade * tint;
+        g *= shade * tint;
+        b *= shade * tint;
+      }
+      map[i * 3] = clamp255(r);
+      map[i * 3 + 1] = clamp255(g);
+      map[i * 3 + 2] = clamp255(b);
+    }
+  }
+  return { map, sea };
+}
 
 /** ZOOM_BLOCKS^2 blocks of `map` centred on (cx, cz), scaled up ZOOM_SCALE times. */
 function zoomAt(map: Uint8Array, size: number, cx: number, cz: number): Uint8Array {

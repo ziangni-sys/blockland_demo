@@ -57,7 +57,7 @@ export class EntityAssets {
     if (v.kind === 'cube') {
       e = { geo: this.cube(v, ITEM_CUBE / 2, ITEM_CUBE, -ITEM_CUBE / 2), mat: this.materialFor(v.layer) };
     } else if (v.kind === 'icon') {
-      const geo = toBufferGeometry(buildQuad(ITEM_ICON, v.tile), this.geoOpts);
+      const geo = toBufferGeometry(buildQuad(ITEM_ICON, v.tile, 0, true), this.geoOpts);
       geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), ITEM_ICON);
       geo.boundingBox = new THREE.Box3(new THREE.Vector3(-ITEM_ICON, -ITEM_ICON, -0.01), new THREE.Vector3(ITEM_ICON, ITEM_ICON, 0.01));
       e = { geo, mat: this.materials.cutout };

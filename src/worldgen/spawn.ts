@@ -3,9 +3,10 @@
  *
  * "Pleasant" = dry, flat-ish meadow / forest / beach a few blocks above the sea, open SEA
  * (not a pond) within 12 blocks, and a few trees within 18 blocks. Cheap 2D column samples
- * reject most candidates; the survivor is confirmed against the real generated chunk (solid
- * ground under the feet, two air cells for the body), so caves or trees can never put the
- * player in a wall.
+ * reject most candidates. The 2D model knows nothing about caves, so a survivor is then
+ * rejected if a cave breaks the surface anywhere in its 5x5 patch (exact heightAt), and
+ * finally confirmed against the real generated chunk (solid ground under the feet, two air
+ * cells for the body), so caves or trees can never put the player in a wall or by a pit.
  */
 import { CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT } from '../core/constants';
 import { AIR } from '../blocks/cell';
@@ -21,6 +22,8 @@ export interface SpawnHost {
   readonly surfaceSeeds: SurfaceSeeds;
   readonly treeSeed: number;
   generate(cx: number, cz: number): Uint16Array;
+  /** Exact top solid terrain cell of a column (caves included). */
+  heightAt(x: number, z: number): number;
 }
 
 /** Candidate grid spacing (blocks) and how many rings of it to try. */
@@ -101,6 +104,16 @@ class SpawnSearch {
     return hi - lo <= 2 && lo >= SEA_LEVEL - 1;
   }
 
+  /** Stage 5: no cave mouth in the 5x5 patch (so no pit or hole right by the feet). */
+  private noCaveMouth(x: number, z: number): boolean {
+    for (let dz = -2; dz <= 2; dz++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        if (this.host.heightAt(x + dx, z + dz) !== this.sample(x + dx, z + dz).height) return false;
+      }
+    }
+    return true;
+  }
+
   /** Stage 4: turf or sand underfoot and enough trees around. */
   private treesAndSurface(x: number, z: number): boolean {
     const r = this.region;
@@ -160,6 +173,7 @@ class SpawnSearch {
         const x = i * STEP;
         const z = j * STEP;
         if (!this.columnOk(x, z) || !this.flat(x, z) || !this.seaNearby(x, z) || !this.treesAndSurface(x, z)) continue;
+        if (!this.noCaveMouth(x, z)) continue;
         const h = this.sample(x, z).height;
         const feet = this.standable(x, z);
         // The feet must be on the terrain surface itself (not on a tree crown).
@@ -177,7 +191,7 @@ class SpawnSearch {
         const [i, j] = ringPoint(ring, k);
         const x = i * 4;
         const z = j * 4;
-        if (this.sample(x, z).height < SEA_LEVEL) continue;
+        if (this.sample(x, z).height < SEA_LEVEL || !this.noCaveMouth(x, z)) continue;
         const feet = this.standable(x, z);
         if (feet > 0) return { x: x + 0.5, y: feet, z: z + 0.5 };
       }

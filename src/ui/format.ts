@@ -83,8 +83,24 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+/** Local midnight of the calendar day that contains `ms`. */
+function localDayStart(ms: number): number {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
 /**
- * "Last played" label. Recent saves read as relative times, older ones as a date.
+ * Whole local calendar days from `from` to `to` (0 = same day, 1 = `from` was yesterday).
+ * Rounded because a local day is 23 or 25 hours long across a DST change.
+ */
+export function calendarDaysBetween(from: number, to: number): number {
+  return Math.round((localDayStart(to) - localDayStart(from)) / DAY);
+}
+
+/**
+ * "Last played" label. Saves under a day old read as minutes / hours (even across midnight:
+ * "2 h ago" at 01:00 says more than "yesterday"); older ones by calendar day ("yesterday"
+ * really means the previous local date), then as a date after a week.
  * `lastPlayed` 0 (unknown) gives the localized "unknown". Timestamps slightly in the future
  * (clock skew between tabs) count as "just now".
  */
@@ -93,9 +109,11 @@ export function formatLastPlayed(lastPlayed: number, now: number, lang: Language
   const age = now - lastPlayed;
   if (age < MINUTE) return t(lang, 'time.justNow');
   if (age < HOUR) return t(lang, 'time.minutes', { n: Math.floor(age / MINUTE) });
-  if (age < DAY) return t(lang, 'time.hours', { n: Math.floor(age / HOUR) });
-  if (age < 2 * DAY) return t(lang, 'time.yesterday');
-  if (age < 7 * DAY) return t(lang, 'time.days', { n: Math.floor(age / DAY) });
+  const days = calendarDaysBetween(lastPlayed, now);
+  // days <= 0 with age >= 24 h only happens inside a 25-hour DST day.
+  if (age < DAY || days <= 0) return t(lang, 'time.hours', { n: Math.floor(age / HOUR) });
+  if (days === 1) return t(lang, 'time.yesterday');
+  if (days < 7) return t(lang, 'time.days', { n: days });
   return formatDate(lastPlayed);
 }
 
@@ -133,6 +151,24 @@ export function rudderAngle(rudder: number): number {
 /** Throttle -1..1 -> lever position 0 (bottom, full astern) .. 1 (top, full ahead). */
 export function throttleLever(throttle: number): number {
   return quantize((clamp(finite(throttle), -1, 1) + 1) / 2, 200);
+}
+
+/** Engine-telegraph notch the lever reads as, top to bottom. */
+export type ThrottleNotch = 'full' | 'half' | 'stop' | 'halfAstern' | 'astern';
+
+/** |throttle| below this reads as Stop: the screw is effectively idle. */
+export const THROTTLE_STOP_BAND = 0.05;
+
+/**
+ * Notch to emphasise on the telegraph. Direction comes first: any real astern throttle lights
+ * an astern notch (a nearest-notch rule would show "Stop" while the ship is backing at 40 %),
+ * then magnitude picks half or full.
+ */
+export function throttleNotch(throttle: number): ThrottleNotch {
+  const v = clamp(finite(throttle), -1, 1);
+  if (Math.abs(v) < THROTTLE_STOP_BAND) return 'stop';
+  if (v > 0) return v >= 0.75 ? 'full' : 'half';
+  return v <= -0.75 ? 'astern' : 'halfAstern';
 }
 
 /**

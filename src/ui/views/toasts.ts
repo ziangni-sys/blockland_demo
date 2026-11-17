@@ -1,6 +1,11 @@
 /**
- * Toast stack (top-right; full-width on phones). The client owns toast lifetimes; this view
- * reconciles the DOM against state.toasts by id, animating entries in and out.
+ * Toast stack. The client owns toast lifetimes and order; this view reconciles the DOM against
+ * state.toasts by id, animating entries in and out, and shows them top to bottom in array
+ * order (a client that keeps them newest-first gets newest on top).
+ *
+ * Placement: top right during play, shifted down past the debug overlay / drag banner / a
+ * raised helm by views/layout.ts; top left (clear of the panels' close buttons) while any
+ * screen is open.
  */
 import type { UiContext } from '../context';
 import { diffKeyed } from '../diff';
@@ -35,8 +40,9 @@ export class ToastStack {
       this.ids = next;
       if (diff) {
         for (const id of diff.removed) this.leave(id);
-        for (const id of diff.added) this.enter(toasts.find((t) => t.id === id)!);
+        for (const id of diff.added) this.create(toasts.find((t) => t.id === id)!);
       }
+      this.order(toasts);
     }
     // Same ids: a client may still edit a toast in place (e.g. a counter); cheap to check.
     for (const t of toasts) {
@@ -60,12 +66,26 @@ export class ToastStack {
     return true;
   }
 
-  private enter(t: Toast): void {
+  private create(t: Toast): void {
     const d = this.ctx.doc;
     const textEl = h(d, 'div', 'bl-toast-text', null, [t.text]);
     const el = h(d, 'div', `bl-toast bl-toast--${t.kind}`, null, [h(d, 'span', 'bl-toast-glyph', { 'aria-hidden': 'true' }, [GLYPH[t.kind]]), textEl]);
     this.live.set(t.id, { el, textEl, text: t.text, kind: t.kind });
-    this.el.appendChild(el);
+  }
+
+  /**
+   * Put live toasts in state order, inserting new ones in place. Walks backwards so each
+   * toast only needs checking against its successor; elements already in place are not
+   * touched (re-inserting would replay their entry animation). Leaving toasts stay where they
+   * are until their exit animation ends.
+   */
+  private order(toasts: readonly Toast[]): void {
+    let next: Element | null = null;
+    for (let i = toasts.length - 1; i >= 0; i--) {
+      const el = this.live.get(toasts[i]!.id)!.el;
+      if (!el.isConnected || nextLive(el) !== next) this.el.insertBefore(el, next);
+      next = el;
+    }
   }
 
   private leave(id: number): void {
@@ -92,4 +112,11 @@ export class ToastStack {
     this.live.clear();
     this.el.remove();
   }
+}
+
+/** Next sibling that is not on its way out. */
+function nextLive(el: Element): Element | null {
+  let n = el.nextElementSibling;
+  while (n && n.classList.contains('is-leaving')) n = n.nextElementSibling;
+  return n;
 }

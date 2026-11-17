@@ -11,8 +11,12 @@
  *     u8       kind (0 ship, 1 rotor)
  *     varuint  id
  *     varuint  parent id (0 = the world; a rotor's parent must be a ship in this file)
- *     cells    varint minX minY minZ, varuint sx sy sz, u16Array of the dense tight box
- *              (index = (x-minX) + (z-minZ)*sx + (y-minY)*sx*sz)
+ *     cells    varint minX minY minZ, varuint sx sy sz: the TIGHT cell box (all 0 when empty),
+ *              then the box in index order (index = (x-minX) + (z-minZ)*sx + (y-minY)*sx*sz)
+ *              as runs of non-air cells: varuint run count, per run varuint gap (air cells
+ *              since the end of the previous run, or since index 0) + u16Array of the cells.
+ *              Proportional to the cell count, so a sparse structure with a huge box (ships
+ *              may be edited at will) stays small and always reads back.
  *     pose     f64 x 23: pivot, position, rotation, prevPosition, prevRotation,
  *              linearVelocity, angularVelocity
  *     glue     i32Array: GlueStore.toArray() (canonical x, y, z, axis quadruples)
@@ -20,6 +24,9 @@
  *              f64 angularSpeed, varuint sails, bool hubGlue
  *     ship:    varint helm x y z, u8 forward, f64 throttle, f64 rudder, bool asleep,
  *              varuint restTicks
+ *
+ * Format 1 (still read) differed only in the cells: the box followed by a u16Array of the
+ * whole dense box.
  *
  * Not stored: the helmsman (entities re-take the wheel), frozen flags and ship.sails
  * (recomputed every step), hull / mass / inertia (rebuilt by the dynamics' refresh).
@@ -39,12 +46,18 @@ import type { World } from '../voxel/world';
 import type { GlueStore } from './glue';
 import { Rotor, Ship, type Structure } from './structure';
 
-export const STRUCTURES_FORMAT = 1;
+export const STRUCTURES_FORMAT = 2;
+/** The previous format (dense cell boxes); read, never written. */
+const FORMAT_DENSE = 1;
 
 const KIND_SHIP = 0;
 const KIND_ROTOR = 1;
-/** Largest dense cell box accepted on read (a 4000-cell ship needs far less). */
-const MAX_BOX_CELLS = 1 << 24;
+/**
+ * Largest cell box a structure can have: StructureGrid stores its box densely in one
+ * Uint16Array, which cannot be longer than this, so no structure that existed in memory has a
+ * bigger one. Also keeps every index computation exact.
+ */
+const MAX_BOX_CELLS = 2 ** 32 - 1;
 /** Coordinates stay well inside int32 so every integer computation downstream is exact. */
 const MAX_COORD = 1 << 28;
 /**
@@ -106,18 +119,40 @@ function writeCells(w: ByteWriter, g: StructureGrid): void {
   const b = g.cellBounds();
   if (b === null) {
     w.varint(0).varint(0).varint(0).varuint(0).varuint(0).varuint(0);
-    w.u16Array(new Uint16Array(0));
+    w.varuint(0);
     return;
   }
   const sx = b.maxX - b.minX;
   const sy = b.maxY - b.minY;
   const sz = b.maxZ - b.minZ;
-  const dense = new Uint16Array(sx * sy * sz);
+  const layer = sx * sz;
+  // forEachCell walks the storage box y-major, then z, then x: the same order as the tight
+  // box's index, so the indices arrive strictly increasing and runs are found in one pass.
+  const values = new Uint16Array(g.count);
+  const gaps: number[] = [];
+  const lens: number[] = [];
+  let next = 0; // index just past the previous run
+  let n = 0;
   g.forEachCell((x, y, z, cell) => {
-    dense[x - b.minX + (z - b.minZ) * sx + (y - b.minY) * sx * sz] = cell;
+    const idx = x - b.minX + (z - b.minZ) * sx + (y - b.minY) * layer;
+    if (n > 0 && idx === next) {
+      lens[lens.length - 1]!++;
+    } else {
+      gaps.push(idx - next);
+      lens.push(1);
+    }
+    next = idx + 1;
+    values[n++] = cell;
   });
   w.varint(b.minX).varint(b.minY).varint(b.minZ).varuint(sx).varuint(sy).varuint(sz);
-  w.u16Array(dense);
+  w.varuint(gaps.length);
+  let o = 0;
+  for (let i = 0; i < gaps.length; i++) {
+    const len = lens[i]!;
+    w.varuint(gaps[i]!);
+    w.u16Array(values.subarray(o, o + len));
+    o += len;
+  }
 }
 
 function writeVec(w: ByteWriter, v: Vec3): void {
@@ -144,7 +179,7 @@ function writePose(w: ByteWriter, g: StructureGrid): void {
  */
 export function readStructures(r: ByteReader, world: World): DecodedStructures {
   const format = r.u8();
-  if (format !== STRUCTURES_FORMAT) r.fail(`unsupported structures format ${format}`);
+  if (format !== STRUCTURES_FORMAT && format !== FORMAT_DENSE) r.fail(`unsupported structures format ${format}`);
   const nextId = r.varuint();
   if (nextId < 1) r.fail('structure id counter must be at least 1');
   const n = r.count(MIN_RECORD_BYTES);
@@ -159,7 +194,8 @@ export function readStructures(r: ByteReader, world: World): DecodedStructures {
     const parentId = r.varuint();
     if (kind === KIND_SHIP && parentId !== 0) r.fail(`ship ${id} has a parent (${parentId})`);
     const s: Structure = kind === KIND_SHIP ? new Ship(id, world) : new Rotor(id, world);
-    readCells(r, s.grid);
+    if (format === FORMAT_DENSE) readDenseCells(r, s.grid);
+    else readCells(r, s.grid);
     readPose(r, s.grid);
     readGlue(r, s.glue);
     if (s instanceof Rotor) {
@@ -241,7 +277,8 @@ function readPose(r: ByteReader, g: StructureGrid): void {
   readVec(r, g.angularVelocity);
 }
 
-function readCells(r: ByteReader, g: StructureGrid): void {
+/** The cell box header shared by both formats; returns its volume. */
+function readBox(r: ByteReader): { minX: number; minY: number; minZ: number; sx: number; sy: number; sz: number; volume: number } {
   const minX = readCoord(r);
   const minY = readCoord(r);
   const minZ = readCoord(r);
@@ -251,15 +288,103 @@ function readCells(r: ByteReader, g: StructureGrid): void {
   if (sx > MAX_COORD || sy > MAX_COORD || sz > MAX_COORD) r.fail('cell box too large');
   const volume = sx * sy * sz;
   if (volume > MAX_BOX_CELLS) r.fail(`cell box of ${volume} cells is too large`);
+  return { minX, minY, minZ, sx, sy, sz, volume };
+}
+
+function checkCell(r: ByteReader, cell: number): void {
+  if (cell === AIR) r.fail('air inside a run of structure cells');
+  if (BLOCKS[cell & ID_MASK] === undefined) r.fail(`unknown block id ${cell & ID_MASK} in structure`);
+}
+
+/**
+ * Allocate the grid's storage for the box. A corrupted box far larger than any structure the
+ * game could hold may fail to allocate: that is malformed data, not a crash.
+ */
+function allocate(r: ByteReader, g: StructureGrid, minX: number, minY: number, minZ: number, sx: number, sy: number, sz: number): void {
+  try {
+    g.resize(minX, minY, minZ, sx, sy, sz);
+  } catch (e) {
+    if (!(e instanceof RangeError)) throw e;
+    r.fail(`cell box of ${sx}x${sy}x${sz} cells cannot be allocated`);
+  }
+}
+
+/** Format 2: tight box + runs of non-air cells (see the header). */
+function readCells(r: ByteReader, g: StructureGrid): void {
+  const { minX, minY, minZ, sx, sy, sz, volume } = readBox(r);
+  // A run takes at least 4 bytes: a gap byte, a length byte and one u16 cell.
+  const runs = r.count(4);
+  if (runs === 0) {
+    if (volume !== 0) r.fail('empty structure with a non-empty cell box');
+    return;
+  }
+  if (volume === 0) r.fail('structure cells without a cell box');
+  // Decode and validate everything before allocating, so the box is known to be the tight
+  // box of real cells (as written) before memory is committed to it.
+  const idx: number[] = [];
+  const vals: Uint16Array[] = [];
+  let next = 0;
+  for (let i = 0; i < runs; i++) {
+    const gap = r.varuint();
+    if (i > 0 && gap === 0) r.fail('adjacent runs of structure cells');
+    const run = r.u16Array();
+    if (run.length === 0) r.fail('empty run of structure cells');
+    const start = next + gap;
+    if (start + run.length > volume) r.fail(`structure cells run past the end of the ${volume}-cell box`);
+    for (let k = 0; k < run.length; k++) checkCell(r, run[k]!);
+    idx.push(start);
+    vals.push(run);
+    next = start + run.length; // runs are strictly increasing, so they never overlap
+  }
+  // The box must be the tight box of the cells, as written (catches a corrupted header
+  // before memory is committed to it). Linear in the cell count, like the writes below.
+  const layer = sx * sz;
+  let x0 = sx;
+  let x1 = -1;
+  let z0 = sz;
+  let z1 = -1;
+  for (let i = 0; i < runs; i++) {
+    const end = idx[i]! + vals[i]!.length;
+    for (let at = idx[i]!; at < end; at++) {
+      const rem = at - Math.floor(at / layer) * layer;
+      const z = Math.floor(rem / sx);
+      const x = rem - z * sx;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (z < z0) z0 = z;
+      if (z > z1) z1 = z;
+    }
+  }
+  const y0 = Math.floor(idx[0]! / layer);
+  const y1 = Math.floor((next - 1) / layer);
+  if (x0 !== 0 || x1 !== sx - 1 || z0 !== 0 || z1 !== sz - 1 || y0 !== 0 || y1 !== sy - 1) {
+    r.fail('structure cell box is not the tight box of its cells');
+  }
+  allocate(r, g, minX, minY, minZ, sx, sy, sz);
+  for (let i = 0; i < runs; i++) {
+    const run = vals[i]!;
+    let at = idx[i]!;
+    for (let k = 0; k < run.length; k++, at++) {
+      const y = Math.floor(at / layer);
+      const rem = at - y * layer;
+      const z = Math.floor(rem / sx);
+      g.setCell(minX + rem - z * sx, minY + y, minZ + z, run[k]!, SET_STRUCTURE_MOVE);
+    }
+  }
+}
+
+/** Format 1: the whole dense box (its length is bounded by the input, so no box limit). */
+function readDenseCells(r: ByteReader, g: StructureGrid): void {
+  const { minX, minY, minZ, sx, sy, sz, volume } = readBox(r);
   const dense = r.u16Array();
   if (dense.length !== volume) r.fail(`cell box holds ${dense.length} cells, expected ${volume}`);
   if (volume === 0) return;
-  g.resize(minX, minY, minZ, sx, sy, sz);
+  allocate(r, g, minX, minY, minZ, sx, sy, sz);
   const layer = sx * sz;
   for (let i = 0; i < volume; i++) {
     const cell = dense[i]!;
     if (cell === AIR) continue;
-    if (BLOCKS[cell & ID_MASK] === undefined) r.fail(`unknown block id ${cell & ID_MASK} in structure`);
+    checkCell(r, cell);
     const y = Math.floor(i / layer);
     const rem = i - y * layer;
     const z = Math.floor(rem / sx);

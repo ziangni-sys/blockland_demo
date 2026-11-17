@@ -18,7 +18,7 @@ import { AIR, cellState, ID_MASK, isLiquidSource, liquidState, makeCell } from '
 import { B } from '../blocks/defs';
 import { BLOCKS, isLiquidCell, isSolidCell, type DropSpec } from '../blocks/registry';
 import { WORLD_HEIGHT } from '../core/constants';
-import { DIR_X, DIR_Y, DIR_Z, nearestDir, NX, NY, NZ, PX, PZ, type Dir } from '../core/dirs';
+import { DIR_X, DIR_Y, DIR_Z, nearestDir, NX, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
 import { qmul, vclone, vec3, vset, type Quat, type Vec3 } from '../core/math';
 import { SET_NO_NEIGHBOR_UPDATE, SET_STRUCTURE_MOVE, type CellBounds, type VoxelGrid } from '../voxel/grid';
 import type { StructureGrid } from '../voxel/sgrid';
@@ -110,25 +110,35 @@ function isWaterSource(cell: number): boolean {
   return (cell & ID_MASK) === WATER_ID && isLiquidSource(cellState(cell));
 }
 
-function touchesWaterSource(world: World, x: number, y: number, z: number): boolean {
-  return (
-    isWaterSource(world.getCell(x + 1, y, z)) ||
-    isWaterSource(world.getCell(x - 1, y, z)) ||
-    isWaterSource(world.getCell(x, y, z + 1)) ||
-    isWaterSource(world.getCell(x, y, z - 1)) ||
-    isWaterSource(world.getCell(x, y + 1, z))
-  );
+/**
+ * The game's own infinite-source condition (DESIGN 世界 "无限水源", liquid/fluids.ts): at
+ * least two horizontally adjacent water sources, and a hard block or a water source below.
+ */
+function becomesSource(world: World, x: number, y: number, z: number): boolean {
+  const below = world.getCell(x, y - 1, z);
+  if (!isSolidCell(below) && !isWaterSource(below)) return false;
+  let n = 0;
+  if (isWaterSource(world.getCell(x + 1, y, z))) n++;
+  if (isWaterSource(world.getCell(x - 1, y, z))) n++;
+  if (n < 2 && isWaterSource(world.getCell(x, y, z + 1))) n++;
+  if (n < 2 && isWaterSource(world.getCell(x, y, z - 1))) n++;
+  return n >= 2;
 }
 
-/** Neighbours a new source can feed: the four horizontal ones and the cell below. */
-const FEED_DIRS: readonly Dir[] = [PX, NX, PZ, NZ, NY];
+/** Neighbours whose condition a new source can complete: the four horizontal ones and the cell above. */
+const FEED_DIRS: readonly Dir[] = [PX, NX, PZ, NZ, PY];
 
 /**
- * DESIGN "水的处理": after a structure left the world, every candidate cell (vacated cells,
- * plus the hull's bilge and sealed cells for a ship) that is AIR and has a water SOURCE
- * horizontally adjacent or directly above becomes a water source, repeated to a fixpoint so
- * the sea closes over the whole footprint of a hull built at sea. A dry dock has no source
- * next to it, so nothing is filled there. Returns the number of cells filled.
+ * DESIGN "水的处理": after a structure left the world, the candidate cells (vacated cells,
+ * plus the hull's bilge and sealed cells for a ship) close up again where they lie in a body
+ * of water. A candidate that is AIR becomes a water source when it meets the infinite-source
+ * condition (two horizontal sources, hard block or source below), counting sources created
+ * here, repeated to a fixpoint. So the sea closes over the whole footprint and the flooded
+ * cavities of a hull built at sea — a footprint surrounded by sources fills from its edges
+ * inwards and from the bottom up to the sea level — while a dry dock stays dry, a puddle on a
+ * deck is not multiplied into a sheet of sources, and no source is left hanging in the air
+ * (the puddle simply flows down after the block updates). The result does not depend on the
+ * order of the candidates. Returns the number of cells filled.
  */
 export function refillWater(world: World, candidates: Int32Array, count: number): number {
   const set = new CellSet(count);
@@ -144,7 +154,7 @@ export function refillWater(world: World, candidates: Int32Array, count: number)
     const z = stack.pop()!;
     const y = stack.pop()!;
     const x = stack.pop()!;
-    if (world.getCell(x, y, z) !== AIR || !touchesWaterSource(world, x, y, z)) continue;
+    if (world.getCell(x, y, z) !== AIR || !becomesSource(world, x, y, z)) continue;
     if (!world.setCell(x, y, z, WATER_SOURCE, MOVE_FLAGS)) continue;
     filled++;
     for (let k = 0; k < FEED_DIRS.length; k++) {
