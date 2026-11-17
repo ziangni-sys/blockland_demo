@@ -7,6 +7,7 @@ import type { Rotor, Ship } from '../../src/structures/structure';
 import { Chunk } from '../../src/voxel/chunk';
 import {
   fillWorld,
+  hullExtent,
   hullSamplePoints,
   launch,
   makeSea,
@@ -142,15 +143,46 @@ describe('sleep and wake', () => {
     expect(boat.grid.position.y).toBeLessThan(p.y + 2);
   });
 
-  it('a moving rotor in reach wakes it, a far one does not', () => {
-    const { world, dyn, boat } = settledBoat();
+  it('a moving rotor whose sweep reaches it wakes it; a far one, or one whose disc ends short of it, does not', () => {
+    const { world, dyn, boat } = settledBoat(); // hull x in [-2, 3)
     const far: Rotor = newRotor(world, 90, 30, 47, 30, PY, [[30, 47, 30], [31, 47, 30], [32, 47, 30]]);
     run(dyn, [boat], 10);
     for (let t = 0; t < 10; t++) tick(dyn, [boat], [far], 1);
     expect(boat.asleep).toBe(true);
-    const near: Rotor = newRotor(world, 91, 7, 47, 0, PY, [[7, 47, 0], [6, 47, 0], [5, 47, 0], [4, 47, 0]]);
-    tick(dyn, [boat], [far, near], 1);
+    // hub 4.5 blocks east of the hull, blade 3.5 long: its disc ends 1 block short of the boat,
+    // so however long it spins it can never touch it (review finding: only a reachable sweep wakes)
+    const short: Rotor = newRotor(world, 91, 7, 47, 0, PY, [[7, 47, 0], [6, 47, 0], [5, 47, 0], [4, 47, 0]]);
+    for (let t = 0; t < 130; t++) tick(dyn, [boat], [far, short], 1); // a full turn and more
+    expect(boat.asleep).toBe(true);
+    // a blade at deck height whose sweep crosses the hull
+    const deck = Math.floor(hullExtent(boat).maxY - 0.5);
+    const near: Rotor = newRotor(world, 92, 7, deck, 0, PY, [[7, deck, 0], [6, deck, 0], [5, deck, 0], [4, deck, 0], [3, deck, 0], [2, deck, 0]]);
+    tick(dyn, [boat], [far, short, near], 1);
     expect(boat.asleep).toBe(false);
+  });
+
+  it("boats moored under a windmill's disc, out of its blades' reach, fall asleep and stay asleep", () => {
+    // Review finding: a boat inside a spinning rotor's bounding SPHERE was woken every tick although
+    // the thin disc the blades sweep could never reach it.
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const boat = launch(plankBoat(world, 1, -2, 47, -2, 5, 5, NZ), dyn); // deck top ~49
+    const cells: Array<[number, number, number]> = [[0, 52, 0]];
+    for (let x = 1; x <= 6; x++) for (let y = 51; y <= 53; y++) cells.push([x, y, 0]);
+    const mill = newRotor(world, 50, 0, 52, 0, PY, cells); // horizontal disc, radius ~6.5, y in [51, 54)
+    let asleep = 0;
+    let simulated = 0;
+    for (let t = 0; t < 400; t++) {
+      tick(dyn, [boat], [mill], 1);
+      expect(dyn.getStats(boat)!.rotorContacts).toBe(0);
+      if (t >= 200) {
+        if (boat.asleep) asleep++;
+        if (dyn.getStats(boat)!.simulated) simulated++;
+      }
+    }
+    expect(hullExtent(boat).maxY).toBeLessThan(51 - 0.5); // really out of reach
+    expect(asleep).toBe(200);
+    expect(simulated).toBe(0);
   });
 
   it('an awake ship approaching wakes a sleeping one', () => {

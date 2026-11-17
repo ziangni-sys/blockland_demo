@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { PY } from '../../src/core/dirs';
+import { NZ, PY } from '../../src/core/dirs';
 import { qfromAxisAngle, quat, vec3, type Vec3 } from '../../src/core/math';
 import { Rotor, type Ship } from '../../src/structures/structure';
 import {
@@ -11,6 +11,7 @@ import {
   hullSamplePoints,
   launch,
   makeSea,
+  makeWorld,
   newRotor,
   plankBoat,
   pointsIntoHull,
@@ -18,6 +19,7 @@ import {
   spinRotor,
   terrainPenetration,
   tick,
+  tilt,
 } from './helpers';
 
 /**
@@ -211,5 +213,92 @@ describe('rotor vs ship: pinning (ACCEPTANCE 16)', () => {
     expect(host.drops).toHaveLength(0);
     expect(boat.grid.position.z).toBeGreaterThan(z0 + 1);
     expect(tr.maxWallPen).toBeLessThan(0.1);
+  });
+});
+
+describe('rotor vs ship: a pinned boat stays calm (review finding: thrashing in the corner)', () => {
+  it('while a blade cuts a boat wedged in a corner, the hull neither thrashes nor plunges', () => {
+    // Before: velocities flipping every tick up to 4.7 blocks/s, 30 degrees of tilt, rotor contacts
+    // with opposite normals in one sub-step (points the blade had passed pushed out through its far
+    // side, deep "walk back" contacts), and a 1-block plunge below the float line on release.
+    const world = makeSea();
+    fillWorld(world, -6, 36, -14, -4, 52, 0, B.STONE);
+    fillWorld(world, -6, 36, -3, -1, 52, -2, B.STONE);
+    const { dyn } = setup(world);
+    const boat = launch(plankBoat(world, 1, -3, 46, -6, 3, 3), dyn);
+    const y0 = boat.grid.position.y;
+    const rotor = blade(world, 0, 0, (80 * Math.PI) / 180);
+    let maxSpeed = 0;
+    let maxSpin = 0;
+    let maxTilt = 0;
+    let minDy = Infinity;
+    let pinned = 0;
+    for (let t = 0; t < 60; t++) {
+      tick(dyn, [boat], [rotor], 1);
+      const st = dyn.getStats(boat)!;
+      pinned += st.pinned;
+      minDy = Math.min(minDy, boat.grid.position.y - y0);
+      if (st.rotorContacts === 0) continue;
+      const v = boat.grid.linearVelocity;
+      const w = boat.grid.angularVelocity;
+      maxSpeed = Math.max(maxSpeed, Math.hypot(v.x, v.z));
+      maxSpin = Math.max(maxSpin, Math.hypot(w.x, w.y, w.z));
+      maxTilt = Math.max(maxTilt, tilt(boat));
+    }
+    expect(pinned).toBeGreaterThan(0);
+    expect(boat.grid.count).toBeLessThan(18);
+    expect(maxSpeed).toBeLessThan(2.5);
+    expect(maxSpin).toBeLessThan(2);
+    expect(maxTilt).toBeLessThan((8 * Math.PI) / 180);
+    expect(minDy).toBeGreaterThan(-0.3);
+  });
+});
+
+describe('rotor vs ship: long blades (review finding: tips outrunning the sub-step clamp)', () => {
+  for (const len of [40, 60]) {
+    it(`a ${len}-long blade at 1 rad/s pushes a floating boat away without cutting into it`, () => {
+      // Tip speed 40-60 blocks/s: with 8 sub-steps the blade moved farther per sub-step than the hull
+      // was allowed to (0.2), contacts reached 2 blocks deep and the blade passed through the hull.
+      const world = makeWorld({ cx0: -2, cx1: 4, cz0: -4, cz1: 1 }); // sea x in [-32, 80), z in [-64, 32)
+      const { dyn, host } = setup(world);
+      const cells: Array<[number, number, number]> = [[0, 47, 0]];
+      for (let x = 1; x <= len; x++) for (let y = 46; y <= 48; y++) cells.push([x, y, 0]);
+      const rotor = newRotor(world, 100, 0, 47, 0, PY, cells);
+      const boat = launch(plankBoat(world, 1, len - 5, 46, -5, 3, 3, NZ), dyn); // near the tip
+      const n = boat.grid.count;
+      let contacts = 0;
+      let maxSub = 0;
+      let maxOverlap = 0;
+      // The boat is flung at the tip's speed (35+ blocks/s): 20 ticks take it well clear, and it
+      // must stay inside the loaded test sea (a frozen ship is an obstacle the blade passes).
+      for (let t = 0; t < 20; t++) {
+        tick(dyn, [boat], [rotor], 1);
+        const st = dyn.getStats(boat)!;
+        expect(st.frozen).toBe(false);
+        contacts += st.rotorContacts;
+        if (st.rotorContacts > 0) maxSub = Math.max(maxSub, dyn.lastSubsteps);
+        maxOverlap = Math.max(maxOverlap, pointsIntoHull(boat, rotorCorners(rotor)));
+        expect(finite(boat)).toBe(true);
+      }
+      expect(contacts).toBeGreaterThan(0);
+      expect(maxSub).toBeGreaterThan(8); // the tick was sub-divided further while the blade was near
+      expect(maxSub).toBeLessThanOrEqual(dyn.options.maxSubsteps);
+      expect(maxOverlap).toBeLessThan(0.3);
+      expect(boat.grid.count).toBe(n);
+      expect(host.drops).toHaveLength(0);
+    });
+  }
+
+  it('without a fast rotor in reach the tick keeps the default sub-step count', () => {
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const cells: Array<[number, number, number]> = [[0, 47, 0]];
+    for (let x = 1; x <= 40; x++) cells.push([x, 47, 0]);
+    const rotor = newRotor(world, 100, 0, 47, 0, PY, cells);
+    const boat = launch(plankBoat(world, 1, -40, 46, 40, 3, 3, NZ), dyn); // ~57 blocks from the hub
+    for (let t = 0; t < 5; t++) {
+      tick(dyn, [boat], [rotor], 1);
+      expect(dyn.lastSubsteps).toBe(dyn.options.substeps);
+    }
   });
 });
