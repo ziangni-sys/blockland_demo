@@ -11,7 +11,7 @@ Read before changing code: `docs/ARCHITECTURE.md` (code conventions, layering, t
 
 ## Commands
 
-- `npm test` — every headless test, including the 24 acceptance scenarios
+- `npm test` — every headless test, including the acceptance scenarios (`tests/acceptance/`)
 - `npm run typecheck`
 - `npm run build:artifact` — single-file build, `dist-artifact/blocklands.html`
 - `node scripts/e2e-smoke.mjs` — browser smoke test (WebGL2 and WebGPU launch configurations)

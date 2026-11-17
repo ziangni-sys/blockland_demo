@@ -103,7 +103,7 @@ export const STRINGS = {
   'ctl.inventory': { zh: '物品栏', en: 'Inventory' },
   'ctl.pause': { zh: '暂停', en: 'Pause' },
   'ctl.debug': { zh: '调试信息', en: 'Debug overlay' },
-  'ctl.view': { zh: '切换视角：第一人称 → 背后 → 正面', en: 'Camera: first person → behind → front' },
+  'ctl.view': { zh: '切换视角：第一人称 → 越肩 → 正面', en: 'Camera: first person → over the shoulder → front' },
   'ctl.helmPreview': { zh: '预览将要组装的船', en: 'Preview the ship' },
   'ctl.helmAssemble': { zh: '组装船只并掌舵', en: 'Assemble the ship and take the wheel' },
   'ctl.helmThrottle': { zh: '油门', en: 'Throttle' },

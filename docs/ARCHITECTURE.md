@@ -45,6 +45,7 @@ art（程序化贴图，纯函数）      save（codec 纯函数 + 存储适配�
 
 - `World`（`voxel/world.ts`）：区块存储、光照存储、**唯一的方块改动钩子** `onCellChange`、待处理方块 tick 队列 `TickQueue`、网格脏标记（用 `takeDirtySections()` 取）。未加载位置 `getCell` 返回 `CELL_UNLOADED`（实心、不可破坏）；`y<0` 是界岩，`y≥128` 是空气。
 - `StructureGrid`（`voxel/sgrid.ts`）：结构体的稠密存储 + 位姿。`父空间点 = position + rotate(rotation, 局部点 − pivot)`；可嵌套（`parent` 是另一个 `StructureGrid`）。每 tick 移动前先 `snapshotPose()`，渲染用 `renderPose(alpha)`。
+- 胶（`structures/glue.ts` 的 `GlueStore`）按面存储，世界一份、每个结构体一份。所有增删都经过存储并发出变更事件；格子变化时由 `StructureManager` 的钩子按“至少一侧是可涂胶方块”的规则清理。
 - 射线、盒体相交、推出向量等查询**只写一份**，对任意 `VoxelGrid` 生效（`voxel/raycast.ts`、`voxel/shape.ts`）。实体的身体永远是**世界轴对齐的盒子**；对旋转的网格，把盒子变换到网格局部空间做 OBB-格子 SAT。站立 / 推开 / 附着 / 挤压四种判定用同一个盒子定义，只是内缩量不同，且附着盒严格在推开盒之内（LESSONS“携带与实体”第一条）。
 
 ## 模拟 tick 的顺序（`sim/`）
@@ -70,6 +71,8 @@ art（程序化贴图，纯函数）      save（codec 纯函数 + 存储适配�
 ## 存档
 
 `save/`：codec（纯函数，区块 RLE、tick 队列、结构体、胶水、实体）+ 存储适配器（`MemoryStorage` 给测试，`IdbStorage` 给浏览器）。新世界必须清空一切全局状态（LESSONS“同种子开新世界”）—— 模拟层**不允许模块级可变状态**，一切状态挂在 `Simulation` 实例上。
+
+存档不向后兼容：格式一变就提高 `SAVE_VERSION`，解码器只读当前版本，旧档给出提示后拒绝打开，不写迁移代码。
 
 ## 测试
 
