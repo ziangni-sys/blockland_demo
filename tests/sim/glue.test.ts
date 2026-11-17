@@ -20,10 +20,10 @@ describe('superglue in the main hand: one face at a time (DESIGN 强力胶)', ()
     const sim = flatSim();
     sim.world.setCell(0, Y, -2, makeCell(B.STONE));
     const log = new EventLog(sim);
-    sim.hold(I.GLUE, 1);
-    sim.lookAtCell(0, Y, -2, PZ);
+    sim.soloPlayer.hold(I.GLUE, 1);
+    sim.soloPlayer.lookAtCell(0, Y, -2, PZ);
     sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.glue.apply');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.glue.apply');
     click(sim);
     // The face between the block and its neighbour along the hit normal (the open side).
     expect(sim.worldGlue.has(0, Y, -2, PZ)).toBe(true);
@@ -31,20 +31,20 @@ describe('superglue in the main hand: one face at a time (DESIGN 强力胶)', ()
     expect(sim.worldGlue.size).toBe(1);
     expect(log.toastKeys()).toContain('toast.glue.added');
     expect(log.of('sound').map((e) => e.name)).toContain('glue');
-    expect(sim.player.inventory.count(I.GLUE)).toBe(1); // creative: not consumed
-    expect(sim.view.hint?.key).toBe('hint.glue.already');
+    expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(1); // creative: not consumed
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.glue.already');
     click(sim);
     expect(log.toastKeys()).toContain('toast.glue.already');
     expect(sim.worldGlue.size).toBe(1);
 
-    sim.player.input.sneak = true;
+    sim.soloPlayer.player.input.sneak = true;
     sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.glue.remove');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.glue.remove');
     log.clear();
     click(sim);
     expect(sim.worldGlue.size).toBe(0);
     expect(log.toastKeys()).toEqual(['toast.glue.removed']);
-    expect(sim.view.hint?.key).toBe('hint.glue.notGlued');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.glue.notGlued');
     click(sim);
     expect(log.toastKeys()).toContain('toast.glue.notGlued');
   });
@@ -52,10 +52,10 @@ describe('superglue in the main hand: one face at a time (DESIGN 强力胶)', ()
   it('each face of a block is its own: gluing the top does not glue the side', () => {
     const sim = flatSim();
     sim.world.setCell(0, T, -2, makeCell(B.STONE)); // below the eye: its top face shows
-    sim.hold(I.GLUE);
-    expect(sim.useOn(0, T, -2, PY)).toBe(true);
+    sim.soloPlayer.hold(I.GLUE);
+    expect(sim.soloPlayer.useOn(0, T, -2, PY)).toBe(true);
     expect(sim.worldGlue.size).toBe(1);
-    expect(sim.useOn(0, T, -2, PZ)).toBe(true);
+    expect(sim.soloPlayer.useOn(0, T, -2, PZ)).toBe(true);
     expect(sim.worldGlue.has(0, T, -2, PY)).toBe(true);
     expect(sim.worldGlue.has(0, T, -2, PZ)).toBe(true);
     expect(sim.worldGlue.has(0, T, -2, PX)).toBe(false);
@@ -66,21 +66,21 @@ describe('superglue in the main hand: one face at a time (DESIGN 强力胶)', ()
     const sim = flatSim({ mode: 'survival' });
     sim.world.setCell(0, Y, -2, makeCell(B.IRON_BLOCK));
     sim.worldGlue.add(0, Y, -2, PZ);
-    sim.hold(I.GLUE, 2);
-    sim.player.input.sneak = true;
-    expect(sim.useOn(0, Y, -2, PZ)).toBe(true);
+    sim.soloPlayer.hold(I.GLUE, 2);
+    sim.soloPlayer.player.input.sneak = true;
+    expect(sim.soloPlayer.useOn(0, Y, -2, PZ)).toBe(true);
     expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(2);
+    expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(2);
   });
 
   it('never on unbreakable blocks', () => {
     const sim = flatSim();
     sim.world.setCell(0, Y, -2, makeCell(B.DEEPROCK));
     const log = new EventLog(sim);
-    sim.hold(I.GLUE);
-    sim.lookAtCell(0, Y, -2, PZ);
+    sim.soloPlayer.hold(I.GLUE);
+    sim.soloPlayer.lookAtCell(0, Y, -2, PZ);
     sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.glue.cannot');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.glue.cannot');
     click(sim);
     expect(sim.worldGlue.size).toBe(0);
     expect(log.toastKeys()).toEqual(['toast.glue.cannot']);
@@ -97,28 +97,28 @@ describe('the glue ray passes through soft blocks: every exposed glued face can 
     it(`with ${what} in front of a glued face: glue in hand aims at the face, sneak removes it, a click glues it again, a left-click breaks the soft block`, () => {
       const sim = flatSim();
       sim.world.setCell(0, T, -3, makeCell(B.STONE));
-      sim.hold(I.GLUE);
-      expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+      sim.soloPlayer.hold(I.GLUE);
+      expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true);
       sim.world.setCell(0, T, -2, soft); // put in front of the glued face afterwards
       expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
       const log = new EventLog(sim);
       // The outline and hint are on the stone's face behind the soft block, not on the soft block.
-      sim.lookAtCell(0, T, -3, PZ);
+      sim.soloPlayer.lookAtCell(0, T, -3, PZ);
       sim.tick();
-      expect(sim.view.target).toEqual({ gridId: 0, x: 0, y: T, z: -3, face: PZ });
-      expect(sim.view.hint?.key).toBe('hint.glue.already');
-      sim.player.input.sneak = true;
+      expect(sim.soloPlayer.view.target).toEqual({ gridId: 0, x: 0, y: T, z: -3, face: PZ });
+      expect(sim.soloPlayer.view.hint?.key).toBe('hint.glue.already');
+      sim.soloPlayer.player.input.sneak = true;
       sim.tick();
-      expect(sim.view.hint?.key).toBe('hint.glue.remove');
-      expect(sim.useOn(0, T, -3, PZ)).toBe(true);
-      sim.player.input.sneak = false;
+      expect(sim.soloPlayer.view.hint?.key).toBe('hint.glue.remove');
+      expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true);
+      sim.soloPlayer.player.input.sneak = false;
       expect(sim.worldGlue.size).toBe(0);
       expect(log.toastKeys()).toEqual(['toast.glue.removed']);
-      expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+      expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true);
       expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
       // The mining ray still stops at the soft block: a left-click with glue in hand breaks it.
-      expect(sim.mineTargetCell()).toMatchObject({ gridId: 0, x: 0, y: T, z: -2 });
-      expect(sim.mine(0, T, -2)).toBe(true);
+      expect(sim.soloPlayer.mineTargetCell()).toMatchObject({ gridId: 0, x: 0, y: T, z: -2 });
+      expect(sim.soloPlayer.mine(0, T, -2)).toBe(true);
       expect(idAt(sim.world, 0, T, -2)).toBe(0);
       expect(idAt(sim.world, 0, T, -3)).toBe(B.STONE);
       expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
@@ -128,11 +128,11 @@ describe('the glue ray passes through soft blocks: every exposed glued face can 
   it('a soft block alone is no target for glue: the ray goes on to the hard block behind it', () => {
     const sim = flatSim();
     sim.world.setCell(0, T, -2, makeCell(B.TORCH));
-    sim.hold(I.GLUE);
-    sim.lookAtCell(0, T, -2);
-    expect(sim.targetCell()).not.toMatchObject({ x: 0, y: T, z: -2 });
-    sim.hold(B.STONE); // any other item: the torch is the target
-    expect(sim.targetCell()).toMatchObject({ gridId: 0, x: 0, y: T, z: -2 });
+    sim.soloPlayer.hold(I.GLUE);
+    sim.soloPlayer.lookAtCell(0, T, -2);
+    expect(sim.soloPlayer.targetCell()).not.toMatchObject({ x: 0, y: T, z: -2 });
+    sim.soloPlayer.hold(B.STONE); // any other item: the torch is the target
+    expect(sim.soloPlayer.targetCell()).toMatchObject({ gridId: 0, x: 0, y: T, z: -2 });
   });
 });
 
@@ -142,10 +142,10 @@ describe('survival: the timed glue operation', () => {
     const sim = flatSim({ mode: 'survival' });
     sim.world.setCell(0, T, -2, makeCell(id));
     sim.world.setCell(1, T, -2, makeCell(B.STONE)); // another block to look at
-    sim.hold(I.GLUE, glue);
-    sim.lookAtCell(0, T, -2, PZ);
-    sim.player.input.use = true;
-    sim.use();
+    sim.soloPlayer.hold(I.GLUE, glue);
+    sim.soloPlayer.lookAtCell(0, T, -2, PZ);
+    sim.soloPlayer.player.input.use = true;
+    sim.soloPlayer.use();
     sim.tick(); // the press starts the operation (and counts as its first tick)
     return sim;
   }
@@ -156,31 +156,31 @@ describe('survival: the timed glue operation', () => {
       const n = ticksOf(id);
       sim.advance(n - 2);
       expect(sim.worldGlue.size).toBe(0);
-      expect(sim.player.inventory.count(I.GLUE)).toBe(3);
-      expect(sim.view.glueProgress).toBeCloseTo((n - 1) / n, 5);
-      expect(sim.view.hint).toEqual({ key: 'hint.glue.working', params: { pct: Math.floor(sim.view.glueProgress * 100) } });
+      expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(3);
+      expect(sim.soloPlayer.view.glueProgress).toBeCloseTo((n - 1) / n, 5);
+      expect(sim.soloPlayer.view.hint).toEqual({ key: 'hint.glue.working', params: { pct: Math.floor(sim.soloPlayer.view.glueProgress * 100) } });
       sim.tick();
       expect(sim.worldGlue.has(0, T, -2, PZ)).toBe(true);
-      expect(sim.player.inventory.count(I.GLUE)).toBe(2);
-      expect(sim.view.glueProgress).toBe(0);
+      expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(2);
+      expect(sim.soloPlayer.view.glueProgress).toBe(0);
       sim.advance(n + 5); // still holding: nothing more happens
-      expect(sim.player.inventory.count(I.GLUE)).toBe(2);
+      expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(2);
       expect(sim.worldGlue.size).toBe(1);
     }
   });
 
   const cancels: Array<[string, (sim: ReturnType<typeof flatSim>) => void]> = [
-    ['letting go of the button', (sim) => (sim.player.input.use = false)],
-    ['looking at the sky', (sim) => sim.lookAt(0.5, Y + 30, -2.5)],
-    ['looking at another block', (sim) => sim.lookAtCell(1, T, -2, PZ)],
-    ['looking at another face of the same block', (sim) => sim.lookAtCell(0, T, -2, PY)],
+    ['letting go of the button', (sim) => (sim.soloPlayer.player.input.use = false)],
+    ['looking at the sky', (sim) => sim.soloPlayer.lookAt(0.5, Y + 30, -2.5)],
+    ['looking at another block', (sim) => sim.soloPlayer.lookAtCell(1, T, -2, PZ)],
+    ['looking at another face of the same block', (sim) => sim.soloPlayer.lookAtCell(0, T, -2, PY)],
     [
       'changing the selected slot',
       (sim) => {
-        sim.player.input.slot = (sim.player.inventory.selected + 1) % 9;
+        sim.soloPlayer.player.input.slot = (sim.soloPlayer.player.inventory.selected + 1) % 9;
       },
     ],
-    ['swapping hands', (sim) => sim.swapHands()],
+    ['swapping hands', (sim) => sim.soloPlayer.swapHands()],
     // Any write path that turns one glueable block straight into another: the time is the block's own.
     ['the block turning into another glueable block', (sim) => sim.world.setCell(0, T, -2, makeCell(B.IRON_BLOCK))],
   ];
@@ -189,22 +189,22 @@ describe('survival: the timed glue operation', () => {
       const sim = scene(B.STONE);
       const n = ticksOf(B.STONE);
       sim.advance(n - 6);
-      expect(sim.view.glueProgress).toBeGreaterThan(0.5);
+      expect(sim.soloPlayer.view.glueProgress).toBeGreaterThan(0.5);
       act(sim);
       sim.tick();
-      expect(sim.view.glueProgress).toBe(0);
+      expect(sim.soloPlayer.view.glueProgress).toBe(0);
       // Back to the start: glue in hand, aimed at the same face, button held.
-      const inv = sim.player.inventory;
+      const inv = sim.soloPlayer.player.inventory;
       if (inv.selectedStack()?.item !== I.GLUE) {
-        if (inv.offhand?.item === I.GLUE) sim.swapHands();
-        else sim.hold(I.GLUE);
+        if (inv.offhand?.item === I.GLUE) sim.soloPlayer.swapHands();
+        else sim.soloPlayer.hold(I.GLUE);
       }
-      sim.lookAtCell(0, T, -2, PZ);
-      sim.player.input.use = true;
+      sim.soloPlayer.lookAtCell(0, T, -2, PZ);
+      sim.soloPlayer.player.input.use = true;
       sim.advance(3 * n);
       expect(sim.worldGlue.size).toBe(0);
-      expect(sim.player.inventory.count(I.GLUE)).toBe(3);
-      expect(sim.view.glueProgress).toBe(0);
+      expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(3);
+      expect(sim.soloPlayer.view.glueProgress).toBe(0);
     });
   }
 });
@@ -212,62 +212,62 @@ describe('survival: the timed glue operation', () => {
 describe('the off-hand swap command', () => {
   it('F swaps the selected hotbar stack with the off-hand stack, in both directions, also with an empty side', () => {
     const sim = flatSim({ mode: 'survival' });
-    const inv = sim.player.inventory;
-    sim.hold(I.GLUE, 5);
+    const inv = sim.soloPlayer.player.inventory;
+    sim.soloPlayer.hold(I.GLUE, 5);
     const slot = inv.selected;
     expect(inv.offhand).toBeNull();
-    sim.swapHands();
+    sim.soloPlayer.swapHands();
     expect(inv.offhand).toBeNull(); // a command: nothing happens before the tick
     sim.tick();
     expect(inv.offhand).toEqual({ item: I.GLUE, count: 5 });
     expect(inv.hotbar[slot]).toBeNull();
-    sim.hold(B.PLANKS_OAK, 20); // into the (now empty) selected slot
+    sim.soloPlayer.hold(B.PLANKS_OAK, 20); // into the (now empty) selected slot
     expect(inv.selected).toBe(slot);
-    sim.swapHands();
+    sim.soloPlayer.swapHands();
     sim.tick();
     expect(inv.offhand).toEqual({ item: B.PLANKS_OAK, count: 20 });
     expect(inv.hotbar[slot]).toEqual({ item: I.GLUE, count: 5 });
-    sim.swapHands();
+    sim.soloPlayer.swapHands();
     sim.tick();
     expect(inv.offhand).toEqual({ item: I.GLUE, count: 5 });
     expect(inv.hotbar[slot]).toEqual({ item: B.PLANKS_OAK, count: 20 });
     // Two presses in one tick swap there and back.
-    sim.swapHands();
-    sim.swapHands();
+    sim.soloPlayer.swapHands();
+    sim.soloPlayer.swapHands();
     sim.tick();
     expect(inv.offhand).toEqual({ item: I.GLUE, count: 5 });
-    expect(sim.player.input.swapPresses).toBe(0);
+    expect(sim.soloPlayer.player.input.swapPresses).toBe(0);
   });
 
   it('a dead player swaps nothing (the press is consumed)', () => {
     const sim = flatSim({ mode: 'survival' });
-    sim.hold(I.GLUE, 5);
-    sim.entities.kill(sim.player, 'test');
-    sim.swapHands();
+    sim.soloPlayer.hold(I.GLUE, 5);
+    sim.entities.kill(sim.soloPlayer.player, 'test');
+    sim.soloPlayer.swapHands();
     sim.tick();
-    expect(sim.player.inventory.offhand).toBeNull();
-    expect(sim.player.input.swapPresses).toBe(0);
+    expect(sim.soloPlayer.player.inventory.offhand).toBeNull();
+    expect(sim.soloPlayer.player.input.swapPresses).toBe(0);
   });
 
   it('a swap drops a pending assembly preview, like changing the slot', () => {
     const sim = flatSim();
     for (let x = -1; x <= 1; x++) for (let z = -4; z <= -3; z++) sim.world.setCell(x, T, z, makeCell(B.PLANKS_OAK));
     sim.world.setCell(0, T + 1, -3, makeCell(B.HELM, facingState(NZ)));
-    sim.emptyHand();
-    expect(sim.useOn(0, T + 1, -3, PZ)).toBe(true);
-    expect(sim.view.preview?.kind).toBe('ship');
-    sim.swapHands();
+    sim.soloPlayer.emptyHand();
+    expect(sim.soloPlayer.useOn(0, T + 1, -3, PZ)).toBe(true);
+    expect(sim.soloPlayer.view.preview?.kind).toBe('ship');
+    sim.soloPlayer.swapHands();
     sim.tick();
-    expect(sim.view.preview).toBeNull();
+    expect(sim.soloPlayer.view.preview).toBeNull();
   });
 
   it('pick block neither searches nor changes the off-hand', () => {
     const sim = flatSim({ mode: 'survival' });
     sim.world.setCell(0, Y, -2, makeCell(B.STONE));
-    const inv = sim.player.inventory;
+    const inv = sim.soloPlayer.player.inventory;
     inv.offhand = { item: B.STONE, count: 9 };
-    sim.lookAtCell(0, Y, -2, PZ);
-    expect(sim.pickBlock()).toBe(false); // only in the off-hand: survival picks nothing
+    sim.soloPlayer.lookAtCell(0, Y, -2, PZ);
+    expect(sim.soloPlayer.pickBlock()).toBe(false); // only in the off-hand: survival picks nothing
     expect(inv.offhand).toEqual({ item: B.STONE, count: 9 });
   });
 });
@@ -277,81 +277,81 @@ describe('glue in the off-hand: placed blocks stick to the clicked face (DESIGN 
   function scene(mode: 'creative' | 'survival', item: number, glue: number) {
     const sim = flatSim({ mode });
     sim.world.setCell(0, T, -3, makeCell(B.STONE));
-    const inv = sim.player.inventory;
+    const inv = sim.soloPlayer.player.inventory;
     inv.offhand = { item: I.GLUE, count: glue };
-    sim.hold(item, 32);
+    sim.soloPlayer.hold(item, 32);
     return sim;
   }
 
   it('creative: the face between the clicked block and the placed one is glued, nothing consumed', () => {
     const sim = scene('creative', B.BRICKS, 4);
-    expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+    expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true);
     expect(idAt(sim.world, 0, T, -2)).toBe(B.BRICKS);
     expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
     expect(sim.worldGlue.size).toBe(1);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 4 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 4 });
   });
 
   it('survival: one glue from the off-hand per face; when it runs out later blocks are not glued', () => {
     const sim = scene('survival', B.BRICKS, 2);
-    expect(sim.useOn(0, T, -3, PZ)).toBe(true); // (0,T,-2)
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
-    expect(sim.useOn(0, T, -3, PY)).toBe(true); // (0,T+1,-3)
-    expect(sim.player.inventory.offhand).toBeNull();
-    sim.hold(B.COBBLE, 8);
-    expect(sim.useOn(0, T, -2, PY)).toBe(true); // on the first brick: placed, not glued
+    expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true); // (0,T,-2)
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
+    expect(sim.soloPlayer.useOn(0, T, -3, PY)).toBe(true); // (0,T+1,-3)
+    expect(sim.soloPlayer.player.inventory.offhand).toBeNull();
+    sim.soloPlayer.hold(B.COBBLE, 8);
+    expect(sim.soloPlayer.useOn(0, T, -2, PY)).toBe(true); // on the first brick: placed, not glued
     expect(idAt(sim.world, 0, T + 1, -2)).toBe(B.COBBLE);
     expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
     expect(sim.worldGlue.has(0, T, -3, PY)).toBe(true);
     expect(sim.worldGlue.has(0, T, -2, PY)).toBe(false);
     expect(sim.worldGlue.size).toBe(2);
-    expect(sim.player.inventory.count(B.BRICKS)).toBe(30);
+    expect(sim.soloPlayer.player.inventory.count(B.BRICKS)).toBe(30);
   });
 
   it('blocks that already stick without glue are not glued (no glue spent)', () => {
     const sim = scene('survival', B.PLANKS_PINE, 3);
     sim.world.setCell(0, T, -3, makeCell(B.PLANKS_OAK)); // planks stick to any planks
-    expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+    expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true);
     expect(idAt(sim.world, 0, T, -2)).toBe(B.PLANKS_PINE);
     expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 3 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 3 });
   });
 
   it('a face already glued is not paid for twice', () => {
     const sim = scene('survival', B.BRICKS, 3);
     sim.worldGlue.add(0, T, -3, PZ);
-    expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+    expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true);
     expect(sim.worldGlue.size).toBe(1);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 3 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 3 });
   });
 
   it('nothing is glued when the placed block cannot carry glue, or replaced the clicked block', () => {
     const sim = scene('survival', B.TORCH, 3);
-    expect(sim.useOn(0, T, -3, PY)).toBe(true);
+    expect(sim.soloPlayer.useOn(0, T, -3, PY)).toBe(true);
     expect(idAt(sim.world, 0, T + 1, -3)).toBe(B.TORCH);
     expect(sim.worldGlue.size).toBe(0);
     // A snow layer or tall grass is replaced in place by the block put on it: no face was
     // clicked against. Stone does not stick to stone, so only that rule keeps the clicked face
     // (now between the new stone and the open air) from being glued.
     const log = new EventLog(sim);
-    sim.hold(B.STONE, 8);
+    sim.soloPlayer.hold(B.STONE, 8);
     sim.world.setCell(2, T, -3, makeCell(B.SNOW_LAYER, layersState(1)));
-    expect(sim.useOn(2, T, -3, PY)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, T, -3, PY)).toBe(true);
     expect(idAt(sim.world, 2, T, -3)).toBe(B.STONE);
     sim.world.setCell(-2, T, -3, makeCell(B.TALL_GRASS));
-    expect(sim.useOn(-2, T, -3, PZ)).toBe(true);
+    expect(sim.soloPlayer.useOn(-2, T, -3, PZ)).toBe(true);
     expect(idAt(sim.world, -2, T, -3)).toBe(B.STONE);
     expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 3 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 3 });
     expect(log.of('sound').map((e) => e.name)).not.toContain('glue');
   });
 
   it('other items in the off-hand have no effect', () => {
     const sim = scene('survival', B.BRICKS, 3);
-    sim.player.inventory.offhand = { item: B.STONE, count: 5 };
-    expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+    sim.soloPlayer.player.inventory.offhand = { item: B.STONE, count: 5 };
+    expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true);
     expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.offhand).toEqual({ item: B.STONE, count: 5 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: B.STONE, count: 5 });
   });
 });
 

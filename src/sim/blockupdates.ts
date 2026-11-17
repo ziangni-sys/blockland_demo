@@ -25,7 +25,8 @@
  *    blockifies into a ship (or starts from one) can leave a torch or a flower without the
  *    block under it. Since evaluation waits for flush(), it sees the move complete.
  *
- * Drops follow the rule used everywhere in the simulation: nothing drops in creative mode.
+ * Drops follow the world rules (sim/rules.ts): popped-off and washed-away blocks drop only when
+ * the world's dropsEnabled is on, whoever caused the change.
  */
 import { AIR, ID_MASK } from '../blocks/cell';
 import { B } from '../blocks/defs';
@@ -91,7 +92,7 @@ export class BlockUpdates {
   /** The simulation's world change hook. */
   onWorldChange(x: number, y: number, z: number, oldCell: number, newCell: number, flags: number): void {
     if ((flags & SET_NO_NEIGHBOR_UPDATE) !== 0) return;
-    if (washedAway(oldCell, newCell)) spawnBlockDrop(this.sim, this.sim.world, x, y, z, oldCell, this.tmp);
+    if (washedAway(oldCell, newCell) && this.sim.rules.dropsEnabled) spawnBlockDrop(this.sim, this.sim.world, x, y, z, oldCell, this.tmp);
     this.enqueueAround(x, y, z);
   }
 
@@ -176,7 +177,7 @@ export class BlockUpdates {
     }
     if (supportedBy(def.support, below)) return;
     if (!world.setCell(x, y, z, AIR)) return;
-    spawnBlockDrop(this.sim, world, x, y, z, cell, this.tmp);
+    if (this.sim.rules.dropsEnabled) spawnBlockDrop(this.sim, world, x, y, z, cell, this.tmp);
   }
 
   private evaluateStructure(grid: VoxelGrid, x: number, y: number, z: number): void {
@@ -189,6 +190,6 @@ export class BlockUpdates {
     if (def === undefined || def.support === 'none') return;
     if (supportedBy(def.support, grid.getCell(x, y - 1, z))) return;
     if (!grid.setCell(x, y, z, AIR)) return;
-    spawnBlockDrop(this.sim, grid, x, y, z, cell, this.tmp);
+    if (this.sim.rules.dropsEnabled) spawnBlockDrop(this.sim, grid, x, y, z, cell, this.tmp);
   }
 }

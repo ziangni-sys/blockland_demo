@@ -21,7 +21,7 @@ describe('explosions', () => {
     const craters: string[][] = [];
     for (let k = 0; k < 2; k++) {
       const sim = flatSim({ seed: 77 });
-      sim.teleport(20.5, T, 20.5);
+      sim.soloPlayer.teleport(20.5, T, 20.5);
       sim.advance(3);
       explode(sim, 0.5, T - 2.5, -5.5, 4, null);
       craters.push(snapshot(sim, -9, T - 12, -15, 10, T, 4));
@@ -31,7 +31,7 @@ describe('explosions', () => {
     expect(removed).toBeGreaterThan(10);
     // Nothing beyond the longest possible ray.
     const sim = flatSim({ seed: 78 });
-    sim.teleport(20.5, T, 20.5);
+    sim.soloPlayer.teleport(20.5, T, 20.5);
     explode(sim, 0.5, T - 2.5, -5.5, 4, null);
     for (let y = T - 12; y < T; y++) {
       for (let z = -15; z <= 4; z++) {
@@ -46,7 +46,7 @@ describe('explosions', () => {
 
   it('blast resistance is respected: obsidian stands and shields what is behind it', () => {
     const sim = flatSim({ seed: 5 });
-    sim.teleport(20.5, T, 20.5);
+    sim.soloPlayer.teleport(20.5, T, 20.5);
     const w = sim.world;
     // Blast at (0.5, T+1.5, 0.5); obsidian wall at z = -2; two dirt blocks at the same distance.
     fill(w, -3, T, -2, 3, T + 4, -2, B.OBSIDIAN);
@@ -60,7 +60,7 @@ describe('explosions', () => {
 
   it('blast crates caught in a blast are primed with a short fuse (chain reaction); items drop only in survival', () => {
     const sim = flatSim({ seed: 9, mode: 'survival' });
-    sim.teleport(20.5, T, 20.5);
+    sim.soloPlayer.teleport(20.5, T, 20.5);
     const w = sim.world;
     w.setCell(2, T, 0, makeCell(B.TNT));
     const log = new EventLog(sim);
@@ -77,7 +77,7 @@ describe('explosions', () => {
     expect(sim.entities.all().filter((e) => e.kind === 'tnt').length).toBe(0);
 
     const c = flatSim({ seed: 9, mode: 'creative' });
-    c.teleport(40.5, T, 40.5);
+    c.soloPlayer.teleport(40.5, T, 40.5);
     explode(c, 0.5, T + 0.5, 0.5, 4, null);
     expect(items(c).entities).toBe(0);
   });
@@ -86,25 +86,25 @@ describe('explosions', () => {
     const sim = flatSim({ seed: 9 });
     sim.world.setCell(0, T, -2, makeCell(B.TNT));
     const log = new EventLog(sim);
-    sim.hold(B.TORCH); // a block item: right-click places instead
-    sim.lookAtCell(0, T, -2, PY);
+    sim.soloPlayer.hold(B.TORCH); // a block item: right-click places instead
+    sim.soloPlayer.lookAtCell(0, T, -2, PY);
     sim.tick();
-    expect(sim.view.hint).toBeNull();
-    sim.player.inventory.hotbar[sim.player.inventory.selected] = null;
+    expect(sim.soloPlayer.view.hint).toBeNull();
+    sim.soloPlayer.player.inventory.hotbar[sim.soloPlayer.player.inventory.selected] = null;
     sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.tnt.ignite');
-    sim.use();
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.tnt.ignite');
+    sim.soloPlayer.use();
     sim.tick();
     expect(idAt(sim.world, 0, T, -2)).toBe(B.AIR);
     expect(sim.entities.all().filter((e) => e.kind === 'tnt').length).toBe(1);
-    sim.teleport(30.5, T, 30.5);
+    sim.soloPlayer.teleport(30.5, T, 30.5);
     sim.advance(85);
     expect(log.of('explosion').length).toBe(1);
   });
 
   it('a bearing destroyed by a blast: the surviving blades blockify after the wave (world, ACCEPTANCE 11)', () => {
     const sim = flatSim({ seed: 11 });
-    sim.teleport(30.5, T, 30.5);
+    sim.soloPlayer.teleport(30.5, T, 30.5);
     const w = sim.world;
     fill(w, -1, T, -4, -1, T + 6, -4, B.STONE_BRICKS);
     w.setCell(0, T + 6, -4, makeCell(B.BEARING, facingState(PX)));
@@ -127,7 +127,7 @@ describe('explosions', () => {
 
   it('a small ship blown away entirely keeps its windmill remains on the (empty) ship (ACCEPTANCE 13)', () => {
     const sim = flatSim({ seed: 13 });
-    sim.teleport(20.5, T, 20.5);
+    sim.soloPlayer.teleport(20.5, T, 20.5);
     const w = sim.world;
     w.setCell(0, T, 0, makeCell(B.PLANKS_OAK));
     w.setCell(1, T, 0, makeCell(B.PLANKS_OAK));
@@ -174,7 +174,7 @@ describe('explosions', () => {
      */
     const run = (blast: boolean) => {
       const sim = seaSim({ seed: 15, spawn: { x: 10.5, y: SEA_TOP + 20, z: 10.5 } });
-      sim.player.flying = true;
+      sim.soloPlayer.player.flying = true;
       const w = sim.world;
       fill(w, 0, SEA_TOP - 1, 0, 2, SEA_TOP - 1, 2, B.PLANKS_OAK);
       w.setCell(1, SEA_TOP, 1, makeCell(B.HELM, facingState(NZ)));
@@ -217,12 +217,12 @@ describe('explosions', () => {
   it('survival damage falls off with distance and is blocked by walls; creative takes none', () => {
     const lost = (d: number, wall = false, mode: 'survival' | 'creative' = 'survival'): number => {
       const sim = flatSim({ seed: 21, mode });
-      sim.teleport(0.5 + d, T, 0.5);
+      sim.soloPlayer.teleport(0.5 + d, T, 0.5);
       sim.advance(2);
       if (wall) fill(sim.world, 1, T, -2, 1, T + 3, 3, B.OBSIDIAN);
-      const h0 = sim.player.health;
+      const h0 = sim.soloPlayer.player.health;
       explode(sim, 0.5 - 0.5, T + 0.5, 0.5, 4, null);
-      return h0 - sim.player.health;
+      return h0 - sim.soloPlayer.player.health;
     };
     const near = lost(2);
     const mid = lost(4.5);
@@ -236,7 +236,7 @@ describe('explosions', () => {
 
   it('knocks entities back; item drops are only pushed, never destroyed', () => {
     const sim = flatSim({ seed: 22, mode: 'survival' });
-    sim.teleport(30.5, T, 30.5);
+    sim.soloPlayer.teleport(30.5, T, 30.5);
     const drop = sim.entities.spawnItem(3.5, T + 0.2, 0.5, B.DIRT, 1, { x: 0, y: 0, z: 0 });
     sim.advance(5);
     explode(sim, 0.5, T + 0.5, 0.5, 4, null);

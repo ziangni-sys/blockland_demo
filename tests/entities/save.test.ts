@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
 import { I } from '../../src/blocks/items';
 import { FallingBlockEntity, ItemEntity, Player, Rabbit, TntEntity } from '../../src/entities/entity';
+import type { EntityManager } from '../../src/entities/manager';
+import { readPlayerRecord, writePlayerRecord } from '../../src/entities/manager';
 import { ByteReader, ByteWriter, SaveFormatError } from '../../src/save/bytes';
 import { B, Bench, deck, fill, qfromYaw, TICK_DT, vec3 } from './harness';
 
@@ -14,7 +16,7 @@ function scene(seed = 99): Bench {
   fill(b.world, 5, 41, 5, 15, 43, 15, makeCell(B.WATER));
   const ship = b.ship(1, deck(-4, -4, 4, 4, 50), vec3(0.5, 50.5, 0.5));
   b.drive(ship, (t) => ({ p: vec3(0.5 + 0.8 * t * DT, 50.5 + 0.1 * Math.sin(t * 0.2), 0.5), q: qfromYaw(0.2 * t * DT) }));
-  const p = b.entities.createPlayer('survival', 1.5, 51, 1.5);
+  const p = b.entities.spawnPlayer('survival', 1.5, 51, 1.5);
   p.inventory.add(B.COBBLE, 70);
   p.inventory.add(I.GLUE, 3);
   b.entities.spawnRabbit(-2.5, 51, -1.5);
@@ -25,9 +27,16 @@ function scene(seed = 99): Bench {
   return b;
 }
 
-/** Scripted input for the local player at tick t. */
+/** The scene's one player. */
+function playerOf(m: EntityManager): Player {
+  const p = m.all().find((e): e is Player => e instanceof Player && !e.removed);
+  if (!p) throw new Error('no player');
+  return p;
+}
+
+/** Scripted input for the player at tick t. */
 function script(b: Bench, t: number): void {
-  const p = b.entities.player!;
+  const p = playerOf(b.entities);
   const inp = p.input;
   inp.forward = t % 120 < 60 ? 1 : -0.5;
   inp.strafe = t % 90 < 30 ? 0.6 : 0;
@@ -39,10 +48,31 @@ function script(b: Bench, t: number): void {
   if (t === 150) inp.jumpPresses = 1;
 }
 
+/**
+ * The entity blob followed by every player's record with its id — what a world save holds (the
+ * simulation keeps players in their own blob, sim/players.ts).
+ */
 function save(b: Bench): Uint8Array {
   const w = new ByteWriter();
   b.entities.serialize(w);
+  const players = b.entities.all().filter((e): e is Player => e instanceof Player && !e.removed);
+  w.varuint(players.length);
+  for (const p of players) {
+    w.varuint(p.id);
+    writePlayerRecord(w, p);
+  }
   return w.finish();
+}
+
+function load(c: Bench, bytes: Uint8Array): void {
+  const r = new ByteReader(bytes, 'entities');
+  c.entities.deserialize(r);
+  const n = r.varuint();
+  for (let i = 0; i < n; i++) {
+    const id = r.varuint();
+    c.entities.add(readPlayerRecord(r, id));
+  }
+  r.expectEnd();
 }
 
 describe('entity save', () => {
@@ -52,7 +82,7 @@ describe('entity save', () => {
     const bytes = save(b);
     const c = scene();
     c.entities.clear();
-    c.entities.deserialize(new ByteReader(bytes, 'entities'));
+    load(c, bytes);
     const a1 = b.entities.all();
     const a2 = c.entities.all();
     expect(a2.length).toBe(a1.length);
@@ -85,8 +115,9 @@ describe('entity save', () => {
         expect((y as Rabbit).wanderYaw).toBe(x.wanderYaw);
       }
     }
-    expect(c.entities.player).toBe(a2.find((e) => e.kind === 'player'));
-    expect((c.entities.player as Player).input.yaw).toBe(b.entities.player!.yaw);
+    // the player takes its old place in the (id-ordered) list, its look seeds the input
+    expect(a2.findIndex((e) => e.kind === 'player')).toBe(a1.findIndex((e) => e.kind === 'player'));
+    expect(playerOf(c.entities).input.yaw).toBe(playerOf(b.entities).yaw);
     // the bytes are stable
     expect(save(c)).toEqual(bytes);
     // a fresh id never collides with a loaded one
@@ -103,7 +134,7 @@ describe('entity save', () => {
     // c: same structures / world at the same tick, entities from the save
     const c = scene();
     for (let t = 1; t <= 120; t++) c.tick(); // advance structures (and junk entities) to the same tick
-    c.entities.deserialize(new ByteReader(bytes, 'entities'));
+    load(c, bytes);
     c.host.rng.state = b.host.rng.state;
     c.world.time = b.world.time;
     // the worlds were changed identically (falling gravel landed in both)
@@ -121,7 +152,7 @@ describe('entity save', () => {
     b.tick(5);
     const bytes = save(b);
     const c = scene();
-    expect(() => c.entities.deserialize(new ByteReader(bytes.slice(0, bytes.length - 7), 'entities'))).toThrow(SaveFormatError);
+    expect(() => load(c, bytes.slice(0, bytes.length - 7))).toThrow(SaveFormatError);
     const bad = bytes.slice();
     bad[0] = 77;
     expect(() => c.entities.deserialize(new ByteReader(bad, 'entities'))).toThrow(SaveFormatError);
@@ -144,5 +175,25 @@ describe('determinism', () => {
     expect(r2.bytes).toEqual(r1.bytes);
     expect(r2.events).toBe(r1.events);
     expect(r1.events.length).toBeGreaterThan(0);
+  });
+});
+
+describe('players are not part of the entity blob', () => {
+  it('serialize leaves players out; a player record round-trips on its own', () => {
+    const b = scene();
+    b.tick(10);
+    const w = new ByteWriter();
+    b.entities.serialize(w);
+    const c = scene();
+    c.entities.deserialize(new ByteReader(w.finish(), 'entities'));
+    expect(c.entities.all().some((e) => e instanceof Player)).toBe(false);
+    const p = playerOf(b.entities);
+    const rw = new ByteWriter();
+    writePlayerRecord(rw, p);
+    const back = readPlayerRecord(new ByteReader(rw.finish(), 'player'), 77);
+    expect(back.id).toBe(77);
+    expect(back.pos).toEqual(p.pos);
+    expect(back.inventory.hotbar).toEqual(p.inventory.hotbar);
+    expect(back.inventory.offhand).toEqual(p.inventory.offhand);
   });
 });

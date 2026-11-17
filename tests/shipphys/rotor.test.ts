@@ -186,9 +186,9 @@ describe('rotor vs ship: pinning (ACCEPTANCE 16)', () => {
     });
   }
 
-  it('creative mode: pinned cells are destroyed without drops', () => {
+  it('drops off (a creative world): pinned cells are destroyed without drops', () => {
     const { world, dyn, host, boat } = corner();
-    host.creative = true;
+    host.dropsEnabled = false;
     const cells = boat.grid.count;
     const rotor = blade(world, 0, 0, (80 * Math.PI) / 180);
     drive(world, dyn, boat, rotor, 1, 50);

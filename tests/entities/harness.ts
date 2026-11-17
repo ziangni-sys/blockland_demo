@@ -31,6 +31,8 @@ export interface Blast {
 export class TestHost implements EntityHost {
   readonly world: World;
   readonly rng: Rng;
+  /** The world rule the entities module asks for (rabbit crush limit). */
+  harmsCreatures = true;
   readonly list: Structure[] = [];
   readonly events: EntityEvent[] = [];
   readonly blasts: Blast[] = [];

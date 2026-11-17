@@ -296,7 +296,7 @@ describe('chunk codec', () => {
     expect(() => decodeChunk(newer)).toThrow(new RegExp(`newer version of the game \\(format ${SAVE_VERSION + 6}`));
     // The reviewer's case: a corrupted version byte in a real chunk is corruption, not "newer".
     const flipped = bytes.slice();
-    flipped[4] = 3;
+    flipped[4] = SAVE_VERSION + 1;
     expect(() => decodeChunk(flipped)).toThrow(/checksum/);
     expect(() => decodeChunk(encodeTicks([], 0))).toThrow(/wrong blob type/);
     expect(() => decodeChunk(encodeMeta(meta()))).toThrow(SaveFormatError);

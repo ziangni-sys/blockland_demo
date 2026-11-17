@@ -287,9 +287,9 @@ describe('dockShip liquids and soft blocks', () => {
     expect(s.host.updateKeys().has('0,45,0')).toBe(true);
   });
 
-  it('creative mode: overwritten soft blocks do not drop', () => {
+  it('drops off (a creative world): overwritten soft blocks do not drop', () => {
     const s = scene();
-    s.host.creative = true;
+    s.host.dropsEnabled = false;
     const ship = openBoat(s);
     s.world.setCell(2, 45, 0, c(B.TORCH));
     const res = s.mgr.dockShip(ship);

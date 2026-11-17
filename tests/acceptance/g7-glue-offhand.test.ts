@@ -53,7 +53,7 @@ describe('25. 手持强力胶右键方块露出的面，面上出现胶；贴着
     // Lit like the face under it: by the light of the open cell east of the plank (open sky).
     expect(drawnFace(sim, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: false, sky: sim.world.getSkyLight(ex + 1, ey, ez), block: 0 });
     expect(sim.world.getSkyLight(ex + 1, ey, ez)).toBe(15);
-    sim.hold(B.STONE);
+    sim.soloPlayer.hold(B.STONE);
     expect(drawnFace(sim, ex, ey, ez, PX)?.covered).toBe(false);
   });
 
@@ -65,9 +65,9 @@ describe('25. 手持强力胶右键方块露出的面，面上出现胶；贴着
     placeAgainst(sim, B.STONE, ex, ey, ez, PX);
     expect(idAt(sim.world, sx, sy, sz)).toBe(B.STONE);
     // Now covered: drawn only while glue is in a hand.
-    sim.hold(I.GLUE);
+    sim.soloPlayer.hold(I.GLUE);
     expect(drawnFace(sim, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: true, sky: 0, block: 0 });
-    sim.hold(B.STONE);
+    sim.soloPlayer.hold(B.STONE);
     expect(drawnFace(sim, ex, ey, ez, PX)).toBeUndefined();
     const cells = assembleRaft(sim);
     expect(cells).toContain(stoneAt(sx, sy, sz));
@@ -96,10 +96,10 @@ describe('26. 已经挨着的两块不能涂胶粘上；拆掉其中一块、涂
     buildRaft(sim);
     put(sim, sx, sy, sz, B.STONE); // touching the edge plank
     standSouthEast(sim);
-    sim.hold(I.GLUE);
+    sim.soloPlayer.hold(I.GLUE);
     // The shared face is covered on both sides: the ray never hits it.
-    expect(sim.useOn(ex, ey, ez, PX)).toBe(false);
-    expect(sim.useOn(sx, sy, sz, NX)).toBe(false); // the stone's west face
+    expect(sim.soloPlayer.useOn(ex, ey, ez, PX)).toBe(false);
+    expect(sim.soloPlayer.useOn(sx, sy, sz, NX)).toBe(false); // the stone's west face
     // Right-clicks on the faces the player can reach glue those faces, not the shared one.
     glueClick(sim, sx, sy, sz, PZ);
     glueClick(sim, sx, sy, sz, PY);
@@ -115,7 +115,7 @@ describe('26. 已经挨着的两块不能涂胶粘上；拆掉其中一块、涂
     buildRaft(sim);
     put(sim, sx, sy, sz, B.STONE);
     standSouthEast(sim);
-    expect(sim.mine(sx, sy, sz, PX)).toBe(true);
+    expect(sim.soloPlayer.mine(sx, sy, sz, PX)).toBe(true);
     expect(idAt(sim.world, sx, sy, sz)).toBe(AIR);
     glueClick(sim, ex, ey, ez, PX);
     placeAgainst(sim, B.STONE, ex, ey, ez, PX);
@@ -137,10 +137,10 @@ describe('27. 拆掉粘着的一侧方块，胶留在另一侧的面上，重新
 
   it('mining the stone leaves the glue on the plank\'s face, still shown there; a stone put back is joined again', () => {
     const sim = gluedStone();
-    expect(sim.mine(sx, sy, sz, PX)).toBe(true);
+    expect(sim.soloPlayer.mine(sx, sy, sz, PX)).toBe(true);
     expect(idAt(sim.world, sx, sy, sz)).toBe(AIR);
     expect(sim.worldGlue.has(ex, ey, ez, PX)).toBe(true);
-    sim.hold(B.STONE);
+    sim.soloPlayer.hold(B.STONE);
     expect(drawnFace(sim, ex, ey, ez, PX)?.covered).toBe(false);
     placeAgainst(sim, B.BRICKS, ex, ey, ez, PX); // any glueable block: no glue in either hand now
     const cells = assembleRaft(sim);
@@ -149,10 +149,10 @@ describe('27. 拆掉粘着的一侧方块，胶留在另一侧的面上，重新
 
   it('the glue stays on the stone\'s face when the plank goes instead (a ship plank can be replaced without regluing)', () => {
     const sim = gluedStone();
-    sim.teleport(1.5, T, -1.5);
+    sim.soloPlayer.teleport(1.5, T, -1.5);
     sim.advance(1);
-    sim.hold(B.DIRT);
-    expect(sim.mine(ex, ey, ez, PZ)).toBe(true);
+    sim.soloPlayer.hold(B.DIRT);
+    expect(sim.soloPlayer.mine(ex, ey, ez, PZ)).toBe(true);
     expect(idAt(sim.world, ex, ey, ez)).toBe(AIR);
     expect(sim.worldGlue.has(ex, ey, ez, PX)).toBe(true);
     placeAgainst(sim, B.PLANKS_OAK, sx, sy, sz, NX); // a new plank where the old one was, against the glued face
@@ -163,9 +163,9 @@ describe('27. 拆掉粘着的一侧方块，胶留在另一侧的面上，重新
 
   it('with both sides taken off, the glue is gone', () => {
     const sim = gluedStone();
-    expect(sim.mine(sx, sy, sz, PX)).toBe(true);
+    expect(sim.soloPlayer.mine(sx, sy, sz, PX)).toBe(true);
     expect(sim.worldGlue.size).toBe(1);
-    expect(sim.mine(ex, ey, ez, PX)).toBe(true);
+    expect(sim.soloPlayer.mine(ex, ey, ez, PX)).toBe(true);
     expect(idAt(sim.world, ex, ey, ez)).toBe(AIR);
     expect(sim.worldGlue.size).toBe(0);
     expect(drawnFace(sim, ex, ey, ez, PX)).toBeUndefined();
@@ -180,9 +180,9 @@ describe('28. 潜行右键露出的胶面去掉胶。生存模式涂胶耗时等
     buildRaft(sim);
     standSouthEast(sim);
     glueClick(sim, ex, ey, ez, PX);
-    sim.player.input.sneak = true;
+    sim.soloPlayer.player.input.sneak = true;
     glueClick(sim, ex, ey, ez, PX);
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = false;
     expect(toasts.keys()).toContain('toast.glue.removed');
     expect(sim.worldGlue.size).toBe(0);
     placeAgainst(sim, B.STONE, ex, ey, ez, PX);
@@ -195,7 +195,7 @@ describe('28. 潜行右键露出的胶面去掉胶。生存模式涂胶耗时等
    * or -1 if it is not glued within maxTicks.
    */
   function holdGlue(sim: ReturnType<typeof makeSim>, maxTicks: number): number {
-    const input = sim.player.input;
+    const input = sim.soloPlayer.player.input;
     input.use = true;
     try {
       glueClick(sim, ex, ey, ez, PX);
@@ -217,31 +217,31 @@ describe('28. 潜行右键露出的胶面去掉胶。生存模式涂胶耗时等
     const mining = measureMiningTicks(sim, 5, T, -2, PZ);
     expect(mining).toBe(hardnessTicks(B.PLANKS_OAK));
     sim.advance(10);
-    sim.hold(I.GLUE, 3);
+    sim.soloPlayer.hold(I.GLUE, 3);
     const n = holdGlue(sim, mining + 40);
     expect(n).toBe(mining);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(2);
+    expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(2);
   });
 
   it('survival: looking away part-way cancels — no glue, none used, and holding on afterwards does not finish it', () => {
     const sim = makeSim('survival');
     buildRaft(sim);
     standSouthEast(sim);
-    sim.hold(I.GLUE, 3);
+    sim.soloPlayer.hold(I.GLUE, 3);
     const total = hardnessTicks(B.PLANKS_OAK);
-    const input = sim.player.input;
+    const input = sim.soloPlayer.player.input;
     input.use = true;
     glueClick(sim, ex, ey, ez, PX);
     sim.advance(total - 5);
-    expect(sim.view.glueProgress).toBeGreaterThan(0.5);
-    sim.lookAt(ex + 0.5, ey + 30, ez + 0.5); // the sky, button still held
+    expect(sim.soloPlayer.view.glueProgress).toBeGreaterThan(0.5);
+    sim.soloPlayer.lookAt(ex + 0.5, ey + 30, ez + 0.5); // the sky, button still held
     sim.tick();
-    expect(sim.view.glueProgress).toBe(0);
-    sim.lookAtCell(ex, ey, ez, PX); // back on the face, still holding
+    expect(sim.soloPlayer.view.glueProgress).toBe(0);
+    sim.soloPlayer.lookAtCell(ex, ey, ez, PX); // back on the face, still holding
     sim.advance(3 * total);
     input.use = false;
     expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(3);
+    expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(3);
   });
 
   it('creative: one right-click glues at once, even on the hardest block, and uses no glue', () => {
@@ -249,11 +249,11 @@ describe('28. 潜行右键露出的胶面去掉胶。生存模式涂胶耗时等
     buildRaft(sim);
     put(sim, ex, ey, ez, B.IRON_BLOCK); // 5 s in survival
     standSouthEast(sim);
-    sim.hold(I.GLUE, 1);
+    sim.soloPlayer.hold(I.GLUE, 1);
     glueClick(sim, ex, ey, ez, PX); // one tick, button not held
     expect(sim.worldGlue.has(ex, ey, ez, PX)).toBe(true);
-    expect(sim.view.glueProgress).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(1);
+    expect(sim.soloPlayer.view.glueProgress).toBe(0);
+    expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(1);
   });
 });
 
@@ -261,11 +261,11 @@ describe('28. 潜行右键露出的胶面去掉胶。生存模式涂胶耗时等
 describe('29. 副手拿强力胶时，主手放出的方块自动粘到点击的面上；生存模式每块消耗 1 个胶，胶用完后放出的方块不粘。', () => {
   /** The player puts glue in the off-hand with the swap key (F) and takes stones in the main hand. */
   function offhandGlue(sim: ReturnType<typeof makeSim>, glue: number): void {
-    sim.hold(I.GLUE, glue);
-    sim.swapHands();
+    sim.soloPlayer.hold(I.GLUE, glue);
+    sim.soloPlayer.swapHands();
     sim.tick();
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: glue });
-    sim.hold(B.STONE, 16);
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: glue });
+    sim.soloPlayer.hold(B.STONE, 16);
   }
 
   it('survival: each placed block sticks to the clicked face, using one glue; once the glue is used up, placed blocks do not stick', () => {
@@ -274,13 +274,13 @@ describe('29. 副手拿强力胶时，主手放出的方块自动粘到点击的
     standSouthEast(sim);
     offhandGlue(sim, 2);
     placeAgainst(sim, B.STONE, ex, ey, ez - 1, PX); // (3, T, -4): glued, 1 left
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
     placeAgainst(sim, B.STONE, ex, ey, ez, PX); // (3, T, -3): glued, none left
-    expect(sim.player.inventory.offhand).toBeNull();
+    expect(sim.soloPlayer.player.inventory.offhand).toBeNull();
     placeAgainst(sim, B.STONE, ex, ey, ez - 1, PY); // (2, T + 1, -4) on the raft: not glued
     expect(idAt(sim.world, ex, ey + 1, ez - 1)).toBe(B.STONE);
     expect(sim.worldGlue.size).toBe(2);
-    expect(sim.player.inventory.count(B.STONE)).toBe(13);
+    expect(sim.soloPlayer.player.inventory.count(B.STONE)).toBe(13);
     const cells = assembleRaft(sim);
     expect(cells).toContain(stoneAt(sx, sy, sz - 1));
     expect(cells).toContain(stoneAt(sx, sy, sz));
@@ -295,7 +295,7 @@ describe('29. 副手拿强力胶时，主手放出的方块自动粘到点击的
     placeAgainst(sim, B.STONE, ex, ey, ez - 1, PX);
     placeAgainst(sim, B.STONE, ex, ey, ez, PX);
     placeAgainst(sim, B.STONE, ex, ey, ez - 1, PY);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
     const cells = assembleRaft(sim);
     expect(cells).toContain(stoneAt(sx, sy, sz - 1));
     expect(cells).toContain(stoneAt(sx, sy, sz));
@@ -308,7 +308,7 @@ describe('29. 副手拿强力胶时，主手放出的方块自动粘到点击的
     put(sim, 0, T, -3, B.STONE);
     put(sim, -2, T, -3, B.STONE);
     offhandGlue(sim, 10);
-    const offhand = (): number => sim.player.inventory.offhand?.count ?? 0;
+    const offhand = (): number => sim.soloPlayer.player.inventory.offhand?.count ?? 0;
     // Logs stick along their axis: an upright log on top of an upright log.
     placeAgainst(sim, B.LOG_OAK, 2, T, -3, PY);
     expect(idAt(sim.world, 2, T + 1, -3)).toBe(B.LOG_OAK);
@@ -336,17 +336,17 @@ describe('29. 副手拿强力胶时，主手放出的方块自动粘到点击的
     placeAgainst(sim, B.LOG_OAK, 2, T, -3, PZ);
     expect(idAt(sim.world, 2, T, -2)).toBe(B.LOG_OAK);
     expect(sim.worldGlue.has(2, T, -3, PZ)).toBe(true);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 9 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 9 });
     // The front of a bearing does not stick: a stone put there (sneaking, so the bearing is not clicked) is glued.
     placeAgainst(sim, B.BEARING, -2, T, -3, PZ);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 9 });
-    sim.player.input.sneak = true;
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 9 });
+    sim.soloPlayer.player.input.sneak = true;
     placeAgainst(sim, B.STONE, -2, T, -2, PZ);
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = false;
     expect(idAt(sim.world, -2, T, -1)).toBe(B.STONE);
     expect(sim.worldGlue.has(-2, T, -2, PZ)).toBe(true);
     expect(sim.worldGlue.size).toBe(2);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 8 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 8 });
   });
 });
 
@@ -364,14 +364,14 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
   /** The (creative) player hovers at ship-local point (x, y, z). */
   function hover(sim: Simulation, ship: Ship, x: number, y: number, z: number): void {
     const q = ship.grid.toWorld(vec3(x, y, z));
-    sim.teleport(q.x, q.y, q.z);
-    sim.player.flying = true;
+    sim.soloPlayer.teleport(q.x, q.y, q.z);
+    sim.soloPlayer.player.flying = true;
     sim.tick();
   }
   /** The (survival) player stands on the deck at ship-local cell (3, D + 1, 3) and is carried. */
   function standOnDeck(sim: Simulation, ship: Ship): void {
     const q = ship.grid.toWorld(vec3(3.5, D + 1.05, 3.5));
-    sim.teleport(q.x, q.y, q.z);
+    sim.soloPlayer.teleport(q.x, q.y, q.z);
     sim.advance(10);
   }
   /** World cells (above the sea floor) holding block `id`. */
@@ -395,9 +395,9 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
     expect(ship.glue.size).toBe(1);
     expect(sim.worldGlue.size).toBe(0);
     expect(drawnGlue(sim)).toContainEqual({ structureId: ship.id, x: 4, y: D, z: 2, face: PX, covered: false, sky: 15, block: 0 });
-    sim.player.input.sneak = true;
+    sim.soloPlayer.player.input.sneak = true;
     glueClick(sim, 4, D, 2, PX, ship.id);
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = false;
     expect(ship.glue.size).toBe(0);
 
     // Glue it again and put a stone against it; a second stone against an unglued face.
@@ -405,8 +405,8 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
     placeAgainst(sim, B.STONE, 4, D, 2, PX, ship.id);
     placeAgainst(sim, B.STONE, 4, D, 0, PX, ship.id);
     // Off-hand glue (swap key): a third stone put against plank (4, D, 4) is glued on its own.
-    sim.hold(I.GLUE);
-    sim.swapHands();
+    sim.soloPlayer.hold(I.GLUE);
+    sim.soloPlayer.swapHands();
     sim.tick();
     placeAgainst(sim, B.STONE, 4, D, 4, PX, ship.id);
     expect(idAt(ship.grid, 5, D, 2)).toBe(B.STONE);
@@ -418,11 +418,11 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
     expect(sim.worldGlue.size).toBe(0);
 
     // Dock (sneak + right-click on the helm, empty hand), then assemble the raft again at its helm.
-    sim.emptyHand();
+    sim.soloPlayer.emptyHand();
     hover(sim, ship, 2.5, D + 2, 6.5);
-    sim.player.input.sneak = true;
-    expect(sim.useOn(2, SEA_TOP, 4, undefined, ship.id)).toBe(true);
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = true;
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 4, undefined, ship.id)).toBe(true);
+    sim.soloPlayer.player.input.sneak = false;
     expect(ship.removed).toBe(true);
     expect(sim.worldGlue.size).toBe(2);
     const helms = findWorld(sim, B.HELM);
@@ -430,11 +430,11 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
     const [hx, hy, hz] = helms[0]!;
     const stones = findWorld(sim, B.STONE);
     expect(stones.length).toBe(3);
-    sim.teleport(hx + 0.5, hy + 1.5, hz + 0.5);
-    sim.player.flying = true;
+    sim.soloPlayer.teleport(hx + 0.5, hy + 1.5, hz + 0.5);
+    sim.soloPlayer.player.flying = true;
     sim.tick();
-    expect(sim.useOn(hx, hy, hz, PY)).toBe(true);
-    expect(sim.useOn(hx, hy, hz, PY)).toBe(true);
+    expect(sim.soloPlayer.useOn(hx, hy, hz, PY)).toBe(true);
+    expect(sim.soloPlayer.useOn(hx, hy, hz, PY)).toBe(true);
     const again = sim.structures.ships();
     expect(again.length).toBe(1);
     const taken = structureLabels(again[0]!.grid).filter((l) => l.endsWith(':stone'));
@@ -449,20 +449,20 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
     const ship = raftShipByHand(sim);
     turnAndSail(sim, ship, (-130 * Math.PI) / 180);
     // A brick on the deck to glue; the player stands on the deck south-east of it.
-    sim.hold(B.BRICKS, 4);
+    sim.soloPlayer.hold(B.BRICKS, 4);
     standOnDeck(sim, ship);
-    expect(sim.useOn(2, D, 1, PY, ship.id)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, D, 1, PY, ship.id)).toBe(true);
     expect(idAt(ship.grid, 2, D + 1, 1)).toBe(B.BRICKS);
 
     // Main hand, survival: hold the button on the brick's east face for the brick's mining time.
-    sim.hold(I.GLUE, 3);
-    const input = sim.player.input;
+    sim.soloPlayer.hold(I.GLUE, 3);
+    const input = sim.soloPlayer.player.input;
     input.use = true;
-    expect(sim.useOn(2, D + 1, 1, PX, ship.id)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, D + 1, 1, PX, ship.id)).toBe(true);
     const total = hardnessTicks(B.BRICKS);
     let n = 1;
     while (!ship.glue.has(2, D + 1, 1, PX) && n < total + 20) {
-      sim.lookAtCell(2, D + 1, 1, PX, ship.id); // the player keeps looking at it as the ship rocks
+      sim.soloPlayer.lookAtCell(2, D + 1, 1, PX, ship.id); // the player keeps looking at it as the ship rocks
       sim.tick();
       n++;
     }
@@ -470,16 +470,16 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
     expect(n).toBe(total);
     expect(ship.glue.size).toBe(1);
     expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(2);
+    expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(2);
 
     // Off-hand: the glue goes to the off-hand (swap key); a stone put against the brick's south face is glued to it.
-    sim.swapHands();
+    sim.soloPlayer.swapHands();
     sim.tick();
     placeAgainst(sim, B.STONE, 2, D + 1, 1, PZ, ship.id);
     expect(idAt(ship.grid, 2, D + 1, 2)).toBe(B.STONE);
     expect(ship.glue.has(2, D + 1, 1, PZ)).toBe(true);
     expect(ship.glue.size).toBe(2);
     expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
   });
 });

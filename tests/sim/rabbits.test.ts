@@ -45,8 +45,8 @@ describe('ambient rabbits', () => {
     sim.advance(400);
     expect(rabbits(sim).length).toBeGreaterThan(0);
     sim.rabbits.enabled = false;
-    sim.player.flying = true;
-    sim.teleport(RABBIT_DESPAWN_DISTANCE + 120, 40, 0.5);
+    sim.soloPlayer.player.flying = true;
+    sim.soloPlayer.teleport(RABBIT_DESPAWN_DISTANCE + 120, 40, 0.5);
     sim.advance(80);
     expect(rabbits(sim).length).toBe(0);
   });

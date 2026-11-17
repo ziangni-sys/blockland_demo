@@ -16,7 +16,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
       p: vec3(0.5 + 1.2 * t * DT, 60.5 + 0.15 * Math.sin(t * 0.21), 0.5 - 0.7 * t * DT), // stays inside the loaded area
       q: qfromYaw(0.35 * t * DT + 0.05 * Math.sin(t * 0.13)),
     }));
-    const p = b.entities.createPlayer('survival', 3.2, 61.02, 1.7);
+    const p = b.entities.spawnPlayer('survival', 3.2, 61.02, 1.7);
     b.tick(30); // the deck slid under the player before it attached: let that slip die out
     expect(p.carrierId).toBe(ship.id);
     const l0 = local({ ship }, p.pos);
@@ -42,7 +42,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     const b = new Bench();
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     const pose = (t: number) => ({ p: vec3(0.5 + 1.5 * t * DT, 60.5 + 0.1 * Math.sin(t * 0.3), 0.5), q: qfromYaw(0.4 * t * DT) });
-    const p = b.entities.createPlayer('survival', 2.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 2.5, 61, 1.5);
     p.carrierId = ship.id;
     const l0 = local({ ship }, p.pos);
     const g = ship.grid;
@@ -70,7 +70,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     const b = new Bench();
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     ship.grid.setPoseImmediate(vec3(0.5, 60.5, 0.5), qfromYaw(0.5));
-    const p = b.entities.createPlayer('survival', 1.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 1.5, 61, 1.5);
     b.tick(5);
     expect(p.carrierId).toBe(ship.id);
     const w0 = vec3(p.pos.x, p.pos.y, p.pos.z);
@@ -83,7 +83,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     const b = new Bench();
     const ship = b.ship(1, deck(-8, -8, 8, 8, 60), vec3(0.5, 60.5, 0.5));
     b.drive(ship, (t) => ({ p: vec3(0.5 + 3 * t * DT, 60.5, 0.5), q: qfromYaw(0.2 * t * DT) }));
-    const p = b.entities.createPlayer('survival', 0.5, 61, 4.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 4.5);
     b.tick(30);
     const l0 = local({ ship }, p.pos);
     // Look toward deck-north; from now on the simulation turns the look with the deck.
@@ -102,7 +102,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     const b = new Bench();
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     b.drive(ship, (t) => ({ p: vec3(0.5 + 4 * t * DT, 60.5 + 0.1 * Math.sin(t * 0.3), 0.5 - 2 * t * DT), q: qfromYaw(0.4 * t * DT) }));
-    const p = b.entities.createPlayer('survival', 2.5, 61, -1.5);
+    const p = b.entities.spawnPlayer('survival', 2.5, 61, -1.5);
     b.tick(30);
     const l0 = local({ ship }, p.pos);
     p.input.jump = true;
@@ -132,7 +132,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
       if (moving) z += 1.5 * DT;
       return { p: vec3(0.5, 60.5, z), q: qfromYaw(0) };
     });
-    const p = b.entities.createPlayer('survival', 3.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 3.5, 61, 0.5);
     b.tick(3);
     expect(p.carrierId).toBe(ship.id);
     p.input.forward = 1;
@@ -158,7 +158,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     fill(b.world, -30, 40, -30, 29, 40, 29, B.STONE);
     const ship = b.ship(1, deck(-3, -3, 3, 3, 60), vec3(0.5, 60.5, 0.5));
     b.drive(ship, (t) => ({ p: vec3(0.5 + 2 * t * DT, 60.5, 0.5), q: qfromYaw(0) }));
-    const p = b.entities.createPlayer('survival', 0.5, 61, 2.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 2.5);
     b.tick(3);
     expect(p.carrierId).toBe(ship.id);
     p.input.forward = -1; // walk backwards = south, off the deck edge (z = 4)
@@ -197,7 +197,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
       p: vec3(0.5 + ux * 0.4 * t * DT, 47 + 0.08 * Math.sin(t * 0.25), 0.5 + uz * 0.4 * t * DT),
       q: qfromYaw(Math.PI / 4 + 0.12 * Math.sin(t * 0.11)),
     }));
-    const p = b.entities.createPlayer('survival', corner.x + ux * 0.35, 46.6, corner.z + uz * 0.35);
+    const p = b.entities.spawnPlayer('survival', corner.x + ux * 0.35, 46.6, corner.z + uz * 0.35);
     p.input.jump = true; // treading water
     const start = vec3(p.pos.x, p.pos.y, p.pos.z);
     let maxY = -Infinity;
@@ -222,7 +222,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     fill(b.world, -20, 41, -20, 19, 47, 19, makeCell(B.WATER));
     const ship = b.ship(1, deck(-3, -3, 3, 3, 47), vec3(0.5, 47.5, 0.5)); // top at 48, just above the water
     b.drive(ship, (t) => ({ p: vec3(0.5, 47.5 + 0.05 * Math.sin(t * 0.2), 0.5), q: qfromYaw(0.3) }));
-    const p = b.entities.createPlayer('survival', 0.5, 46.6, 6.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 46.6, 6.5);
     p.input.jump = true;
     b.tick(40);
     expect(p.carrierId).toBe(0);
@@ -252,7 +252,7 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     // World wall whose south face (z = -4) cuts across the deck, through the rotated gunwale.
     fill(b.world, -20, 61, -6, 20, 63, -5, B.STONE);
     b.tick();
-    const p = b.entities.createPlayer('survival', -3.5, 61.05, -3.6);
+    const p = b.entities.spawnPlayer('survival', -3.5, 61.05, -3.6);
     b.checks.push(() => {
       expect(inWorld(b.world, p)).toBe(false);
       expect(p.health).toBe(20);

@@ -22,7 +22,7 @@ const Y = SEA_TOP;
 
 function run(onShip: boolean): number {
   const sim = seaSim({ mode: 'survival', spawn: { x: 10.5, y: Y + 10, z: 10.5 } });
-  sim.player.flying = true;
+  sim.soloPlayer.player.flying = true;
   const w = sim.world;
   // raft + helm; a plank post carrying a bearing that faces +X
   fill(w, 0, Y - 1, 0, 4, Y - 1, 4, B.PLANKS_OAK);

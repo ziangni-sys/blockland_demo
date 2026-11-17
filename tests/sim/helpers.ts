@@ -4,10 +4,11 @@
  */
 import { ID_MASK, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { Simulation, type GameMode } from '../../src/sim/simulation';
+import { type GameMode, type SimOptions, type Simulation } from '../../src/sim/simulation';
 import type { Message, SimEvent } from '../../src/sim/view';
 import { FlatGenerator, VoidGenerator } from '../../src/worldgen/generator';
 import type { VoxelGrid } from '../../src/voxel/grid';
+import { soloSim } from '../solo';
 
 export interface WorldOpts {
   mode?: GameMode;
@@ -20,8 +21,9 @@ export interface WorldOpts {
 /** Default flat world: deeprock y=0, stone 1..30, dirt 31..33, turf 34; first air at y = 35. */
 export const FLAT_TOP = 35;
 
-export function flatSim(o: WorldOpts = {}): Simulation {
-  return new Simulation({
+/** Options of the default flat world (flatSim without a joined player: for loading a save into). */
+export function flatOpts(o: WorldOpts = {}): SimOptions {
+  return {
     seed: o.seed ?? 1,
     mode: o.mode ?? 'creative',
     generator: new FlatGenerator(),
@@ -29,7 +31,12 @@ export function flatSim(o: WorldOpts = {}): Simulation {
     loadRadius: o.loadRadius ?? 2,
     rabbits: o.rabbits ?? false,
     spawn: o.spawn ?? { x: 0.5, y: FLAT_TOP, z: 0.5 },
-  });
+  };
+}
+
+/** A flat world with one joined player (SOLO_KEY). */
+export function flatSim(o: WorldOpts = {}): Simulation {
+  return soloSim(flatOpts(o));
 }
 
 /** Sea world: deeprock y=0, stone 1..19, water 20..29 (surface cells at y = 29); first air y = 30. */
@@ -43,8 +50,9 @@ export function seaGenerator(): FlatGenerator {
   ]);
 }
 
-export function seaSim(o: WorldOpts = {}): Simulation {
-  return new Simulation({
+/** Options of the sea world (seaSim without a joined player). */
+export function seaOpts(o: WorldOpts = {}): SimOptions {
+  return {
     seed: o.seed ?? 2,
     mode: o.mode ?? 'creative',
     generator: seaGenerator(),
@@ -52,11 +60,17 @@ export function seaSim(o: WorldOpts = {}): Simulation {
     loadRadius: o.loadRadius ?? 2,
     rabbits: o.rabbits ?? false,
     spawn: o.spawn ?? { x: 0.5, y: SEA_TOP, z: 0.5 },
-  });
+  };
 }
 
+/** A sea world with one joined player (SOLO_KEY). */
+export function seaSim(o: WorldOpts = {}): Simulation {
+  return soloSim(seaOpts(o));
+}
+
+/** A void world with one joined player (SOLO_KEY). */
 export function voidSim(o: WorldOpts = {}): Simulation {
-  return new Simulation({
+  return soloSim({
     seed: o.seed ?? 3,
     mode: o.mode ?? 'creative',
     generator: new VoidGenerator(),
@@ -122,14 +136,14 @@ export function items(sim: Simulation, item?: number): { entities: number; count
   return { entities, count };
 }
 
-/** Right-click once (queues a press) and run one tick. */
+/** Right-click once with the one joined player (queues a press) and run one tick. */
 export function click(sim: Simulation): void {
-  sim.use();
+  sim.soloPlayer.use();
   sim.tick();
 }
 
-/** Left-click once and run one tick. */
+/** Left-click once with the one joined player and run one tick. */
 export function hit(sim: Simulation): void {
-  sim.attack();
+  sim.soloPlayer.attack();
   sim.tick();
 }

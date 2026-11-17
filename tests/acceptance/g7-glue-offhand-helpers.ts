@@ -39,20 +39,20 @@ export const EAST: readonly [number, number, number] = [3, T, -3];
  * of the raft, looking north-west.
  */
 export function standSouthEast(sim: Simulation): void {
-  sim.teleport(4.5, T, -0.5);
+  sim.soloPlayer.teleport(4.5, T, -0.5);
   sim.advance(1);
 }
 
 /** With glue in the main hand, one right-click on face `face` of cell (x,y,z) (checked aim). */
 export function glueClick(sim: Simulation, x: number, y: number, z: number, face: Dir, gridId = 0): void {
-  if (sim.player.inventory.selectedStack()?.item !== I.GLUE) sim.hold(I.GLUE);
-  expect(sim.useOn(x, y, z, face, gridId), `aim at face ${face} of ${x},${y},${z}`).toBe(true);
+  if (sim.soloPlayer.player.inventory.selectedStack()?.item !== I.GLUE) sim.soloPlayer.hold(I.GLUE);
+  expect(sim.soloPlayer.useOn(x, y, z, face, gridId), `aim at face ${face} of ${x},${y},${z}`).toBe(true);
 }
 
 /** With `item` in the main hand, place it against face `face` of cell (x,y,z) (checked aim). */
 export function placeAgainst(sim: Simulation, item: number, x: number, y: number, z: number, face: Dir, gridId = 0): void {
-  sim.hold(item);
-  expect(sim.useOn(x, y, z, face, gridId), `aim at face ${face} of ${x},${y},${z}`).toBe(true);
+  sim.soloPlayer.hold(item);
+  expect(sim.soloPlayer.useOn(x, y, z, face, gridId), `aim at face ${face} of ${x},${y},${z}`).toBe(true);
 }
 
 /**
@@ -60,7 +60,7 @@ export function placeAgainst(sim: Simulation, item: number, x: number, y: number
  * blocks the ship took, e.g. "3,T,-3:stone" is present when the stone came along.
  */
 export function assembleRaft(sim: Simulation): string[] {
-  sim.teleport(1.5, T, 0.5);
+  sim.soloPlayer.teleport(1.5, T, 0.5);
   sim.advance(1);
   return assembleShipByHand(sim, 1, T + 1, -3, PZ).cells;
 }
@@ -73,7 +73,7 @@ export function stoneAt(x: number, y: number, z: number): string {
 /** The glued faces the client would draw right now (built the way the game builds its overlays). */
 export function drawnGlue(sim: Simulation): OverlayFace[] {
   const v = new ViewBuilder();
-  return v.updateOverlays(sim, 0).glue;
+  return v.updateOverlays(sim, sim.soloPlayer, 0).glue;
 }
 
 /** The drawn face of world cell (x,y,z) towards `face`, or undefined. */

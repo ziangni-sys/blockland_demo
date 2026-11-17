@@ -14,6 +14,7 @@ import { Simulation, type GameMode } from '../../src/sim/simulation';
 import type { Message, SimEvent } from '../../src/sim/view';
 import type { Ship } from '../../src/structures/structure';
 import { FlatGenerator } from '../../src/worldgen/generator';
+import { soloSim } from '../solo';
 
 /** Sea: deeprock y=0, stone y=1..19, water sources y=20..29; the first air cell is y = SEA_TOP. */
 export const SEA_TOP = 30;
@@ -30,7 +31,7 @@ export interface SeaOpts {
 
 /** A real sea, ten water sources deep over stone, with a generous loaded area. */
 export function seaSim(o: SeaOpts): Simulation {
-  return new Simulation({
+  return soloSim({
     seed: o.seed ?? 62,
     mode: o.mode ?? 'creative',
     generator: new FlatGenerator([

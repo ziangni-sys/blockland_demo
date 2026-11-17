@@ -95,7 +95,8 @@ import { Mover, attachInset, boxAt } from './physics';
 import { StructureCache, boxNearRec, carryPoint, curToWorld, pointVelocity, type StructRec } from './structs';
 
 const DT = TICK_DT;
-const SAVE_VERSION = 1;
+/** Layout of the entity blob. Version 2: players are no longer part of it. */
+const SAVE_VERSION = 2;
 const KIND_TAG: Readonly<Record<EntityKind, number>> = Object.freeze({ player: 1, item: 2, falling: 3, tnt: 4, rabbit: 5 });
 /** Margin around a body when collecting the structures it may touch this tick. */
 const NEAR_MARGIN = 0.5;
@@ -109,7 +110,6 @@ export class EntityManager {
   private readonly list: Entity[] = [];
   private readonly byId = new Map<number, Entity>();
   private nextId = 1;
-  private localPlayer: Player | null = null;
 
   private readonly cache = new StructureCache();
   private readonly mover: Mover;
@@ -138,6 +138,9 @@ export class EntityManager {
   /** Structures a free-spot search can reach (wider than mover.near). */
   private readonly relocNear: StructRec[] = [];
   private readonly items: ItemEntity[] = [];
+  /** pickups(): the live players, and those in reach of one drop. */
+  private readonly pickers: Player[] = [];
+  private readonly takers: Player[] = [];
   /** Vertical distance the last moveBody() teleported the body (crush / unstuck): not a fall. */
   private relocatedDy = 0;
 
@@ -156,33 +159,43 @@ export class EntityManager {
   get(id: number): Entity | undefined {
     return this.byId.get(id);
   }
-  /** The (single) local player. */
-  get player(): Player | null {
-    return this.localPlayer;
-  }
   /** A fresh entity id (for entities built outside the spawn helpers). */
   allocateId(): number {
     return this.nextId++;
   }
 
+  /**
+   * Add an entity. The list stays in ascending id order (the update order): a new entity has the
+   * largest id and goes last; an entity that comes back with an older id (a player rejoining
+   * under its kept id, sim/players.ts) takes its old place — only outside an iteration, which an
+   * insertion would disturb (it then goes last).
+   */
   add<T extends Entity>(e: T): T {
     if (this.byId.has(e.id)) throw new Error(`duplicate entity id ${e.id}`);
     e.removed = false;
     e.snapshot();
-    this.list.push(e);
+    const list = this.list;
+    if (list.length > 0 && list[list.length - 1]!.id > e.id && this.iterDepth === 0) {
+      let lo = 0;
+      let hi = list.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (list[mid]!.id < e.id) lo = mid + 1;
+        else hi = mid;
+      }
+      list.splice(lo, 0, e);
+    } else {
+      list.push(e);
+    }
     this.byId.set(e.id, e);
     if (e.id >= this.nextId) this.nextId = e.id + 1;
-    if (e instanceof Player && this.localPlayer === null) this.localPlayer = e;
     return e;
   }
 
   remove(e: Entity): void {
     if (e.removed) return;
     e.removed = true;
-    if (e instanceof Player) {
-      this.releaseHelm(e, 'removed');
-      if (this.localPlayer === e) this.localPlayer = null;
-    }
+    if (e instanceof Player) this.releaseHelm(e, 'removed');
     if (this.byId.get(e.id) === e) this.byId.delete(e.id);
     if (this.iterDepth > 0) {
       // Someone is walking the list (this manager, or a callback it invoked): splicing now
@@ -198,7 +211,6 @@ export class EntityManager {
     this.list.length = 0;
     this.byId.clear();
     this.nextId = 1;
-    this.localPlayer = null;
     this.pendingBlasts.length = 0;
     this.snapshotDone = false;
     this.carriedThisTick = false;
@@ -223,17 +235,17 @@ export class EntityManager {
 
   // ================================================================== spawning
 
-  /** A new local player with feet at (x, y, z); that is also its spawn point. Replaces an existing local player. */
-  createPlayer(mode: GameMode, x: number, y: number, z: number): Player {
-    if (this.localPlayer !== null) this.remove(this.localPlayer);
+  /**
+   * A new player with feet at (x, y, z); that is also its spawn point. Any number of players may
+   * exist; which client drives which one is the simulation's business (sim/players.ts).
+   */
+  spawnPlayer(mode: GameMode, x: number, y: number, z: number): Player {
     const p = new Player(this.allocateId(), mode);
     p.setPosition(x, y, z);
     p.spawn.x = x;
     p.spawn.y = y;
     p.spawn.z = z;
-    this.add(p);
-    this.localPlayer = p;
-    return p;
+    return this.add(p);
   }
 
   /**
@@ -573,10 +585,10 @@ export class EntityManager {
   // ================================================================== save
 
   /**
-   * All entities including the player (position, look, health, air, mode, flying, inventory,
-   * spawn). Never writes a value deserialize() would reject: a non-player entity whose state is
-   * not finite (or a drop that holds nothing) is left out, non-finite player fields are written
-   * as safe defaults — one broken entity must not make the whole save unloadable.
+   * Every entity except players (players are saved per PlayerKey by the simulation, with
+   * writePlayerRecord). Never writes a value deserialize() would reject: an entity whose state is
+   * not finite (or a drop that holds nothing) is left out — one broken entity must not make the
+   * whole save unloadable.
    */
   serialize(w: ByteWriter): void {
     w.u8(SAVE_VERSION);
@@ -588,45 +600,8 @@ export class EntityManager {
       if (!saveable(e)) continue;
       w.u8(KIND_TAG[e.kind]);
       w.varuint(e.id);
-      if (e instanceof Player && !finiteVec(e.pos)) writeVec(w, finiteVec(e.spawn) ? e.spawn : ORIGIN);
-      else writeVec(w, e.pos);
-      writeVec(w, finiteVec(e.vel) ? e.vel : ORIGIN);
-      writeVec(w, finiteVec(e.carrierVel) ? e.carrierVel : ORIGIN);
-      w.f64(finiteOr(e.yaw, 0));
-      w.f64(finiteOr(e.pitch, 0));
-      w.bool(e.onGround);
-      w.f64(finiteOr(e.wet, 0));
-      w.bool(e.headWet);
-      w.bool(e.inLava);
-      w.varuint(uint(e.carrierId));
-      w.varuint(uint(e.noAttachTicks));
-      w.varuint(uint(e.noAttachStructureId));
-      w.varuint(uint(e.age));
-      w.f64(finiteOr(e.fallDistance, 0));
-      w.f64(finiteOr(e.contactNx, 0));
-      w.f64(finiteOr(e.contactNz, 0));
-      w.bool(e.onWorldGround);
-      if (e instanceof Player) {
-        w.u8(e.mode === 'creative' ? 1 : 0);
-        w.f64(finiteOr(e.health, e.maxHealth));
-        w.f64(finiteOr(e.maxHealth, PLAYER_MAX_HEALTH));
-        w.varuint(uint(e.air));
-        w.varuint(uint(e.maxAir));
-        w.bool(e.dead);
-        w.varuint(uint(e.hurtTicks));
-        w.bool(e.flying);
-        w.bool(e.sneaking);
-        w.bool(e.sprinting);
-        w.varuint(uint(e.steeringShipId));
-        writeVec(w, finiteVec(e.seat) ? e.seat : ORIGIN);
-        writeVec(w, finiteVec(e.spawn) ? e.spawn : ORIGIN);
-        w.varuint(uint(e.drownTicks));
-        w.varuint(uint(e.lavaTicks));
-        w.varuint(Math.min(uint(e.unhurtTicks), 1 << 30));
-        w.varint(Math.max(-(1 << 30), int(e.lastJumpPressAge)));
-        w.u8(e.input.slot & 0xff);
-        e.inventory.serialize(w);
-      } else if (e instanceof ItemEntity) {
+      writeCommon(w, e, e.pos);
+      if (e instanceof ItemEntity) {
         w.varuint(e.stack.item);
         w.varuint(uint(e.stack.count));
         w.varuint(uint(e.pickupDelay));
@@ -646,8 +621,10 @@ export class EntityManager {
   }
 
   /**
-   * Replace every entity with the saved ones. Atomic: the whole blob is parsed first, so a
-   * corrupt or truncated one throws (SaveFormatError) and leaves the current entities untouched.
+   * Replace every entity with the saved ones (players are not part of this blob: the players
+   * that are in the manager are dropped too — the simulation loads and joins them separately).
+   * Atomic: the whole blob is parsed first, so a corrupt or truncated one throws
+   * (SaveFormatError) and leaves the current entities untouched.
    */
   deserialize(r: ByteReader): void {
     const v = r.u8();
@@ -662,48 +639,9 @@ export class EntityManager {
       if (id === 0) r.fail('entity id 0');
       if (seen.has(id)) r.fail(`duplicate entity id ${id}`);
       seen.add(id);
-      const pos = readVec(r);
-      const vel = readVec(r);
-      const cvel = readVec(r);
-      const yaw = readFinite(r);
-      const pitch = readFinite(r);
-      const onGround = r.bool();
-      const wet = readFinite(r);
-      const headWet = r.bool();
-      const inLava = r.bool();
-      const carrierId = r.varuint();
-      const noAttachTicks = r.varuint();
-      const noAttachStructureId = r.varuint();
-      const age = r.varuint();
-      const fallDistance = readFinite(r);
-      const cnx = readFinite(r);
-      const cnz = readFinite(r);
-      const onWorldGround = r.bool();
+      const common = readCommon(r);
       let e: Entity;
-      if (tag === KIND_TAG.player) {
-        const mode: GameMode = r.u8() === 1 ? 'creative' : 'survival';
-        const p = new Player(id, mode);
-        p.health = readFinite(r);
-        p.maxHealth = readFinite(r);
-        p.air = r.varuint();
-        p.maxAir = r.varuint();
-        p.dead = r.bool();
-        p.hurtTicks = r.varuint();
-        p.flying = r.bool();
-        p.sneaking = r.bool();
-        p.sprinting = r.bool();
-        p.steeringShipId = r.varuint();
-        copyVec(p.seat, readVec(r));
-        copyVec(p.spawn, readVec(r));
-        p.drownTicks = r.varuint();
-        p.lavaTicks = r.varuint();
-        p.unhurtTicks = r.varuint();
-        p.lastJumpPressAge = r.varint();
-        p.input.slot = r.u8();
-        p.inventory.deserialize(r);
-        p.input.slot = p.inventory.selected;
-        e = p;
-      } else if (tag === KIND_TAG.item) {
+      if (tag === KIND_TAG.item) {
         const item = r.varuint();
         const cnt = r.varuint();
         const it = new ItemEntity(id, { item, count: cnt });
@@ -729,29 +667,7 @@ export class EntityManager {
       } else {
         r.fail(`unknown entity kind tag ${tag}`);
       }
-      copyVec(e.pos, pos);
-      copyVec(e.vel, vel);
-      copyVec(e.carrierVel, cvel);
-      e.yaw = yaw;
-      e.pitch = pitch;
-      if (e instanceof Player) {
-        // The look is driven by input.yaw / pitch: seed it, or the first tick after loading
-        // would snap the view to 0 until the client writes its own.
-        e.input.yaw = yaw;
-        e.input.pitch = pitch;
-      }
-      e.onGround = onGround;
-      e.wet = wet;
-      e.headWet = headWet;
-      e.inLava = inLava;
-      e.carrierId = carrierId;
-      e.noAttachTicks = noAttachTicks;
-      e.noAttachStructureId = noAttachStructureId;
-      e.age = age;
-      e.fallDistance = fallDistance;
-      e.contactNx = cnx;
-      e.contactNz = cnz;
-      e.onWorldGround = onWorldGround;
+      applyCommon(e, common);
       parsed.push(e);
     }
     this.clear();
@@ -1525,53 +1441,84 @@ export class EntityManager {
 
   /**
    * DESIGN 实体被挤: the body has already been moved to the nearest free spot. Players take
-   * damage in survival (HURT_TICKS of invulnerability), rabbits are flattened at the third
-   * squeeze in survival, item drops / falling blocks / crates are only moved.
+   * damage in survival (their own mode; HURT_TICKS of invulnerability), rabbits are flattened at
+   * the third squeeze when the world harms creatures (host.harmsCreatures: a survival world),
+   * item drops / falling blocks / crates are only moved.
    */
   private crushed(e: Entity): void {
     this.host.emit({ type: 'crush', entity: e, cause: 'structure' });
     if (e instanceof Player) {
       this.damage(e, CRUSH_DAMAGE, 'crush');
-    } else if (e instanceof Rabbit && this.survival()) {
+    } else if (e instanceof Rabbit && this.host.harmsCreatures) {
       e.crushCount++;
       if (e.crushCount >= RABBIT_CRUSH_LIMIT) this.kill(e, 'crush');
     }
   }
 
-  /** The world's mode is the local player's mode (creative when there is no player). */
-  private survival(): boolean {
-    const p = this.localPlayer;
-    return p !== null && p.mode === 'survival';
-  }
-
   // ------------------------------------------------------------------ pickups and merging
 
+  /**
+   * Every live player collects the drops within its pickup reach. A drop several players can
+   * reach goes to the nearest one (distance from the drop to the player's feet; a tie goes to the
+   * lower entity id); what does not fit into that player's inventory is offered to the next
+   * nearest, and so on. Players are considered in ascending id order, so the outcome depends only
+   * on positions and inventories (and on ids for exact ties).
+   */
   private pickups(): void {
-    const p = this.localPlayer;
-    if (p === null || p.dead || p.removed) return;
-    const reach = p.box(this.box2);
-    reach.minX -= PICKUP_REACH_H;
-    reach.maxX += PICKUP_REACH_H;
-    reach.minZ -= PICKUP_REACH_H;
-    reach.maxZ += PICKUP_REACH_H;
-    reach.minY -= PICKUP_REACH_V;
-    reach.maxY += PICKUP_REACH_V;
     const world = this.host.world;
-    if (!world.isLoaded(Math.floor(p.pos.x), Math.floor(p.pos.z))) return;
+    const players = this.pickers;
+    players.length = 0;
     const list = this.list;
     for (let i = 0; i < list.length; i++) {
       const e = list[i]!;
+      if (!(e instanceof Player) || e.removed || e.dead) continue;
+      if (!world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
+      players.push(e);
+    }
+    if (players.length === 0) return;
+    players.sort((a, b) => a.id - b.id);
+    const reach = this.box2;
+    const takers = this.takers;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i]!;
       if (!(e instanceof ItemEntity) || e.removed || e.pickupDelay > 0) continue;
-      const b = e.box(this.box1);
-      if (b.minX >= reach.maxX || b.maxX <= reach.minX || b.minY >= reach.maxY || b.maxY <= reach.minY || b.minZ >= reach.maxZ || b.maxZ <= reach.minZ) continue;
       // A drop in an unloaded chunk is frozen: it does nothing, not even get picked up.
       if (!world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
-      const left = p.inventory.add(e.stack.item, e.stack.count);
-      const taken = e.stack.count - left;
-      if (taken <= 0) continue;
-      e.stack.count = left;
-      this.host.emit({ type: 'pickup', entity: e, amount: taken });
-      if (left <= 0) this.remove(e);
+      const b = e.box(this.box1);
+      takers.length = 0;
+      for (let j = 0; j < players.length; j++) {
+        const p = players[j]!;
+        p.box(reach);
+        if (
+          b.minX >= reach.maxX + PICKUP_REACH_H ||
+          b.maxX <= reach.minX - PICKUP_REACH_H ||
+          b.minY >= reach.maxY + PICKUP_REACH_V ||
+          b.maxY <= reach.minY - PICKUP_REACH_V ||
+          b.minZ >= reach.maxZ + PICKUP_REACH_H ||
+          b.maxZ <= reach.minZ - PICKUP_REACH_H
+        ) {
+          continue;
+        }
+        takers.push(p);
+      }
+      if (takers.length === 0) continue;
+      if (takers.length > 1) {
+        const ex = e.pos.x;
+        const ey = e.pos.y;
+        const ez = e.pos.z;
+        const d2 = (p: Player): number => (p.pos.x - ex) ** 2 + (p.pos.y - ey) ** 2 + (p.pos.z - ez) ** 2;
+        // Stable sort on an id-ordered list: equal distances keep the lower id first.
+        takers.sort((a, c) => d2(a) - d2(c));
+      }
+      for (let j = 0; j < takers.length && e.stack.count > 0; j++) {
+        const p = takers[j]!;
+        const left = p.inventory.add(e.stack.item, e.stack.count);
+        const taken = e.stack.count - left;
+        if (taken <= 0) continue;
+        e.stack.count = left;
+        this.host.emit({ type: 'pickup', entity: e, amount: taken, player: p });
+      }
+      if (e.stack.count <= 0) this.remove(e);
     }
   }
 
@@ -1667,8 +1614,7 @@ const ORIGIN: Readonly<Vec3> = Object.freeze(vec3(0, 0, 0));
 
 /** Does serialize() write this entity? (see serialize) */
 function saveable(e: Entity): boolean {
-  if (e.removed) return false;
-  if (e instanceof Player) return true;
+  if (e.removed || e instanceof Player) return false;
   if (!finiteVec(e.pos)) return false;
   if (e instanceof ItemEntity) return isItem(e.stack.item) && Number.isFinite(e.stack.count) && e.stack.count >= 1;
   return true;
@@ -1695,4 +1641,160 @@ function copyVec(out: Vec3, v: Vec3): void {
   out.x = v.x;
   out.y = v.y;
   out.z = v.z;
+}
+
+// ====================================================================== records
+
+/** The fields every saved entity has, as read back (all finite). */
+interface CommonFields {
+  pos: Vec3;
+  vel: Vec3;
+  cvel: Vec3;
+  yaw: number;
+  pitch: number;
+  onGround: boolean;
+  wet: number;
+  headWet: boolean;
+  inLava: boolean;
+  carrierId: number;
+  noAttachTicks: number;
+  noAttachStructureId: number;
+  age: number;
+  fallDistance: number;
+  cnx: number;
+  cnz: number;
+  onWorldGround: boolean;
+}
+
+/** The common fields of an entity; `pos` is written in place of e.pos (a player with a broken position writes its spawn). */
+function writeCommon(w: ByteWriter, e: Entity, pos: Vec3): void {
+  writeVec(w, pos);
+  writeVec(w, finiteVec(e.vel) ? e.vel : ORIGIN);
+  writeVec(w, finiteVec(e.carrierVel) ? e.carrierVel : ORIGIN);
+  w.f64(finiteOr(e.yaw, 0));
+  w.f64(finiteOr(e.pitch, 0));
+  w.bool(e.onGround);
+  w.f64(finiteOr(e.wet, 0));
+  w.bool(e.headWet);
+  w.bool(e.inLava);
+  w.varuint(uint(e.carrierId));
+  w.varuint(uint(e.noAttachTicks));
+  w.varuint(uint(e.noAttachStructureId));
+  w.varuint(uint(e.age));
+  w.f64(finiteOr(e.fallDistance, 0));
+  w.f64(finiteOr(e.contactNx, 0));
+  w.f64(finiteOr(e.contactNz, 0));
+  w.bool(e.onWorldGround);
+}
+
+function readCommon(r: ByteReader): CommonFields {
+  return {
+    pos: readVec(r),
+    vel: readVec(r),
+    cvel: readVec(r),
+    yaw: readFinite(r),
+    pitch: readFinite(r),
+    onGround: r.bool(),
+    wet: readFinite(r),
+    headWet: r.bool(),
+    inLava: r.bool(),
+    carrierId: r.varuint(),
+    noAttachTicks: r.varuint(),
+    noAttachStructureId: r.varuint(),
+    age: r.varuint(),
+    fallDistance: readFinite(r),
+    cnx: readFinite(r),
+    cnz: readFinite(r),
+    onWorldGround: r.bool(),
+  };
+}
+
+function applyCommon(e: Entity, c: CommonFields): void {
+  copyVec(e.pos, c.pos);
+  copyVec(e.vel, c.vel);
+  copyVec(e.carrierVel, c.cvel);
+  e.yaw = c.yaw;
+  e.pitch = c.pitch;
+  e.onGround = c.onGround;
+  e.wet = c.wet;
+  e.headWet = c.headWet;
+  e.inLava = c.inLava;
+  e.carrierId = c.carrierId;
+  e.noAttachTicks = c.noAttachTicks;
+  e.noAttachStructureId = c.noAttachStructureId;
+  e.age = c.age;
+  e.fallDistance = c.fallDistance;
+  e.contactNx = c.cnx;
+  e.contactNz = c.cnz;
+  e.onWorldGround = c.onWorldGround;
+  e.snapshot();
+}
+
+/** Layout version of a player record (writePlayerRecord). Only this version is read. */
+const PLAYER_RECORD_VERSION = 1;
+
+/**
+ * Everything a player keeps between sessions: position and motion, look, carrier and seat,
+ * mode, health, air, death, flight, spawn point, the selected slot and the whole inventory
+ * (hotbar, backpack, off-hand, cursor), and the timers that go with them (hurt flash, breath and
+ * lava timers, regeneration, the double-tap-to-fly timer). Not part of it: the entity id (the
+ * caller keeps it next to the record) and the input, except the selected slot. Never writes a value readPlayerRecord would reject (non-finite fields become safe defaults).
+ */
+export function writePlayerRecord(w: ByteWriter, p: Player): void {
+  w.u8(PLAYER_RECORD_VERSION);
+  writeCommon(w, p, finiteVec(p.pos) ? p.pos : finiteVec(p.spawn) ? p.spawn : ORIGIN);
+  w.u8(p.mode === 'creative' ? 1 : 0);
+  w.f64(finiteOr(p.health, p.maxHealth));
+  w.f64(finiteOr(p.maxHealth, PLAYER_MAX_HEALTH));
+  w.varuint(uint(p.air));
+  w.varuint(uint(p.maxAir));
+  w.bool(p.dead);
+  w.varuint(uint(p.hurtTicks));
+  w.bool(p.flying);
+  w.bool(p.sneaking);
+  w.bool(p.sprinting);
+  w.varuint(uint(p.steeringShipId));
+  writeVec(w, finiteVec(p.seat) ? p.seat : ORIGIN);
+  writeVec(w, finiteVec(p.spawn) ? p.spawn : ORIGIN);
+  w.varuint(uint(p.drownTicks));
+  w.varuint(uint(p.lavaTicks));
+  w.varuint(Math.min(uint(p.unhurtTicks), 1 << 30));
+  w.varint(Math.max(-(1 << 30), int(p.lastJumpPressAge)));
+  p.inventory.serialize(w);
+}
+
+/**
+ * A player entity with id `id` from a record written by writePlayerRecord. Throws
+ * SaveFormatError on a corrupt or truncated record.
+ */
+export function readPlayerRecord(r: ByteReader, id: number): Player {
+  const v = r.u8();
+  if (v !== PLAYER_RECORD_VERSION) r.fail(`unsupported player record version ${v}`);
+  const common = readCommon(r);
+  const mode: GameMode = r.u8() === 1 ? 'creative' : 'survival';
+  const p = new Player(id, mode);
+  p.health = readFinite(r);
+  p.maxHealth = readFinite(r);
+  p.air = r.varuint();
+  p.maxAir = r.varuint();
+  p.dead = r.bool();
+  p.hurtTicks = r.varuint();
+  p.flying = r.bool();
+  p.sneaking = r.bool();
+  p.sprinting = r.bool();
+  p.steeringShipId = r.varuint();
+  copyVec(p.seat, readVec(r));
+  copyVec(p.spawn, readVec(r));
+  p.drownTicks = r.varuint();
+  p.lavaTicks = r.varuint();
+  p.unhurtTicks = r.varuint();
+  p.lastJumpPressAge = r.varint();
+  p.inventory.deserialize(r);
+  p.input.slot = p.inventory.selected;
+  applyCommon(p, common);
+  // The look is driven by input.yaw / pitch: seed it, or the first tick after joining would snap
+  // the view to 0 until the client writes its own.
+  p.input.yaw = p.yaw;
+  p.input.pitch = p.pitch;
+  return p;
 }

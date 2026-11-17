@@ -34,7 +34,7 @@ describe('review: a push uphill along a slightly rolled deck is judged a crush',
     const dir = roll > 0 ? -1 : 1;
     const z0 = dir < 0 ? 4.5 : -3.5;
     b.drive(paddle, (t) => ({ p: vec3(0.5, 61.7, z0 + dir * 1.5 * t * TICK_DT), q: { x: 0, y: 0, z: 0, w: 1 } }));
-    const p = b.entities.createPlayer('survival', 0.5, 61.4, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61.4, 0.5);
     b.tick(90);
     expect(Math.abs(p.pos.z - 0.5)).toBeGreaterThan(2); // it was really pushed along the deck
     expect(p.carrierId).toBe(ship.id);
@@ -57,7 +57,7 @@ describe('review: a push uphill along a slightly rolled deck is judged a crush',
     const paddle = b.rotor(20, null, [-8, 61, 0], 2, paddleCells);
     const p0 = vec3(-7.5, 62, 0.5);
     b.drive(paddle, (t) => ({ p: vec3(p0.x + 3 * t * TICK_DT, p0.y, p0.z), q: qfromAxisAngle(vec3(0, 1, 0), 0.35) }));
-    const p = b.entities.createPlayer('survival', -4.5, 61.3, -1.65);
+    const p = b.entities.spawnPlayer('survival', -4.5, 61.3, -1.65);
     b.tick(83);
     expect(p.pos.x).toBeGreaterThan(-1); // swept along the gunwale
     expect(p.carrierId).toBe(ship.id);

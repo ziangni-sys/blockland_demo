@@ -5,8 +5,7 @@
  * clicks, steering, pouring a bucket); the scene's blocks are placed with world.setCell. Saves go
  * through the client's SaveManager into a MemoryStorage (putAll with a WorldMeta) and come back
  * through SaveManager.load (listChunkKeys / getChunks / getBlob) into a fresh Simulation with the
- * same seed and generator, built with deferInitialLoad (as src/sim/persist.ts recommends); one
- * test also loads the way src/client/game.ts does (a normally constructed Simulation).
+ * same seed and generator, into which the player then rejoins (as src/client/game.ts does).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cellState, liquidState, makeCell, stateFacing } from '../../src/blocks/cell';
@@ -14,7 +13,7 @@ import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NX, NY, NZ, PX, PY, PZ } from '../../src/core/dirs';
 import { decodeTicks } from '../../src/save/codec';
-import { exportSave, importSave, type SaveBundle } from '../../src/sim/persist';
+import { exportSave, type SaveBundle } from '../../src/sim/persist';
 import { Simulation } from '../../src/sim/simulation';
 import { Rotor, Ship } from '../../src/structures/structure';
 import { FlatGenerator, VoidGenerator } from '../../src/worldgen/generator';
@@ -42,6 +41,7 @@ import {
   type SimSpec,
   type StoredSave,
 } from './g6-save-helpers';
+import { loadSolo } from '../solo';
 
 const T = SEA_TOP;
 
@@ -129,59 +129,59 @@ function playHarbour(): Harbour {
   const sim = newWorld(HARBOUR);
   const log = new EventLog(sim);
   buildHarbour(sim);
-  sim.giveItem(B.PLANKS_OAK, 40);
-  sim.giveItem(I.BUCKET, 2);
-  sim.giveItem(B.CANVAS, 7);
+  sim.soloPlayer.giveItem(B.PLANKS_OAK, 40);
+  sim.soloPlayer.giveItem(I.BUCKET, 2);
+  sim.soloPlayer.giveItem(B.CANVAS, 7);
   sim.advance(2);
 
   // World windmill: glue the south face of a sail, then preview + start at the bearing.
   glueFace(sim, [-9, WM.hy, 0, PZ]);
-  sim.hold(B.PLANKS_OAK);
+  sim.soloPlayer.hold(B.PLANKS_OAK);
   rightClick(sim, WM.bx, WM.by, WM.bz, PX);
   rightClick(sim, WM.bx, WM.by, WM.bz, PX);
   // World glue on the north face of a pier stone.
   glueFace(sim, [-6, T, 5, NZ]);
 
   // On the raft: glue the mast's west face and put the stone against it.
-  sim.teleport(0.5, T, 1.5);
+  sim.soloPlayer.teleport(0.5, T, 1.5);
   sim.advance(2);
   glueFace(sim, [RAFT.mast[0], RAFT.mast[1], RAFT.mast[2], NX]);
-  sim.hold(B.STONE, 1);
+  sim.soloPlayer.hold(B.STONE, 1);
   rightClick(sim, RAFT.mast[0], RAFT.mast[1], RAFT.mast[2], NX);
   // Hovering north of the bearing: glue its front face and put the hub against it (sneak: with
   // a block in hand that places instead of previewing the rotor).
-  sim.teleport(2.5, T + 2, -1.5);
-  sim.player.flying = true;
+  sim.soloPlayer.teleport(2.5, T + 2, -1.5);
+  sim.soloPlayer.player.flying = true;
   sim.advance(2);
   glueFace(sim, [RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NZ]);
-  sim.hold(B.CANVAS);
-  sim.player.input.sneak = true;
+  sim.soloPlayer.hold(B.CANVAS);
+  sim.soloPlayer.player.input.sneak = true;
   rightClick(sim, RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NZ);
-  sim.player.input.sneak = false;
+  sim.soloPlayer.player.input.sneak = false;
   for (const [x, y, z] of cross(RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], T_CROSS)) setBlock(sim.world, x, y, z, B.CANVAS);
   // Glue on a sail of the raft's windmill: it rides into the ship, then into the nested
   // windmill, so the nested structure has a glue store of its own to save.
   glueFace(sim, [RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], NZ]);
-  sim.player.flying = false;
-  sim.teleport(3.5, T, 1.5);
+  sim.soloPlayer.player.flying = false;
+  sim.soloPlayer.teleport(3.5, T, 1.5);
   sim.advance(2);
-  sim.emptyHand();
+  sim.soloPlayer.emptyHand();
   rightClick(sim, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], PX); // preview
   rightClick(sim, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], PX); // assemble (takes the wheel)
   const ship = sim.structures.ships()[0];
   if (ship === undefined) throw new Error(`the raft did not assemble: ${log.toastKeys().join(', ')}`);
-  sim.use(); // let go of the wheel
+  sim.soloPlayer.use(); // let go of the wheel
   sim.tick();
   // Walk over to the mast (teleport), start the windmill on the ship.
   const stand = ship.grid.toWorld({ x: 3.5, y: T, z: 1.5 });
-  sim.teleport(stand.x, stand.y, stand.z);
+  sim.soloPlayer.teleport(stand.x, stand.y, stand.z);
   sim.advance(2);
   rightClick(sim, RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NY, ship.id);
   rightClick(sim, RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NY, ship.id);
   // Back to the wheel and sail a curve (W + D held).
   rightClick(sim, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], PX, ship.id);
-  sim.player.input.forward = 1;
-  sim.player.input.strafe = 1;
+  sim.soloPlayer.player.input.forward = 1;
+  sim.soloPlayer.player.input.strafe = 1;
   sim.advance(60);
   return { sim, log };
 }
@@ -279,7 +279,7 @@ function pourWater(): Simulation {
   const sim = newWorld(POUR);
   fill(sim.world, -PLATFORM_HALF, PLATFORM_Y, -PLATFORM_HALF, PLATFORM_HALF, PLATFORM_Y, PLATFORM_HALF, B.STONE);
   sim.advance(2);
-  sim.hold(I.BUCKET_WATER, 1);
+  sim.soloPlayer.hold(I.BUCKET_WATER, 1);
   rightClick(sim, 0, PLATFORM_Y, 0, PY); // the source appears during this tick
   sim.advance(8); // 0.4 s
   return sim;
@@ -388,20 +388,19 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
   });
 
   it("存档往返: the client's own way of loading (a Simulation constructed normally, then importSave) gives the same game back", async () => {
-    const sim = new Simulation({ seed: HARBOUR.seed, mode: HARBOUR.mode, generator: HARBOUR.generator(), syncChunks: true, rabbits: false, loadRadius: HARBOUR.loadRadius });
-    importSave(sim, await readAgain(saved));
+    const sim = loadSolo({ seed: HARBOUR.seed, mode: HARBOUR.mode, generator: HARBOUR.generator(), syncChunks: true, rabbits: false, loadRadius: HARBOUR.loadRadius }, await readAgain(saved));
     expect(snapshot(sim)).toEqual(before);
   });
 
   it('存档往返: a player standing on the deck of a sailing ship (not steering) stays aboard through the round trip, in step', async () => {
     const { sim } = playHarbour();
-    sim.player.input.forward = 0;
-    sim.player.input.strafe = 0;
-    sim.use(); // let go of the wheel: the ship coasts on, turning, with the player on its deck
+    sim.soloPlayer.player.input.forward = 0;
+    sim.soloPlayer.player.input.strafe = 0;
+    sim.soloPlayer.use(); // let go of the wheel: the ship coasts on, turning, with the player on its deck
     sim.tick();
     sim.advance(5);
-    expect(sim.player.steeringShipId).toBe(0);
-    expect(sim.player.carrierId).toBe(2);
+    expect(sim.soloPlayer.player.steeringShipId).toBe(0);
+    expect(sim.soloPlayer.player.carrierId).toBe(2);
     const ship = sim.structures.get(2)!;
     expect(Math.hypot(ship.grid.linearVelocity.x, ship.grid.linearVelocity.z)).toBeGreaterThan(0.05);
     const s = await saveThroughStorage(sim, 'rider', 'rider', HARBOUR.seed);
@@ -413,7 +412,7 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
       expect(playerState(b)).toEqual(playerState(sim));
     }
     expect(snapshot(b)).toEqual(snapshot(sim));
-    expect(b.player.carrierId).toBe(2);
+    expect(b.soloPlayer.player.carrierId).toBe(2);
   });
 
   it('存档往返: the player is back at the wheel where he was, with the same inventory', () => {
@@ -427,8 +426,8 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     const b = loadWorld(HARBOUR, await readAgain(saved));
     expect(snapshot(a)).toEqual(before); // (the unsaved game has not moved on yet)
     // The client re-applies the keys still held (W + D) to the reloaded game.
-    b.player.input.forward = a.player.input.forward;
-    b.player.input.strafe = a.player.input.strafe;
+    b.soloPlayer.player.input.forward = a.soloPlayer.player.input.forward;
+    b.soloPlayer.player.input.strafe = a.soloPlayer.player.input.strafe;
     for (let i = 0; i < 40; i++) {
       a.tick();
       b.tick();
@@ -437,12 +436,12 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     expect(snapshot(b)).toEqual(snapshot(a));
     // Docking now (sneak + right-click at the wheel) gives the same world back, glue included.
     for (const s of [a, b]) {
-      s.player.input.forward = 0;
-      s.player.input.strafe = 0;
-      s.player.input.sneak = true;
-      s.use();
+      s.soloPlayer.player.input.forward = 0;
+      s.soloPlayer.player.input.strafe = 0;
+      s.soloPlayer.player.input.sneak = true;
+      s.soloPlayer.use();
       s.tick();
-      s.player.input.sneak = false;
+      s.soloPlayer.player.input.sneak = false;
     }
     expect(b.structures.ships().length).toBe(0);
     expect(a.structures.ships().length).toBe(0);
@@ -466,17 +465,17 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     const logs = [new EventLog(a), new EventLog(b)];
     for (const s of [a, b]) {
       // let go of the wheel, walk (teleport) to the mast, stop the windmill on the ship
-      s.player.input.forward = 0;
-      s.player.input.strafe = 0;
-      s.use();
+      s.soloPlayer.player.input.forward = 0;
+      s.soloPlayer.player.input.strafe = 0;
+      s.soloPlayer.use();
       s.tick();
       const ship = s.structures.get(2)!;
       const stand = ship.grid.toWorld({ x: 3.5, y: T, z: 1.5 });
-      s.teleport(stand.x, stand.y, stand.z);
+      s.soloPlayer.teleport(stand.x, stand.y, stand.z);
       s.advance(2);
       rightClick(s, RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NY, ship.id);
       // over to the pier, stop the windmill on the tower
-      s.teleport(HARBOUR.spawn.x, HARBOUR.spawn.y, HARBOUR.spawn.z);
+      s.soloPlayer.teleport(HARBOUR.spawn.x, HARBOUR.spawn.y, HARBOUR.spawn.z);
       s.advance(2);
       rightClick(s, WM.bx, WM.by, WM.bz, PX);
     }
@@ -611,20 +610,20 @@ function playPreviousGame(): Simulation {
   // the player then puts the stone on.
   glueFace(sim, [FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY]);
   glueFace(sim, [BAY.plank[0], BAY.plank[1], BAY.plank[2], PY]);
-  sim.hold(B.STONE, 1);
+  sim.soloPlayer.hold(B.STONE, 1);
   rightClick(sim, BAY.plank[0], BAY.plank[1], BAY.plank[2], PY);
   // Start the windmill.
-  sim.hold(B.PLANKS_OAK);
+  sim.soloPlayer.hold(B.PLANKS_OAK);
   rightClick(sim, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
   rightClick(sim, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
   // Throw a stack of dirt out of the inventory screen.
-  sim.giveItem(B.DIRT, 5);
-  const inv = sim.player.inventory;
+  sim.soloPlayer.giveItem(B.DIRT, 5);
+  const inv = sim.soloPlayer.player.inventory;
   const slot = inv.hotbar.findIndex((s) => s !== null && s.item === B.DIRT);
   inv.slotClick('hotbar', slot, 0, false);
-  sim.dropCursorStack();
+  sim.soloPlayer.dropCursorStack();
   // Assemble the raft at its helm (takes the wheel) and let the game run.
-  sim.emptyHand();
+  sim.soloPlayer.emptyHand();
   rightClick(sim, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
   rightClick(sim, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
   sim.advance(20);
@@ -670,14 +669,14 @@ describe('24. 用同一个种子开新世界时，没有上一局的胶水。', 
     const log = new EventLog(fresh);
     buildPier(fresh); // somewhere to stand (does not touch the sea floor)
     fresh.advance(2);
-    fresh.hold(I.GLUE);
-    fresh.lookAtCell(FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY);
+    fresh.soloPlayer.hold(I.GLUE);
+    fresh.soloPlayer.lookAtCell(FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY);
     fresh.tick();
-    expect(fresh.view.hint?.key).toBe('hint.glue.apply'); // 'hint.glue.already' if the old glue were there
-    fresh.player.input.sneak = true;
+    expect(fresh.soloPlayer.view.hint?.key).toBe('hint.glue.apply'); // 'hint.glue.already' if the old glue were there
+    fresh.soloPlayer.player.input.sneak = true;
     fresh.tick();
-    expect(fresh.view.hint?.key).toBe('hint.glue.notGlued'); // nothing to remove either
-    fresh.player.input.sneak = false;
+    expect(fresh.soloPlayer.view.hint?.key).toBe('hint.glue.notGlued'); // nothing to remove either
+    fresh.soloPlayer.player.input.sneak = false;
     rightClick(fresh, FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY);
     expect(log.toastKeys()).toContain('toast.glue.added');
     expect(log.toastKeys()).not.toContain('toast.glue.already');
@@ -694,14 +693,14 @@ describe('24. 用同一个种子开新世界时，没有上一局的胶水。', 
     buildRaft(fresh);
     buildWindmill(fresh);
     fresh.advance(2);
-    fresh.emptyHand();
+    fresh.soloPlayer.emptyHand();
     rightClick(fresh, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
     rightClick(fresh, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
-    fresh.use(); // let go of the wheel
+    fresh.soloPlayer.use(); // let go of the wheel
     fresh.tick();
-    fresh.teleport(SHALLOW.spawn.x, SHALLOW.spawn.y, SHALLOW.spawn.z);
+    fresh.soloPlayer.teleport(SHALLOW.spawn.x, SHALLOW.spawn.y, SHALLOW.spawn.z);
     fresh.advance(1);
-    fresh.hold(B.PLANKS_OAK);
+    fresh.soloPlayer.hold(B.PLANKS_OAK);
     rightClick(fresh, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
     rightClick(fresh, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
     expect(structureTree(fresh)).toEqual([
@@ -713,7 +712,7 @@ describe('24. 用同一个种子开新世界时，没有上一局的胶水。', 
   it('新世界里没有上一局的东西: only the new player, at the spawn, with an empty inventory', () => {
     const fresh = openNewWorld();
     expect(fresh.entities.all().map((e) => [e.id, e.kind])).toEqual([[1, 'player']]);
-    const p = fresh.player;
+    const p = fresh.soloPlayer.player;
     expect([p.pos.x, p.pos.y, p.pos.z]).toEqual([SHALLOW.spawn.x, SHALLOW.spawn.y, SHALLOW.spawn.z]);
     expect([p.steeringShipId, p.carrierId]).toEqual([0, 0]);
     expect(p.inventory.hotbar.every((st) => st === null)).toBe(true);

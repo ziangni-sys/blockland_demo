@@ -24,10 +24,10 @@ function raft(mode: 'creative' | 'survival'): Simulation {
   w.setCell(2, SEA_TOP, 4, makeCell(B.HELM, facingState(NZ)));
   sim.advance(2);
   // preview + assemble (the player takes the wheel)
-  sim.lookAtCell(2, SEA_TOP, 4, PZ);
-  sim.use();
+  sim.soloPlayer.lookAtCell(2, SEA_TOP, 4, PZ);
+  sim.soloPlayer.use();
   sim.tick();
-  sim.use();
+  sim.soloPlayer.use();
   sim.tick();
   expect(sim.structures.ships().length).toBe(1);
   sim.structures.dynamics = null; // keep the raft exactly where it was built
@@ -38,17 +38,17 @@ describe('review: a right-click that removes the hit structure, then mining in t
   it('survival: finishing the helm break on the docking tick does not duplicate the helm', () => {
     const sim = raft('survival');
     const ship = sim.structures.ships()[0]!;
-    sim.releaseHelm();
+    sim.soloPlayer.releaseHelm();
     sim.advance(3);
     const log = new EventLog(sim);
-    sim.lookAtCell(2, SEA_TOP, 4, PZ, ship.id);
-    expect(sim.targetCell()?.gridId).toBe(ship.id);
-    const inp = sim.player.input;
+    sim.soloPlayer.lookAtCell(2, SEA_TOP, 4, PZ, ship.id);
+    expect(sim.soloPlayer.targetCell()?.gridId).toBe(ship.id);
+    const inp = sim.soloPlayer.player.input;
     inp.attack = true;
-    sim.attack();
+    sim.soloPlayer.attack();
     sim.advance(29); // helm: 1.5 s = 30 ticks, one short of breaking
     inp.sneak = true;
-    sim.use(); // sneak + right-click on the ship's helm: dock
+    sim.soloPlayer.use(); // sneak + right-click on the ship's helm: dock
     sim.tick();
     inp.attack = false;
     inp.sneak = false;
@@ -62,16 +62,16 @@ describe('review: a right-click that removes the hit structure, then mining in t
   it('creative: attack + sneak-dock from the wheel in one tick emits no blockBroken for the removed ship', () => {
     const sim = raft('creative');
     const ship = sim.structures.ships()[0]!;
-    expect(sim.player.steeringShipId).toBe(ship.id);
+    expect(sim.soloPlayer.player.steeringShipId).toBe(ship.id);
     sim.advance(2);
     const log = new EventLog(sim);
-    sim.lookAtCell(3, SEA_TOP - 1, 5, PY, ship.id); // the deck plank beside the helmsman's seat
-    expect(sim.targetCell()).toMatchObject({ gridId: ship.id, x: 3, y: SEA_TOP - 1, z: 5 });
-    sim.player.input.sneak = true;
-    sim.attack();
-    sim.use(); // while steering, sneak + right-click docks
+    sim.soloPlayer.lookAtCell(3, SEA_TOP - 1, 5, PY, ship.id); // the deck plank beside the helmsman's seat
+    expect(sim.soloPlayer.targetCell()).toMatchObject({ gridId: ship.id, x: 3, y: SEA_TOP - 1, z: 5 });
+    sim.soloPlayer.player.input.sneak = true;
+    sim.soloPlayer.attack();
+    sim.soloPlayer.use(); // while steering, sneak + right-click docks
     sim.tick();
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = false;
     expect(ship.removed).toBe(true);
     expect(log.of('blockBroken').filter((e) => e.gridId === ship.id)).toEqual([]);
     expect(idAt(sim.world, 3, SEA_TOP - 1, 5)).toBe(B.PLANKS_OAK);

@@ -21,7 +21,9 @@ import { SAVE_VERSION, type WorldMeta } from '../save/codec';
 import { formatMessage } from '../sim/messages';
 import { placeExampleShip } from '../sim/exampleShip';
 import { exportSave, importSave } from '../sim/persist';
+import type { PlayerControl } from '../sim/players';
 import { Simulation } from '../sim/simulation';
+import { worldRulesFor } from '../sim/rules';
 import type { Message, SimEvent } from '../sim/view';
 import type { MeshResponse } from '../mesh/types';
 import { createUi } from '../ui/index';
@@ -57,6 +59,11 @@ export const CLIENT_VERSION = '0.1.0';
 
 /** Autosave interval in milliseconds of running simulation. */
 export const AUTOSAVE_MS = 30_000;
+/**
+ * The player key this client joins every world with. Single player has one player per world;
+ * a stable per-browser identity comes with networked play.
+ */
+export const LOCAL_PLAYER_KEY = 'local';
 /** Main-thread budget for streaming + meshing per frame while playing / while loading. */
 const PLAY_WORK_BUDGET_MS = 4;
 const LOADING_WORK_BUDGET_MS = 14;
@@ -251,11 +258,11 @@ export class Game implements InputHost {
    * the next tick would select the old slot again.
    */
   private pickBlock(): void {
-    const sim = this.sim;
-    if (!sim || !this.isPlaying()) return;
+    const me = this.me;
+    if (!me || !this.isPlaying()) return;
     try {
-      sim.pickBlock();
-      this.input.selectSlot(sim.player.inventory.selected);
+      me.pickBlock();
+      this.input.selectSlot(me.player.inventory.selected);
     } catch (e) {
       this.faults.report('pick block', e);
     }
@@ -274,6 +281,10 @@ export class Game implements InputHost {
   /** The running simulation, if any. */
   get sim(): Simulation | null {
     return this.session?.sim ?? null;
+  }
+  /** The player this client plays in the running world, if any. */
+  get me(): PlayerControl | null {
+    return this.session?.me ?? null;
   }
   get pointerLocked(): boolean {
     return this.binder.locked;
@@ -406,7 +417,7 @@ export class Game implements InputHost {
     if (!s || s.state !== 'ready') return;
     this.binder.exitLock();
     try {
-      s.sim.releaseHelm();
+      s.me.releaseHelm();
     } catch (e) {
       this.faults.report('release helm', e);
     }
@@ -418,13 +429,13 @@ export class Game implements InputHost {
     const s = this.session;
     if (s) {
       try {
-        const inv = s.sim.player.inventory;
+        const inv = s.me.player.inventory;
         const c = inv.takeCursor();
         if (c) {
           const left = inv.add(c.item, c.count);
           if (left > 0) {
             inv.cursor = { item: c.item, count: left };
-            s.sim.dropCursorStack();
+            s.me.dropCursorStack();
           }
         }
       } catch (e) {
@@ -496,16 +507,16 @@ export class Game implements InputHost {
         const s = this.session;
         if (!s || this.screen !== 'inventory') return;
         try {
-          s.sim.player.inventory.slotClick(area, index, button, shift);
+          s.me.player.inventory.slotClick(area, index, button, shift);
         } catch (e) {
           this.faults.report('inventory', e);
         }
       },
       creativePick: (item, shift) => {
         const s = this.session;
-        if (!s || this.screen !== 'inventory' || s.sim.mode !== 'creative') return;
+        if (!s || this.screen !== 'inventory' || s.me.player.mode !== 'creative') return;
         try {
-          s.sim.player.inventory.creativePick(item, shift);
+          s.me.player.inventory.creativePick(item, shift);
         } catch (e) {
           this.faults.report('inventory', e);
         }
@@ -514,7 +525,7 @@ export class Game implements InputHost {
         const s = this.session;
         if (!s || this.screen !== 'inventory') return;
         try {
-          s.sim.dropCursorStack();
+          s.me.dropCursorStack();
         } catch (e) {
           this.faults.report('inventory', e);
         }
@@ -535,15 +546,19 @@ export class Game implements InputHost {
     this.settingsStore.save(next);
     this.renderDirty = true;
     this.debugAt = -Infinity;
-    const sim = this.sim;
-    if (rdChanged && sim) sim.loadRadius = loadRadiusFor(next.renderDistance);
+    const me = this.me;
+    if (rdChanged && me) me.viewRadius = loadRadiusFor(next.renderDistance);
   }
 
   private setMode(mode: GameMode): void {
-    const sim = this.sim;
-    if (!sim || (mode !== 'creative' && mode !== 'survival')) return;
+    const me = this.me;
+    if (!me || (mode !== 'creative' && mode !== 'survival')) return;
     try {
-      sim.setMode(mode);
+      me.setMode(mode);
+      // This client hosts its own world: the pause-menu switch sets the world's rules along with
+      // the player's mode, as it always did (drops from blasts and block updates, harm to
+      // creatures). A multiplayer host will set the rules separately.
+      this.session?.sim.setRules(worldRulesFor(mode));
     } catch (e) {
       this.faults.report('set mode', e);
     }
@@ -553,7 +568,7 @@ export class Game implements InputHost {
     const s = this.session;
     if (!s || this.screen !== 'death') return;
     try {
-      s.sim.respawn();
+      s.me.respawn();
     } catch (e) {
       this.faults.report('respawn', e);
     }
@@ -597,12 +612,13 @@ export class Game implements InputHost {
       const name = (typeof opts.name === 'string' && opts.name.trim()) || 'World';
       const generator = new TerrainGenerator(seed);
       const sim = new Simulation({ seed, mode, generator, loadRadius: loadRadiusFor(this.settings.renderDistance) });
-      giveStarterKit(sim);
+      const me = sim.join(LOCAL_PLAYER_KEY);
+      giveStarterKit(me);
       // A windmill boat moored near the spawn, as blocks (new worlds only, never on load).
       placeExampleShip(sim);
       const id = makeWorldId(Date.now(), Math.random);
       const meta = newWorldMeta(id, name.slice(0, 64), seedText, seed, mode, Date.now());
-      this.startSession(sim, meta, generator, true);
+      this.startSession(sim, me, meta, generator, true);
     } catch (e) {
       this.faults.report('new world', e);
       this.backToMenu();
@@ -638,15 +654,8 @@ export class Game implements InputHost {
       await this.nextFrame();
       const meta = res.meta;
       const generator = new TerrainGenerator(meta.seedHash);
-      // deferInitialLoad: importSave() throws the constructor's spawn-area chunks away and loads
-      // the ground under the saved player itself.
-      const sim = new Simulation({
-        seed: meta.seedHash,
-        mode: meta.mode,
-        generator,
-        loadRadius: loadRadiusFor(this.settings.renderDistance),
-        deferInitialLoad: true,
-      });
+      // The save brings the world rules; `mode` only matters for a world without them.
+      const sim = new Simulation({ seed: meta.seedHash, mode: meta.mode, generator, loadRadius: loadRadiusFor(this.settings.renderDistance) });
       try {
         importSave(sim, res.bundle);
       } catch (e) {
@@ -654,7 +663,9 @@ export class Game implements InputHost {
         this.toast(clientText(lang, 'load.failed', { msg: describeError(e) }), 'error');
         return this.backToMenu();
       }
-      this.startSession(sim, meta, generator, false);
+      // Restores this client's player from the save (or spawns it, the first time this key plays here).
+      const me = sim.join(LOCAL_PLAYER_KEY);
+      this.startSession(sim, me, meta, generator, false);
     } catch (e) {
       this.faults.report('load world', e);
       this.backToMenu();
@@ -673,8 +684,8 @@ export class Game implements InputHost {
     await this.refreshWorlds();
   }
 
-  private startSession(sim: Simulation, meta: WorldMeta, generator: TerrainGenerator, isNew: boolean): void {
-    const session = new WorldSession(sim, meta, generator, isNew, {
+  private startSession(sim: Simulation, me: PlayerControl, meta: WorldMeta, generator: TerrainGenerator, isNew: boolean): void {
+    const session = new WorldSession(sim, me, meta, generator, isNew, {
       backend: this.backend,
       genPool: this.genPool,
       meshPool: this.meshPool,
@@ -683,7 +694,7 @@ export class Game implements InputHost {
       onEvent: (ev) => this.onSimEvent(ev),
     });
     this.session = session;
-    const p = sim.player;
+    const p = me.player;
     this.input.releaseAll();
     this.input.setLook(p.yaw, p.pitch);
     this.input.selectSlot(p.inventory.selected);
@@ -704,7 +715,7 @@ export class Game implements InputHost {
     if (!s) return;
     s.state = 'loading';
     this.binder.exitLock();
-    this.input.writeTo(s.sim.player.input, false);
+    this.input.writeTo(s.me.player.input, false);
     this.runTick(s);
     this.showLoading('loading.terrain', 0.05);
   }
@@ -713,9 +724,9 @@ export class Game implements InputHost {
     s.state = 'ready';
     this.loading = null;
     this.clock.reset();
-    this.lastPlayerX = s.sim.player.pos.x;
-    this.lastPlayerZ = s.sim.player.pos.z;
-    this.setScreen(s.sim.player.dead ? 'death' : 'none');
+    this.lastPlayerX = s.me.player.pos.x;
+    this.lastPlayerZ = s.me.player.pos.z;
+    this.setScreen(s.me.player.dead ? 'death' : 'none');
     if (s.isNew && !s.savedOnce) void this.saveNow('initial');
   }
 
@@ -790,7 +801,8 @@ export class Game implements InputHost {
     try {
       await saves.save(() => {
         const sim = s.sim;
-        const meta: WorldMeta = { ...s.meta, mode: sim.mode, lastPlayed: Date.now(), time: sim.world.time, version: SAVE_VERSION };
+        // The world list shows the mode this client's player was last in.
+        const meta: WorldMeta = { ...s.meta, mode: s.me.player.mode, lastPlayed: Date.now(), time: sim.world.time, version: SAVE_VERSION };
         const bundle = exportSave(sim);
         s.meta = meta;
         return { meta, bundle };
@@ -827,7 +839,7 @@ export class Game implements InputHost {
     this.tickTimeAcc += this.win.performance.now() - t0;
     this.tickCountAcc++;
     try {
-      const turned = s.sim.player.takeCarriedYaw();
+      const turned = s.me.player.takeCarriedYaw();
       this.input.addYaw(turned);
       this.lastCarriedYaw = turned;
     } catch {
@@ -839,7 +851,7 @@ export class Game implements InputHost {
   private checkTeleport(force = false): void {
     const s = this.session;
     if (!s || s.state !== 'ready') return;
-    const p = s.sim.player.pos;
+    const p = s.me.player.pos;
     const far = Math.hypot(p.x - this.lastPlayerX, p.z - this.lastPlayerZ) > RELOAD_DISTANCE;
     this.lastPlayerX = p.x;
     this.lastPlayerZ = p.z;
@@ -872,7 +884,7 @@ export class Game implements InputHost {
   }
 
   private loadingFrame(s: WorldSession, now: number, dt: number): boolean {
-    const p = s.sim.player;
+    const p = s.me.player;
     const w0 = this.win.performance.now();
     s.work(now, LOADING_WORK_BUDGET_MS, p.pos.x, p.pos.y + p.eyeHeight, p.pos.z, Number.NaN);
     this.stats.workMs = this.win.performance.now() - w0;
@@ -897,8 +909,8 @@ export class Game implements InputHost {
   }
 
   private playFrame(s: WorldSession, now: number, dt: number): boolean {
-    const sim = s.sim;
-    if (sim.player.dead && (this.screen === 'none' || this.screen === 'inventory')) {
+    const me = s.me;
+    if (me.player.dead && (this.screen === 'none' || this.screen === 'inventory')) {
       if (this.screen === 'inventory') this.closeInventory(false);
       this.binder.exitLock();
       this.setScreen('death');
@@ -909,10 +921,10 @@ export class Game implements InputHost {
     for (let i = 0; i < n; i++) {
       // Written before every tick: presses go to the first one, the look direction (turned by
       // a carrier during the previous tick) to each.
-      this.input.writeTo(sim.player.input, playing);
+      this.input.writeTo(me.player.input, playing);
       this.runTick(s);
     }
-    if (n === 0) this.input.writeTo(sim.player.input, playing);
+    if (n === 0) this.input.writeTo(me.player.input, playing);
     if (this.tickCountAcc >= 20) {
       this.stats.tickMs = this.tickTimeAcc / this.tickCountAcc;
       this.tickTimeAcc = 0;
@@ -971,10 +983,11 @@ export class Game implements InputHost {
     try {
       const s = this.session;
       const sim = s && s.state === 'ready' ? s.sim : null;
-      const p = sim ? sim.player : null;
+      const me = sim ? s!.me : null;
+      const p = me ? me.player : null;
       let hint: string | null = null;
-      if (sim && this.screen === 'none') {
-        const msg = sim.view.hint;
+      if (me && this.screen === 'none') {
+        const msg = me.view.hint;
         if (msg !== this.hintMsg || this.settings.language !== this.hintLang) {
           this.hintMsg = msg;
           this.hintLang = this.settings.language;
@@ -993,7 +1006,7 @@ export class Game implements InputHost {
       const state = this.uiBuilder.build({
         screen: this.screen,
         settingsReturn: this.settingsReturn,
-        mode: sim ? sim.mode : 'creative',
+        mode: p ? p.mode : 'creative',
         inventory: p ? p.inventory : null,
         selected: this.input.slot,
         health: p ? p.health : 20,
@@ -1003,7 +1016,7 @@ export class Game implements InputHost {
         hint,
         toasts: this.toasts.list,
         debug: this.debugLines,
-        helm: sim && this.screen === 'none' ? sim.helmView() : null,
+        helm: me && this.screen === 'none' ? me.helmView() : null,
         worlds: this.worlds,
         settings: this.settings,
         loading: this.screen === 'loading' ? this.loading : null,
@@ -1025,7 +1038,7 @@ export class Game implements InputHost {
     const ms = s.mesher.stats;
     const cs = s.streamer.stats;
     const workers = this.workerModes;
-    return debugLines(s.sim, {
+    return debugLines(s.sim, s.me, {
       version: this.version,
       rendererDetail: this.backendInfo?.detail ?? '?',
       fps: st.fps,
@@ -1058,6 +1071,7 @@ export class Game implements InputHost {
     state: (): Record<string, unknown> => {
       const s = this.session;
       const sim = s?.sim;
+      const p = s?.me.player;
       return {
         screen: this.screen,
         sessionState: s?.state ?? null,
@@ -1071,8 +1085,8 @@ export class Game implements InputHost {
         sectionsMeshed: s ? s.mesher.meshedCount : 0,
         sectionsDrawn: this.backend.stats().sections,
         meshQueue: s ? s.mesher.stats.queued : 0,
-        player: sim ? { x: sim.player.pos.x, y: sim.player.pos.y, z: sim.player.pos.z, dead: sim.player.dead, mode: sim.mode } : null,
-        target: sim ? sim.view.target : null,
+        player: p ? { x: p.pos.x, y: p.pos.y, z: p.pos.z, dead: p.dead, mode: p.mode } : null,
+        target: s ? s.me.view.target : null,
         worldTime: sim ? sim.world.time : 0,
         worlds: this.worlds.map((w) => ({ id: w.id, name: w.name })),
         worldId: s ? s.meta.id : null,
@@ -1099,21 +1113,21 @@ export class Game implements InputHost {
     },
     /** Move the player (feet). */
     teleport: (x: number, y: number, z: number): void => {
-      const sim = this.sim;
-      if (!sim) return;
+      const me = this.me;
+      if (!me) return;
       // The sim's scripted-control path: lets go of the helm / carrier, clears velocity and
       // fall distance (a bare setPosition is undone by the helm seat on the next tick).
-      sim.teleport(x, y, z);
+      me.teleport(x, y, z);
       this.renderDirty = true;
     },
     /** World cell value at integer coordinates. */
     cell: (x: number, y: number, z: number): number => this.sim?.world.getCell(x, y, z) ?? -1,
     /** Put a stack in the selected hotbar slot (creative testing). */
     give: (item: number): void => {
-      const sim = this.sim;
-      if (!sim) return;
-      sim.player.inventory.creativePick(item, true);
-      const idx = sim.player.inventory.hotbar.findIndex((st) => st !== null && st.item === item);
+      const me = this.me;
+      if (!me) return;
+      me.player.inventory.creativePick(item, true);
+      const idx = me.player.inventory.hotbar.findIndex((st) => st !== null && st.item === item);
       if (idx >= 0) this.input.selectSlot(idx);
     },
     /** Set the camera mode ('first' | 'back' | 'front'), or cycle it like F5 without an argument. */
@@ -1125,10 +1139,10 @@ export class Game implements InputHost {
     },
     /** Pick block (what the middle mouse button does). */
     pick: (): boolean => {
-      const sim = this.sim;
-      if (!sim) return false;
-      const ok = sim.pickBlock();
-      this.input.selectSlot(sim.player.inventory.selected);
+      const me = this.me;
+      if (!me) return false;
+      const ok = me.pickBlock();
+      this.input.selectSlot(me.player.inventory.selected);
       return ok;
     },
     /** Save immediately (returns whether it succeeded). */
@@ -1159,7 +1173,7 @@ function wantsWebGL2(win: Window): boolean {
  * What a new world starts with: enough to build a raft with a helm and a small windmill
  * right away, so the core of the game is in the player's hands from the first minute.
  */
-function giveStarterKit(sim: Simulation): void {
+function giveStarterKit(me: PlayerControl): void {
   const kit: Array<[number, number]> = [
     [B.PLANKS_OAK, 64],
     [B.WOOL_WHITE, 32],
@@ -1171,5 +1185,5 @@ function giveStarterKit(sim: Simulation): void {
     [B.COBBLE, 32],
     [I.BUCKET_WATER, 1],
   ];
-  for (const [item, count] of kit) sim.giveItem(item, count);
+  for (const [item, count] of kit) me.giveItem(item, count);
 }

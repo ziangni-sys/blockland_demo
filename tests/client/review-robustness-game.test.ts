@@ -55,6 +55,8 @@ import { Simulation } from '../../src/sim/simulation';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { B } from '../../src/blocks/defs';
 import { makeCell } from '../../src/blocks/cell';
+import { soloSim } from '../solo';
+import type { PlayerControl } from '../../src/sim/players';
 
 function fakeEnv(): { win: Window; canvas: HTMLCanvasElement; uiRoot: HTMLElement } {
   let now = 0;
@@ -78,7 +80,7 @@ interface GameInternals {
   saves: SaveManager | null;
   storageReady: Promise<SaveManager> | null;
   backendReady: Promise<boolean> | null;
-  startSession(sim: Simulation, meta: ReturnType<typeof newWorldMeta>, gen: FlatGenerator, isNew: boolean): void;
+  startSession(sim: Simulation, me: PlayerControl, meta: ReturnType<typeof newWorldMeta>, gen: FlatGenerator, isNew: boolean): void;
   setScreen(s: string): void;
 }
 
@@ -91,8 +93,8 @@ function gameWithWorld(storage: MemoryStorage): { game: Game; sim: Simulation } 
   g.backendReady = Promise.resolve(true);
   game.storagePersistent = true;
   const gen = new FlatGenerator();
-  const sim = new Simulation({ seed: 1, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2, rabbits: false });
-  g.startSession(sim, newWorldMeta('wreview', 'Review', '1', 1, 'creative', 0), gen, false);
+  const sim = soloSim({ seed: 1, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2, rabbits: false });
+  g.startSession(sim, sim.soloPlayer, newWorldMeta('wreview', 'Review', '1', 1, 'creative', 0), gen, false);
   game.session!.state = 'ready';
   g.setScreen('pause');
   return { game, sim };

@@ -19,6 +19,7 @@ import type {
   OverlayFace,
   OverlayState,
 } from '../render/backend';
+import type { PlayerControl } from '../sim/players';
 import type { Simulation } from '../sim/simulation';
 import type { InteractionView } from '../sim/view';
 import { FallingBlockEntity, ItemEntity, Player, TntEntity, type Entity } from '../entities/entity';
@@ -190,8 +191,8 @@ export class ViewBuilder {
    * (blended with the carrier's turn). The eye position is interpolated exactly like the player
    * model's.
    */
-  updateCamera(sim: Simulation, alpha: number, yaw: number, pitch: number, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
-    const p = sim.player;
+  updateCamera(sim: Simulation, me: PlayerControl, alpha: number, yaw: number, pitch: number, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
+    const p = me.player;
     const pos = this.renderPosition(sim, p, alpha, this.scratch2);
     const eye = this.eye;
     eye.x = pos.x;
@@ -282,10 +283,10 @@ export class ViewBuilder {
    * is drawn at the same interpolated position as the camera's eye, facing the look yaw of
    * updateCamera — so call updateCamera first in a frame.
    */
-  updateEntities(sim: Simulation, alpha: number): readonly EntityRenderState[] {
+  updateEntities(sim: Simulation, me: PlayerControl, alpha: number): readonly EntityRenderState[] {
     const list = this.entityList;
     list.length = 0;
-    const player = sim.player;
+    const player = me.player;
     const all = sim.entities.all();
     const world = sim.world;
     for (let i = 0; i < all.length; i++) {
@@ -314,9 +315,9 @@ export class ViewBuilder {
   }
 
   /** Overlays from the interaction view plus the glued faces around the player. */
-  updateOverlays(sim: Simulation, nowMs: number): OverlayState {
+  updateOverlays(sim: Simulation, me: PlayerControl, nowMs: number): OverlayState {
     const o = this.overlay;
-    const v = sim.view;
+    const v = me.view;
     if (v.target) {
       const t = this.targetCell;
       t.structureId = v.target.gridId;
@@ -347,7 +348,7 @@ export class ViewBuilder {
       this.lastConflicts = v.conflicts;
       o.conflicts = v.conflicts.map((c) => ({ structureId: 0, x: c.x, y: c.y, z: c.z }));
     }
-    this.updateGlue(sim, nowMs);
+    this.updateGlue(sim, me, nowMs);
     return o;
   }
 
@@ -360,9 +361,9 @@ export class ViewBuilder {
    * switch it between covered and exposed; the light at a decal changes). An unchanged result
    * keeps the previous array.
    */
-  private updateGlue(sim: Simulation, nowMs: number): void {
+  private updateGlue(sim: Simulation, me: PlayerControl, nowMs: number): void {
     const o = this.overlay;
-    const p = sim.player;
+    const p = me.player;
     if (p.dead) {
       if (o.glue.length > 0) o.glue = [];
       this.glueKey.length = 0;

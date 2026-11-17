@@ -930,7 +930,7 @@ describe('placeCamera: back easing (T5)', () => {
     const sim = flatSim();
     fill(sim.world, 0, FLAT_TOP, 4, 0, FLAT_TOP + 4, 4, B.STONE); // pillar on the centre line behind
     fill(sim.world, 1, FLAT_TOP, -6, 3, FLAT_TOP + 4, 0, B.STONE); // on the right (face x = 1), ends at z = 1
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     for (const fps of [30, 60, 144]) {
       const v = new ViewBuilder();
       let lagging = 0;
@@ -939,7 +939,7 @@ describe('placeCamera: back easing (T5)', () => {
         p.pos.x = p.prevPos.x = 0.5;
         p.pos.y = p.prevPos.y = FLAT_TOP;
         p.pos.z = p.prevPos.z = z;
-        const cam = v.updateCamera(sim, 1, 0, 0, 70, 1 / fps, 'back');
+        const cam = v.updateCamera(sim, sim.soloPlayer, 1, 0, 0, 70, 1 / fps, 'back');
         const e = vec3(0.5, FLAT_TOP + p.eyeHeight, z);
         if (collapsed(cam, e)) continue;
         expect(nearestBlock(sim, cam), `fps ${fps} z ${z}`).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
@@ -1014,16 +1014,16 @@ describe('ViewBuilder third person', () => {
     const w = sim.world;
     // A wall 2 blocks behind the player (south, +Z), the player looking north.
     fill(w, -3, FLAT_TOP, 2, 3, FLAT_TOP + 4, 2, B.STONE);
-    sim.lookAt(0.5, FLAT_TOP + 1.62, -10);
+    sim.soloPlayer.lookAt(0.5, FLAT_TOP + 1.62, -10);
     sim.tick();
     const v = new ViewBuilder();
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     const eyeOf = (): Vec3 => vec3(p.pos.x, p.pos.y + p.eyeHeight, p.pos.z);
 
-    v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 0.05, 'first');
-    expect(v.updateEntities(sim, 1).some((e) => e.id === p.id)).toBe(false);
+    v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 0.05, 'first');
+    expect(v.updateEntities(sim, sim.soloPlayer, 1).some((e) => e.id === p.id)).toBe(false);
 
-    const cam = v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 0.05, 'back');
+    const cam = v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 0.05, 'back');
     const cell = w.getCell(Math.floor(cam.x), Math.floor(cam.y), Math.floor(cam.z));
     expect(SOLID[cell & ID_MASK]).toBe(0);
     expect(cam.z).toBeLessThan(2 - CAMERA_CLEARANCE);
@@ -1031,7 +1031,7 @@ describe('ViewBuilder third person', () => {
     // Over the right shoulder (yaw 0: the right is +X), aimed at the point 5 ahead of the eye.
     expect(cam.x).toBeCloseTo(p.pos.x + SHOULDER_OFFSET, 9);
     expect(centreRayMiss(cam, convergence(eyeOf(), p.yaw, p.pitch))).toBeLessThan(1e-6);
-    const self = v.updateEntities(sim, 1).find((e) => e.id === p.id);
+    const self = v.updateEntities(sim, sim.soloPlayer, 1).find((e) => e.id === p.id);
     expect(self).toBeDefined();
     expect(self!.kind).toBe('player');
     expect(self!.yaw).toBe(p.yaw);
@@ -1039,29 +1039,29 @@ describe('ViewBuilder third person', () => {
     expect(self!.z).toBeCloseTo(p.pos.z, 12);
 
     // Front: open air in front, the full distance; the camera looks back (yaw + PI).
-    const front = v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 0.05, 'front');
+    const front = v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 0.05, 'front');
     expect(front.z).toBeCloseTo(p.pos.z - THIRD_PERSON_DISTANCE * Math.cos(p.pitch), 9);
     expect(Math.cos(front.yaw - p.yaw)).toBeCloseTo(-1, 9);
-    expect(v.updateEntities(sim, 1).some((e) => e.id === p.id)).toBe(true);
+    expect(v.updateEntities(sim, sim.soloPlayer, 1).some((e) => e.id === p.id)).toBe(true);
 
     // Back against the wall: the camera stays beside the head, out of the model's way.
-    sim.teleport(0.5, FLAT_TOP, 1.5);
-    sim.lookAt(0.5, FLAT_TOP + 1.62, -10);
+    sim.soloPlayer.teleport(0.5, FLAT_TOP, 1.5);
+    sim.soloPlayer.lookAt(0.5, FLAT_TOP + 1.62, -10);
     sim.tick();
-    const c2 = v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 0.05, 'back');
+    const c2 = v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 0.05, 'back');
     expect(c2.z).toBeLessThanOrEqual(2 - CAMERA_CLEARANCE);
     expect(nearestBlock(sim, c2)).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
     expect(selfModelGap(c2.x, c2.y, c2.z, eyeOf(), p.yaw, p.eyeHeight)).toBeGreaterThanOrEqual(SELF_HIDE_CLEARANCE);
-    expect(v.updateEntities(sim, 1).some((e) => e.id === p.id)).toBe(true);
+    expect(v.updateEntities(sim, sim.soloPlayer, 1).some((e) => e.id === p.id)).toBe(true);
 
     // In a corner (a wall on the right too): the camera is pulled in to the head (same
     // frame), the model is left out.
     fill(w, 1, FLAT_TOP, -3, 1, FLAT_TOP + 4, 1, B.STONE);
-    const c3 = v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 0.05, 'back');
+    const c3 = v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 0.05, 'back');
     expect(c3.x).toBeLessThanOrEqual(1 - CAMERA_CLEARANCE);
     expect(nearestBlock(sim, c3)).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
     expect(selfModelGap(c3.x, c3.y, c3.z, eyeOf(), p.yaw, p.eyeHeight)).toBeLessThan(SELF_HIDE_CLEARANCE);
-    expect(v.updateEntities(sim, 1).some((e) => e.id === p.id)).toBe(false);
+    expect(v.updateEntities(sim, sim.soloPlayer, 1).some((e) => e.id === p.id)).toBe(false);
   });
 
   it('the local player is hidden exactly when the camera is nearer than SELF_HIDE_CLEARANCE to its model box', () => {
@@ -1071,7 +1071,7 @@ describe('ViewBuilder third person', () => {
     const w = sim.world;
     fill(w, -6, FLAT_TOP, 2, 2, FLAT_TOP + 4, 2, B.STONE);
     fill(w, 2, FLAT_TOP, -6, 2, FLAT_TOP + 4, 1, B.STONE);
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     const v = new ViewBuilder();
     for (const [d, shown] of [
       [0.95, false], // gap 0.10 (above the near plane's own 0.05, below the near-plane reach)
@@ -1079,44 +1079,44 @@ describe('ViewBuilder third person', () => {
       [1.12, true], // gap 0.27
       [1.4, true], // full side offset, gap 0.30
     ] as const) {
-      sim.teleport(2 - d, FLAT_TOP, 1.5);
+      sim.soloPlayer.teleport(2 - d, FLAT_TOP, 1.5);
       p.prevPos.x = p.pos.x;
       p.prevPos.y = p.pos.y;
       p.prevPos.z = p.pos.z;
-      const cam = v.updateCamera(sim, 1, 0, 0, 70, 1 / 60, 'back');
+      const cam = v.updateCamera(sim, sim.soloPlayer, 1, 0, 0, 70, 1 / 60, 'back');
       const e = vec3(p.pos.x, p.pos.y + p.eyeHeight, p.pos.z);
       const gap = selfModelGap(cam.x, cam.y, cam.z, e, 0, p.eyeHeight);
       expect(gap, `d ${d}`).toBeCloseTo(Math.min(SHOULDER_OFFSET, d - PIVOT_CLEARANCE) - SELF_BOX_HALF, 5);
       expect(cam.z - e.z).toBeCloseTo(0.5 - CAMERA_CLEARANCE, 5);
       expect(Math.hypot(cam.x - e.x, cam.z - e.z), `d ${d}`).toBeGreaterThan(0.6);
-      expect(v.updateEntities(sim, 1).some((x) => x.id === p.id), `d ${d}`).toBe(shown);
-      v.updateCamera(sim, 1, 0, 0, 70, 1 / 60, 'first'); // fresh easing for the next case
+      expect(v.updateEntities(sim, sim.soloPlayer, 1).some((x) => x.id === p.id), `d ${d}`).toBe(shown);
+      v.updateCamera(sim, sim.soloPlayer, 1, 0, 0, 70, 1 / 60, 'first'); // fresh easing for the next case
     }
   });
 
   it('eases out after an obstacle is gone; a view mode change resets the easing', () => {
     const sim = flatSim();
     fill(sim.world, -3, FLAT_TOP, 2, 3, FLAT_TOP + 4, 2, B.STONE);
-    sim.lookAt(0.5, FLAT_TOP + 1.62, -10);
+    sim.soloPlayer.lookAt(0.5, FLAT_TOP + 1.62, -10);
     sim.tick();
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     const v = new ViewBuilder();
     const backOf = (c: { x: number; y: number; z: number }): number => c.z - p.pos.z;
-    const pulled = backOf(v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'));
+    const pulled = backOf(v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'));
     expect(pulled).toBeCloseTo(1.5 - CAMERA_CLEARANCE, 5);
     fill(sim.world, -3, FLAT_TOP, 2, 3, FLAT_TOP + 4, 2, B.AIR);
     // Same mode: eased out, one frame is not enough.
-    const eased = backOf(v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'));
+    const eased = backOf(v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'));
     expect(eased).toBeGreaterThan(pulled);
     expect(eased).toBeLessThan(THIRD_PERSON_DISTANCE - 1);
     // A mode change (back -> front -> back) starts from the allowed pose.
-    v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 1 / 60, 'front');
-    expect(backOf(v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'))).toBeCloseTo(THIRD_PERSON_DISTANCE, 9);
+    v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 1 / 60, 'front');
+    expect(backOf(v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'))).toBeCloseTo(THIRD_PERSON_DISTANCE, 9);
     // So does a new ViewBuilder (one per opened world).
     fill(sim.world, -3, FLAT_TOP, 2, 3, FLAT_TOP + 4, 2, B.STONE);
-    v.updateCamera(sim, 1, p.yaw, p.pitch, 70, 1 / 60, 'back');
+    v.updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 1 / 60, 'back');
     fill(sim.world, -3, FLAT_TOP, 2, 3, FLAT_TOP + 4, 2, B.AIR);
-    expect(backOf(new ViewBuilder().updateCamera(sim, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'))).toBeCloseTo(THIRD_PERSON_DISTANCE, 9);
+    expect(backOf(new ViewBuilder().updateCamera(sim, sim.soloPlayer, 1, p.yaw, p.pitch, 70, 1 / 60, 'back'))).toBeCloseTo(THIRD_PERSON_DISTANCE, 9);
   });
 
   it('ray stops at hard or opaque blocks, not at liquids, plants or the unloaded sentinel', () => {
@@ -1138,24 +1138,24 @@ describe('ViewBuilder third person', () => {
     build(sim);
     w.setCell(2, SEA_TOP, 4, makeCell(B.HELM, facingState(NZ)));
     sim.advance(2);
-    sim.teleport(2.5, SEA_TOP, 3.5);
-    expect(sim.useOn(2, SEA_TOP, 4)).toBe(true);
-    expect(sim.useOn(2, SEA_TOP, 4)).toBe(true);
-    expect(sim.player.steeringShipId).toBe(sim.structures.ships()[0]!.id);
+    sim.soloPlayer.teleport(2.5, SEA_TOP, 3.5);
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 4)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 4)).toBe(true);
+    expect(sim.soloPlayer.player.steeringShipId).toBe(sim.structures.ships()[0]!.id);
     return sim;
   }
 
   it('a helmsman on a moving ship is drawn where the camera eye is (same interpolation), and ship cells stop the camera', () => {
     const sim = helmScene((s) => fill(s.world, 0, SEA_TOP, 5, 4, SEA_TOP + 3, 5, B.PLANKS_OAK)); // a tall stern wall behind the helm
     const ship = sim.structures.ships()[0]!;
-    sim.player.input.forward = 1;
-    sim.player.input.strafe = 1;
+    sim.soloPlayer.player.input.forward = 1;
+    sim.soloPlayer.player.input.strafe = 1;
     sim.advance(60);
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     const v = new ViewBuilder();
     for (const alpha of [0, 0.3, 0.75, 1]) {
-      const cam = v.updateCamera(sim, alpha, p.yaw, 0, 70, 0.05, 'front');
-      const self = v.updateEntities(sim, alpha).find((e) => e.id === p.id)!;
+      const cam = v.updateCamera(sim, sim.soloPlayer, alpha, p.yaw, 0, 70, 0.05, 'front');
+      const self = v.updateEntities(sim, sim.soloPlayer, alpha).find((e) => e.id === p.id)!;
       const pos = v.renderPosition(sim, p, alpha, vec3());
       expect(self.x).toBeCloseTo(pos.x, 12);
       expect(self.y).toBeCloseTo(pos.y, 12);
@@ -1170,7 +1170,7 @@ describe('ViewBuilder third person', () => {
       // from its right, and keeps its clearance from the ship as drawn at this alpha.
       const e = vec3(pos.x, pos.y + p.eyeHeight, pos.z);
       for (const pitch of [0, -0.5, 0.4]) {
-        const back = v.updateCamera(sim, alpha, p.yaw, pitch, 70, 0.05, 'back');
+        const back = v.updateCamera(sim, sim.soloPlayer, alpha, p.yaw, pitch, 70, 0.05, 'back');
         expect(centreRayMiss(back, convergence(e, p.yaw, pitch))).toBeLessThan(1e-6);
         expect(shoulderParts(back, e, p.yaw, pitch).side).toBeGreaterThanOrEqual(0);
         const rp = ship.grid.renderPose(alpha);
@@ -1189,7 +1189,7 @@ describe('ViewBuilder third person', () => {
   it('the back 0.3 from a wall of a turned ship: the pivot still slides to the full side offset (the eye clearance sees structures)', () => {
     const sim = helmScene((s) => fill(s.world, 5, SEA_TOP - 1, 0, 5, SEA_TOP + 4, 5, B.PLANKS_OAK));
     const ship = sim.structures.ships()[0]!;
-    sim.releaseHelm();
+    sim.soloPlayer.releaseHelm();
     sim.structures.dynamics = null;
     const rot = qmul(qfromAxisAngle(vec3(0, 1, 0), 33 * DEG), qfromAxisAngle(vec3(1, 0, 0), 12 * DEG), quat());
     ship.grid.setPoseImmediate(vec3(40.3, 70.1, -20.6), rot);
@@ -1213,7 +1213,7 @@ describe('ViewBuilder third person', () => {
     // A ship with a wall along the raft's east edge (local x = 5, z 0..5, six high).
     const sim = helmScene((s) => fill(s.world, 5, SEA_TOP - 1, 0, 5, SEA_TOP + 4, 5, B.PLANKS_OAK));
     const ship = sim.structures.ships()[0]!;
-    sim.releaseHelm();
+    sim.soloPlayer.releaseHelm();
     sim.structures.dynamics = null;
     const rot = qmul(qfromAxisAngle(vec3(0, 1, 0), 33 * DEG), qfromAxisAngle(vec3(1, 0, 0), 12 * DEG), quat());
     ship.grid.setPoseImmediate(vec3(40.3, 70.1, -20.6), rot);
@@ -1223,12 +1223,12 @@ describe('ViewBuilder third person', () => {
     const n = g.dirToWorld(vec3(-1, 0, 0));
     const onFace = g.toWorld(vec3(5, SEA_TOP + 2.2, 3));
     const v = new ViewBuilder();
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     let checked = 0;
     for (const d of [0.35, 0.6, 1.0]) {
       // The eye `d` from the face; the player's feet below it, the body clear of the ship.
       const e = vec3(onFace.x + n.x * d, onFace.y + n.y * d, onFace.z + n.z * d);
-      sim.teleport(e.x, e.y - p.eyeHeight, e.z);
+      sim.soloPlayer.teleport(e.x, e.y - p.eyeHeight, e.z);
       p.prevPos.x = p.pos.x;
       p.prevPos.y = p.pos.y;
       p.prevPos.z = p.pos.z;
@@ -1238,8 +1238,8 @@ describe('ViewBuilder third person', () => {
       for (let yd = -40; yd <= 40; yd += 2) {
         for (let pd = -80; pd <= 80; pd += 10) {
           const yaw = yaw0 + yd * DEG;
-          v.updateCamera(sim, 1, yaw, pd * DEG, 70, 1 / 60, 'first');
-          const cam = v.updateCamera(sim, 1, yaw, pd * DEG, 70, 1 / 60, 'back');
+          v.updateCamera(sim, sim.soloPlayer, 1, yaw, pd * DEG, 70, 1 / 60, 'first');
+          const cam = v.updateCamera(sim, sim.soloPlayer, 1, yaw, pd * DEG, 70, 1 / 60, 'back');
           const at = `d ${d} yaw ${yd} pitch ${pd}`;
           expect(centreRayMiss(cam, convergence(e, yaw, pd * DEG)), at).toBeLessThan(1e-6);
           if (collapsed(cam, e)) continue;
@@ -1248,8 +1248,8 @@ describe('ViewBuilder third person', () => {
         }
       }
       // Parallel to the tilted wall the camera still gets most of the way back.
-      v.updateCamera(sim, 1, yaw0, 0, 70, 1 / 60, 'first');
-      const par = v.updateCamera(sim, 1, yaw0, 0, 70, 1 / 60, 'back');
+      v.updateCamera(sim, sim.soloPlayer, 1, yaw0, 0, 70, 1 / 60, 'first');
+      const par = v.updateCamera(sim, sim.soloPlayer, 1, yaw0, 0, 70, 1 / 60, 'back');
       expect(Math.hypot(par.x - e.x, par.y - e.y, par.z - e.z), `parallel ${d}`).toBeGreaterThan(2);
     }
     expect(checked).toBeGreaterThan(2000);
@@ -1262,7 +1262,7 @@ describe('ViewBuilder third person', () => {
     g.position.y = now.y;
     g.position.z = now.z;
     const e = vec3(onFace.x + n.x * 1.0, onFace.y + n.y * 1.0, onFace.z + n.z * 1.0);
-    sim.teleport(e.x, e.y - p.eyeHeight, e.z);
+    sim.soloPlayer.teleport(e.x, e.y - p.eyeHeight, e.z);
     p.prevPos.x = p.pos.x;
     p.prevPos.y = p.pos.y;
     p.prevPos.z = p.pos.z;
@@ -1271,8 +1271,8 @@ describe('ViewBuilder third person', () => {
     for (const alpha of [0, 0.4, 1]) {
       for (let yd = -40; yd <= 40; yd += 4) {
         for (let pd = -60; pd <= 60; pd += 20) {
-          v.updateCamera(sim, alpha, yaw0 + yd * DEG, pd * DEG, 70, 1 / 60, 'first');
-          const cam = v.updateCamera(sim, alpha, yaw0 + yd * DEG, pd * DEG, 70, 1 / 60, 'back');
+          v.updateCamera(sim, sim.soloPlayer, alpha, yaw0 + yd * DEG, pd * DEG, 70, 1 / 60, 'first');
+          const cam = v.updateCamera(sim, sim.soloPlayer, alpha, yaw0 + yd * DEG, pd * DEG, 70, 1 / 60, 'back');
           if (collapsed(cam, e)) continue;
           const drawn = nearestBlock(sim, cam, alpha);
           expect(drawn, `alpha ${alpha} yaw ${yd} pitch ${pd}`).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);

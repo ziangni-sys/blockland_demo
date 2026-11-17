@@ -16,13 +16,14 @@ import type { Rotor, Ship } from '../../src/structures/structure';
 import type { StructureGrid } from '../../src/voxel/sgrid';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator } from '../../src/worldgen/generator';
+import { soloSim } from '../solo';
 
 /** Default flat world: deeprock y=0, stone 1..30, dirt 31..33, turf 34 — the first air row is T. */
 export const T = new FlatGenerator().top;
 
 /** A fresh flat world (no rabbits), the player standing at `spawn` (default just south of the scene rows). */
 export function makeSim(mode: GameMode = 'creative', spawn = { x: 0.5, y: T, z: 0.5 }): Simulation {
-  const sim = new Simulation({
+  const sim = soloSim({
     seed: 0x5eed01,
     mode,
     generator: new FlatGenerator(),
@@ -39,7 +40,7 @@ export function makeSim(mode: GameMode = 'creative', spawn = { x: 0.5, y: T, z: 
 export const SEA_TOP = 30;
 
 export function makeSeaSim(mode: GameMode = 'creative', spawn = { x: 2.5, y: SEA_TOP, z: 7.5 }): Simulation {
-  const sim = new Simulation({
+  const sim = soloSim({
     seed: 0x5eed02,
     mode,
     generator: new FlatGenerator([
@@ -69,11 +70,11 @@ export function raftShipByHand(sim: Simulation): Ship {
   sim.advance(2);
   const a = assembleShipByHand(sim, 2, SEA_TOP, 4, PZ);
   expect(a.cells.length, 'raft + helm').toBe(31);
-  expect(sim.player.steeringShipId).toBe(a.structure.id);
-  sim.use(); // a plain right-click lets go of the wheel
+  expect(sim.soloPlayer.player.steeringShipId).toBe(a.structure.id);
+  sim.soloPlayer.use(); // a plain right-click lets go of the wheel
   sim.tick();
-  expect(sim.player.steeringShipId).toBe(0);
-  sim.teleport(2.5, SEA_TOP, 6.5);
+  expect(sim.soloPlayer.player.steeringShipId).toBe(0);
+  sim.soloPlayer.teleport(2.5, SEA_TOP, 6.5);
   sim.advance(10);
   return a.structure;
 }
@@ -110,7 +111,7 @@ export function structureLabels(grid: StructureGrid): string[] {
 
 /** The highlighted preview cells (view.preview), labelled with the WORLD block they show. */
 export function previewLabels(sim: Simulation): string[] {
-  const pv = sim.view.preview;
+  const pv = sim.soloPlayer.view.preview;
   if (pv === null) return [];
   const g = sim.structures.gridById(pv.gridId)!;
   const out: string[] = [];
@@ -136,12 +137,12 @@ export interface Assembled<S> {
  * previews, the second assembles. Fails loudly when the helm cannot be aimed at.
  */
 export function assembleShipByHand(sim: Simulation, x: number, y: number, z: number, face: Dir = PZ): Assembled<Ship> {
-  sim.emptyHand();
-  expect(sim.useOn(x, y, z, face), 'aim at the helm').toBe(true);
-  expect(sim.view.preview?.kind, 'first right-click previews a ship').toBe('ship');
+  sim.soloPlayer.emptyHand();
+  expect(sim.soloPlayer.useOn(x, y, z, face), 'aim at the helm').toBe(true);
+  expect(sim.soloPlayer.view.preview?.kind, 'first right-click previews a ship').toBe('ship');
   expect(sim.structures.ships().length, 'first right-click does not assemble').toBe(0);
   const preview = previewLabels(sim);
-  expect(sim.useOn(x, y, z, face), 'aim at the helm again').toBe(true);
+  expect(sim.soloPlayer.useOn(x, y, z, face), 'aim at the helm again').toBe(true);
   const ships = sim.structures.ships();
   expect(ships.length, 'second right-click assembles one ship').toBe(1);
   const ship = ships[0]!;
@@ -150,12 +151,12 @@ export function assembleShipByHand(sim: Simulation, x: number, y: number, z: num
 
 /** The player right-clicks the world bearing at (x,y,z) twice (empty hand): preview, then start. */
 export function startRotorByHand(sim: Simulation, x: number, y: number, z: number, face: Dir = PZ): Assembled<Rotor> {
-  sim.emptyHand();
-  expect(sim.useOn(x, y, z, face), 'aim at the bearing').toBe(true);
-  expect(sim.view.preview?.kind, 'first right-click previews a rotor').toBe('rotor');
+  sim.soloPlayer.emptyHand();
+  expect(sim.soloPlayer.useOn(x, y, z, face), 'aim at the bearing').toBe(true);
+  expect(sim.soloPlayer.view.preview?.kind, 'first right-click previews a rotor').toBe('rotor');
   expect(sim.structures.rotors().length, 'first right-click does not start the rotor').toBe(0);
   const preview = previewLabels(sim);
-  expect(sim.useOn(x, y, z, face), 'aim at the bearing again').toBe(true);
+  expect(sim.soloPlayer.useOn(x, y, z, face), 'aim at the bearing again').toBe(true);
   const rotors = sim.structures.rotors();
   expect(rotors.length, 'second right-click starts one rotor').toBe(1);
   const rotor = rotors[0]!;
@@ -185,10 +186,10 @@ export function hardnessTicks(id: number): number {
 
 /**
  * Ticks the player needs to mine the world block at (x,y,z) by holding the attack button
- * (sim.mine), counted on the world clock. -1 when it did not break.
+ * (sim.soloPlayer.mine), counted on the world clock. -1 when it did not break.
  */
 export function measureMiningTicks(sim: Simulation, x: number, y: number, z: number, face?: Dir): number {
   const t0 = sim.ticks;
-  const ok = sim.mine(x, y, z, face);
+  const ok = sim.soloPlayer.mine(x, y, z, face);
   return ok ? sim.ticks - t0 : -1;
 }

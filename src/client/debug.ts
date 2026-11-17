@@ -4,6 +4,7 @@
  * language, like most games' debug screens.
  */
 import { DAY_TICKS } from '../core/constants';
+import type { PlayerControl } from '../sim/players';
 import type { Simulation } from '../sim/simulation';
 import type { FaultRecord } from './faults';
 
@@ -47,10 +48,10 @@ export function worldClock(time: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 }
 
-export function debugLines(sim: Simulation, d: DebugInfo): string[] {
-  const p = sim.player;
+export function debugLines(sim: Simulation, me: PlayerControl, d: DebugInfo): string[] {
+  const p = me.player;
   const deg = (r: number): string => ((r * 180) / Math.PI).toFixed(1);
-  const t = sim.view.target;
+  const t = me.view.target;
   const structures = sim.structures;
   const lines = [
     `Blocklands ${d.version} · ${d.rendererDetail}`,
@@ -62,7 +63,7 @@ export function debugLines(sim: Simulation, d: DebugInfo): string[] {
     `structures ${structures.all().length} (${structures.ships().length} ships, ${structures.rotors().length} rotors) · entities ${sim.entities.all().length}`,
     `draw calls ${d.drawCalls} · triangles ${(d.triangles / 1000).toFixed(0)}k`,
     t ? `target ${t.gridId === 0 ? 'world' : `#${t.gridId}`} ${t.x} ${t.y} ${t.z} face ${t.face}` : 'target —',
-    `time ${worldClock(Math.round(sim.dayTime * DAY_TICKS))} (tick ${sim.world.time}) · ${sim.mode}`,
+    `time ${worldClock(Math.round(sim.dayTime * DAY_TICKS))} (tick ${sim.world.time}) · ${p.mode}`,
     `storage ${d.storage} · workers ${d.workers}`,
   ];
   for (const f of d.faults) lines.push(`! ${f.what}: ${f.message}${f.count > 1 ? ` ×${f.count}` : ''}`);

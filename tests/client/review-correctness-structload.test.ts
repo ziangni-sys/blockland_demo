@@ -10,10 +10,10 @@ import { NZ } from '../../src/core/dirs';
 import { Mesher } from '../../src/mesh/mesher';
 import type { MeshData, MeshRequest, MeshResponse } from '../../src/mesh/types';
 import type { RenderBackend } from '../../src/render/backend';
-import { Simulation } from '../../src/sim/simulation';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { WorldSession } from '../../src/client/session';
 import { WorkerPool, type WorkerLike } from '../../src/client/workers';
+import { soloSim } from '../solo';
 
 /** A mesh "worker" that answers world sections at once but is slow with anything bigger. */
 class SlowStructureWorker implements WorkerLike {
@@ -39,7 +39,7 @@ class SlowStructureWorker implements WorkerLike {
 describe('review: loading waits for structure meshes', () => {
   it('does not report "done" while a big ship has no mesh on screen yet', () => {
     const gen = new FlatGenerator();
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: gen, loadRadius: 4, syncChunks: true, rabbits: false });
+    const sim = soloSim({ seed: 1, mode: 'creative', generator: gen, loadRadius: 4, syncChunks: true, rabbits: false });
     for (let i = 0; i < 40; i++) sim.tick(); // load the columns around the raft
     // A 40 x 40 raft with a 10-high mast: padded snapshot 42*13*42 > 24^3 cells -> worker path
     const y = 35;
@@ -83,7 +83,7 @@ describe('review: loading waits for structure meshes', () => {
       firstReplyTimeoutMs: 1e9,
       now: () => 0,
     });
-    const s = new WorldSession(sim, { id: 'x', name: 'x', seed: '', seedHash: 1, mode: 'creative', createdAt: 0, lastPlayed: 0, version: 1, time: 0 }, gen, false, {
+    const s = new WorldSession(sim, sim.soloPlayer, { id: 'x', name: 'x', seed: '', seedHash: 1, mode: 'creative', createdAt: 0, lastPlayed: 0, version: 1, time: 0 }, gen, false, {
       backend,
       genPool: null,
       meshPool: pool,
@@ -96,7 +96,7 @@ describe('review: loading waits for structure meshes', () => {
     // The game's loading frame: work every frame, present now and then (here: every frame).
     let frames = 0;
     while (!s.loadingProgress().done && frames < 400) {
-      s.work(0, 1e9, sim.player.pos.x, sim.player.pos.y + 1.6, sim.player.pos.z, Number.NaN);
+      s.work(0, 1e9, sim.soloPlayer.player.pos.x, sim.soloPlayer.player.pos.y + 1.6, sim.soloPlayer.player.pos.z, Number.NaN);
       s.present(0, 1 / 60, 0, 0, 70, 4, 0, frames);
       frames++;
     }

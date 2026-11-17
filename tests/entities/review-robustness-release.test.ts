@@ -25,7 +25,7 @@ describe('review: releaseRiders on a rotor mounted on a moving ship', () => {
     const tt = b.rotor(2, ship, [0, 61, 0], 2, plat);
     b.tick();
     const start = ship.grid.toWorld(vec3(0.5, 62, 0.5));
-    const p = b.entities.createPlayer('survival', start.x, start.y, start.z);
+    const p = b.entities.spawnPlayer('survival', start.x, start.y, start.z);
     b.tick(20);
     expect(p.carrierId).toBe(tt.id);
     const l0 = ship.grid.toLocal(p.pos, vec3());

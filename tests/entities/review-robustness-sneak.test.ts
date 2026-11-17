@@ -24,7 +24,7 @@ describe('review: sneak edge guard on a turning deck', () => {
       b.drive(ship, (t) => ({ p: vec3(0.5, 60.5, 0.5), q: qfromYaw(shipYaw(t)) }));
       b.tick();
       const w = ship.grid.toWorld(vec3(0.5, 61.01, 0.5));
-      const p = b.entities.createPlayer('survival', w.x, w.y, w.z);
+      const p = b.entities.spawnPlayer('survival', w.x, w.y, w.z);
       p.carrierId = ship.id;
       b.tick(5);
       expect(p.carrierId).toBe(ship.id);
@@ -46,7 +46,7 @@ describe('review: sneak edge guard when the player already stands near the edge'
     fill(b.world, -2, 60, -2, 2, 60, 2, B.STONE); // 5x5 platform, east edge at x = 3
     // Standing (not sneaking) with only 0.05 of the footprint over the platform: still on the
     // ground (inset-0 support), but outside the ATTACH-inset probe the guard requires.
-    const p = b.entities.createPlayer('survival', 3.25, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 3.25, 61, 0.5);
     b.tick(3);
     expect(p.onGround).toBe(true);
     expect(p.pos.y).toBe(61);

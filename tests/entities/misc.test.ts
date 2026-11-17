@@ -78,7 +78,7 @@ describe('blast crates', () => {
 describe('item drops', () => {
   it('are picked up by a living player within reach once the delay is over', () => {
     const b = floorBench();
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     const it = b.entities.spawnItem(1.5, 61.2, 0.5, B.COBBLE, 5, vec3(0, 0, 0));
     b.tick(5);
     expect(it.removed).toBe(false);
@@ -101,7 +101,7 @@ describe('item drops', () => {
 
   it('a full inventory takes only what fits', () => {
     const b = floorBench();
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     for (let i = 0; i < 9; i++) p.inventory.hotbar[i] = { item: B.STONE, count: 64 };
     for (let i = 0; i < 27; i++) p.inventory.main[i] = { item: B.STONE, count: 64 };
     p.inventory.main[3] = { item: B.COBBLE, count: 60 };
@@ -170,7 +170,7 @@ describe('unloaded chunks', () => {
     const world = new World(1);
     world.addChunk(new Chunk(0, 0));
     const b = new Bench(world);
-    const p = b.entities.createPlayer('survival', 40.5, 70, 40.5); // chunk (2, 2): not loaded
+    const p = b.entities.spawnPlayer('survival', 40.5, 70, 40.5); // chunk (2, 2): not loaded
     p.vel.y = -5;
     p.input.forward = 1;
     const it = b.entities.spawnItem(-20, 70, 3, B.COBBLE, 1, vec3(1, 0, 0));
@@ -232,7 +232,7 @@ describe('player health', () => {
       ['creative', 10, 20],
     ] as const) {
       const b = floorBench();
-      const p = b.entities.createPlayer(mode, 0.5, 61 + h, 0.5);
+      const p = b.entities.spawnPlayer(mode, 0.5, 61 + h, 0.5);
       b.tick(60);
       expect(p.pos.y).toBe(61);
       expect(p.health).toBe(expected);
@@ -241,7 +241,7 @@ describe('player health', () => {
     const b = new Bench();
     fill(b.world, -5, 40, -5, 5, 40, 5, B.STONE);
     fill(b.world, -5, 41, -5, 5, 43, 5, makeCell(B.WATER));
-    const p = b.entities.createPlayer('survival', 0.5, 70, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 70, 0.5);
     b.tick(80);
     expect(p.health).toBe(20);
     expect(b.host.count('splash', p)).toBe(1);
@@ -251,7 +251,7 @@ describe('player health', () => {
       const c = new Bench();
       fill(c.world, -5, 40, -5, 5, 40, 5, B.STONE);
       fill(c.world, -5, 41, -5, 5, 41, 5, makeCell(B.WATER));
-      const q = c.entities.createPlayer('survival', 0.5, startY, 0.5);
+      const q = c.entities.spawnPlayer('survival', 0.5, startY, 0.5);
       c.tick(100);
       expect(q.pos.y).toBe(41);
       expect(q.health).toBe(20);
@@ -261,20 +261,20 @@ describe('player health', () => {
   it('lava hurts in survival; creative takes no damage and keeps its breath', () => {
     const b = floorBench();
     fill(b.world, 0, 61, 0, 2, 62, 2, makeCell(B.LAVA));
-    const p = b.entities.createPlayer('survival', 1.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 1.5, 61, 1.5);
     b.tick(25);
     expect(p.health).toBeLessThanOrEqual(8);
     expect(p.inLava).toBe(true);
     const c = floorBench();
     fill(c.world, 0, 61, 0, 2, 62, 2, makeCell(B.LAVA));
-    const q = c.entities.createPlayer('creative', 1.5, 61, 1.5);
+    const q = c.entities.spawnPlayer('creative', 1.5, 61, 1.5);
     c.tick(25);
     expect(q.health).toBe(20);
   });
 
   it('suffocation: a block placed into the body pushes the player to the nearest free spot', () => {
     const b = floorBench();
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     b.tick(2);
     b.world.setCell(0, 62, 0, makeCell(B.STONE));
     b.tick();
@@ -285,7 +285,7 @@ describe('player health', () => {
   it('falling out of the world: items vanish, survival players die', () => {
     const b = new Bench();
     const it = b.entities.spawnItem(0.5, -70, 0.5, B.COBBLE, 1, vec3(0, 0, 0));
-    const p = b.entities.createPlayer('survival', 0.5, -70, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, -70, 0.5);
     b.tick();
     expect(it.removed).toBe(true);
     expect(p.dead).toBe(true);

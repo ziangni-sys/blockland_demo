@@ -22,6 +22,7 @@ import type { Rabbit } from '../../src/entities/entity';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import type { Simulation } from '../../src/sim/simulation';
 import type { SimEvent } from '../../src/sim/view';
+import { SOLO_KEY } from '../solo';
 import {
   LAND_TOP,
   assemble,
@@ -334,15 +335,15 @@ interface PlayerRun {
 function tracePlayer(sim: Simulation, rotor: Rotor, ticks: number): PlayerRun {
   const events = watchEvents(sim);
   const crushes = watchCrushes(sim);
-  const start = copy(sim.player.pos);
+  const start = copy(sim.soloPlayer.player.pos);
   let maxAway = 0;
-  let minHealth = sim.player.health;
+  let minHealth = sim.soloPlayer.player.health;
   let insideBlade = 0;
   for (let i = 0; i < ticks; i++) {
     sim.tick();
-    maxAway = Math.max(maxAway, hdist(sim.player.pos, start));
-    minHealth = Math.min(minHealth, sim.player.health);
-    if (bodyIn(rotor.grid, sim.player)) insideBlade++;
+    maxAway = Math.max(maxAway, hdist(sim.soloPlayer.player.pos, start));
+    minHealth = Math.min(minHealth, sim.soloPlayer.player.health);
+    if (bodyIn(rotor.grid, sim.soloPlayer.player)) insideBlade++;
   }
   return { start, maxAway, minHealth, hurts: hurtEvents(events), crushes, insideBlade };
 }
@@ -379,22 +380,22 @@ function cageRun(mode: 'survival' | 'creative'): CageRun {
   fill(sim, -1, T + 2, 2, 1, T + 2, 4, B.STONE);
   const events = watchEvents(sim);
   const crushes = watchCrushes(sim);
-  let before = copy(sim.player.pos);
-  let healthBefore = sim.player.health;
+  let before = copy(sim.soloPlayer.player.pos);
+  let healthBefore = sim.soloPlayer.player.health;
   for (let i = 0; i < 200 && crushes.length === 0; i++) {
-    before = copy(sim.player.pos);
-    healthBefore = sim.player.health;
+    before = copy(sim.soloPlayer.player.pos);
+    healthBefore = sim.soloPlayer.player.health;
     sim.tick();
   }
   return {
     crush: crushes[0],
     before,
-    after: copy(sim.player.pos),
+    after: copy(sim.soloPlayer.player.pos),
     healthBefore,
-    healthAfter: sim.player.health,
+    healthAfter: sim.soloPlayer.player.health,
     hurts: hurtEvents(events),
-    inWorld: bodyIn(sim.world, sim.player),
-    inBlade: bodyIn(rotor.grid, sim.player),
+    inWorld: bodyIn(sim.world, sim.soloPlayer.player),
+    inBlade: bodyIn(rotor.grid, sim.soloPlayer.player),
   };
 }
 
@@ -454,31 +455,31 @@ describe('17. 叶片扫过玩家时把人推开。玩家被关在笼子里时，
       sim.advance(2);
       const ship = assemble(sim, [6, 30, 3]);
       sim.advance(80); // float to rest, the player riding on the deck
-      if (sim.player.carrierId !== ship.id) throw new Error('scene: the player is not aboard');
+      if (sim.soloPlayer.player.carrierId !== ship.id) throw new Error('scene: the player is not aboard');
       const deckTop = ship.grid.toWorld(vec3(0, 30, 2)).y;
       const bearing = windmill(sim, 0, hubAbove(deckTop, 4, 0.05), 0);
       sim.advance(2);
       startWindmillByClicks(sim, bearing, NX);
       const events = watchEvents(sim);
       const crushes = watchCrushes(sim);
-      const local = (): Vec3 => ship.grid.toLocal(copy(sim.player.pos), vec3());
+      const local = (): Vec3 => ship.grid.toLocal(copy(sim.soloPlayer.player.pos), vec3());
       const l0 = local();
       let maxDz = 0;
       let inShip = 0;
       let shipRotorContacts = 0;
-      let minHealth = sim.player.health;
+      let minHealth = sim.soloPlayer.player.health;
       for (let i = 0; i < 200; i++) {
         sim.tick();
         maxDz = Math.max(maxDz, Math.abs(local().z - l0.z));
-        if (bodyIn(ship.grid, sim.player)) inShip++;
+        if (bodyIn(ship.grid, sim.soloPlayer.player)) inShip++;
         shipRotorContacts += shipStats(sim, ship).rotorContacts;
-        minHealth = Math.min(minHealth, sim.player.health);
+        minHealth = Math.min(minHealth, sim.soloPlayer.player.health);
       }
       gunwale = {
         l0,
         l1: local(),
         maxDz,
-        carrierAtEnd: sim.player.carrierId === ship.id,
+        carrierAtEnd: sim.soloPlayer.player.carrierId === ship.id,
         inShip,
         shipRotorContacts,
         crushes,
@@ -507,7 +508,7 @@ describe('17. 叶片扫过玩家时把人推开。玩家被关在笼子里时，
     expect(cageSurvival.crush?.kind).toBe('player');
     expect(cageSurvival.healthBefore).toBe(PLAYER_MAX_HEALTH);
     expect(cageSurvival.healthAfter).toBe(PLAYER_MAX_HEALTH - CRUSH_DAMAGE);
-    expect(cageSurvival.hurts).toEqual([{ type: 'playerHurt', amount: CRUSH_DAMAGE, cause: 'crush' }]);
+    expect(cageSurvival.hurts).toEqual([{ type: 'playerHurt', player: SOLO_KEY, amount: CRUSH_DAMAGE, cause: 'crush' }]);
   });
 
   it('关在笼子里，生存模式挪位: the crushed survival player is moved out of the cage to a free spot', () => {

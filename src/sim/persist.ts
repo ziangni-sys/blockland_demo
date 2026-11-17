@@ -5,16 +5,18 @@
  * (src/save) only moves bytes; the client decides when to save and where to.
  *
  *   exportSave(sim)            -> SaveBundle (cheap enough to call every autosave)
- *   importSave(sim, bundle)    -> call right after `new Simulation(...)`, before the first tick
+ *   importSave(sim, bundle)    -> call right after `new Simulation(...)`, before anyone joins and
+ *                                 before the first tick; then join the players
  *
- * Blob names: 'sim' (clock, rng, time-of-day offset), 'ticks' (pending block ticks: liquids
- * mid-flow, sand about to fall), 'glue' (world glue), 'structures' (nested ones included, with
- * their glue and rotor angles), 'entities' (incl. the player and inventory).
+ * Blob names: 'sim' (clock, rng, time-of-day offset, world rules), 'ticks' (pending block ticks:
+ * liquids mid-flow, sand about to fall), 'glue' (world glue), 'structures' (nested ones included,
+ * with their glue and rotor angles), 'entities' (every entity but players), 'players' (the record
+ * of every player the world knows, by PlayerKey — joined ones and those who left).
  * A loader finds the saved chunks with SaveStorage.listChunkKeys().
  *
- * Deliberately NOT saved: what the player's hands were doing (a timed glue operation, an
+ * Deliberately NOT saved: what the players' hands were doing (a timed glue operation, an
  * assembly preview, mining progress, highlighted docking conflicts) — a reload starts with
- * empty hands.
+ * empty hands; the world spawn (it comes from the generator).
  */
 import { DAY_TICKS } from '../core/constants';
 import { mod } from '../core/math';
@@ -30,8 +32,8 @@ export interface SaveBundle {
   blobs: Array<[string, Uint8Array]>;
 }
 
-/** Layout of the 'sim' blob: time, rng, time-of-day offset. Only this version is read. */
-const SIM_BLOB_VERSION = 2;
+/** Layout of the 'sim' blob: time, rng, time-of-day offset, world rules. Only this version is read. */
+const SIM_BLOB_VERSION = 3;
 
 export function exportSave(sim: Simulation): SaveBundle {
   const chunks = sim.chunks.modifiedChunks();
@@ -42,6 +44,8 @@ export function exportSave(sim: Simulation): SaveBundle {
   w.varuint(sim.world.time);
   w.u32(sim.rng.state);
   w.varuint(Number.isFinite(sim.dayOffset) ? mod(Math.floor(sim.dayOffset), DAY_TICKS) : 0);
+  w.u8(sim.rules.defaultMode === 'creative' ? 1 : 0);
+  w.bool(sim.rules.dropsEnabled);
   blobs.push(['sim', w.finish()]);
 
   blobs.push(['ticks', encodeTicks(sim.world.ticks.all(), sim.world.time)]);
@@ -58,10 +62,15 @@ export function exportSave(sim: Simulation): SaveBundle {
   sim.entities.serialize(e);
   blobs.push(['entities', e.finish()]);
 
+  const p = new ByteWriter();
+  sim.players.serialize(p);
+  blobs.push(['players', p.finish()]);
+
   return { chunks, blobs };
 }
 
 export function importSave(sim: Simulation, bundle: SaveBundle): void {
+  if (sim.players.online().length > 0) throw new Error('importSave: load the save before any player joins');
   const blob = (name: string): Uint8Array | null => {
     for (const [n, b] of bundle.blobs) if (n === name) return b;
     return null;
@@ -80,6 +89,8 @@ export function importSave(sim: Simulation, bundle: SaveBundle): void {
     sim.world.time = r.varuint();
     sim.rng.state = r.u32();
     sim.dayOffset = mod(r.varuint(), DAY_TICKS);
+    sim.rules.defaultMode = r.u8() === 1 ? 'creative' : 'survival';
+    sim.rules.dropsEnabled = r.bool();
   }
 
   sim.world.ticks.clear();
@@ -103,9 +114,10 @@ export function importSave(sim: Simulation, bundle: SaveBundle): void {
   const entities = blob('entities');
   if (entities) sim.entities.deserialize(new ByteReader(entities, 'entities'));
 
-  // Ground under the player must exist before the first tick. Loading a chunk reschedules
-  // its restless liquid (Fluids.rescheduleChunk), so water saved mid-flow keeps flowing.
-  const p = sim.player.pos;
-  sim.chunks.loadAround(sim.generator, p.x, p.z, 1);
+  const players = blob('players');
+  if (players) sim.players.deserialize(new ByteReader(players, 'players'));
+
+  // The ground under each player is loaded when it joins (PlayerRegistry.join). Loading a chunk
+  // reschedules its restless liquid (Fluids.rescheduleChunk), so water saved mid-flow keeps flowing.
   sim.afterLoad();
 }

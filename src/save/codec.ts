@@ -35,8 +35,9 @@ import { crc32 } from './crc32';
  * any blob layout changes. Only this version is read: worlds saved by an older build cannot be
  * opened (they stay listed so the player can delete them); there is no migration code.
  * 2: the player's off-hand slot; glue that outlives one side of its face; no hub-glue flag.
+ * 3: players saved by PlayerKey in their own blob (offline ones too); world rules in the sim blob.
  */
-export const SAVE_VERSION = 2;
+export const SAVE_VERSION = 3;
 
 /**
  * Intact data written by a newer build of the game (its format version is above

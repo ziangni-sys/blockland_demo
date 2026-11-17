@@ -18,7 +18,7 @@ import { B, Bench, fill, makeWorld } from './harness';
 function loadedBench(): Bench {
   const b = new Bench(makeWorld(-16, -16, 15, 15)); // chunks (-1..0, -1..0) only
   fill(b.world, -16, 40, -16, 15, 40, 15, B.STONE);
-  b.entities.createPlayer('survival', 0.5, 41, 0.5);
+  b.entities.spawnPlayer('survival', 0.5, 41, 0.5);
   return b;
 }
 

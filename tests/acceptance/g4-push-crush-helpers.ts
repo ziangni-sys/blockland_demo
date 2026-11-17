@@ -23,6 +23,7 @@ import type { SimEvent } from '../../src/sim/view';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { boxOverlapsSolid } from '../../src/voxel/shape';
 import { FlatGenerator } from '../../src/worldgen/generator';
+import { soloSim } from '../solo';
 
 // ------------------------------------------------------------------ worlds
 
@@ -32,7 +33,7 @@ export const LAND_TOP = 35;
 export const SEA_TOP = 30;
 
 export function landSim(mode: GameMode, spawn: Vec3, seed = 41): Simulation {
-  return new Simulation({
+  return soloSim({
     seed,
     mode,
     generator: new FlatGenerator(),
@@ -44,7 +45,7 @@ export function landSim(mode: GameMode, spawn: Vec3, seed = 41): Simulation {
 }
 
 export function seaSim(mode: GameMode, spawn: Vec3, seed = 42): Simulation {
-  return new Simulation({
+  return soloSim({
     seed,
     mode,
     generator: new FlatGenerator([
@@ -95,9 +96,9 @@ export function buildWindmill(sim: Simulation, bearing: Cell3, facing: Dir, canv
 export function startWindmillByClicks(sim: Simulation, bearing: Cell3, face: Dir): Rotor {
   const before = new Set(sim.structures.rotors());
   const [x, y, z] = bearing;
-  if (!sim.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) face ${face}`);
-  if (sim.view.preview?.kind !== 'rotor') throw new Error('windmill: the first right-click did not preview a rotor');
-  if (!sim.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) a second time`);
+  if (!sim.soloPlayer.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) face ${face}`);
+  if (sim.soloPlayer.view.preview?.kind !== 'rotor') throw new Error('windmill: the first right-click did not preview a rotor');
+  if (!sim.soloPlayer.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) a second time`);
   const started = sim.structures.rotors().filter((r) => !before.has(r));
   if (started.length !== 1) throw new Error(`windmill: the second right-click started ${started.length} rotors`);
   return started[0]!;

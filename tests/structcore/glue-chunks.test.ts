@@ -16,6 +16,7 @@ import type { GlueStore } from '../../src/structures/glue';
 import { Chunk, cellIndex } from '../../src/voxel/chunk';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { c, glueKeys, scene } from './helpers';
+import { SOLO_KEY, soloSim } from '../solo';
 
 /** A chunk whose cells are all air except `cell` at the given chunk-local positions. */
 function chunkWith(cx: number, cz: number, cell: number, at: Array<[number, number, number]>): Chunk {
@@ -125,7 +126,7 @@ describe('glue of a saved world, reloaded chunk by chunk', () => {
   });
 
   it('keeps every valid face, whatever order the chunks come back in, and the event mirror stays identical', () => {
-    const a = new Simulation(opts());
+    const a = soloSim(opts());
     a.advance(5); // every chunk within the load radius
     const w = a.world;
     const g = a.worldGlue;
@@ -157,10 +158,11 @@ describe('glue of a saved world, reloaded chunk by chunk', () => {
     const bundle = exportSave(a);
 
     for (const reversed of [false, true]) {
-      const b = new Simulation({ ...opts(), deferInitialLoad: true });
+      const b = new Simulation(opts());
       b.worldGlue.add(1, 34, 1, PY); // something that the import must clear
       const mirror = mirrorOf(b.worldGlue);
-      importSave(b, bundle); // loads the 3 x 3 chunks around the player
+      importSave(b, bundle);
+      b.join(SOLO_KEY); // loads the 3 x 3 chunks around the player
       expect(glueKeys(b.worldGlue)).toEqual(faces);
       const cols: Array<[number, number]> = [];
       for (let cz = -2; cz <= 2; cz++) for (let cx = -2; cx <= 2; cx++) cols.push([cx, cz]);

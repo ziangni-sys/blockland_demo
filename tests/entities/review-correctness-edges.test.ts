@@ -27,7 +27,7 @@ describe('review: sneak guard uses the attach inset to decide whether it engages
   it('world platform: a player standing on the outer 0.05 of the footprint sneaks off the edge', () => {
     const b = new Bench();
     fill(b.world, -2, 60, -2, 2, 60, 2, B.STONE); // edge at x = 3
-    const p = b.entities.createPlayer('survival', 3.25, 61, 0.5); // footprint overlaps the block by 0.05
+    const p = b.entities.spawnPlayer('survival', 3.25, 61, 0.5); // footprint overlaps the block by 0.05
     b.tick(3);
     expect(p.onGround).toBe(true);
     expect(p.pos.y).toBe(61);
@@ -47,7 +47,7 @@ describe('review: sneak guard uses the attach inset to decide whether it engages
       x += 0.01;
       return { p: vec3(x, 60.5, 0.5), q: qfromYaw(0) };
     });
-    const p = b.entities.createPlayer('survival', 0.5, 61.01, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61.01, 0.5);
     b.tick(5);
     expect(p.carrierId).toBe(ship.id);
     // Footprint overlaps the deck by 0.06 (e.g. walked there without sneaking, then stopped).
@@ -71,7 +71,7 @@ describe('review: a deck floating a hair below a pier turns the pier into a wall
     fill(b.world, 6, 60, -2, 14, 60, 2, B.STONE); // pier, top at 61, starts at x = 6 (deck ends at 6)
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     ship.grid.setPoseImmediate(vec3(0.5, 60.5 + off, 0.5), qfromYaw(0));
-    const p = b.entities.createPlayer('survival', 3.5, 61.02, 0.5);
+    const p = b.entities.spawnPlayer('survival', 3.5, 61.02, 0.5);
     b.tick(5);
     expect(p.carrierId).toBe(ship.id);
     p.input.forward = 1;
