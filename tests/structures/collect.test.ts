@@ -335,15 +335,92 @@ describe('collect: world edges', () => {
     expect(r.ok).toBe(true);
     expect(r.count).toBe(1);
   });
-  it('the fill stops at unloaded chunks', () => {
+  // Regression (review): a fill cut off by an unloaded chunk used to report ok with the loaded
+  // part only, so an assembler that forgot its own isAreaLoaded() check would split the ship
+  // and delete the glue across the border.
+  it('a ship touching an unloaded chunk is refused as unloaded; cells hold the loaded part', () => {
     const w = world();
     for (let x = 0; x < 16; x++) w.setCell(x, 40, 8, c(B.PLANKS_OAK));
     w.setCell(15, 41, 8, HELM_N);
     expect(w.getCell(16, 40, 8)).toBe(CELL_UNLOADED);
     const r = collectShip(w, new GlueStore(), 15, 41, 8);
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('unloaded');
     expect(r.count).toBe(17);
     expect(r.bounds).toEqual({ minX: 0, minY: 40, minZ: 8, maxX: 16, maxY: 42, maxZ: 9 });
+  });
+  it('a ship one cell away from an unloaded chunk is complete and ok', () => {
+    const w = world();
+    // Only chunk (0,0) is loaded: x = 0 and x = 15 stay air, so x = -1 and 16 are never touched.
+    for (let x = 1; x < 15; x++) w.setCell(x, 40, 8, c(B.PLANKS_OAK));
+    w.setCell(14, 41, 8, HELM_N);
+    const r = collectShip(w, new GlueStore(), 14, 41, 8);
+    expect(r.ok).toBe(true);
+    expect(r.count).toBe(15);
+  });
+  it('touching an unloaded cell counts even through a face that would not connect', () => {
+    // A rubble block (never auto-sticks) glued to the raft lies on the border: whatever is in
+    // the unloaded chunk could be glued or mounted to it, so the result is incomplete.
+    const w = world();
+    const glue = new GlueStore();
+    for (let z = 1; z <= 4; z++) w.setCell(14, 40, z, c(B.PLANKS_OAK));
+    w.setCell(15, 40, 1, c(B.COBBLE));
+    glue.add(14, 40, 1, PX);
+    w.setCell(14, 41, 2, HELM_N);
+    expect(collectShip(w, glue, 14, 41, 2).reason).toBe('unloaded');
+    glue.remove(14, 40, 1, PX); // the rubble is no longer part of the raft
+    expect(collectShip(w, glue, 14, 41, 2).reason).toBe('ok');
+  });
+  it('too_big takes precedence over unloaded', () => {
+    const w = world();
+    for (let x = 0; x < 16; x++) w.setCell(x, 40, 8, c(B.PLANKS_OAK));
+    w.setCell(15, 41, 8, HELM_N);
+    expect(collectShip(w, new GlueStore(), 15, 41, 8, 5).reason).toBe('too_big');
+    expect(collectShip(w, new GlueStore(), 15, 41, 8, 17).reason).toBe('unloaded');
+  });
+  it('rotors: an unloaded hub is unloaded, not no_hub', () => {
+    const w = world();
+    w.setCell(14, 50, 5, c(B.PLANKS_OAK));
+    w.setCell(15, 50, 5, facing(B.BEARING, PX)); // its hub (16,50,5) is in the unloaded chunk
+    const r = collectRotor(w, new GlueStore(), 15, 50, 5);
+    expect(r).toEqual({ ok: false, reason: 'unloaded', cells: new Int32Array(0), count: 0, sails: 0, bounds: null });
+  });
+  it('rotors: touching an unloaded chunk is reported before the sail check', () => {
+    const w = world();
+    const glue = new GlueStore();
+    w.setCell(12, 60, 4, c(B.PLANKS_OAK));
+    w.setCell(12, 60, 5, facing(B.BEARING, PZ)); // plane z = 5
+    for (let x = 12; x <= 15; x++) w.setCell(x, 60, 6, c(B.PLANKS_OAK)); // hub + arm to the border
+    w.setCell(12, 61, 6, c(B.CANVAS));
+    w.setCell(12, 62, 6, c(B.CANVAS));
+    glue.add(12, 61, 6, NY); // canvas <-> hub (cloth and planks do not stick)
+    let r = collectRotor(w, glue, 12, 60, 5);
+    expect(r.reason).toBe('unloaded'); // only 2 sails, but more may be across the border
+    expect(r.count).toBe(6);
+    expect(r.sails).toBe(2);
+    w.setCell(15, 60, 6, c(B.AIR)); // the arm no longer reaches the border
+    r = collectRotor(w, glue, 12, 60, 5);
+    expect(r.reason).toBe('not_enough_sails');
+    expect(r.count).toBe(5);
+  });
+  it('rotors: unloaded cells in or behind the bearing plane are never examined', () => {
+    // Chunks (0,0), (1,0), (1,1) loaded; (0,1) not. The bearing at x = 15 faces +X, so the
+    // rotor lives at x >= 16; its cell (16,50,16) has its in-plane neighbour (15,50,16) in the
+    // unloaded chunk, which can never be part of the rotor and must not spoil the result.
+    const w = new World(7);
+    w.addChunk(new Chunk(0, 0));
+    w.addChunk(new Chunk(1, 0));
+    w.addChunk(new Chunk(1, 1));
+    w.setCell(14, 50, 15, c(B.PLANKS_OAK));
+    w.setCell(15, 50, 15, facing(B.BEARING, PX));
+    for (let z = 15; z <= 18; z++) w.setCell(16, 50, z, c(B.CANVAS));
+    expect(w.getCell(15, 50, 16)).toBe(CELL_UNLOADED);
+    const r = collectRotor(w, new GlueStore(), 15, 50, 15);
+    expect(r.reason).toBe('ok');
+    expect(r.count).toBe(4);
+    // A ship has no half-space: a helm on the same arm does see the unloaded chunk.
+    w.setCell(16, 51, 18, HELM_N);
+    expect(collectShip(w, new GlueStore(), 16, 51, 18).reason).toBe('unloaded');
   });
   it('a rotor can be collected inside a ship grid nested in the world (negative local coords)', () => {
     const ship = new StructureGrid(3, new World(5));
@@ -354,6 +431,50 @@ describe('collect: world edges', () => {
     expect(r.ok).toBe(true);
     expect(r.count).toBe(5);
     expect(Array.from(r.cells.slice(0, 3))).toEqual([-101, -50, -100]);
+  });
+});
+
+describe('collect: limit semantics', () => {
+  // The contract words the limits as "more than maxCells -> too_big" and "fewer than minSails
+  // -> not_enough_sails"; they are compared literally. With integer counts a fractional
+  // maxCells therefore acts as its floor and a fractional minSails as its ceiling.
+  // (A review asked for minSails = 3.5 to accept 3 sails, i.e. to floor it; but 3 sails are
+  // fewer than 3.5, so the contract requires not_enough_sails. The module comment that said
+  // limits are "floored" was what was wrong, and has been corrected.)
+  function threeSailRotor(): StructureGrid {
+    const g = new StructureGrid(5, new World(1));
+    g.setCell(0, 0, 0, makeCell(B.PLANKS_OAK));
+    g.setCell(1, 0, 0, facing(B.BEARING, PX));
+    g.setCell(2, 0, 0, makeCell(B.CANVAS)); // hub
+    g.setCell(2, 1, 0, makeCell(B.CANVAS));
+    g.setCell(2, -1, 0, makeCell(B.CANVAS));
+    return g;
+  }
+  it('minSails is compared as given: 3 sails are fewer than 3.5 but not fewer than 3', () => {
+    const g = threeSailRotor();
+    const glue = new GlueStore();
+    let r = collectRotor(g, glue, 1, 0, 0, 400, 3.5);
+    expect(r.sails).toBe(3);
+    expect(r.reason).toBe('not_enough_sails');
+    expect(collectRotor(g, glue, 1, 0, 0, 400, 3).reason).toBe('ok');
+    expect(collectRotor(g, glue, 1, 0, 0, 400, 2.5).reason).toBe('ok');
+    expect(collectRotor(g, glue, 1, 0, 0, 400, 0).reason).toBe('ok');
+    expect(collectRotor(g, glue, 1, 0, 0, 400, Infinity).reason).toBe('not_enough_sails');
+    g.setCell(2, 2, 0, makeCell(B.WOOL_RED));
+    r = collectRotor(g, glue, 1, 0, 0, 400, 3.5);
+    expect(r.sails).toBe(4);
+    expect(r.reason).toBe('ok');
+    expect(() => collectRotor(g, glue, 1, 0, 0, 400, Number.NaN)).toThrow(RangeError);
+    expect(() => collectRotor(g, glue, 1, 0, 0, 400, -1)).toThrow(RangeError);
+  });
+  it('maxCells is compared as given: 3 cells are not more than 3.9 but more than 2.9', () => {
+    const g = threeSailRotor();
+    const glue = new GlueStore();
+    expect(collectRotor(g, glue, 1, 0, 0, 3.9, 0).reason).toBe('ok');
+    const r = collectRotor(g, glue, 1, 0, 0, 2.9, 0);
+    expect(r.reason).toBe('too_big');
+    expect(r.count).toBe(3); // stopped at the first cell over floor(2.9) = 2
+    expect(() => collectRotor(g, glue, 1, 0, 0, Number.NaN, 0)).toThrow(RangeError);
   });
 });
 

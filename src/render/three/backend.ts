@@ -97,8 +97,8 @@ function makeTileTexture(data: Uint8Array, size: number, count: number): THREE.D
   t.magFilter = THREE.NearestFilter;
   // Nearest within a level keeps pixel art crisp up close; linear between levels hides the
   // switch. Each layer is its own image, so mips never bleed between tiles.
-  t.minFilter = THREE.NearestFilter; // TEMP
-  t.generateMipmaps = false; // TEMP
+  t.minFilter = THREE.NearestMipmapLinearFilter;
+  t.generateMipmaps = true;
   t.wrapS = THREE.ClampToEdgeWrapping;
   t.wrapT = THREE.ClampToEdgeWrapping;
   t.flipY = false;
@@ -113,8 +113,12 @@ function makeMaskTexture(data: Uint8Array, sx: number, sy: number, sz: number): 
   t.format = THREE.RedFormat;
   t.type = THREE.UnsignedByteType;
   t.colorSpace = THREE.NoColorSpace;
-  t.magFilter = THREE.NearestFilter;
-  t.minFilter = THREE.NearestFilter;
+  // Linear on purpose: with the shader's 0.2 threshold the dry region reaches ~0.3 cells
+  // into neighbouring (hull wall) cells (still 0.25 at concave corners), which removes the 1 px
+  // z-fight line where the water
+  // plane meets the inner wall faces. The walls hide everything else that is cut.
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearFilter;
   t.generateMipmaps = false;
   t.wrapS = THREE.ClampToEdgeWrapping;
   t.wrapT = THREE.ClampToEdgeWrapping;
@@ -441,16 +445,22 @@ export class ThreeBackend implements RenderBackend {
     }
     const n = dry.sx * dry.sy * dry.sz;
     const old = rec.dry;
-    if (rec.dryTex && old && old.sx === dry.sx && old.sy === dry.sy && old.sz === dry.sz) {
-      // Same size: update the texels in place.
-      (rec.dryTex.image.data as Uint8Array).set(dry.mask.subarray(0, n));
-      rec.dryTex.needsUpdate = true;
+    const sameSize = rec.dryTex !== null && old !== null && old.sx === dry.sx && old.sy === dry.sy && old.sz === dry.sz;
+    // The contract marks dry cells with any non-zero byte; an R8 unorm texture would sample a
+    // 1 as 1/255, so normalize to 0 / 255 while copying (we never keep the caller's buffer).
+    const data = sameSize ? (rec.dryTex!.image.data as Uint8Array) : new Uint8Array(n);
+    const src = dry.mask;
+    const m = Math.min(n, src.length);
+    for (let i = 0; i < m; i++) data[i] = src[i] !== 0 ? 255 : 0;
+    data.fill(0, m);
+    if (sameSize) {
+      rec.dryTex!.needsUpdate = true;
     } else {
       rec.dryTex?.dispose();
-      rec.dryTex = makeMaskTexture(dry.mask.slice(0, n), dry.sx, dry.sy, dry.sz);
+      rec.dryTex = makeMaskTexture(data, dry.sx, dry.sy, dry.sz);
     }
     // Keep our own copy of the box (not the caller's object, which may be reused).
-    rec.dry = { ox: dry.ox, oy: dry.oy, oz: dry.oz, sx: dry.sx, sy: dry.sy, sz: dry.sz, mask: rec.dryTex.image.data as Uint8Array };
+    rec.dry = { ox: dry.ox, oy: dry.oy, oz: dry.oz, sx: dry.sx, sy: dry.sy, sz: dry.sz, mask: data };
   }
 
   // ------------------------------------------------------------------ per frame state

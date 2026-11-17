@@ -69,10 +69,9 @@ function inRange(x: number, y: number, z: number): boolean {
   );
 }
 
-/** floor(v) clamped to [lo, hi]. Callers reject NaN first. */
-function clampInt(v: number, lo: number, hi: number): number {
-  const f = Math.floor(v);
-  return f < lo ? lo : f > hi ? hi : f;
+/** v clamped to [lo, hi]. Callers reject NaN first. */
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
 }
 
 interface Bucket {
@@ -142,7 +141,10 @@ export class GlueStore {
 
   /**
    * Drop the up-to-6 glued faces touching the cell; returns how many were removed. Call it
-   * whenever the cell is removed or replaced (任一侧方块被移除或替换，胶就消失).
+   * whenever the cell is removed or replaced (任一侧方块被移除或替换，胶就消失) — normally from
+   * the grid's onCellChange hook when the block id changes. That hook must skip writes made
+   * with SET_STRUCTURE_MOVE (or the bulk move must be ordered as moveTo() describes), or it
+   * deletes the glue that is supposed to travel with an assembled / blockified structure.
    */
   removeAllAt(x: number, y: number, z: number): number {
     let n = 0;
@@ -183,9 +185,10 @@ export class GlueStore {
   /**
    * Visit every glued face with at least one end cell inside the box [min, max] (cell
    * coordinates, BOTH bounds inclusive; fractional bounds are floored, so a float AABB selects
-   * every cell it overlaps). Each face is visited once, as canonical cell + axis. Only the
-   * buckets overlapping the box are examined (or, when the box spans more buckets than the
-   * store holds, only the stored buckets), so a small query on a large store stays cheap.
+   * every cell it overlaps; +-Infinity is allowed, a NaN bound selects nothing). Each face is
+   * visited once, as canonical cell + axis. Only the buckets overlapping the box are examined
+   * (or, when the box spans more buckets than the store holds, only the stored buckets), so a
+   * small query on a large store stays cheap. Do not modify the store from `fn`.
    */
   forEachInBox(
     minX: number,
@@ -198,14 +201,36 @@ export class GlueStore {
   ): void {
     if (this.count === 0) return;
     if (minX !== minX || minY !== minY || minZ !== minZ || maxX !== maxX || maxY !== maxY || maxZ !== maxZ) return; // NaN
-    // Clamp to one cell beyond the key range: keeps every shift in int32 and loses nothing,
-    // since no stored cell (or its +1 neighbour) lies further out.
-    const x0 = clampInt(minX, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
-    const y0 = clampInt(minY, GLUE_MIN_Y - 1, GLUE_MAX_Y + 1);
-    const z0 = clampInt(minZ, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
-    const x1 = clampInt(maxX, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
-    const y1 = clampInt(maxY, GLUE_MIN_Y - 1, GLUE_MAX_Y + 1);
-    const z1 = clampInt(maxZ, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
+    const fx0 = Math.floor(minX);
+    const fy0 = Math.floor(minY);
+    const fz0 = Math.floor(minZ);
+    const fx1 = Math.floor(maxX);
+    const fy1 = Math.floor(maxY);
+    const fz1 = Math.floor(maxZ);
+    // Every end cell of a storable face lies in [MIN, MAX + 1] on each axis (the canonical
+    // cell is in [MIN, MAX], the far end one beyond). A box missing that span on any axis
+    // selects nothing. This test must come BEFORE the clamp below: clamping a box that lies
+    // wholly beyond MAX + 1 would squash it onto the plane MAX + 1, where faces keyed on MAX
+    // have their far end, and report them although neither end is in the requested box.
+    if (
+      fx0 > GLUE_MAX_XZ + 1 ||
+      fx1 < GLUE_MIN_XZ ||
+      fy0 > GLUE_MAX_Y + 1 ||
+      fy1 < GLUE_MIN_Y ||
+      fz0 > GLUE_MAX_XZ + 1 ||
+      fz1 < GLUE_MIN_XZ
+    ) {
+      return;
+    }
+    // The box now overlaps [MIN, MAX + 1] on every axis, so clamping it to [MIN - 1, MAX + 1]
+    // changes neither which end cells it contains nor its emptiness; it keeps every shift
+    // below in int32 and turns +-Infinity into finite bounds.
+    const x0 = clamp(fx0, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
+    const y0 = clamp(fy0, GLUE_MIN_Y - 1, GLUE_MAX_Y + 1);
+    const z0 = clamp(fz0, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
+    const x1 = clamp(fx1, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
+    const y1 = clamp(fy1, GLUE_MIN_Y - 1, GLUE_MAX_Y + 1);
+    const z1 = clamp(fz1, GLUE_MIN_XZ - 1, GLUE_MAX_XZ + 1);
     if (x0 > x1 || y0 > y1 || z0 > z1) return;
 
     // A face keyed on c joins c and c + e_axis, so its canonical cell lies in [min - 1, max].
@@ -325,7 +350,18 @@ export class GlueStore {
    *
    * `map` may return the same object on every call. `target` may be this store (in-place
    * remap). The operation is atomic: if `map` breaks adjacency or leaves the key range, an
-   * Error is thrown before anything is modified. Returns the number of faces moved.
+   * Error is thrown before anything is modified. Returns the number of faces moved (a moved
+   * face that `target` already held counts, but is of course stored once).
+   *
+   * ORDER RELATIVE TO THE CELL WRITES. Glue is not tied to cell contents; the grids' change
+   * hooks delete it (removeAllAt) when a block changes. A bulk move therefore needs ONE of:
+   *  - the hooks ignore writes flagged SET_STRUCTURE_MOVE (StructureManager's hooks do), and
+   *    the mover itself calls removeAllAt on any destination cell whose block it overwrites; or
+   *  - the order: write the destination cells, THEN moveTo, THEN clear the source cells.
+   * Calling moveTo before writing the destination lets the destination hook delete every face
+   * just moved in (a docked ship would come back without glue: acceptance 8); clearing the
+   * source first deletes the faces before they can move. Likewise, an `inSet` that reads the
+   * source grid (e.g. "cell is not air") must run while the source cells are still there.
    */
   moveTo(
     target: GlueStore,

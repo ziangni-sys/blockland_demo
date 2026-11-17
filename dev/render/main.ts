@@ -89,7 +89,20 @@ const PRESETS: Record<string, () => { cam: CameraState; sub: 'none' | 'water' | 
   },
   hut: () => ({ cam: lookAt({ x: 72.5, y: 58, z: 30 }, { x: 72.5, y: 54, z: 42 }), sub: 'none' }),
   mill: () => ({ cam: lookAt({ x: 31, y: 62, z: 52 }, { x: 30.5, y: 62, z: 33 }), sub: 'none' }),
-  entities: () => ({ cam: lookAt({ x: 26, y: 57, z: 64 }, { x: 31, y: 53, z: 56 }), sub: 'none' }),
+  entities: () => ({ cam: lookAt({ x: 19, y: 55.5, z: 47.5 }, { x: 18.5, y: 52, z: 38.5 }), sub: 'none' }),
+  closeup: () => {
+    const c = { x: 18.5, y: groundY(18.5, 39.5), z: 39.5 };
+    return { cam: lookAt({ x: c.x + 1.2, y: c.y + 2.4, z: c.z + 5.2 }, { x: c.x, y: c.y + 0.3, z: c.z - 0.5 }), sub: 'none' };
+  },
+  rabbit: () => {
+    const r = entities.find((e) => e.kind === 'rabbit')!;
+    updateEntities(state.time);
+    return { cam: lookAt({ x: r.x + 1.3, y: r.y + 0.9, z: r.z + 1.3 }, { x: r.x, y: r.y + 0.25, z: r.z }), sub: 'none' };
+  },
+  deck: () => {
+    const t = state.time;
+    return { cam: lookAt(shipToWorld(-1.5, 7, 6.5, t), shipToWorld(4, 3, 3, t)), sub: 'none' };
+  },
 };
 
 function applyView(): void {
@@ -115,28 +128,28 @@ const groundY = (x: number, z: number): number => {
 };
 
 const entities: EntityRenderState[] = [
-  { id: 1, kind: 'item', x: 30, y: 0, z: 58, yaw: 0, payload: B.LOG_OAK, flash: 0, sky: 15, block: 0 },
-  { id: 2, kind: 'item', x: 31.2, y: 0, z: 58.4, yaw: 0, payload: I.GLUE, flash: 0, sky: 15, block: 0 },
-  { id: 3, kind: 'item', x: 29, y: 0, z: 57.5, yaw: 0, payload: B.FLOWER_YELLOW, flash: 0, sky: 15, block: 0 },
-  { id: 4, kind: 'falling', x: 33.5, y: 0, z: 55.5, yaw: 0, payload: B.SAND, flash: 0, sky: 15, block: 0 },
-  { id: 5, kind: 'tnt', x: 35.5, y: 0, z: 57.5, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
-  { id: 6, kind: 'rabbit', x: 30, y: 0, z: 54, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
-  { id: 7, kind: 'player', x: 27.5, y: 0, z: 55, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
+  { id: 1, kind: 'item', x: 17.5, y: 0, z: 40.5, yaw: 0, payload: B.LOG_OAK, flash: 0, sky: 15, block: 0 },
+  { id: 2, kind: 'item', x: 18.6, y: 0, z: 40.8, yaw: 0, payload: I.GLUE, flash: 0, sky: 15, block: 0 },
+  { id: 3, kind: 'item', x: 16.4, y: 0, z: 40.2, yaw: 0, payload: B.FLOWER_YELLOW, flash: 0, sky: 15, block: 0 },
+  { id: 4, kind: 'falling', x: 21.5, y: 0, z: 38.5, yaw: 0, payload: B.SAND, flash: 0, sky: 15, block: 0 },
+  { id: 5, kind: 'tnt', x: 23.5, y: 0, z: 41.5, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
+  { id: 6, kind: 'rabbit', x: 18, y: 0, z: 37, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
+  { id: 7, kind: 'player', x: 14.5, y: 0, z: 38, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
 ];
 
 function updateEntities(t: number): void {
   for (const e of entities) {
     if (e.kind === 'rabbit') {
       const a = t * 0.6;
-      e.x = 30.5 + Math.cos(a) * 2.2;
-      e.z = 54 + Math.sin(a) * 2.2;
+      e.x = 18.5 + Math.cos(a) * 2.2;
+      e.z = 36.5 + Math.sin(a) * 2.2;
       // Motion direction d/da (cos, sin) = (-sin, cos); forward(yaw) = (-sin yaw, -cos yaw).
       e.yaw = Math.atan2(Math.sin(a), -Math.cos(a));
       e.y = groundY(e.x, e.z);
     } else if (e.kind === 'player') {
       const a = t * 0.35;
-      e.x = 27.5 + Math.sin(a) * 1.5;
-      e.z = 55;
+      e.x = 14.5 + Math.sin(a) * 1.5;
+      e.z = 38;
       e.yaw = Math.cos(a) >= 0 ? -Math.PI / 2 : Math.PI / 2;
       e.y = groundY(e.x, e.z);
     } else if (e.kind === 'falling') {
@@ -152,8 +165,8 @@ function updateEntities(t: number): void {
   }
 }
 
-const targetCell = { structureId: 0, x: 33, y: 0, z: 59 };
-targetCell.y = groundY(33.5, 59.5) - 1;
+const targetCell = { structureId: 0, x: 20, y: 0, z: 42 };
+targetCell.y = groundY(20.5, 42.5) - 1;
 const overlays: OverlayState = {
   target: targetCell,
   breakProgress: 0.45,

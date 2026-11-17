@@ -116,11 +116,13 @@ describe('day / night', () => {
     expect(s.zenith.b).toBeGreaterThan(s.zenith.r * 2);
     expect(s.horizon.b).toBeGreaterThan(s.horizon.r);
     expect(s.stars).toBe(0);
+    expect(s.glowStrength).toBeLessThan(0.05);
     expect(s.dayLight).toBeCloseTo(1, 6);
 
     computeSkyState(0.5, s);
     expect(s.horizon.r).toBeGreaterThan(s.horizon.b);
-    expect(s.sunGlow.r).toBeGreaterThan(0.2);
+    expect(s.glowStrength).toBeGreaterThan(0.8);
+    expect(s.sunGlow.r).toBeGreaterThan(s.sunGlow.b);
 
     computeSkyState(0.75, s);
     const lum = 0.2126 * s.zenith.r + 0.7152 * s.zenith.g + 0.0722 * s.zenith.b;

@@ -9,6 +9,7 @@
  *                       2 px per block vertically) showing caves (black), ores, lava, water;
  *   zoom_<seed>.png     160 x 160 blocks around the spawn at 4 px per block;
  *   peak_<seed>.png     the same around the highest land column of the map;
+ *   focus_<seed>.png    the same around an optional focus column (WORLDGEN_FOCUS=x,z);
  *   relief_<seed>.png   grey-scale height with a contour line every 8 blocks.
  *
  * Run (env-guarded vitest entry, see map-preview.test.ts):
@@ -71,6 +72,8 @@ export interface PreviewOptions {
   outDir: string;
   /** Centre the map on the spawn point instead of the origin. */
   centreOnSpawn?: boolean;
+  /** Extra zoom view centred on this world column (written as focus_<seed>.png). */
+  focus?: { x: number; z: number };
 }
 
 export interface PreviewStats {
@@ -223,6 +226,7 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
   for (let i = 0; i < size * size; i++) if (topId[i] !== B.WATER && topY[i]! > topY[peakI]!) peakI = i;
   const zoom = zoomAt(mapClean, size, sx, sz);
   const peakZoom = zoomAt(mapClean, size, peakI % size, Math.floor(peakI / size));
+  const focusZoom = opts.focus ? zoomAt(mapClean, size, opts.focus.x - x0, opts.focus.z - z0) : null;
 
   // ---- relief: terrain height (water columns show their floor), contours every 8 blocks
   const relief = new Uint8Array(size * size * 3);
@@ -256,6 +260,10 @@ function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
   writeFileSync(files[3]!, encodePng(ZOOM_BLOCKS * ZOOM_SCALE, ZOOM_BLOCKS * ZOOM_SCALE, zoom));
   writeFileSync(files[4]!, encodePng(size, size, relief));
   writeFileSync(files[5]!, encodePng(ZOOM_BLOCKS * ZOOM_SCALE, ZOOM_BLOCKS * ZOOM_SCALE, peakZoom));
+  if (focusZoom) {
+    files.push(join(opts.outDir, `focus_${seed}.png`));
+    writeFileSync(files[6]!, encodePng(ZOOM_BLOCKS * ZOOM_SCALE, ZOOM_BLOCKS * ZOOM_SCALE, focusZoom));
+  }
 
   const biomeFractions: Record<string, number> = {};
   for (const name of BIOME_NAMES) biomeFractions[name] = (biomeCount.get(name) ?? 0) / (size * size);

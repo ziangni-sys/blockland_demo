@@ -256,23 +256,49 @@ export class InventoryView implements ScreenView {
     this.ctx.actions.slotClick(area, Number(slot.dataset.index), button, e.shiftKey);
   }
 
-  /** Arrow keys move focus within a grid of buttons (row width read from the layout). */
+  /**
+   * Arrow keys move focus spatially among the buttons of a section (both slot grids form one
+   * 4-row block; the palette groups chain into one list), so keyboard play never dead-ends at
+   * a grid edge. Layout is read only on key presses.
+   */
   private gridKeyNav(e: KeyboardEvent, selector: string): void {
     const k = e.key;
     if (k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'ArrowUp' && k !== 'ArrowDown') return;
     const cur = (e.target as Element).closest<HTMLElement>(selector);
-    const grid = cur?.parentElement;
-    if (!cur || !grid) return;
-    const items = [...grid.querySelectorAll<HTMLElement>(`:scope > ${selector}:not([hidden])`)];
+    const scope = e.currentTarget as HTMLElement | null;
+    if (!cur || !scope) return;
+    const items = [...scope.querySelectorAll<HTMLElement>(`${selector}:not([hidden])`)].filter((el) => !el.closest('[hidden]'));
     const i = items.indexOf(cur);
     if (i < 0) return;
-    let cols = 1;
-    while (cols < items.length && items[cols]!.offsetTop === items[0]!.offsetTop) cols++;
-    const step = k === 'ArrowLeft' ? -1 : k === 'ArrowRight' ? 1 : k === 'ArrowUp' ? -cols : cols;
-    const next = items[i + step];
+    let next: HTMLElement | undefined;
+    if (k === 'ArrowLeft' || k === 'ArrowRight') {
+      next = items[i + (k === 'ArrowLeft' ? -1 : 1)];
+    } else {
+      const r = cur.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const down = k === 'ArrowDown';
+      // Nearest row in the requested direction, then the closest column within it.
+      let rowTop = down ? Infinity : -Infinity;
+      const rects = items.map((el) => el.getBoundingClientRect());
+      for (const q of rects) {
+        if (down ? q.top > r.top + 1 && q.top < rowTop : q.top < r.top - 1 && q.top > rowTop) rowTop = q.top;
+      }
+      if (Number.isFinite(rowTop)) {
+        let best = Infinity;
+        rects.forEach((q, j) => {
+          if (Math.abs(q.top - rowTop) > 1) return;
+          const dx = Math.abs(q.left + q.width / 2 - cx);
+          if (dx < best) {
+            best = dx;
+            next = items[j];
+          }
+        });
+      }
+    }
     if (next) {
       e.preventDefault();
       next.focus();
+      next.scrollIntoView({ block: 'nearest' });
     }
   }
 
@@ -352,7 +378,8 @@ export class InventoryView implements ScreenView {
       this.hideTip();
       return;
     }
-    if (item !== this.tipItem || force || this.tipLang !== this.ctx.lang) {
+    const changed = item !== this.tipItem || force || this.tipLang !== this.ctx.lang;
+    if (changed) {
       this.tipItem = item;
       this.tipLang = this.ctx.lang;
       this.tipName.textContent = itemName(item, this.ctx.lang);
@@ -361,9 +388,12 @@ export class InventoryView implements ScreenView {
       // Measure once per content change; following the pointer then needs no layout reads.
       this.tipW = this.tip.offsetWidth;
       this.tipH = this.tip.offsetHeight;
+      this.placeFloaters();
+    } else if (this.tip.hidden) {
+      setHidden(this.tip, false);
+      this.placeFloaters();
     }
-    setHidden(this.tip, false);
-    this.placeFloaters();
+    // Otherwise nothing to do: update() calls this every frame while hovering.
   }
 
   private placeTip(x: number, y: number): void {

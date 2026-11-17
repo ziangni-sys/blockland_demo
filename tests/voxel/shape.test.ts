@@ -727,3 +727,58 @@ describe('nearestFreeOffset', () => {
     expect(boxOverlapsSolid(s2, aabbTranslate(b3, r3.x * 0.5, r3.y * 0.5, r3.z * 0.5))).toBe(true);
   });
 });
+
+// ====================================================================== cross-path consistency
+
+describe('world fast path, aligned structure path and SAT path agree', () => {
+  it('same voxels in the world, an identity-pose structure and a near-identity (SAT) structure', () => {
+    const rng = new Rng(77);
+    const w = emptyWorld();
+    const world = new World();
+    const ident = structure(world, 1, vec3(0, 0, 0), qidentity());
+    // A rotation of 1e-9 rad is far from axis-aligned for ALIGN_TOL (1e-12), so this grid
+    // goes through the full 15-axis SAT, yet geometrically matches the others to ~1e-8.
+    const tilt = structure(world, 2, vec3(0, 0, 0), axisAngle(0.3, 1, -0.2, 1e-9));
+    for (let i = 0; i < 500; i++) {
+      const x = rng.int(-6, 5);
+      const y = rng.int(60, 67);
+      const z = rng.int(-6, 5);
+      for (const g of [w, ident, tilt] as VoxelGrid[]) g.setCell(x, y, z, STONE);
+    }
+    const near = (v: number): boolean => Math.abs(v - Math.round(v)) < 1e-6;
+    let compared = 0;
+    for (let i = 0; i < 600; i++) {
+      const c = vec3(rng.range(-6, 6), rng.range(59, 69), rng.range(-6, 6));
+      const b = boxAround(c, rng.range(0.1, 1.2), rng.range(0.1, 1.2), rng.range(0.1, 1.2));
+      if ([b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ].some(near)) continue;
+      compared++;
+      const ref = visited(w, b);
+      expect(visited(ident, b)).toEqual(ref);
+      expect(visited(tilt, b)).toEqual(ref);
+      expect(boxOverlapsSolid(ident, b)).toBe(ref.size > 0);
+      expect(boxOverlapsSolid(tilt, b)).toBe(ref.size > 0);
+      const pw = deepestPenetration(w, b);
+      const pi = deepestPenetration(ident, b);
+      const pt = deepestPenetration(tilt, b);
+      // The structure path works from centre +- half extents, so depths may differ in the
+      // last bits from the world path's direct min/max.
+      if (pw === null) {
+        expect(pi).toBeNull();
+        expect(pt).toBeNull();
+      } else {
+        for (const p of [pi!, pt!]) {
+          expect([p.cx, p.cy, p.cz]).toEqual([pw.cx, pw.cy, pw.cz]);
+          expectVec(p, vec3(pw.nx, pw.ny, pw.nz), 6);
+          expect(p.depth).toBeCloseTo(pw.depth, 6);
+        }
+        expect([pi!.nx, pi!.ny, pi!.nz]).toEqual([pw.nx, pw.ny, pw.nz]); // snapped: exact
+      }
+      expect(hasSupportBelow(ident, b, 0.3, 0.1)).toBe(hasSupportBelow(w, b, 0.3, 0.1));
+      const rw = resolvePenetration(w, b);
+      const ri = resolvePenetration(ident, b);
+      expect([ri.resolved, ri.iterations, ri.nx, ri.ny, ri.nz]).toEqual([rw.resolved, rw.iterations, rw.nx, rw.ny, rw.nz]);
+      expectVec({ x: ri.dx, y: ri.dy, z: ri.dz }, vec3(rw.dx, rw.dy, rw.dz), 9);
+    }
+    expect(compared).toBeGreaterThan(500);
+  });
+});

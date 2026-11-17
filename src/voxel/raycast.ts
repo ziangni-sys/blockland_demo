@@ -84,6 +84,27 @@ export function raycastGrid(
   pred: CellPredicate = targetable,
 ): GridHit | null {
   if (!(maxDist >= 0)) return null; // also rejects NaN
+  // Clip box: the structure's cell bounds, or for the world the half-space below the build
+  // limit (everything at or above it is AIR, which predicates reject).
+  let bx0 = -Infinity;
+  let by0 = -Infinity;
+  let bz0 = -Infinity;
+  let bx1 = Infinity;
+  let by1 = Infinity;
+  let bz1 = Infinity;
+  if (grid.isWorld) {
+    by1 = WORLD_HEIGHT;
+  } else {
+    const b = grid.cellBounds();
+    if (b === null) return null; // empty structure (only the world is unbounded)
+    bx0 = b.minX;
+    by0 = b.minY;
+    bz0 = b.minZ;
+    bx1 = b.maxX;
+    by1 = b.maxY;
+    bz1 = b.maxZ;
+  }
+
   const lo = grid.toLocal(origin, vec3());
   const ld = grid.dirToLocal(dir, vec3());
   const ox = lo.x;
@@ -97,27 +118,6 @@ export function raycastGrid(
   if (Math.abs(dx) < DIR_ZERO) dx = 0;
   if (Math.abs(dy) < DIR_ZERO) dy = 0;
   if (Math.abs(dz) < DIR_ZERO) dz = 0;
-
-  // ---- clip box: the structure's cell bounds, or for the world the half-space below the
-  // build limit (everything at or above it is AIR, which predicates reject).
-  let bx0 = -Infinity;
-  let by0 = -Infinity;
-  let bz0 = -Infinity;
-  let bx1 = Infinity;
-  let by1 = Infinity;
-  let bz1 = Infinity;
-  if (grid.isWorld) {
-    by1 = WORLD_HEIGHT;
-  } else {
-    const b = grid.cellBounds();
-    if (b === null) return null; // empty structure
-    bx0 = b.minX;
-    by0 = b.minY;
-    bz0 = b.minZ;
-    bx1 = b.maxX;
-    by1 = b.maxY;
-    bz1 = b.maxZ;
-  }
 
   // ---- slab test. t0 = entry parameter, t1 = exit parameter (already capped by maxDist).
   let t0 = 0;
@@ -184,7 +184,10 @@ export function raycastGrid(
   // ---- starting cell. On the entry axis the cell is known exactly (the boundary layer of
   // the box); recomputing it with floor() could land one cell outside because of rounding.
   // On other axes: the cell containing the ray just AFTER t0 (an origin exactly on a cell
-  // boundary while moving in -axis direction belongs to the lower cell), clamped into the box.
+  // boundary while moving in -axis direction belongs to the lower cell). For an entering ray
+  // that cell is clamped into the box (rounding when entering exactly at an edge); for an
+  // origin inside the box it can only be outside when the origin sits on the box's surface
+  // and the ray leaves immediately.
   let cx: number;
   let cy: number;
   let cz: number;
@@ -200,8 +203,10 @@ export function raycastGrid(
       onFaceX = true;
       if (dx < 0) cx -= 1;
     }
-    if (cx < bx0) cx = bx0;
-    else if (cx > bx1 - 1) cx = bx1 - 1;
+    if (cx < bx0 || cx > bx1 - 1) {
+      if (enterAxis < 0) return null; // origin on the box's outer face, moving away
+      cx = cx < bx0 ? bx0 : bx1 - 1; // entry point rounding at an edge
+    }
   }
   if (enterAxis === 1) {
     cy = dy > 0 ? by0 : by1 - 1;
@@ -212,8 +217,10 @@ export function raycastGrid(
       onFaceY = true;
       if (dy < 0) cy -= 1;
     }
-    if (cy < by0) cy = by0;
-    else if (cy > by1 - 1) cy = by1 - 1;
+    if (cy < by0 || cy > by1 - 1) {
+      if (enterAxis < 0) return null; // origin on the box's outer face, moving away
+      cy = cy < by0 ? by0 : by1 - 1; // entry point rounding at an edge
+    }
   }
   if (enterAxis === 2) {
     cz = dz > 0 ? bz0 : bz1 - 1;
@@ -224,8 +231,10 @@ export function raycastGrid(
       onFaceZ = true;
       if (dz < 0) cz -= 1;
     }
-    if (cz < bz0) cz = bz0;
-    else if (cz > bz1 - 1) cz = bz1 - 1;
+    if (cz < bz0 || cz > bz1 - 1) {
+      if (enterAxis < 0) return null; // origin on the box's outer face, moving away
+      cz = cz < bz0 ? bz0 : bz1 - 1; // entry point rounding at an edge
+    }
   }
 
   // Face through which the ray is in the starting cell.

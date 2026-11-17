@@ -3,9 +3,10 @@
  * (seed, x, z).
  *
  * Shape of the world (the game is about ships and windmills):
- *  - "Continentalness" `cont` (three noise scales, domain-warped) decides land vs sea; its
- *    zero contour is the coastline. Roughly half of all columns end up under water, as an
- *    archipelago of islands, larger landmasses, bays and straits.
+ *  - "Continentalness" `cont` (domain-warped noise; regions alternate between larger
+ *    landmasses and fine archipelagos) decides land vs sea; its zero contour is the
+ *    coastline. Roughly half of all columns end up under water, in every region, as
+ *    islands, larger landmasses, bays and straits.
  *  - Under water, depth grows with -cont (shallow shelves near coasts, deep straits).
  *  - On land, height grows with cont, plus rolling hills, terraced cliff bands, ridged
  *    mountains in a few regions, and sea-level lake basins in the lowlands.
@@ -87,6 +88,8 @@ const S_SNOW = 16;
 const S_GROVE = 17;
 const S_FLOOR = 18;
 const S_ROCK = 19;
+const S_CONT_B = 20;
+const S_REGION = 21;
 
 const SEA = SEA_LEVEL;
 
@@ -97,6 +100,8 @@ export class TerrainSampler {
   private readonly sContL: number;
   private readonly sContM: number;
   private readonly sContS: number;
+  private readonly sContB: number;
+  private readonly sRegion: number;
   private readonly sCliff: number;
   private readonly sRug: number;
   private readonly sHill: number;
@@ -120,6 +125,8 @@ export class TerrainSampler {
     this.sContL = deriveSeed(s, S_CONT_L);
     this.sContM = deriveSeed(s, S_CONT_M);
     this.sContS = deriveSeed(s, S_CONT_S);
+    this.sContB = deriveSeed(s, S_CONT_B);
+    this.sRegion = deriveSeed(s, S_REGION);
     this.sCliff = deriveSeed(s, S_CLIFF);
     this.sRug = deriveSeed(s, S_RUG);
     this.sHill = deriveSeed(s, S_HILL);
@@ -145,13 +152,20 @@ export class TerrainSampler {
 
   /** Continentalness from already-warped coordinates (wx, wz) of column (x, z). */
   private contWarped(wx: number, wz: number, x: number, z: number): number {
-    // Large scale = landmass vs open-sea regions; mid = individual islands; small = coast detail.
-    // The large weight is kept modest so any ~500-block window stays roughly half sea.
+    // Island field: a very low-frequency "region" field blends a broad scale (larger
+    // landmasses with bays) and a fine scale (scattered archipelago). Both are zero-mean,
+    // so the blend changes the CHARACTER of a region without shifting its land/sea balance:
+    // any ~500-block window stays close to half sea. (A large additive term would tilt
+    // whole windows towards land or sea, so it is kept small.)
+    const t = smoothstep(-0.15, 0.15, fbm2(this.sRegion, x / 1500, z / 1500, 2));
+    const fine = t < 1 ? fbm2(this.sContM, wx / 180, wz / 180, 3) : 0;
+    const broad = t > 0 ? fbm2(this.sContB, wx / 330, wz / 330, 3) : 0;
+    const islands = fine + (broad - fine) * t;
     return (
-      0.3 * fbm2(this.sContL, wx / 1100, wz / 1100, 2) +
-      0.55 * fbm2(this.sContM, wx / 300, wz / 300, 3) +
-      0.17 * fbm2(this.sContS, x / 80, z / 80, 2) +
-      0.012
+      0.08 * fbm2(this.sContL, wx / 1100, wz / 1100, 2) +
+      0.62 * islands +
+      0.18 * fbm2(this.sContS, x / 80, z / 80, 2) + // coast detail and islets
+      0.005
     );
   }
 
@@ -371,12 +385,6 @@ export class ColumnRegion {
   /** Index of world column (x, z); the caller guarantees it lies inside the region. */
   index(x: number, z: number): number {
     return x - this.x0 + (z - this.z0) * this.size;
-  }
-
-  contains(x: number, z: number): boolean {
-    const ix = x - this.x0;
-    const iz = z - this.z0;
-    return ix >= 0 && iz >= 0 && ix < this.size && iz < this.size;
   }
 }
 

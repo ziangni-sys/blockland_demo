@@ -103,11 +103,11 @@ function setRGB(out: RGB, c: Readonly<RGB>): RGB {
 // Authoring palette (sRGB hex -> linear). Original palette, tuned by eye in the dev harness.
 const DAY_ZENITH: Readonly<RGB> = Object.freeze(hexToLinear(0x3a78d8));
 const DAY_HORIZON: Readonly<RGB> = Object.freeze(hexToLinear(0xa8cdef));
-const TWILIGHT_ZENITH: Readonly<RGB> = Object.freeze(hexToLinear(0x3d4f8f));
-const TWILIGHT_HORIZON: Readonly<RGB> = Object.freeze(hexToLinear(0xf0a070));
+const TWILIGHT_ZENITH: Readonly<RGB> = Object.freeze(hexToLinear(0x33467f));
+const TWILIGHT_HORIZON: Readonly<RGB> = Object.freeze(hexToLinear(0xc9a3a6));
 const NIGHT_ZENITH: Readonly<RGB> = Object.freeze(hexToLinear(0x03060f));
 const NIGHT_HORIZON: Readonly<RGB> = Object.freeze(hexToLinear(0x0d1528));
-const SUN_GLOW: Readonly<RGB> = Object.freeze(hexToLinear(0xff8a3c));
+const SUN_GLOW: Readonly<RGB> = Object.freeze(hexToLinear(0xff8a3a));
 
 const SKY_TINT_DAY: Readonly<RGB> = Object.freeze(hexToLinear(0xfffaf2));
 const SKY_TINT_TWILIGHT: Readonly<RGB> = Object.freeze(hexToLinear(0xffd2a6));
@@ -116,7 +116,7 @@ const SKY_TINT_NIGHT: Readonly<RGB> = Object.freeze(hexToLinear(0x9db4ff));
 export const BLOCK_TINT: Readonly<RGB> = Object.freeze(hexToLinear(0xffd29a));
 
 const SUN_CORE: Readonly<RGB> = Object.freeze(hexToLinear(0xfff6d8));
-const SUN_LOW: Readonly<RGB> = Object.freeze(hexToLinear(0xffb060));
+const SUN_LOW: Readonly<RGB> = Object.freeze(hexToLinear(0xff9440));
 const MOON_CORE: Readonly<RGB> = Object.freeze(hexToLinear(0xdfe7ff));
 
 const CLOUD_DAY: Readonly<RGB> = Object.freeze(hexToLinear(0xffffff));
@@ -170,8 +170,10 @@ export interface SkyState {
   moonDir: Dir3;
   zenith: RGB;
   horizon: RGB;
-  /** Glow added around the sun near the horizon (already scaled by twilight strength). */
+  /** Colour of the twilight glow around the sun's side of the horizon. */
   sunGlow: RGB;
+  /** 0..1 strength of that glow (peaks at sunrise / sunset). */
+  glowStrength: number;
   sunColor: RGB;
   moonColor: RGB;
   /** Multiplies skylight on terrain. */
@@ -193,6 +195,7 @@ export function createSkyState(): SkyState {
     zenith: c(),
     horizon: c(),
     sunGlow: c(),
+    glowStrength: 0,
     sunColor: c(),
     moonColor: c(),
     skyTint: c(),
@@ -228,10 +231,8 @@ export function computeSkyState(dayTime: number, out: SkyState): SkyState {
   mixRGB(out.zenith, TWILIGHT_ZENITH, twz * (1 - night * 0.6), out.zenith);
   mixRGB(out.horizon, TWILIGHT_HORIZON, tw * (1 - night * 0.5), out.horizon);
 
-  const glow = tw * (1 - night * 0.7);
-  out.sunGlow.r = SUN_GLOW.r * glow;
-  out.sunGlow.g = SUN_GLOW.g * glow;
-  out.sunGlow.b = SUN_GLOW.b * glow;
+  out.glowStrength = tw * (1 - night * 0.75);
+  setRGB(out.sunGlow, SUN_GLOW);
 
   mixRGB(SUN_CORE, SUN_LOW, tw, out.sunColor);
   setRGB(out.moonColor, MOON_CORE);

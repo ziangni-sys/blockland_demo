@@ -14,27 +14,6 @@ export function slotEq(a: SlotView | null | undefined, b: SlotView | null | unde
   return a.item === b.item && a.count === b.count;
 }
 
-/** Same item (ignoring count), treating null/undefined as "empty". */
-export function sameItem(a: SlotView | null | undefined, b: SlotView | null | undefined): boolean {
-  const ia = a ? a.item : -1;
-  const ib = b ? b.item : -1;
-  return ia === ib;
-}
-
-export function slotsEq(a: ReadonlyArray<SlotView | null>, b: ReadonlyArray<SlotView | null>): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (!slotEq(a[i], b[i])) return false;
-  return true;
-}
-
-export function stringsEq(a: readonly string[] | null, b: readonly string[] | null): boolean {
-  if (a === b) return true;
-  if (!a || !b || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
-
 export function settingsEq(a: Settings, b: Settings): boolean {
   return (
     a === b ||
@@ -94,29 +73,4 @@ export function diffKeyed<K>(prev: readonly K[], next: readonly K[]): KeyedDiff<
   for (const k of next) if (!prevSet.has(k)) added.push(k);
   for (const k of prev) if (!nextSet.has(k)) removed.push(k);
   return { added, removed };
-}
-
-/**
- * Memo of the last value written to one DOM property. `set` reports whether the value
- * changed, so callers write the DOM only then.
- */
-export class Memo<T> {
-  private has = false;
-  private value: T | undefined;
-
-  /** True (and remembers `v`) when `v` differs from the stored value or nothing is stored. */
-  set(v: T): boolean {
-    if (this.has && Object.is(this.value, v)) return false;
-    this.has = true;
-    this.value = v;
-    return true;
-  }
-  get(): T | undefined {
-    return this.value;
-  }
-  /** Forget the stored value so the next `set` always reports a change. */
-  reset(): void {
-    this.has = false;
-    this.value = undefined;
-  }
 }

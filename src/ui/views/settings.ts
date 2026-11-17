@@ -3,6 +3,7 @@
  * Sliders report live (on 'input') so FOV and distance can be previewed while dragging.
  */
 import type { UiContext } from '../context';
+import { settingsEq } from '../diff';
 import { clamp, formatFov, formatSensitivity } from '../format';
 import { LANGUAGE_NAMES, type StringKey } from '../i18n';
 import type { Language, Settings, UiState } from '../model';
@@ -50,10 +51,15 @@ class Slider {
     this.row = h(d, 'div', 'bl-field', null, [ctx.text(h(d, 'label', 'bl-field-label', { for: id }), spec.label), this.input, this.out]);
   }
 
+  /**
+   * Reflect the stored value. While the slider has focus the player owns it (a drag or arrow
+   * key in progress), so a lagging echo from the client must not yank the thumb back; the
+   * view re-syncs once focus leaves.
+   */
   set(v: number, force = false): void {
     if (v === this.value && !force) return;
-    // Don't fight the thumb while it is being dragged: the client echoes what we sent.
-    if (this.ctx.doc.activeElement !== this.input || Number(this.input.value) !== v) this.input.value = String(v);
+    if (!force && this.ctx.doc.activeElement === this.input) return;
+    if (Number(this.input.value) !== v) this.input.value = String(v);
     this.show(v);
   }
 
@@ -79,12 +85,15 @@ export class SettingsView implements ScreenView {
   private readonly debug: Switch;
   private readonly lang: Segmented<Language>;
   private last: Settings | null = null;
+  /** Settings of the most recent update (reference, not a copy), for the focus-out re-sync. */
+  private latest: Settings | null = null;
 
   constructor(private readonly ctx: UiContext) {
     const d = ctx.doc;
     const a = ctx.actions;
     const titleId = ctx.id('settings');
-    const mk = (key: NumericKey): Slider => new Slider(ctx, SLIDERS[key], (v) => a.changeSettings({ [key]: v }));
+    const mk = (key: NumericKey): Slider =>
+      new Slider(ctx, SLIDERS[key], (v) => a.changeSettings({ [key]: v }));
     const dist = mk('renderDistance');
     const fov = mk('fov');
     const sens = mk('sensitivity');
@@ -123,12 +132,23 @@ export class SettingsView implements ScreenView {
       h(d, 'div', 'bl-actions', null, [back]),
     ]);
     this.el = h(d, 'div', 'bl-screen bl-screen--overlay bl-settings', { hidden: true, 'data-screen': 'settings' }, [this.panel]);
+    // A slider the player was holding may show a value the client clamped or refused; once it
+    // lets go, snap it to the stored setting. (Done here rather than in update(): the client
+    // may keep passing the very same state object, which the root skips.)
+    this.panel.addEventListener('focusout', (e) => {
+      const st = this.latest;
+      if (!st) return;
+      if (e.target === dist.input) dist.set(st.renderDistance, true);
+      else if (e.target === fov.input) fov.set(st.fov, true);
+      else if (e.target === sens.input) sens.set(st.sensitivity, true);
+    });
   }
 
   update(s: UiState): void {
     const st = s.settings;
-    if (this.last === st) return;
-    this.last = st;
+    this.latest = st;
+    if (this.last && settingsEq(this.last, st)) return;
+    this.last = { ...st };
     this.sliders[0]!.set(st.renderDistance);
     this.sliders[1]!.set(st.fov);
     this.sliders[2]!.set(st.sensitivity);

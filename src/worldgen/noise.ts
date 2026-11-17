@@ -297,8 +297,3 @@ export function smoothstep(e0: number, e1: number, v: number): number {
   t = t < 0 ? 0 : t > 1 ? 1 : t;
   return t * t * (3 - 2 * t);
 }
-
-/** Clamp to [0, 1]. */
-export function saturate(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}

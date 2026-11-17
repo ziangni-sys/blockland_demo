@@ -39,7 +39,7 @@ import {
   type SurfaceSeeds,
 } from './surface';
 import { ColumnRegion, createColumnSample, REGION_MARGIN, REGION_SIZE, TerrainSampler } from './terrain';
-import { findTrees, stampTrees, TREE_MAX_HEIGHT, TREE_REACH, TreeList } from './trees';
+import { findTrees, stampTrees, TREE_REACH, TreeList } from './trees';
 
 /** A source of chunk columns. */
 export interface ChunkGenerator {
@@ -269,9 +269,9 @@ export class TerrainGenerator implements ChunkGenerator {
     const snowy = top >= r.snowLine[ri]!;
 
     if (snowy) {
-      // Snow settles on the highest solid cell of the column: ground, rock or a tree crown.
-      const yStart = Math.min(WORLD_HEIGHT - 2, top + TREE_MAX_HEIGHT + 1);
-      for (let y = yStart; y >= top - 1 && y >= 1; y--) {
+      // Snow settles on the highest solid cell of the column: ground, rock or a tree crown
+      // (possibly the crown of a tree rooted on higher ground next door).
+      for (let y = WORLD_HEIGHT - 2; y >= top - 1 && y >= 1; y--) {
         const c = cells[ci | (y << 8)]!;
         if (c === AIR) continue;
         if (SOLID[c & ID_MASK] === 1 && LIQUID[c & ID_MASK] === 0 && cells[ci | ((y + 1) << 8)] === AIR) {

@@ -87,7 +87,7 @@ export function classifySurface(r: ColumnRegion, i: number, x: number, z: number
   // and conifers) so cold regions read as snowy forest rather than flat white sheets.
   if (top >= r.snowLine[i]! + 3 && top >= SNOW_CAP_MIN_Y && slope <= 2) return SURF_SNOW;
   if (r.rock[i]! > 0.42 + 0.4 * jit) return SURF_STONE;
-  if (r.dry[i]! > 0.3 + 0.35 * jit) return SURF_SAND;
+  if (r.dry[i]! > 0.22 + 0.5 * jit) return SURF_SAND;
   if (biome === BIOME.SHORE) {
     if (top <= SEA_LEVEL && simplex2(ss.gravel, x / 22, z / 22) > 0.5) return SURF_GRAVEL;
     // The sand fades into turf a block or two above the waterline.

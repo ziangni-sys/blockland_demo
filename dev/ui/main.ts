@@ -6,6 +6,7 @@
  *   helm=1  air=<0..300>  health=<0..20>  hint=<text|1>  toasts=<n>  debug=1  locked=1  drag=1
  *   worlds=<n>  icons=placeholder  panel=1  cursor=<itemId>  from=pause|mainMenu  progress=<0..1>
  *   animate=1 (helm / debug values change every frame, like a running game)
+ *   clamp=1   (the fake client caps FOV at 100, to test that the UI shows what the client kept)
  *
  * window.harness: { state(), set(patch), show(screen), log, clearLog(), perf(n), ui }
  * Every UiActions call is appended to window.harness.log as { name, args }.
@@ -189,6 +190,8 @@ const actions: UiActions = {
   changeSettings(patch) {
     record('changeSettings', [patch]);
     const settings = { ...state.settings, ...patch };
+    // ?clamp=1 simulates a client that refuses part of a change (FOV capped at 100).
+    if (flag('clamp')) settings.fov = Math.min(100, settings.fov);
     set({ settings, debug: settings.showDebug ? debugLines(0) : null });
   },
   setMode(mode) {

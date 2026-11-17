@@ -112,9 +112,7 @@ describe('raycastGrid — world', () => {
   });
 
   it('works for negative coordinates across chunk borders', () => {
-    const w = emptyWorld();
-    w.setCell(-17, 5, -33, STONE); // chunk (-2,-3) is not loaded -> load a dedicated world
-    const w2 = emptyWorld(-3, 0);
+    const w2 = emptyWorld(-3, 0); // chunks -3..0: the ray crosses several chunk borders
     w2.setCell(-17, 5, -33, STONE);
     const from = vec3(-1.2, 7.3, -20.4);
     const target = vec3(-16.5, 5.5, -32.5);
@@ -123,7 +121,6 @@ describe('raycastGrid — world', () => {
     expect([h.x, h.y, h.z]).toEqual([-17, 5, -33]);
     const ref = referenceRay(w2, [[-17, 5, -33]], from, dir, 40)!;
     expect(h.dist).toBeCloseTo(ref.t, 12);
-    void w;
   });
 
   it('a ray running exactly along a cell boundary plane uses the half-open cell convention', () => {
@@ -389,5 +386,33 @@ describe('raycastGrids', () => {
     const c = ship.toWorld(vec3(0.5, 0.5, 0.5));
     const h = raycastGrids(new Set<VoxelGrid>([ship]), vec3(c.x, c.y + 5, c.z), vec3(0, -1, 0), 10)!;
     expect(h.grid).toBe(ship);
+  });
+});
+
+describe('raycastGrid — box surface edge cases', () => {
+  it('an origin on the bounds max face moving outward misses; moving inward hits', () => {
+    const world = new World();
+    const s = structure(world, 1, vec3(0, 0, 0), qidentity());
+    fill(s, 0, 0, 0, 2, 2, 2);
+    // Origin exactly on the plane x = 2 (the bounds max face), cell (1,0,0) behind it.
+    expect(raycastGrid(s, vec3(2, 0.5, 0.5), vec3(1, 0, 0), 10)).toBeNull();
+    const h = raycastGrid(s, vec3(2, 0.5, 0.5), vec3(-1, 0, 0), 10)!;
+    expect([h.x, h.dist, h.face]).toEqual([1, 0, PX]);
+    // Origin on the min face moving outward.
+    expect(raycastGrid(s, vec3(0, 0.5, 0.5), vec3(-1, 0, 0), 10)).toBeNull();
+    // World build limit: origin exactly at y = WORLD_HEIGHT moving up.
+    const w = emptyWorld();
+    expect(raycastGrid(w, vec3(0.5, 128, 0.5), vec3(0, 1, 0), 10)).toBeNull();
+  });
+
+  it('a ray grazing exactly along an edge of the bounds still terminates sensibly', () => {
+    const world = new World();
+    const s = structure(world, 1, vec3(0, 0, 0), qidentity());
+    fill(s, 0, 0, 0, 2, 2, 2);
+    const h = raycastGrid(s, vec3(-3, 2, 0.5), vec3(1, 0, 0), 10);
+    expect(h).toBeNull(); // y = 2 is the top boundary plane: half-open cells, nothing above it
+    const d = unit(1, -1, 0);
+    const h2 = raycastGrid(s, vec3(-1, 3, 0.5), d, 10)!; // passes exactly through the corner (0,2)
+    expect(h2.dist).toBeCloseTo(Math.SQRT2, 12);
   });
 });

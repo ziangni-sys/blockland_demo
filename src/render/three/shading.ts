@@ -48,6 +48,7 @@ import {
   texture3D,
   uniform,
   uv,
+  vec2,
   vec3,
   vec4,
   vertexStage,
@@ -57,6 +58,8 @@ import { AMBIENT_FLOOR, FACE_BOTTOM, FACE_TOP, FACE_X, FACE_Z, LIGHT_CURVE_K, ty
 
 /** Number of structures whose dry volumes cut world water at the same time. */
 export const DRY_SLOTS = 4;
+/** Linearly filtered mask value above which world water is cut (see makeMaskTexture). */
+const DRY_THRESHOLD = 0.2;
 
 type N<T> = Node<T>;
 
@@ -68,7 +71,8 @@ export class SharedUniforms {
   readonly blockTint = uniform(new THREE.Vector3(1, 0.8, 0.6)).setGroup(renderGroup);
   readonly zenith = uniform(new THREE.Vector3(0.1, 0.3, 0.8)).setGroup(renderGroup);
   readonly horizon = uniform(new THREE.Vector3(0.5, 0.7, 0.9)).setGroup(renderGroup);
-  readonly sunGlow = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
+  readonly sunGlow = uniform(new THREE.Vector3(1, 0.5, 0.2)).setGroup(renderGroup);
+  readonly glowStrength = uniform(0).setGroup(renderGroup);
   readonly sunDir = uniform(new THREE.Vector3(0, 1, 0)).setGroup(renderGroup);
   readonly moonDir = uniform(new THREE.Vector3(0, -1, 0)).setGroup(renderGroup);
   readonly sunColor = uniform(new THREE.Vector3(1, 1, 1)).setGroup(renderGroup);
@@ -98,6 +102,7 @@ export class SharedUniforms {
     this.zenith.value.set(s.zenith.r, s.zenith.g, s.zenith.b);
     this.horizon.value.set(s.horizon.r, s.horizon.g, s.horizon.b);
     this.sunGlow.value.set(s.sunGlow.r, s.sunGlow.g, s.sunGlow.b);
+    this.glowStrength.value = s.glowStrength;
     this.sunDir.value.set(s.sunDir.x, s.sunDir.y, s.sunDir.z);
     this.moonDir.value.set(s.moonDir.x, s.moonDir.y, s.moonDir.z);
     this.sunColor.value.set(s.sunColor.r, s.sunColor.g, s.sunColor.b);
@@ -161,9 +166,13 @@ export function skyGradientNode(u: SharedUniforms, dir: N<'vec3'>): N<'vec3'> {
   const below = clamp(h.negate().mul(3), 0, 1);
   const base = mix(u.horizon, u.zenith, t).mul(float(1).sub(below.mul(0.25)));
   const toSun = max(dot(dir, u.sunDir), 0);
-  const nearHorizon = float(1).sub(up).mul(float(1).sub(below));
-  const glow = u.sunGlow.mul(pow(toSun, 5).mul(0.9).add(pow(toSun, 32).mul(0.6))).mul(nearHorizon);
-  return base.add(glow);
+  // Twilight glow: a broad lobe along the horizon centred on the sun's azimuth (so the far
+  // side of the sky stays dusky) plus a tighter halo around the sun itself.
+  const azimuth = max(dot(normalize(dir.xz.add(vec2(1e-5, 0))), normalize(u.sunDir.xz.add(vec2(1e-5, 0)))), 0);
+  const nearHorizon = pow(float(1).sub(up), 3).mul(float(1).sub(below.mul(0.7)));
+  const lobe = pow(azimuth, 3).mul(nearHorizon).mul(0.9).add(pow(toSun, 24).mul(0.6));
+  // Blend rather than add: adding on top of the bright horizon only washes it out to white.
+  return mix(base, u.sunGlow, clamp(lobe.mul(u.glowStrength), 0, 1));
 }
 
 /** Fog blend factor 0..1 and colour for a world position. */
@@ -310,7 +319,7 @@ export function createVoxelMaterials(
       const dry = dryVolumeFactor(u, worldPos, dryTextures, dryNodes);
       const li = float(layer);
       const isWater = li.equal(u.waterLayers.x).or(li.equal(u.waterLayers.y));
-      const cut = objUniform.w.greaterThan(0.5).and(isWater).and(dry.greaterThan(0.5));
+      const cut = objUniform.w.greaterThan(0.5).and(isWater).and(dry.greaterThan(DRY_THRESHOLD));
       m.transparent = true;
       m.depthWrite = false;
       m.side = THREE.DoubleSide;
@@ -372,7 +381,7 @@ export function createVoxelMaterials(
 
 /**
  * Dry-volume test (docs/LESSONS.md "船舱里冒出水面": the water stays in the world, the renderer
- * cuts it). Returns > 0.5 where the fragment lies inside the dry mask of one of the nearest
+ * cuts it). Returns > DRY_THRESHOLD where the fragment lies inside the dry mask of one of the nearest
  * structures. Built eagerly (outside any Fn) so the four texture nodes exist exactly once and
  * the backend can retarget them every frame. Texture fetches are unconditional (uniform
  * control flow); only the results are selected per slot.

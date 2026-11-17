@@ -7,8 +7,14 @@
  * (Dir 0..5), so the result (including the order of `cells`) is deterministic. The queue is
  * a typed array that doubles as the result list; the visited set is an open-addressing hash
  * of int32 triples (CellSet), so negative structure-local coordinates work everywhere.
+ *
+ * Unloaded chunks read as CELL_UNLOADED, which can never join a structure, so a fill cannot
+ * cross into them. Instead of silently returning the loaded part as if it were complete, a
+ * fill that had to look at an unloaded cell reports 'unloaded' (ok = false): assembling it
+ * would leave the rest of the structure behind and delete the glue across the chunk border.
  */
-import { cellState, stateFacing } from '../blocks/cell';
+import { cellState, ID_MASK, stateFacing } from '../blocks/cell';
+import { CELL_UNLOADED } from '../blocks/defs';
 import { ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, dirSign, type Dir } from '../core/dirs';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
@@ -116,7 +122,12 @@ export class CellSet {
 
 // ------------------------------------------------------------ results
 
-export type CollectReason = 'ok' | 'not_a_helm' | 'not_a_bearing' | 'no_hub' | 'too_big' | 'not_enough_sails';
+/**
+ * Why a collect failed. 'unloaded' (an extension of the contract list): the structure touches
+ * a cell of an unloaded chunk, so it may continue there; `cells` holds the loaded part only.
+ * When several apply: 'too_big' > 'unloaded' > 'not_enough_sails'.
+ */
+export type CollectReason = 'ok' | 'not_a_helm' | 'not_a_bearing' | 'no_hub' | 'too_big' | 'not_enough_sails' | 'unloaded';
 
 export interface CollectResult {
   ok: boolean;
@@ -124,6 +135,7 @@ export interface CollectResult {
   /**
    * x,y,z triples in BFS order, start cell first; exactly `count` triples. When too_big, the
    * fill stopped as soon as it found cell number maxCells + 1, so it holds maxCells + 1 cells.
+   * When unloaded, it holds every connected cell that is loaded.
    */
   cells: Int32Array;
   count: number;
@@ -137,11 +149,20 @@ function failure(reason: CollectReason): CollectResult {
   return { ok: false, reason, cells: new Int32Array(0), count: 0, sails: 0, bounds: null };
 }
 
-/** Validates a limit and floors it. Infinity is allowed (no limit); NaN and negatives throw. */
+/**
+ * Validates a limit: Infinity is allowed (no limit); NaN and negatives throw a RangeError.
+ * The limits are compared exactly as the contract words them — 'too_big' when count >
+ * maxCells, 'not_enough_sails' when sails < minSails — so with integer counts a fractional
+ * maxCells behaves like its floor and a fractional minSails like its ceiling (3 sails ARE
+ * fewer than 3.5). Returns floor(v): for maxCells that gives the same verdict (count > v
+ * exactly when count > floor(v)) and is what the queue is sized from; minSails is used as given.
+ */
 function checkLimit(name: string, v: number): number {
   if (!(v >= 0)) throw new RangeError(`${name} must be >= 0, got ${v}`);
   return Math.floor(v);
 }
+
+const UNLOADED_ID = CELL_UNLOADED & ID_MASK;
 
 // ------------------------------------------------------------ flood fill
 
@@ -151,6 +172,8 @@ interface Fill {
   sails: number;
   bounds: CellBounds;
   tooBig: boolean;
+  /** A neighbour the fill had to examine lies in an unloaded chunk. */
+  unloaded: boolean;
 }
 
 const INITIAL_CAPACITY = 256;
@@ -199,6 +222,12 @@ class FillQueue {
  * halfAxis >= 0 restricts the fill to cells whose coordinate along that axis is strictly
  * beyond `plane` in direction `sign` (the rotor half-space). excludeFunc rejects functional
  * blocks (rotors). Stops as soon as more than maxCells cells were found.
+ *
+ * `unloaded` is set when any neighbour the fill examines (inside the half-space) reads as
+ * CELL_UNLOADED. Its content is unknown, so it may well belong to the structure (it could be
+ * glued to, stick to or be mounted on the collected cell next to it); the flag does not try to
+ * rule that out. Conversely, when it stays false and the fill was not cut short, every
+ * neighbour of every collected cell was read, so the result is the complete structure.
  */
 function flood(
   grid: VoxelGrid,
@@ -218,6 +247,7 @@ function flood(
   q.push(sx, sy, sz, start);
   visited.add(sx, sy, sz);
   let tooBig = maxCells < 1;
+  let unloaded = false;
 
   let head = 0;
   fill: while (head < q.n && !tooBig) {
@@ -237,7 +267,10 @@ function flood(
       }
       const nc = grid.getCell(nx, ny, nz);
       // Cheap rejections first: most neighbours are air or already collected.
-      if (!canJoinStructure(nc)) continue;
+      if (!canJoinStructure(nc)) {
+        if ((nc & ID_MASK) === UNLOADED_ID) unloaded = true;
+        continue;
+      }
       if (excludeFunc && isFunctionalCell(nc)) continue;
       if (visited.has(nx, ny, nz)) continue;
       if (!connectedCells(cell, nc, d as Dir, glue, x, y, z)) continue;
@@ -281,6 +314,7 @@ function flood(
     sails,
     bounds: { minX, minY, minZ, maxX: maxX + 1, maxY: maxY + 1, maxZ: maxZ + 1 },
     tooBig,
+    unloaded,
   };
 }
 
@@ -292,10 +326,8 @@ function flood(
  * propellers, torches) are part of the ship. Blocks in front of a bearing (a stopped windmill)
  * come along only when the rules reach them, e.g. through glue between the bearing and its hub.
  *
- * Reasons: 'not_a_helm' (start cell is not a helm), 'too_big' (more than maxCells cells).
- *
- * The world returns CELL_UNLOADED (unbreakable) for unloaded chunks, so the fill never crosses
- * into them; callers should check world.isAreaLoaded() around `bounds` before assembling.
+ * Reasons: 'not_a_helm' (start cell is not a helm), 'too_big' (more than maxCells cells),
+ * 'unloaded' (the ship touches an unloaded chunk; `cells` is its loaded part).
  */
 export function collectShip(
   grid: VoxelGrid,
@@ -309,9 +341,10 @@ export function collectShip(
   const start = grid.getCell(hx, hy, hz);
   if (cellFunc(start) !== 'helm') return failure('not_a_helm');
   const f = flood(grid, glue, hx, hy, hz, start, maxCells, -1, 0, 0, false);
+  const reason: CollectReason = f.tooBig ? 'too_big' : f.unloaded ? 'unloaded' : 'ok';
   return {
-    ok: !f.tooBig,
-    reason: f.tooBig ? 'too_big' : 'ok',
+    ok: reason === 'ok',
+    reason,
     cells: f.cells,
     count: f.count,
     sails: f.sails,
@@ -326,7 +359,9 @@ export function collectShip(
  * every functional block (helm, bearing, propeller) are never included and stop the fill.
  *
  * Reasons: 'not_a_bearing'; 'no_hub' (the hub cannot join a structure, or is functional);
- * 'too_big' (more than maxCells cells); 'not_enough_sails' (fewer than minSails sail cells).
+ * 'too_big' (more than maxCells cells); 'unloaded' (the hub, or a cell the rotor touches,
+ * lies in an unloaded chunk; checked before the sails, which may be in the missing part);
+ * 'not_enough_sails' (fewer than minSails sail cells, compared as given: 3 < 3.5).
  * For 'not_enough_sails' `cells` holds the complete rotor, so the preview can still show it.
  */
 export function collectRotor(
@@ -339,7 +374,7 @@ export function collectRotor(
   minSails: number = ROTOR_MIN_SAILS,
 ): CollectResult {
   maxCells = checkLimit('maxCells', maxCells);
-  checkLimit('minSails', minSails);
+  checkLimit('minSails', minSails); // validated only: compared as given (see checkLimit)
   const bearing = grid.getCell(bx, by, bz);
   if (cellFunc(bearing) !== 'bearing') return failure('not_a_bearing');
   const facing = stateFacing(cellState(bearing));
@@ -347,11 +382,18 @@ export function collectRotor(
   const hy = by + DIR_Y[facing]!;
   const hz = bz + DIR_Z[facing]!;
   const hub = grid.getCell(hx, hy, hz);
+  if ((hub & ID_MASK) === UNLOADED_ID) return failure('unloaded'); // a hub may well be there
   if (!canJoinStructure(hub) || isFunctionalCell(hub)) return failure('no_hub');
   const axis = facing >> 1;
   const plane = axis === 0 ? bx : axis === 1 ? by : bz;
   const f = flood(grid, glue, hx, hy, hz, hub, maxCells, axis, plane, dirSign(facing), true);
-  const reason: CollectReason = f.tooBig ? 'too_big' : f.sails < minSails ? 'not_enough_sails' : 'ok';
+  const reason: CollectReason = f.tooBig
+    ? 'too_big'
+    : f.unloaded
+      ? 'unloaded'
+      : f.sails < minSails
+        ? 'not_enough_sails'
+        : 'ok';
   return {
     ok: reason === 'ok',
     reason,

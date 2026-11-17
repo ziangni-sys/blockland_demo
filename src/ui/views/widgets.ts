@@ -329,7 +329,9 @@ export class SlotWidget {
     if (on === this.selected) return;
     this.selected = on;
     this.el.classList.toggle('is-selected', on);
-    this.el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    // The selected hotbar slot is the "current" item, not a pressed toggle.
+    if (on) this.el.setAttribute('aria-current', 'true');
+    else this.el.removeAttribute('aria-current');
   }
 
   /** Item id shown, -1 when empty. */

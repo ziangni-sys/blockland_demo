@@ -71,8 +71,8 @@ export class CaveCarver {
   }
 
   /**
-   * Carve density at a world point: < 0 inside a cave. Pure function of (seed, x, y, z);
-   * exposed for tests. Evaluated only at lattice points during generation.
+   * Carve density at a world point: < 0 inside a cave. Pure function of (seed, x, y, z).
+   * Generation evaluates it only at lattice points and interpolates in between.
    */
   density(x: number, y: number, z: number): number {
     // Two tunnel systems at different scales (fine winding passages + long galleries), each
@@ -95,8 +95,8 @@ export class CaveCarver {
 
   /**
    * Carve the chunk with corner column (x0, z0).
-   * @param ceiling per chunk column (lx | lz << 4): highest y that may be carved (exclusive
-   *   of nothing: cells with y <= ceiling may go). Use a value < MIN_CAVE_Y to protect a column.
+   * @param ceiling per chunk column (lx | lz << 4): highest y that may be carved
+   *   (inclusive). A value below MIN_CAVE_Y protects the whole column.
    * @param surface per chunk column: y of the terrain surface (for the surface taper).
    */
   carve(cells: Uint16Array, x0: number, z0: number, ceiling: Int16Array, surface: Int16Array): void {

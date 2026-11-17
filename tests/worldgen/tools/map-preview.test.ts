@@ -4,7 +4,8 @@
  *   WORLDGEN_PREVIEW=1 WORLDGEN_OUT=/tmp/maps WORLDGEN_SEEDS=1,2,3 WORLDGEN_SIZE=768 \
  *     npx vitest run tests/worldgen/tools
  *
- * WORLDGEN_SPAWN_CENTRE=1 centres the maps on the spawn point instead of the origin.
+ * WORLDGEN_SPAWN_CENTRE=1 centres the maps on the spawn point instead of the origin;
+ * WORLDGEN_FOCUS=x,z adds a zoom view around that column.
  */
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +19,9 @@ describe.runIf(enabled)('worldgen map preview (tool)', () => {
     const seeds = (process.env.WORLDGEN_SEEDS ?? '1,2,3').split(',').map((s) => Number(s.trim()) >>> 0);
     const size = Number(process.env.WORLDGEN_SIZE ?? 768);
     const outDir = process.env.WORLDGEN_OUT ?? join(tmpdir(), 'blocklands-worldgen');
-    const stats = renderPreviews({ seeds, size, outDir, centreOnSpawn: !!process.env.WORLDGEN_SPAWN_CENTRE });
+    const focusArg = process.env.WORLDGEN_FOCUS?.split(',').map(Number);
+    const focus = focusArg && focusArg.length === 2 ? { x: focusArg[0]!, z: focusArg[1]! } : undefined;
+    const stats = renderPreviews({ seeds, size, outDir, centreOnSpawn: !!process.env.WORLDGEN_SPAWN_CENTRE, focus });
     for (const s of stats) {
       const biomes = Object.entries(s.biomeFractions)
         .map(([k, v]) => `${k} ${(v * 100).toFixed(1)}%`)

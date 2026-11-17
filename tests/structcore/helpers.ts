@@ -187,3 +187,30 @@ export function glueKeys(g: GlueStore): string[] {
   g.forEach((x, y, z, axis) => out.push(`${x},${y},${z},${axis}`));
   return out.sort();
 }
+
+/** Bearing of the millShip windmill (facing +Z, mounted on the mast top behind it). */
+export const MILL_BEARING: readonly [number, number, number] = [0, 65, -2];
+/** Helm of the millShip (facing north). */
+export const SHIP_HELM: readonly [number, number, number] = [0, 61, 2];
+/** Cells of the millShip hull without the windmill: 49 deck + 5 mast + bearing + helm + 2 logs. */
+export const SHIP_CELLS = 58;
+/** Cells of the millShip windmill: canvas hub + 4 arms of 2 felt. */
+export const MILL_CELLS = 9;
+
+/**
+ * A raft of planks (7 x 7 at y = 60, x,z in [-3, 3]) with a helm facing north at (0,61,2), a
+ * planks mast at (0, 61..65, -3), two X-axis logs at (2..3, 61, 0) glued to the deck, one
+ * redundant glued deck face, and a windmill (arm 2) on a bearing at (0,65,-2) facing +Z.
+ * With `hubGlue` the hub is glued to the bearing, so a stopped windmill assembles with the ship.
+ */
+export function millShip(g: VoxelGrid, glue: GlueStore, hubGlue = false): void {
+  fill(g, -3, 60, -3, 3, 60, 3, c(B.PLANKS_OAK));
+  fill(g, 0, 61, -3, 0, 65, -3, c(B.PLANKS_PINE));
+  g.setCell(SHIP_HELM[0], SHIP_HELM[1], SHIP_HELM[2], facing(B.HELM, 5 /* north */));
+  g.setCell(2, 61, 0, log(0));
+  g.setCell(3, 61, 0, log(0));
+  glue.add(2, 61, 0, 3 /* down */);
+  glue.add(-3, 60, -3, 4 /* +Z */);
+  windmill(g, MILL_BEARING[0], MILL_BEARING[1], MILL_BEARING[2], 2);
+  if (hubGlue) glue.add(MILL_BEARING[0], MILL_BEARING[1], MILL_BEARING[2], 4 /* +Z */);
+}

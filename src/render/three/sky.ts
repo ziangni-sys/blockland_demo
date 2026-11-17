@@ -24,6 +24,7 @@ import {
   pow,
   sin,
   smoothstep,
+  step,
   texture,
   vec2,
   vec3,
@@ -83,22 +84,26 @@ export function createSky(u: SharedUniforms): Sky {
 
     // ---- stars (rotating with the sky)
     const sdir = u.starRotation.mul(dir);
-    const sp = sdir.mul(150);
+    // One candidate star per cell of a 3D grid around the unit sphere; a hash decides which
+    // cells hold one, how bright it is and how it twinkles.
+    const sp = sdir.mul(190);
     const cell = floor(sp);
     const h = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))).mul(43758.5453));
     const h2 = fract(sin(dot(cell, vec3(39.346, 11.135, 83.155))).mul(24634.6345));
     const f = fract(sp).sub(0.5);
-    const starShape = smoothstep(0.32, 0.0, length(f));
-    const twinkle = sin(u.time.mul(h2.mul(3).add(1.5)).add(h.mul(40))).mul(0.3).add(0.7);
-    const starAmt = smoothstep(0.9965, 1, h).mul(starShape).mul(twinkle).mul(u.stars).mul(smoothstep(-0.02, 0.15, dir.y));
-    col = col.add(vec3(0.85, 0.9, 1).mul(starAmt).mul(h2.mul(0.7).add(0.5)));
+    const starShape = smoothstep(0.45, 0.05, length(f));
+    const twinkle = sin(u.time.mul(h2.mul(3).add(1.5)).add(h.mul(40))).mul(0.25).add(0.75);
+    const starAmt = step(0.992, h).mul(starShape).mul(twinkle).mul(u.stars).mul(smoothstep(-0.02, 0.15, dir.y));
+    const warm = vec3(1, 0.9, 0.78);
+    const cool = vec3(0.78, 0.86, 1);
+    col = col.add(mix(cool, warm, h2).mul(starAmt).mul(h2.mul(1.4).add(0.6)));
 
     // ---- sun: hot core, warm halo
     const sunUp = smoothstep(-0.12, 0.02, u.sunDir.y);
     const toSun = max(dot(dir, u.sunDir), 0);
     const sunCore = disc(dir, u.sunDir, 0.99935, 0.99895);
     const halo = pow(toSun, 220).mul(0.55).add(pow(toSun, 24).mul(0.12));
-    col = col.add(u.sunColor.mul(sunCore.mul(3).add(halo)).mul(sunUp));
+    col = col.add(u.sunColor.mul(sunCore.mul(mix(float(2.2), float(1.1), u.glowStrength)).add(halo)).mul(sunUp));
 
     // ---- moon: pale disc with soft maria from the noise texture
     const moonUp = smoothstep(-0.12, 0.02, u.moonDir.y);
@@ -124,7 +129,7 @@ export function createSky(u: SharedUniforms): Sky {
     const n1s = texture(noise, cuv.add(lightDir2.mul(0.035))).b;
     const selfShadow = clamp(n1.sub(n1s).mul(2.2), 0, 1);
     const cloudLit = u.cloudColor.mul(float(1).sub(selfShadow.mul(0.35)));
-    const glowSide = pow(toSun, 6).mul(u.sunGlow).mul(0.6);
+    const glowSide = pow(toSun, 6).mul(u.sunGlow).mul(u.glowStrength).mul(0.6);
     const cloudCol = cloudLit.add(glowSide);
     col = mix(col, cloudCol, density.mul(above).mul(0.88));
 

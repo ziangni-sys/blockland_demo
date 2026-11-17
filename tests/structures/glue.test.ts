@@ -251,6 +251,47 @@ describe('GlueStore: iteration and box queries', () => {
     expect(s.facesInBox(-Infinity, -Infinity, -Infinity, Infinity, Infinity, Infinity).length).toBe(2);
   });
 
+  // Regression (review): the bounds used to be clamped to [MIN - 1, MAX + 1] before the test,
+  // which squashed a box lying wholly beyond MAX + 1 onto the plane MAX + 1, the far end of
+  // faces keyed on MAX, and reported those faces.
+  it('box queries at the edges of the key range return exactly the faces with an end inside', () => {
+    const s = new GlueStore();
+    s.add(GLUE_MAX_XZ, 0, 0, PX); // x = MAX .. MAX+1
+    s.add(0, 0, GLUE_MAX_XZ, PZ); // z = MAX .. MAX+1
+    s.add(0, GLUE_MAX_Y, 0, PY); // y = MAX_Y .. MAX_Y+1
+    s.add(GLUE_MIN_XZ, 5, 5, PX); // x = MIN .. MIN+1
+    s.add(5, GLUE_MIN_Y, 5, PY); // y = MIN_Y .. MIN_Y+1
+    s.add(GLUE_MAX_XZ, 7, -3, PX);
+    const keys = (fs: GlueFace[]): string[] => fs.map((f) => `${f.x},${f.y},${f.z},${f.axis}`).sort();
+    const count = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): number => {
+      let n = 0;
+      s.forEachInBox(x0, y0, z0, x1, y1, z1, () => n++);
+      return n;
+    };
+    // Boxes wholly beyond the upper end of the range, on each axis.
+    expect(s.facesInBox(GLUE_MAX_XZ + 5, 0, 0, GLUE_MAX_XZ + 10, 0, 0)).toEqual([]);
+    expect(s.facesInBox(-1, -1, GLUE_MAX_XZ + 2, 1, 1, GLUE_MAX_XZ + 5)).toEqual([]);
+    expect(s.facesInBox(0, GLUE_MAX_Y + 5, 0, 0, GLUE_MAX_Y + 10, 0)).toEqual([]);
+    expect(s.facesInBox(-1, GLUE_MAX_Y + 3, -1, 1, GLUE_MAX_Y + 9, 1)).toEqual([]);
+    expect(count(GLUE_MAX_XZ + 2, 7, -3, GLUE_MAX_XZ + 1000, 7, -3)).toBe(0);
+    expect(count(GLUE_MAX_XZ + 10, -1, -1, GLUE_MAX_XZ + 20, 1, 1)).toBe(0);
+    expect(count(GLUE_MAX_XZ + 2, -Infinity, -Infinity, Infinity, Infinity, Infinity)).toBe(0);
+    // ... and wholly below the lower end.
+    expect(s.facesInBox(GLUE_MIN_XZ - 10, 5, 5, GLUE_MIN_XZ - 1, 5, 5)).toEqual([]);
+    expect(s.facesInBox(5, GLUE_MIN_Y - 10, 5, 5, GLUE_MIN_Y - 1, 5)).toEqual([]);
+    expect(count(-Infinity, -Infinity, -Infinity, GLUE_MIN_XZ - 1, Infinity, Infinity)).toBe(0);
+    // A box that just reaches the far end MAX + 1 (or the near end MIN) still finds the face.
+    expect(keys(s.facesInBox(GLUE_MAX_XZ + 1, 0, 0, GLUE_MAX_XZ + 50, 0, 0))).toEqual([`${GLUE_MAX_XZ},0,0,0`]);
+    expect(keys(s.facesInBox(GLUE_MAX_XZ + 1, -Infinity, -Infinity, Infinity, Infinity, Infinity))).toEqual(
+      [`${GLUE_MAX_XZ},0,0,0`, `${GLUE_MAX_XZ},7,-3,0`].sort(),
+    );
+    expect(keys(s.facesInBox(0, GLUE_MAX_Y + 1, 0, 0, GLUE_MAX_Y + 1, 0))).toEqual([`0,${GLUE_MAX_Y},0,1`]);
+    expect(keys(s.facesInBox(-1, -1, GLUE_MAX_XZ + 1, 1, 1, Infinity))).toEqual([`0,0,${GLUE_MAX_XZ},2`]);
+    expect(keys(s.facesInBox(-Infinity, 5, 5, GLUE_MIN_XZ, 5, 5))).toEqual([`${GLUE_MIN_XZ},5,5,0`]);
+    expect(keys(s.facesInBox(5, -Infinity, 5, 5, GLUE_MIN_Y, 5))).toEqual([`5,${GLUE_MIN_Y},5,1`]);
+    expect(count(-Infinity, -Infinity, -Infinity, Infinity, Infinity, Infinity)).toBe(6);
+  });
+
   it('facesInBox does not scan a large store', () => {
     const s = new GlueStore();
     // ~200k faces spread over many buckets, plus a few near the query point.
@@ -324,57 +365,101 @@ function transform(r: (p: P) => P, tx: number, ty: number, tz: number): Map3 {
   };
 }
 
-/** A small cluster with glued faces on all three axes, one face leaving the set, one outside. */
-function cluster(): { s: GlueStore; inSet: (x: number, y: number, z: number) => boolean; inner: Array<[P, P]> } {
+interface Cluster {
+  s: GlueStore;
+  inSet: (x: number, y: number, z: number) => boolean;
+  /** Faces with both ends in the set (they move). */
+  inner: Array<[P, P]>;
+  /** Faces with exactly one end in the set (they are deleted): [in-set end, outside end]. */
+  oneEnd: Array<[P, P]>;
+  /** A face with no end in the set (it stays in the source store, untouched). */
+  outside: [P, P];
+  /** toArray() of a store holding only the inner faces, at their original positions. */
+  innerArray: Int32Array;
+}
+
+/**
+ * A 4x2x2 cell set with glued faces on all three axes (inner), two faces leaving the set —
+ * one whose canonical (smaller) end is inside, one whose far end is inside — and one face
+ * entirely outside it.
+ */
+function cluster(): Cluster {
   const cells = new Set<string>();
   for (let x = -2; x <= 1; x++) for (let y = 3; y <= 4; y++) for (let z = -1; z <= 0; z++) cells.add(`${x},${y},${z}`);
   const inSet = (x: number, y: number, z: number): boolean => cells.has(`${x},${y},${z}`);
   const s = new GlueStore();
-  const inner: Array<[P, P]> = [];
-  const glue = (a: P, d: Dir): void => {
+  const innerOnly = new GlueStore();
+  const glue = (a: P, d: Dir): [P, P] => {
     s.add(a.x, a.y, a.z, d);
-    inner.push([a, { x: a.x + DIR_X[d]!, y: a.y + DIR_Y[d]!, z: a.z + DIR_Z[d]! }]);
+    return [a, { x: a.x + DIR_X[d]!, y: a.y + DIR_Y[d]!, z: a.z + DIR_Z[d]! }];
   };
-  glue({ x: -2, y: 3, z: -1 }, PX);
-  glue({ x: 1, y: 4, z: 0 }, NX);
-  glue({ x: 0, y: 3, z: -1 }, PY);
-  glue({ x: -1, y: 4, z: 0 }, NZ);
-  glue({ x: 1, y: 3, z: -1 }, PZ);
-  return { s, inSet, inner };
+  const inner: Array<[P, P]> = [
+    glue({ x: -2, y: 3, z: -1 }, PX),
+    glue({ x: 1, y: 4, z: 0 }, NX),
+    glue({ x: 0, y: 3, z: -1 }, PY),
+    glue({ x: -1, y: 4, z: 0 }, NZ),
+    glue({ x: 1, y: 3, z: -1 }, PZ),
+  ];
+  for (const [a, b] of inner) innerOnly.add(a.x, a.y, a.z, dirBetween(a, b));
+  const oneEnd: Array<[P, P]> = [
+    glue({ x: 1, y: 3, z: 0 }, PX), // (2,3,0) outside; the canonical end (1,3,0) is inside
+    glue({ x: -2, y: 3, z: -1 }, NY), // (-2,2,-1) outside and canonical; (-2,3,-1) inside
+  ];
+  const outside = glue({ x: 10, y: 10, z: 10 }, PY);
+  for (const [a, b] of [...oneEnd, outside]) {
+    expect(inSet(a.x, a.y, a.z) && inSet(b.x, b.y, b.z)).toBe(false); // the helper's own sanity
+  }
+  return { s, inSet, inner, oneEnd, outside, innerArray: innerOnly.toArray() };
+}
+
+/** Did `s` keep exactly the untouched face and none of the one-end faces? */
+function expectSourceAfterMove(s: GlueStore, c: Cluster): void {
+  const [oa, ob] = c.outside;
+  expect(s.has(oa.x, oa.y, oa.z, dirBetween(oa, ob))).toBe(true);
+  for (const [a, b] of c.oneEnd) expect(s.has(a.x, a.y, a.z, dirBetween(a, b))).toBe(false);
 }
 
 describe('GlueStore: moveTo', () => {
   it('translation: both-end faces move, one-end faces are deleted, others stay', () => {
-    const { s, inSet, inner } = cluster();
-    s.add(1, 3, 0, PX); // (2,3,0) is outside the set: deleted
-    s.add(-2, 3, -1, NY); // (-2,2,-1) outside: deleted
-    s.add(10, 10, 10, PY); // far outside: kept
+    const cl = cluster();
+    const { s, inSet, inner } = cl;
     const t = new GlueStore();
     t.add(50, 50, 50, PZ); // pre-existing target glue is kept
     const n = s.moveTo(t, inSet, transform((p) => p, 100, -200, 300));
     expect(n).toBe(inner.length);
     expect(s.size).toBe(1);
-    expect(s.has(10, 10, 10, PY)).toBe(true);
+    expectSourceAfterMove(s, cl);
     expect(t.size).toBe(inner.length + 1);
+    expect(t.has(50, 50, 50, PZ)).toBe(true);
     for (const [a, b] of inner) expect(t.has(a.x + 100, a.y - 200, a.z + 300, dirBetween(a, b))).toBe(true);
-    expect(t.has(2 + 100, 3 - 200, 0 + 300, NX)).toBe(false);
+    // The one-end faces were deleted, not carried along.
+    for (const [a, b] of cl.oneEnd) expect(t.has(a.x + 100, a.y - 200, a.z + 300, dirBetween(a, b))).toBe(false);
   });
 
   for (const [name, rot] of [['X', rotX], ['Y', rotY], ['Z', rotZ]] as const) {
     for (const k of [1, 2, 3]) {
-      it(`rotation by ${k * 90} degrees about ${name} re-keys from the mapped ends`, () => {
-        const { s, inSet, inner } = cluster();
+      it(`rotation by ${k * 90} degrees about ${name} re-keys from the mapped ends; one-end faces deleted, others untouched`, () => {
+        const cl = cluster();
+        const { s, inSet, inner } = cl;
         const r = times(rot, k);
         const t = new GlueStore();
         const map = transform(r, -7, 5, -3);
         expect(s.moveTo(t, inSet, map)).toBe(inner.length);
-        expect(s.size).toBe(0);
+        expect(s.size).toBe(1);
+        expectSourceAfterMove(s, cl);
         expect(t.size).toBe(inner.length);
         for (const [a, b] of inner) {
           const ma = map(a.x, a.y, a.z);
           const mb = map(b.x, b.y, b.z);
           expect(t.has(ma.x, ma.y, ma.z, dirBetween(ma, mb))).toBe(true);
           expect(t.has(mb.x, mb.y, mb.z, dirBetween(mb, ma))).toBe(true);
+        }
+        // Neither the mapped nor the unmapped position of a one-end face appears in the target.
+        for (const [a, b] of cl.oneEnd) {
+          const ma = map(a.x, a.y, a.z);
+          const mb = map(b.x, b.y, b.z);
+          expect(t.has(ma.x, ma.y, ma.z, dirBetween(ma, mb))).toBe(false);
+          expect(t.has(a.x, a.y, a.z, dirBetween(a, b))).toBe(false);
         }
       });
     }
@@ -398,7 +483,8 @@ describe('GlueStore: moveTo', () => {
   });
 
   it('in place (target === this) and with a map that reuses its result object', () => {
-    const { s, inSet, inner } = cluster();
+    const cl = cluster();
+    const { s, inSet, inner } = cl;
     const out: P = { x: 0, y: 0, z: 0 };
     const reuse: Map3 = (x, y, z) => {
       const q = rotY({ x, y, z });
@@ -409,7 +495,8 @@ describe('GlueStore: moveTo', () => {
     };
     const fresh = transform(rotY, 1, 0, 0);
     expect(s.moveTo(s, inSet, reuse)).toBe(inner.length);
-    expect(s.size).toBe(inner.length);
+    expect(s.size).toBe(inner.length + 1); // + the untouched outside face
+    expectSourceAfterMove(s, cl);
     for (const [a, b] of inner) {
       const ma = fresh(a.x, a.y, a.z);
       const mb = fresh(b.x, b.y, b.z);
@@ -417,9 +504,8 @@ describe('GlueStore: moveTo', () => {
     }
   });
 
-  it('round trip through four quarter turns restores the store', () => {
-    const { s, inSet } = cluster();
-    const before = s.toArray();
+  it('round trip through four quarter turns restores the moved faces', () => {
+    const { s, inSet, innerArray } = cluster();
     let cur = s;
     let set = inSet;
     for (let i = 0; i < 4; i++) {
@@ -432,7 +518,8 @@ describe('GlueStore: moveTo', () => {
       };
       cur = next;
     }
-    expect(cur.toArray()).toEqual(before);
+    // The first move dropped the one-end faces and left the outside face behind.
+    expect(cur.toArray()).toEqual(innerArray);
   });
 
   it('is atomic when the map breaks adjacency or leaves the range', () => {

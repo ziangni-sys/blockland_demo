@@ -73,11 +73,13 @@ export const UI_CSS = String.raw`
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Zen Hei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
   --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif SC", "Songti SC", "STSong", serif;
-  --slot: clamp(30px, min(calc((100vw - 56px) / 9), calc(4.4vh + 22px)), 92px);
+  --slot: clamp(30px, min(calc((100vw - 56px) / 9), calc(4.4vh + 22px)), calc(92px * var(--ui-zoom)));
   --gap: clamp(3px, calc(var(--slot) * 0.09), 8px);
   --islot: clamp(31px, min(calc((100vw - 84px) / 9), calc(4.2vh + 18px)), 54px);
   --igap: clamp(3px, calc(var(--islot) * 0.1), 6px);
   --safe-b: env(safe-area-inset-bottom, 0px);
+  /* Extra scale for very large CSS viewports (a 4K screen at 100 %); see the media queries. */
+  --ui-zoom: 1;
 
   position: fixed;
   inset: 0;
@@ -111,7 +113,6 @@ export const UI_CSS = String.raw`
   border: 1px solid var(--line); border-bottom-color: var(--brass-600);
   border-radius: 5px; box-shadow: 0 1px 0 rgba(0, 0, 0, 0.5); white-space: nowrap;
 }
-.bl-ui .bl-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .bl-ui .bl-kbd-mouse { min-width: 1.75em; padding: 0 0.3em; }
 .bl-kbd-mouse svg { width: 1.12em; height: 1.45em; overflow: visible; }
 .bl-m-body { fill: none; stroke: var(--canvas-100); stroke-width: 1.2; stroke-linecap: round; }
@@ -121,6 +122,9 @@ export const UI_CSS = String.raw`
 
 /* ------------------------------------------------------------------ HUD */
 .bl-hud { position: absolute; inset: 0; }
+/* The debug text changes every frame; keep its relayout to itself. (No paint containment
+   on HUD widgets: it would clip their drop shadows.) */
+.bl-debug { contain: layout style; }
 .bl-ui[data-ingame="0"] .bl-hud { display: none; }
 .bl-hud[data-play="0"] .bl-play { display: none; }
 
@@ -234,11 +238,11 @@ export const UI_CSS = String.raw`
 }
 .bl-slot-num {
   position: absolute; top: max(2px, calc(var(--s) * 0.07)); left: max(4px, calc(var(--s) * 0.12));
-  font: 600 clamp(8px, calc(var(--s) * 0.19), 14px)/1 var(--font-mono); color: var(--brass-300); opacity: 0.62;
+  font: 600 clamp(8px, calc(var(--s) * 0.19), calc(14px * var(--ui-zoom)))/1 var(--font-mono); color: var(--brass-300); opacity: 0.62;
 }
 .bl-slot-count {
   position: absolute; right: max(4px, calc(var(--s) * 0.1)); bottom: max(3px, calc(var(--s) * 0.07));
-  font: 700 clamp(10px, calc(var(--s) * 0.27), 20px)/1 var(--font-mono); color: var(--canvas-50);
+  font: 700 clamp(10px, calc(var(--s) * 0.27), calc(20px * var(--ui-zoom)))/1 var(--font-mono); color: var(--canvas-50);
   text-shadow: 0 1px 0 #000, 0 0 3px rgba(0, 0, 0, 0.95); font-variant-numeric: tabular-nums;
 }
 .bl-slot.is-selected {
@@ -653,7 +657,7 @@ export const UI_CSS = String.raw`
 .bl-inv-panel { display: flex; flex-direction: column; gap: 12px; max-width: 100%; padding: 16px 20px 18px; }
 .bl-inv-head { display: flex; align-items: center; gap: 12px; }
 .bl-inv-head .bl-panel-title { flex: 1; margin: 0; }
-.bl-inv-body { display: flex; gap: 22px; align-items: stretch; min-height: 0; }
+.bl-inv-body { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: stretch; min-height: 0; }
 .bl-palette { display: flex; flex-direction: column; gap: 10px; width: calc(var(--islot) * 9 + var(--igap) * 8 + 14px); min-height: 0; }
 .bl-inv[data-creative="0"] .bl-palette { display: none; }
 .bl-search { position: relative; display: block; }
@@ -688,12 +692,13 @@ export const UI_CSS = String.raw`
 .bl-inv-close { min-height: 34px; min-width: 34px; padding: 6px; border-radius: 8px; }
 
 .bl-cursor {
-  position: fixed; left: 0; top: 0; z-index: 5; width: var(--islot); height: var(--islot); margin: calc(var(--islot) * -0.5) 0 0 calc(var(--islot) * -0.5);
+  --cs: calc(var(--islot) * var(--ui-zoom));
+  position: fixed; left: 0; top: 0; z-index: 5; width: var(--cs); height: var(--cs); margin: calc(var(--cs) * -0.5) 0 0 calc(var(--cs) * -0.5);
   display: flex; align-items: center; justify-content: center; pointer-events: none; will-change: transform;
   filter: drop-shadow(0 6px 8px rgba(0, 0, 0, 0.55));
 }
 .bl-cursor canvas { width: 82%; height: 82%; }
-.bl-cursor .bl-slot-count { --s: var(--islot); }
+.bl-cursor .bl-slot-count { --s: var(--cs); }
 
 .bl-tooltip {
   position: fixed; left: 0; top: 0; z-index: 4; max-width: 260px; padding: 7px 11px; border-radius: 8px; pointer-events: none;
@@ -734,10 +739,12 @@ export const UI_CSS = String.raw`
   .bl-world-list { max-height: none; }
   .bl-pause-panel { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 22px 18px; }
   .bl-pause-ref { padding-left: 0; padding-top: 16px; border-left: 0; border-top: 1px solid var(--line-faint); }
-  .bl-inv-body { flex-direction: column; gap: 12px; }
-  .bl-palette { width: auto; }
   .bl-palette-scroll { max-height: calc(var(--islot) * 4.6 + 40px); }
   .bl-pgrid { grid-template-columns: repeat(9, var(--islot)); }
+}
+@media (max-width: 1100px) {
+  /* The bottom-right corner is no longer free beside the hotbar: sit above the bottom cluster. */
+  .bl-helm { transform: scale(0.82); right: 8px; bottom: calc(var(--slot) * 2.1 + 34px + var(--safe-b)); }
 }
 @media (max-width: 560px) {
   .bl-ui { font-size: 14px; }
@@ -764,7 +771,7 @@ export const UI_CSS = String.raw`
   .bl-field-ctl { grid-column: 2; justify-self: end; }
   .bl-settings-panel, .bl-inv-panel { padding: 16px 12px; }
   .bl-inv-panel { gap: 10px; }
-  .bl-helm { transform: scale(0.78); right: 8px; bottom: calc(var(--slot) + var(--gap) * 3 + 80px + var(--safe-b)); }
+  .bl-helm { transform: scale(0.78); }
   .bl-toasts { left: 12px; right: 12px; width: auto; align-items: stretch; }
   .bl-title-lg { font-size: 24px; }
   .bl-death-card { padding: 24px 18px; }
@@ -774,6 +781,13 @@ export const UI_CSS = String.raw`
   .bl-helm { transform: scale(1.3); }
   .bl-debug { font-size: 14px; }
 }
+@media (min-width: 2400px) and (min-height: 1300px) { .bl-ui { --ui-zoom: 1.5; } .bl-helm { transform: none; } }
+@media (min-width: 3200px) and (min-height: 1800px) { .bl-ui { --ui-zoom: 2; } }
+/* Panels and text blocks scale as a unit; elements positioned from pointer coordinates
+   (held stack, tooltip box) scale their size only, so their placement stays exact. */
+.bl-menu-inner, .bl-loading-inner, .bl-panel-modal, .bl-toasts, .bl-veil-card, .bl-debug, .bl-hint, .bl-crosshair,
+.bl-gauges, .bl-itemname, .bl-tooltip > * { zoom: var(--ui-zoom); }
+.bl-helm { zoom: var(--ui-zoom); }
 
 /* ------------------------------------------------------------------ reduced motion */
 @media (prefers-reduced-motion: reduce) {

@@ -80,6 +80,16 @@ describe('TerrainGenerator: determinism', () => {
     again.x = 1e9; // callers get a copy
     expect(g.spawnPoint()).toEqual(a);
   });
+
+  it('matches the golden output (worlds are stable across versions)', () => {
+    // Unmodified chunks are not saved: they are re-generated from the seed on load. Any
+    // change to these hashes changes every existing world, so update them only on purpose.
+    const gen = new TerrainGenerator(12345);
+    expect(chunkHash(gen.generate(0, 0)).toString(16)).toBe('7353bb3');
+    expect(chunkHash(gen.generate(-3, 7)).toString(16)).toBe('f830bcce');
+    expect(chunkHash(gen.generate(25, -40)).toString(16)).toBe('d48d4278');
+    expect(gen.spawnPoint()).toEqual({ x: 7.5, y: 52, z: -216.5 });
+  });
 });
 
 describe('TerrainGenerator: seams', () => {
@@ -223,10 +233,11 @@ describe('TerrainGenerator: world shape', () => {
   });
 
   it('biome borders do not create height seams', () => {
-    // Heights never read the biome label, so where the label changes for climate reasons
-    // the terrain must look like terrain anywhere else. (Labels defined BY height — shore,
-    // peaks, highland — sit on slopes by definition and are left out.)
-    const climate = new Set<Biome>(['meadow', 'broadleaf', 'conifer', 'scrub']);
+    // Heights never read the biome label, so where the label changes for purely climatic
+    // reasons the terrain must look like terrain anywhere else. (Labels that depend on
+    // height — shore, peaks, highland, and conifer through the altitude lapse — sit on
+    // slopes by definition and are left out.)
+    const climate = new Set<Biome>(['meadow', 'broadleaf', 'scrub']);
     const border: number[] = [];
     const inner: number[] = [];
     for (const seed of [1, 3, 5]) {
