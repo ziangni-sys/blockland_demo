@@ -268,6 +268,16 @@ export class Simulation {
     const stack = this.player.inventory.takeCursor();
     if (stack) this.entities.dropFromPlayer(this.player, stack.item, stack.count);
   }
+  /**
+   * Pick block (middle click): put the block the player looks at (the use ray's target, what
+   * the outline shows; world or structure) in hand — see Interaction.pickBlock for the hotbar
+   * and backpack rules (creative fills a slot, survival only selects or swaps). Also writes
+   * input.slot, so the next tick keeps the selection; a client that drives input.slot must
+   * adopt player.inventory.selected afterwards. Returns true when the block is in hand.
+   */
+  pickBlock(): boolean {
+    return this.interaction.pickBlock();
+  }
   /** Steering read-out while the player holds a helm, else null. */
   helmView(): { throttle: number; rudder: number; speed: number; sails: number } | null {
     const id = this.player.steeringShipId;

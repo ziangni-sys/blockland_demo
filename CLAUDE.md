@@ -4,6 +4,11 @@ Original voxel sandbox in the browser. Core gameplay: multi-block structures (ph
 
 Read before changing code: `docs/ARCHITECTURE.md` (code conventions, layering, tick order), `docs/DESIGN.md` (gameplay rules), `docs/LESSONS.md` (bugs the prototype had), `docs/ACCEPTANCE.md` (scenarios, automated in `tests/acceptance/`), `docs/ROADMAP.md` (milestones).
 
+## Tracking
+
+- Scope, progress and leftovers live in `docs/ROADMAP.md` only. GitHub issues and milestones are not used (owner's decision, 2026-11-17).
+- At the start of a session, fetch the latest `main` before reading the docs.
+
 ## Commands
 
 - `npm test` — every headless test, including the 24 acceptance scenarios

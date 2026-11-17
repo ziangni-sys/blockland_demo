@@ -6,3 +6,4 @@ dist-artifact/
 .DS_Store
 coverage/
 test-results/
+.claude/worktrees/

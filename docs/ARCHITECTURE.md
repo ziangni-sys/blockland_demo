@@ -76,3 +76,10 @@ art（程序化贴图，纯函数）      save（codec 纯函数 + 存储适配�
 - 单元测试放 `tests/<模块>/`；验收场景放 `tests/acceptance/`，一条场景一个 `describe`，全部无头。
 - 修 bug 先写复现测试；每轮修改后跑全量 `npm test` 和 `npm run typecheck`。
 - 浏览器冒烟：`scripts/e2e-smoke.mjs`（Playwright，headless Chromium 走 WebGL2 回退）。
+
+## M2 计划中的变化
+
+M2 会动地基，细节在 [ROADMAP.md](ROADMAP.md) 的“M2 细化”和 [DESIGN.md](DESIGN.md) 的“M2 规则”。两点先记在这里：
+
+- **联机优先**：`Simulation` 变成服务器，在 Worker 里运行；`client/` 不再直接读模拟层对象，改为通过消息协议维护一份副本（世界、结构体、实体），光照在副本上计算。分层里会多出 `net/`（协议、传输、同步）。
+- **材质 + 形状**：格子值加上“缺口”位和多部件标志；按 id 查的实心 / 不透明表由统一的形状查询取代。

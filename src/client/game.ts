@@ -19,6 +19,7 @@ import { I } from '../blocks/items';
 import { openBestStorage } from '../save/idb';
 import { SAVE_VERSION, type WorldMeta } from '../save/codec';
 import { formatMessage } from '../sim/messages';
+import { placeExampleShip } from '../sim/exampleShip';
 import { exportSave, importSave } from '../sim/persist';
 import { Simulation } from '../sim/simulation';
 import type { Message, SimEvent } from '../sim/view';
@@ -36,6 +37,7 @@ import {
 } from '../ui/model';
 import { TerrainGenerator } from '../worldgen/generator';
 import type { GenErrorResponse, GenResponse } from '../worldgen/protocol';
+import { nextViewMode, type ViewMode } from './camera';
 import { debugLines } from './debug';
 import { describeError, Faults } from './faults';
 import { InputState, type InputCommand, type LookSettings } from './input';
@@ -110,6 +112,8 @@ export class Game implements InputHost {
   storagePersistent = false;
   storageReason = '';
   readonly stats: FrameStats = { fps: 0, frameMs: 0, tickMs: 0, workMs: 0, renderMs: 0, ticks: 0 };
+  /** Camera mode (F5): first person, third person from behind, from the front. Client only. */
+  viewMode: ViewMode = 'first';
 
   private readonly win: Window;
   private readonly canvas: HTMLCanvasElement;
@@ -228,8 +232,32 @@ export class Game implements InputHost {
       case 'toggleDebug':
         this.changeSettings({ showDebug: !this.settings.showDebug });
         break;
+      case 'cycleView':
+        if (this.inWorld()) {
+          this.viewMode = nextViewMode(this.viewMode);
+          this.renderDirty = true;
+        }
+        break;
+      case 'pickBlock':
+        this.pickBlock();
+        break;
       default:
         break;
+    }
+  }
+  /**
+   * Middle click: the simulation puts the looked-at block in hand and selects its slot; the
+   * client's own hotbar selection (written into input.slot before every tick) follows it, or
+   * the next tick would select the old slot again.
+   */
+  private pickBlock(): void {
+    const sim = this.sim;
+    if (!sim || !this.isPlaying()) return;
+    try {
+      sim.pickBlock();
+      this.input.selectSlot(sim.player.inventory.selected);
+    } catch (e) {
+      this.faults.report('pick block', e);
     }
   }
   onLockLost(): void {
@@ -570,6 +598,8 @@ export class Game implements InputHost {
       const generator = new TerrainGenerator(seed);
       const sim = new Simulation({ seed, mode, generator, loadRadius: loadRadiusFor(this.settings.renderDistance) });
       giveStarterKit(sim);
+      // A windmill boat moored near the spawn, as blocks (new worlds only, never on load).
+      placeExampleShip(sim);
       const id = makeWorldId(Date.now(), Math.random);
       const meta = newWorldMeta(id, name.slice(0, 64), seedText, seed, mode, Date.now());
       this.startSession(sim, meta, generator, true);
@@ -857,7 +887,7 @@ export class Game implements InputHost {
     // gradually instead of all in the first playable frame.
     let rendered = false;
     if (now - this.lastRender >= LOADING_RENDER_MS || prog.done) {
-      s.present(this.clock.alpha, dt / 1000, this.input.yaw, this.input.pitch, this.settings.fov, this.settings.renderDistance, this.envTime, now);
+      s.present(this.clock.alpha, dt / 1000, this.input.yaw, this.input.pitch, this.settings.fov, this.settings.renderDistance, this.envTime, now, this.viewMode);
       rendered = this.render(now);
     }
     if (prog.done) this.finishLoading(s);
@@ -905,7 +935,7 @@ export class Game implements InputHost {
     this.stats.workMs = this.win.performance.now() - w0;
     // While nothing moves (pause, death, settings) a frame now and then is enough.
     if (!running && !this.renderDirty && now - this.lastRender < IDLE_RENDER_MS) return false;
-    s.present(alpha, dt / 1000, yaw, this.input.pitch, this.settings.fov, this.settings.renderDistance, this.envTime, now);
+    s.present(alpha, dt / 1000, yaw, this.input.pitch, this.settings.fov, this.settings.renderDistance, this.envTime, now, this.viewMode);
     return this.render(now);
   }
 
@@ -1034,6 +1064,7 @@ export class Game implements InputHost {
         storagePersistent: this.storagePersistent,
         pointerLocked: this.binder.locked,
         dragLook: this.binder.dragLook,
+        viewMode: this.viewMode,
         chunks: sim ? sim.world.chunks.size : 0,
         sectionsMeshed: s ? s.mesher.meshedCount : 0,
         sectionsDrawn: this.backend.stats().sections,
@@ -1082,6 +1113,21 @@ export class Game implements InputHost {
       sim.player.inventory.creativePick(item, true);
       const idx = sim.player.inventory.hotbar.findIndex((st) => st !== null && st.item === item);
       if (idx >= 0) this.input.selectSlot(idx);
+    },
+    /** Set the camera mode ('first' | 'back' | 'front'), or cycle it like F5 without an argument. */
+    view: (mode?: ViewMode): ViewMode => {
+      if (mode === 'first' || mode === 'back' || mode === 'front') this.viewMode = mode;
+      else this.viewMode = nextViewMode(this.viewMode);
+      this.renderDirty = true;
+      return this.viewMode;
+    },
+    /** Pick block (what the middle mouse button does). */
+    pick: (): boolean => {
+      const sim = this.sim;
+      if (!sim) return false;
+      const ok = sim.pickBlock();
+      this.input.selectSlot(sim.player.inventory.selected);
+      return ok;
     },
     /** Save immediately (returns whether it succeeded). */
     save: (): Promise<boolean> => this.saveNow('autosave'),

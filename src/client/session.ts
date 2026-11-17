@@ -13,6 +13,7 @@ import type { WorldMeta } from '../save/codec';
 import { sectionKey } from '../voxel/chunk';
 import type { ChunkGenerator } from '../worldgen/generator';
 import type { GenErrorResponse, GenResponse } from '../worldgen/protocol';
+import type { ViewMode } from './camera';
 import { ChunkStreamer } from './chunkstream';
 import { SectionMesher } from './meshing';
 import { StructureRenderer } from './structures';
@@ -129,9 +130,20 @@ export class WorldSession {
   /**
    * Push this frame's state to the backend: structures, camera, environment, entities and
    * overlays, all at blend factor `alpha`. Each part is isolated so one failure cannot blank
-   * the others.
+   * the others. `viewMode` places the camera (first / third person); the camera goes first, the
+   * entity list (which then includes the local player in third person) after it.
    */
-  present(alpha: number, dt: number, yaw: number, pitch: number, fov: number, renderDistance: number, envTime: number, nowMs: number): void {
+  present(
+    alpha: number,
+    dt: number,
+    yaw: number,
+    pitch: number,
+    fov: number,
+    renderDistance: number,
+    envTime: number,
+    nowMs: number,
+    viewMode: ViewMode = 'first',
+  ): void {
     const b = this.deps.backend;
     const sim = this.sim;
     const v = this.view;
@@ -141,7 +153,7 @@ export class WorldSession {
       this.deps.onError('structures', e);
     }
     try {
-      b.setCamera(v.updateCamera(sim, alpha, yaw, pitch, fov, dt));
+      b.setCamera(v.updateCamera(sim, alpha, yaw, pitch, fov, dt, viewMode));
     } catch (e) {
       this.deps.onError('camera', e);
     }

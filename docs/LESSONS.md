@@ -100,5 +100,5 @@
 - **无头环境的软件 WebGPU 设备在第一次呈现时丢失** → 初始化时先在临时画布上试着呈现两帧，失败就退回 WebGL2。
 
 ### 流程
-- **没看 GitHub 上的路线图和 issue 就自己定义了 M1** → 会话开始时本地 `main` 落后于远端，也没有列 milestone 和 issue。开工前先 fetch 最新的 `main`，并读一遍 milestone 和 issue。
+- **没看到已有的路线图就自己定义了 M1** → 会话开始时本地 `main` 落后于远端，路线图又分散在文档、milestone 和 issue 三处。开工前先 fetch 最新的 `main`；进度只记在 `docs/ROADMAP.md` 一处。
 - **token 花费偏高** → 每个模块“实现 + 两名审查 + 修复”全部用最高思考强度，约 100～200 万 token。之后改为默认 `high`、每模块一名审查者，难题再升级。

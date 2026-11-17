@@ -8,7 +8,8 @@ import { DAY_TICKS } from '../core/constants';
 import { quat, vec3, type Vec3 } from '../core/math';
 import { ID_MASK, liquidAmount, STATE_MASK, STATE_SHIFT } from '../blocks/cell';
 import { I } from '../blocks/items';
-import { LIQUID, LIQUID_LAVA, LIQUID_WATER, OPAQUE } from '../blocks/registry';
+import { B } from '../blocks/defs';
+import { LIQUID, LIQUID_LAVA, LIQUID_WATER, OPAQUE, SOLID } from '../blocks/registry';
 import { LIQUID_FULL_HEIGHT } from '../mesh/mesher';
 import type {
   CameraState,
@@ -22,7 +23,10 @@ import type { Simulation } from '../sim/simulation';
 import type { InteractionView } from '../sim/view';
 import { FallingBlockEntity, ItemEntity, Player, TntEntity, type Entity } from '../entities/entity';
 import { isDryCell } from '../structures/hull';
+import type { VoxelGrid } from '../voxel/grid';
+import { raycastGrids, type CellPredicate } from '../voxel/raycast';
 import type { World } from '../voxel/world';
+import { cameraPose, placeCamera, SELF_HIDE_DISTANCE, type CameraRay, type ViewMode } from './camera';
 import { approach, interpolateCarried, lerpAngle, lerpVec, type FramePose } from './interp';
 
 /** Radius (blocks) around the player in which glued faces are drawn while holding glue. */
@@ -62,6 +66,16 @@ export function mediumAt(world: World, x: number, y: number, z: number): 'none' 
   return kind === LIQUID_WATER ? 'water' : 'lava';
 }
 
+/**
+ * Cells the third-person camera may not enter: every hard or opaque block (liquids, plants,
+ * torches and the invisible unloaded sentinel do not stop it).
+ */
+export const blocksCamera: CellPredicate = (cell) => {
+  const id = cell & ID_MASK;
+  if (id === B.UNLOADED || LIQUID[id] !== 0) return false;
+  return SOLID[id] === 1 || OPAQUE[id] === 1;
+};
+
 function newEntityState(): EntityRenderState {
   return { id: 0, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 };
 }
@@ -74,6 +88,19 @@ export class ViewBuilder {
   private readonly entityPool: EntityRenderState[] = [];
   private readonly entityList: EntityRenderState[] = [];
   private fovScale = 1;
+  /** Third person with the camera clear of the head: the local player is drawn. */
+  private showSelf = false;
+  /** Body yaw of the local player this frame (the interpolated look yaw). */
+  private selfYaw = 0;
+  private readonly pose = cameraPose();
+  private readonly eye: Vec3 = vec3();
+  private readonly rayDir: Vec3 = vec3();
+  /** Grids the camera ray of the current updateCamera call tests (null outside the call). */
+  private rayGrids: VoxelGrid[] | null = null;
+  private readonly cameraRay: CameraRay = (o, d, max) => {
+    const h = this.rayGrids === null ? null : raycastGrids(this.rayGrids, o, d, max, blocksCamera);
+    return h === null ? Infinity : h.dist;
+  };
 
   // overlay caches (rebuilt only when the simulation publishes a new object)
   private readonly targetCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0 };
@@ -117,16 +144,30 @@ export class ViewBuilder {
     return lerpVec(e.prevPos, e.pos, alpha, out);
   }
 
-  /** First-person camera at the local player's eyes. `yaw`/`pitch` come straight from the input. */
-  updateCamera(sim: Simulation, alpha: number, yaw: number, pitch: number, fov: number, dt: number): CameraState {
+  /**
+   * The camera for the view mode: first person at the local player's eyes, or third person on
+   * the line through the eyes along the look direction (src/client/camera.ts), pulled in by a
+   * ray against every grid. `yaw`/`pitch` come straight from the input (blended with the
+   * carrier's turn). The eye position is interpolated exactly like the player model's.
+   */
+  updateCamera(sim: Simulation, alpha: number, yaw: number, pitch: number, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
     const p = sim.player;
     const pos = this.renderPosition(sim, p, alpha, this.scratch2);
+    const eye = this.eye;
+    eye.x = pos.x;
+    eye.y = pos.y + p.eyeHeight;
+    eye.z = pos.z;
+    this.rayGrids = mode === 'first' ? null : sim.grids();
+    const pose = placeCamera(mode, eye, yaw, pitch, this.cameraRay, this.pose, this.rayDir);
+    this.rayGrids = null;
+    this.showSelf = mode !== 'first' && pose.distance >= SELF_HIDE_DISTANCE && !p.dead;
+    this.selfYaw = yaw;
     const cam = this.camera;
-    cam.x = pos.x;
-    cam.y = pos.y + p.eyeHeight;
-    cam.z = pos.z;
-    cam.yaw = yaw;
-    cam.pitch = pitch;
+    cam.x = pose.x;
+    cam.y = pose.y;
+    cam.z = pose.z;
+    cam.yaw = pose.yaw;
+    cam.pitch = pose.pitch;
     const moving = Math.hypot(p.vel.x - p.carrierVel.x, p.vel.z - p.carrierVel.z) > 1;
     this.fovScale = approach(this.fovScale, p.sprinting && moving ? SPRINT_FOV_SCALE : 1, 10, dt);
     cam.fov = Math.min(150, fov * this.fovScale);
@@ -162,7 +203,12 @@ export class ViewBuilder {
     return false;
   }
 
-  /** Every entity except the local player, interpolated and lit. */
+  /**
+   * Every entity, interpolated and lit. The local player is left out in first person (and when
+   * the third-person camera is pulled into the head); in third person it is drawn at the same
+   * interpolated position as the camera's eye, facing the look yaw of updateCamera — so call
+   * updateCamera first in a frame.
+   */
   updateEntities(sim: Simulation, alpha: number): readonly EntityRenderState[] {
     const list = this.entityList;
     list.length = 0;
@@ -171,7 +217,7 @@ export class ViewBuilder {
     const world = sim.world;
     for (let i = 0; i < all.length; i++) {
       const e = all[i]!;
-      if (e === player || e.removed) continue;
+      if (e.removed || (e === player && !this.showSelf)) continue;
       let s = this.entityPool[list.length];
       if (!s) {
         s = newEntityState();
@@ -183,7 +229,7 @@ export class ViewBuilder {
       s.x = pos.x;
       s.y = pos.y;
       s.z = pos.z;
-      s.yaw = lerpAngle(e.prevYaw, e.yaw, alpha);
+      s.yaw = e === player ? this.selfYaw : lerpAngle(e.prevYaw, e.yaw, alpha);
       s.payload = e instanceof ItemEntity ? e.stack.item : e instanceof FallingBlockEntity ? e.cell : 0;
       s.flash = e instanceof TntEntity ? (Math.floor(e.fuse / 4) % 2 === 0 ? 0.8 : 0) : e instanceof Player && e.hurtTicks > 0 ? 0.6 : 0;
       sampleLight(world, pos.x, pos.y + Math.min(0.5, e.height * 0.5), pos.z, this.light);
