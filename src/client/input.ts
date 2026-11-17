@@ -13,7 +13,7 @@ import type { PlayerInput } from '../entities/input';
 import { HOTBAR_SIZE } from '../ui/model';
 
 /** What a key press asks the client (not the simulation) to do. */
-export type InputCommand = 'none' | 'toggleInventory' | 'escape' | 'toggleDebug';
+export type InputCommand = 'none' | 'toggleInventory' | 'escape' | 'toggleDebug' | 'cycleView' | 'pickBlock';
 
 export interface LookSettings {
   /** Multiplier, 0.2..3. */
@@ -31,6 +31,8 @@ export const SPRINT_DOUBLE_TAP_MS = 300;
 export const WHEEL_STEP_PIXELS = 50;
 
 export const BUTTON_ATTACK = 0;
+/** Middle button: pick block (a command, never a held button). */
+export const BUTTON_PICK = 1;
 export const BUTTON_USE = 2;
 
 const FORWARD_KEYS = ['KeyW', 'ArrowUp'];
@@ -52,6 +54,7 @@ const GAME_KEYS = new Set([
   'KeyE',
   'Escape',
   'F3',
+  'F5',
   'Digit1',
   'Digit2',
   'Digit3',
@@ -125,6 +128,8 @@ export class InputState {
         return repeat ? 'none' : 'escape';
       case 'F3':
         return repeat ? 'none' : 'toggleDebug';
+      case 'F5':
+        return repeat ? 'none' : 'cycleView';
       default:
         break;
     }
@@ -161,22 +166,29 @@ export class InputState {
 
   // ------------------------------------------------------------ mouse
 
-  /** A button went down and is held (attack = 0, use = 2; others ignored). Counts a press. */
-  buttonDown(button: number): void {
+  /**
+   * A button went down and is held (attack = 0, use = 2). Counts a press. The middle button is
+   * not held: it returns the 'pickBlock' command. Other buttons are ignored.
+   */
+  buttonDown(button: number): InputCommand {
+    if (button === BUTTON_PICK) return 'pickBlock';
     if (button === BUTTON_ATTACK) this.attackPresses++;
     else if (button === BUTTON_USE) this.usePresses++;
-    else return;
+    else return 'none';
     this.buttons |= 1 << button;
+    return 'none';
   }
 
   buttonUp(button: number): void {
     if (button === BUTTON_ATTACK || button === BUTTON_USE) this.buttons &= ~(1 << button);
   }
 
-  /** A click that was never "held" (drag-to-look tap): one press, no hold. */
-  click(button: number): void {
+  /** A click that was never "held" (drag-to-look tap): one press, no hold; middle = 'pickBlock'. */
+  click(button: number): InputCommand {
+    if (button === BUTTON_PICK) return 'pickBlock';
     if (button === BUTTON_ATTACK) this.attackPresses++;
     else if (button === BUTTON_USE) this.usePresses++;
+    return 'none';
   }
 
   /** Rotate the view by a mouse movement in pixels. Moving right turns right (yaw decreases). */

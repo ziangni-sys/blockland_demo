@@ -48,13 +48,14 @@ import {
   stateLayers,
 } from '../blocks/cell';
 import { B } from '../blocks/defs';
-import { I, isBlockItem } from '../blocks/items';
+import { I, isBlockItem, type ItemStack } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID, type BlockDef } from '../blocks/registry';
 import { TICK_DT, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, NX, NY, NZ, PX, PY, PZ, dirAxis, nearestDir, type Dir } from '../core/dirs';
 import { aabb, clamp, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
 import { Player } from '../entities/entity';
 import type { EntityEvent } from '../entities/host';
+import { maxStackOf } from '../entities/inventory';
 import { axisValue, finiteAngle } from '../entities/input';
 import { analyzeHull, isDryCell, type HullInfo } from '../structures/hull';
 import { canGlue, canJoinStructure } from '../structures/stick';
@@ -340,6 +341,55 @@ export class Interaction {
   /** The cell a left-click would mine right now (never a liquid, whatever is held). */
   raycastMining(): GridHit | null {
     return this.castRay(this.sim.player, false);
+  }
+
+  // ================================================================== pick block
+
+  /**
+   * Pick block (middle click): put the block the player looks at in hand. The target is the use
+   * ray's cell (what the outline shows), on the world or a structure; air, liquids and the
+   * unloaded sentinel pick nothing. The item is the block itself (block id == item id), never
+   * its mining drop.
+   *
+   *  - Already in the hotbar: that slot is selected (the selected slot first, if it holds it).
+   *  - Creative, not in the hotbar: a full stack goes into the selected slot when it is empty,
+   *    else into the first empty hotbar slot (selected), else it replaces the selected slot.
+   *  - Survival, only in the backpack: that stack swaps places with the selected hotbar slot.
+   *    No items are ever created; with none at all nothing happens (false).
+   *
+   * The selection is written to input.slot too, which the next tick applies (applyLook): the
+   * caller that drives input.slot (the client) must adopt inventory.selected afterwards.
+   * Runs between ticks with the look of the last tick, so it acts on what the outline shows.
+   * Returns true when the block is in hand afterwards.
+   */
+  pickBlock(): boolean {
+    const p = this.sim.entities.player;
+    if (p === null || p.dead || p.removed) return false;
+    const h = this.castRay(p, isBucket(this.heldItem(p)));
+    if (h === null) return false;
+    const id = h.cell & ID_MASK;
+    if (id === AIR || id === B.UNLOADED || LIQUID[id] !== 0 || !isBlockItem(id)) return false;
+    const inv = p.inventory;
+    const holds = (s: ItemStack | null | undefined): boolean => s != null && s.count > 0 && s.item === id;
+    const empty = (s: ItemStack | null | undefined): boolean => s == null || s.count <= 0;
+    let slot = holds(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(holds);
+    if (slot < 0) {
+      if (p.mode === 'creative') {
+        slot = empty(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(empty);
+        if (slot < 0) slot = inv.selected;
+        inv.hotbar[slot] = { item: id, count: maxStackOf(id) };
+      } else {
+        const j = inv.main.findIndex(holds);
+        if (j < 0) return false;
+        slot = inv.selected;
+        const cur = inv.hotbar[slot] ?? null;
+        inv.hotbar[slot] = inv.main[j]!;
+        inv.main[j] = empty(cur) ? null : cur;
+      }
+    }
+    inv.selected = slot;
+    p.input.slot = slot;
+    return true;
   }
 
   // ================================================================== tick

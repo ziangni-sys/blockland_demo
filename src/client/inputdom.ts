@@ -13,7 +13,7 @@
  * (e.g. Chrome refuses a re-lock right after the user pressed Esc): the click-to-play veil
  * stays up and the next click retries.
  */
-import { DragGesture, isGameKey, type InputCommand, type InputState, type LookSettings } from './input';
+import { BUTTON_PICK, DragGesture, isGameKey, type InputCommand, type InputState, type LookSettings } from './input';
 
 /** What the binder needs from the game. */
 export interface InputHost {
@@ -97,7 +97,7 @@ export class InputBinder {
   /** Per frame: promotes a still drag-mode press to a held button; detects silent lock refusals. */
   update(now: number): void {
     const ev = this.gesture.update(now);
-    if (ev === 'startHold' && !this.engagingPress) this.host.input.buttonDown(this.gesture.button);
+    if (ev === 'startHold' && !this.engagingPress) this.run(this.host.input.buttonDown(this.gesture.button));
     if (this.pendingSince >= 0 && !this.locked && now - this.pendingSince > LOCK_SILENCE_MS) {
       this.pendingSince = -1;
       if (!this.everLocked && this.requestFromClick) this.enterDragLook(true);
@@ -159,7 +159,8 @@ export class InputBinder {
     // Browser shortcuts (Ctrl+E, Cmd+W ...) are not game commands; Ctrl alone is sprint.
     if (modified && e.code !== 'ControlLeft' && e.code !== 'ControlRight' && !playing) return;
     if (playing && isGameKey(e.code)) e.preventDefault();
-    else if (e.code === 'F3') e.preventDefault();
+    // F3 / F5 are game keys on every in-world screen (F5 would reload the page and lose the world).
+    else if (e.code === 'F3' || e.code === 'F5') e.preventDefault();
     if (!playing && e.code !== 'KeyE' && e.code !== 'Escape' && e.code !== 'F3') {
       // In menus only the screen keys act; held movement keys are still tracked so walking
       // resumes naturally when the inventory closes with W still down.
@@ -182,6 +183,8 @@ export class InputBinder {
 
   private onMouseDown(e: MouseEvent): void {
     if (!this.host.isPlaying()) return;
+    // The middle button picks a block; its browser default (autoscroll) must never start.
+    if (e.button === BUTTON_PICK) e.preventDefault();
     // Make sure keyboard events reach this frame (iframe hosts).
     try {
       this.win.focus();
@@ -189,7 +192,7 @@ export class InputBinder {
       // ignore
     }
     if (this.locked) {
-      this.host.input.buttonDown(e.button);
+      this.run(this.host.input.buttonDown(e.button));
       return;
     }
     if (this.dragLook) {
@@ -243,11 +246,16 @@ export class InputBinder {
       const engaging = this.engagingPress;
       const ev = this.gesture.up(e.button);
       if (this.gesture.state === 'idle') this.engagingPress = false;
-      if (ev === 'click' && this.host.isPlaying() && !engaging) this.host.input.click(button);
+      if (ev === 'click' && this.host.isPlaying() && !engaging) this.run(this.host.input.click(button));
       else if (ev === 'endHold') this.host.input.buttonUp(button);
     }
     // Releases always go through (a button pressed before a screen opened must not stick).
     this.host.input.buttonUp(e.button);
+  }
+
+  /** Hand a command from a mouse button (the middle button's pick block) to the game. */
+  private run(cmd: InputCommand): void {
+    if (cmd !== 'none' && this.host.isPlaying()) this.host.command(cmd);
   }
 
   private onWheel(e: WheelEvent): void {
