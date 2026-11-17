@@ -23,6 +23,7 @@ import {
   TNT_HALF_WIDTH,
   TNT_HEIGHT,
 } from './constants';
+import type { ClientDrive } from './drive';
 import { emptyInput, type PlayerInput } from './input';
 import { Inventory } from './inventory';
 
@@ -160,6 +161,12 @@ export class Player extends Entity {
    * that keeps its own camera yaw adds the taken amount to it so the view turns with the ship.
    */
   carriedYaw = 0;
+  /**
+   * Null: the server moves this player from its input (server-driven). Otherwise its client moves
+   * it and reports, and this is the server's state of that (entities/drive.ts). Not saved: who
+   * drives a player is decided when it joins.
+   */
+  remote: ClientDrive | null = null;
 
   // ---- health timers (EntityManager)
   drownTicks = 0;

@@ -66,15 +66,15 @@ export class FluidSampler {
     }
     for (let k = 0; k < near.length; k++) {
       const r = near[k]!;
-      const ship = r.ship;
-      if (ship === null || ship.hull === null) continue;
+      const hull = r.hull;
+      if (hull === null) continue;
       if (x < r.minX || x > r.maxX || y < r.minY || y > r.maxY || z < r.minZ || z > r.maxZ) continue;
       const p = this.point;
       p.x = x;
       p.y = y;
       p.z = z;
       const l = curToLocal(r, p, this.local);
-      if (isDryCell(ship.hull, Math.floor(l.x), Math.floor(l.y), Math.floor(l.z))) return 0;
+      if (isDryCell(hull, Math.floor(l.x), Math.floor(l.y), Math.floor(l.z))) return 0;
     }
     return liq;
   }

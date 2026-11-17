@@ -1,10 +1,11 @@
 /**
  * What the entities module needs from the simulation. Keeping it this small is what lets the
- * module run against a hand-built world and hand-built structures in tests.
+ * module run against a hand-built world and hand-built structures in tests. The body mover alone
+ * needs even less (BodyHost, body.ts): that is what lets a client run it.
  */
 import type { Rng } from '../core/rng';
 import type { Structure } from '../structures/structure';
-import type { World } from '../voxel/world';
+import type { BodyHost } from './body';
 import type { Entity, Player } from './entity';
 
 export type EntityEventType = 'hurt' | 'death' | 'crush' | 'land' | 'splash' | 'pickup' | 'helmReleased' | 'despawn';
@@ -29,8 +30,8 @@ export type EntityEvent = {
   player?: Player;
 };
 
-export interface EntityHost {
-  readonly world: World;
+/** What the entity rules need: the bodies' host (world, structures) plus randomness, blasts and events. */
+export interface EntityHost extends BodyHost {
   /** The only source of randomness (determinism). */
   readonly rng: Rng;
   /**

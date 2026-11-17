@@ -354,9 +354,7 @@ function pushEntities(sim: Simulation, centre: Vec3, power: number): void {
     }
     if (e instanceof Player && e.dead) continue;
     const k = impact * KNOCKBACK_SPEED;
-    e.vel.x += dx * k;
-    e.vel.y += dy * k;
-    e.vel.z += dz * k;
+    sim.entities.knock(e, dx * k, dy * k, dz * k);
   }
 }
 

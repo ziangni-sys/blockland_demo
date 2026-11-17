@@ -12,7 +12,8 @@
  * 损毁并掉落；实体被挤 — 先推开，推不动（被世界方块或另一个结构体挡住）就受伤，并挪到最近的空位，
  * 创造模式只挪不伤；LESSONS 生物被挤住 — 生存模式下被挤 3 次算死.
  */
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, expect, it } from 'vitest';
+import { driveSuite } from './drive-modes';
 import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { NX, NY, NZ, PY, PZ } from '../../src/core/dirs';
@@ -141,7 +142,7 @@ function sum(a: readonly number[]): number {
 
 // ======================================================================== 15
 
-describe('15. 风车推开阔水面上的船，船不受损。', () => {
+driveSuite('15. 风车推开阔水面上的船，船不受损。', () => {
   /** A 3x3 plank boat (open hold, helm) floating west of a paddle's southern arc, open water all around. */
   let paddle: ShipRun;
   /** The same boat floating in the plane of a windmill whose lowest blades dip into the sea. */
@@ -220,7 +221,7 @@ describe('15. 风车推开阔水面上的船，船不受损。', () => {
 
 // ======================================================================== 16
 
-describe('16. 叶片把船顶在墙角：先推；推不动时逐格损毁，不会穿墙。', () => {
+driveSuite('16. 叶片把船顶在墙角：先推；推不动时逐格损毁，不会穿墙。', () => {
   /**
    * The paddle and boat of scenario 15, the boat now in a corner of two thin (one block) stone
    * walls, one block away from each: a west wall (cells x = -5, face x = -4) and a wall between
@@ -413,7 +414,7 @@ interface GunwaleRun {
   minHealth: number;
 }
 
-describe('17. 叶片扫过玩家时把人推开。玩家被关在笼子里时，生存模式扣血并挪位，创造模式只挪位。风车沿着船舷推人时，不算挤伤。', () => {
+driveSuite('17. 叶片扫过玩家时把人推开。玩家被关在笼子里时，生存模式扣血并挪位，创造模式只挪位。风车沿着船舷推人时，不算挤伤。', () => {
   let sweep: PlayerRun;
   let millOver: PlayerRun;
   let cageSurvival: CageRun;
@@ -604,7 +605,7 @@ function rabbitRun(mode: 'survival' | 'creative', ticks: number): RabbitRun {
   return out;
 }
 
-describe('18. 兔子被挤住：创造模式挪位；生存模式被挤多次后压扁。', () => {
+driveSuite('18. 兔子被挤住：创造模式挪位；生存模式被挤多次后压扁。', () => {
   let creative: RabbitRun;
   let survival: RabbitRun;
 

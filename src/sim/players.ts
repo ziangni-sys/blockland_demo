@@ -37,9 +37,18 @@
  * (input, inventory) or what a command would (teleport, mode), so a scripted player behaves
  * exactly like a played one. A control is valid until its player leaves; a rejoin hands out a
  * new one.
+ *
+ * DRIVE. A joined player starts server-driven: the server moves it from its input (the present
+ * client, tests and scripted control). setDrive('client') makes it client-driven: its client moves
+ * it and sends move reports (submitReport), the server checks them and keeps the authority on
+ * everything else, and tells the client where it put the player whenever it moved it on its own
+ * authority (correction / takeCorrection). See entities/drive.ts. Scripted clicks and held keys
+ * still reach the server for both; for a client-driven player the held movement keys only matter
+ * to its client, except the stick axes and sneak, which its reports carry (helm, docking).
  */
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../core/dirs';
 import { vec3 } from '../core/math';
+import type { Correction, DriveMode, MoveReport } from '../entities/drive';
 import { Player, type GameMode } from '../entities/entity';
 import { maxStackOf } from '../entities/inventory';
 import { readPlayerRecord, writePlayerRecord } from '../entities/manager';
@@ -320,9 +329,7 @@ export class PlayerControl {
 
   /** This player's game mode (DESIGN: per player). Survival ends flight. */
   setMode(mode: GameMode): void {
-    const p = this.player;
-    p.mode = mode;
-    if (mode === 'survival') p.flying = false;
+    this.sim.entities.setMode(this.player, mode);
   }
   respawn(): void {
     const p = this.player;
@@ -446,13 +453,30 @@ export class PlayerControl {
 
   /** Move the player's feet to a world point: lets go of any helm or carrier, no velocity, no fall. */
   teleport(x: number, y: number, z: number): void {
-    const p = this.player;
-    this.releaseHelm();
-    p.carrierId = 0;
-    p.carrierVel.x = p.carrierVel.y = p.carrierVel.z = 0;
-    p.vel.x = p.vel.y = p.vel.z = 0;
-    p.fallDistance = 0;
-    p.setPosition(x, y, z);
+    this.sim.entities.teleport(this.player, x, y, z);
+  }
+
+  // ------------------------------------------------------------------ drive (see DRIVE in the header)
+
+  /** Who moves this player: 'server' (from its input) or 'client' (from its move reports). */
+  get drive(): DriveMode {
+    return this.sim.entities.driveOf(this.player);
+  }
+  /** Switch who moves this player (to 'client' raises a correction telling the client where it is). */
+  setDrive(mode: DriveMode): void {
+    this.sim.entities.setDrive(this.player, mode);
+  }
+  /** A move report from this player's client (checked and applied in the next tick; copied). */
+  submitReport(report: MoveReport): void {
+    this.sim.entities.submitReport(this.player, report);
+  }
+  /** The correction waiting for this player's client, or null (client-driven players only). */
+  get correction(): Readonly<Correction> | null {
+    return this.sim.entities.correctionOf(this.player);
+  }
+  /** Take the waiting correction (a copy) to send it; null when there is none. */
+  takeCorrection(): Correction | null {
+    return this.sim.entities.takeCorrection(this.player);
   }
 
   /**

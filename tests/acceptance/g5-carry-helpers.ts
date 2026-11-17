@@ -18,6 +18,7 @@ import { Rotor, Ship } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { soloSim } from '../solo';
+import { withDrive } from './drive-modes';
 
 /** Sea world: deeprock y=0, stone 1..19, water 20..29; the first air cell is y = SEA_TOP. */
 export const SEA_TOP = 30;
@@ -29,7 +30,7 @@ export const WATER_SURFACE = SEA_TOP - 1 + 8 / 9;
 export const FLAT_TOP = 35;
 
 export function seaSim(mode: GameMode, spawn: Vec3, seed = 1901): Simulation {
-  return soloSim({
+  return withDrive(soloSim({
     seed,
     mode,
     generator: new FlatGenerator([
@@ -41,11 +42,11 @@ export function seaSim(mode: GameMode, spawn: Vec3, seed = 1901): Simulation {
     loadRadius: 3,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  });
+  }));
 }
 
 export function flatSim(mode: GameMode, spawn: Vec3, seed = 2001): Simulation {
-  return soloSim({
+  return withDrive(soloSim({
     seed,
     mode,
     generator: new FlatGenerator(),
@@ -53,7 +54,7 @@ export function flatSim(mode: GameMode, spawn: Vec3, seed = 2001): Simulation {
     loadRadius: 2,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  });
+  }));
 }
 
 /** Fill an inclusive box of a grid with a block id (or full cell value). */
