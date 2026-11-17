@@ -449,7 +449,19 @@ export class Mover {
               continue;
             }
           }
-          if (!this.applyPush(e, r, nx, ny, nz, pen.depth, mask)) {
+          let pushed = this.applyPush(e, r, nx, ny, nz, pen.depth, mask);
+          if (!pushed && kind !== 0) {
+            // The vertical (ground / ceiling) correction is blocked, e.g. a rising blade's tip
+            // presses a free-standing body into the ground. That is not yet a crush: the face can
+            // still be cleared along its horizontal part (the body goes out sideways). Only when
+            // that is refused too is the body truly stuck (DESIGN 实体被挤: only 推不动 is a crush).
+            const side = (Math.abs(nx) > 1e-9 ? 1 : 0) | (Math.abs(nz) > 1e-9 ? 4 : 0);
+            if (side !== 0 && this.applyPush(e, r, nx, ny, nz, pen.depth, side | 2)) {
+              pushed = true;
+              kind = 0;
+            }
+          }
+          if (!pushed) {
             this.pushBlocked = true;
             break;
           }
@@ -556,6 +568,14 @@ export class Mover {
           failed = a;
           break;
         }
+      }
+      if (failed < 0 && ty < 0 && this.adjY > 0) {
+        // The push's downward part dipped the box into another structure's floor and the
+        // floor-lift took it back: that axis is effectively refused. Without it the move would
+        // clear only the horizontal share of the depth (nx² of it), leaving a sliver of overlap
+        // after the iteration cap that was then judged a crush (a blade pushing a rider on a
+        // ship's deck). Drop the axis and rescale the rest so the face is actually cleared.
+        failed = 1;
       }
       if (failed < 0) {
         e.pos.x += tx + this.adjX;

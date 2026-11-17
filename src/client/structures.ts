@@ -59,6 +59,23 @@ export class StructureRenderer {
   }
 
   /**
+   * True when every live structure of the simulation has had a mesh installed (or settled as
+   * empty / failed) at least once. A record exists before its mesh does: a big ship meshed in
+   * the worker pool is invisible until the job returns, so loading must wait for this, not for
+   * the record count.
+   */
+  allMeshed(sim: Simulation): boolean {
+    const list = sim.structures.all();
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i]!;
+      if (s.removed) continue;
+      const rec = this.recs.get(s.id);
+      if (!rec || rec.shownVersion < 0) return false;
+    }
+    return true;
+  }
+
+  /**
    * Bring the backend in line with the simulation's structures and write every pose for the
    * blend factor `alpha`. `dt` (seconds) drives light smoothing.
    */
@@ -136,8 +153,17 @@ export class StructureRenderer {
       if (accepted) return;
       rec.jobVersion = -1;
     }
-    this.local ??= new Mesher();
-    const data = this.local.build(input);
+    let data: MeshData;
+    try {
+      this.local ??= new Mesher();
+      data = this.local.build(input);
+    } catch (e) {
+      // Report once and keep what is shown: retrying a deterministic failure every frame would
+      // spam the error and never let loading finish.
+      this.onError('structure meshing', e);
+      rec.shownVersion = version;
+      return;
+    }
     this.install(s.id, ox, oy, oz, data);
     rec.shownVersion = version;
   }

@@ -67,6 +67,8 @@ export const STRINGS = {
   'pause.settings': { zh: '设置', en: 'Settings' },
   'pause.mode': { zh: '游戏模式', en: 'Game mode' },
   'pause.saveQuit': { zh: '保存并退出', en: 'Save & quit' },
+  'pause.saveFailed': { zh: '保存失败，世界仍然打开。', en: 'Saving failed; the world is still open.' },
+  'pause.quitNoSave': { zh: '不保存退出', en: 'Quit without saving' },
   'pause.controls': { zh: '操作说明', en: 'Controls reference' },
 
   // ---- controls: key captions
@@ -103,7 +105,7 @@ export const STRINGS = {
   'ctl.helmThrottle': { zh: '油门', en: 'Throttle' },
   'ctl.helmRudder': { zh: '转舵', en: 'Rudder' },
   'ctl.helmRelease': { zh: '（掌舵时）松开舵轮', en: 'Let go (while steering)' },
-  'ctl.helmDock': { zh: '停靠：船还原为方块', en: 'Dock: turn the ship back into blocks' },
+  'ctl.helmDock': { zh: '停靠（空手对舵轮，或掌舵时）：船还原为方块', en: 'Dock (empty hand on the helm, or while steering): ship back to blocks' },
   'ctl.bearingPreview': { zh: '预览转子', en: 'Preview the rotor' },
   'ctl.bearingStart': { zh: '启动转子', en: 'Start the rotor' },
   'ctl.bearingStop': { zh: '（运转中）停止转子', en: 'Stop a running bearing' },

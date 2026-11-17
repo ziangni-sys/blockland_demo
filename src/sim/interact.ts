@@ -18,7 +18,7 @@
  *   block item      place
  * Sneaking with a block item in hand places it against ANY helm (world or ship) or bearing:
  * building while sneaking along a deck must never dock the whole ship by accident. Docking
- * from the helm therefore takes sneak + right-click with an empty hand or a non-block item;
+ * from the helm therefore takes sneak + right-click with an EMPTY hand (glue and buckets are handled before the helm);
  * from the wheel (steering) sneak + right-click docks whatever is in hand.
  *
  * TWO RAYS. The use ray (outline, right-click, glue) is the bucket ray while a bucket is held:

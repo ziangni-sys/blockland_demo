@@ -25,6 +25,29 @@ import type { WorkerPool } from './workers';
 const JOBS_PER_WORKER = 3;
 /** Most sections dispatched in one frame. */
 const MAX_DISPATCH_PER_FRAME = 24;
+/**
+ * Most trivially empty sections (all air / all opaque: finished on the main thread without the
+ * mesher) settled in one frame on top of the real jobs. They cost a snapshot each and must not
+ * use up the worker slots, but an unbounded sweep through a sky full of them could stall a frame.
+ */
+const MAX_TRIVIAL_PER_FRAME = 96;
+/**
+ * A section whose snapshot or main-thread mesh throws is tried this many times in all (a
+ * transient error gets another chance), then settled as it is — whatever was on screen stays,
+ * like a worker's error reply — so loading can finish and the frame loop is never stuck on it.
+ */
+const MAX_MESH_ATTEMPTS = 3;
+
+/** What dispatch() did with a section. */
+const Dispatched = {
+  /** A worker job was posted, or the section was meshed on the main thread (real work). */
+  Job: 0,
+  /** Trivially empty: settled without the mesher. */
+  Trivial: 1,
+  /** Snapshot or mesh failed (retried later or settled). */
+  Failed: 2,
+} as const;
+type Dispatched = (typeof Dispatched)[keyof typeof Dispatched];
 
 /** True when nothing in the padded box can produce a visible face (all air, or all opaque cubes). */
 export function isTriviallyEmpty(input: MeshInput): boolean {
@@ -63,6 +86,8 @@ export class SectionMesher {
   private readonly meshed = new Set<number>();
   private readonly results: Result[] = [];
   private readonly picked: number[] = [];
+  /** Failed attempts per section (snapshot / main-thread mesh), until it meshes or is settled. */
+  private readonly failures = new Map<number, number>();
   private local: Mesher | null = null;
   private disposed = false;
   private readonly eligible: (cx: number, cz: number) => boolean;
@@ -102,18 +127,29 @@ export class SectionMesher {
     const cap = pool ? Math.max(1, pool.size || 2) * JOBS_PER_WORKER : 1;
     const room = pool ? Math.min(MAX_DISPATCH_PER_FRAME, cap - pool.inFlight) : MAX_DISPATCH_PER_FRAME;
     const picked = this.picked;
-    picked.length = 0;
-    if (room > 0) this.queue.take(room, this.eligible, picked);
+    // Only real jobs count against `room`: trivially empty sections finish here without a
+    // worker, so keep taking until the workers have their share (or the budget is spent).
+    let jobs = 0;
+    let trivial = 0;
     let done = 0;
-    for (let i = 0; i < picked.length; i++) {
-      const key = picked[i]!;
-      // Always make some progress, then respect the budget; hand back what is left.
-      if (done > 0 && this.now() - frameStart >= budgetMs) {
-        this.queue.retry(key);
-        continue;
+    let outOfTime = false;
+    while (!outOfTime && room - jobs > 0 && trivial < MAX_TRIVIAL_PER_FRAME) {
+      picked.length = 0;
+      this.queue.take(room - jobs, this.eligible, picked);
+      if (picked.length === 0) break;
+      for (let i = 0; i < picked.length; i++) {
+        const key = picked[i]!;
+        // Always make some progress, then respect the budget; hand back what is left.
+        if (outOfTime || (done > 0 && this.now() - frameStart >= budgetMs)) {
+          outOfTime = true;
+          this.queue.retry(key);
+          continue;
+        }
+        const r = this.dispatch(key, pool);
+        done++;
+        if (r === Dispatched.Trivial) trivial++;
+        else jobs++;
       }
-      this.dispatch(key, pool);
-      done++;
     }
     this.stats.queued = this.queue.size;
     this.stats.inFlight = this.queue.inFlightCount;
@@ -134,6 +170,7 @@ export class SectionMesher {
     this.queue.dropChunk(cx, cz);
     for (let sy = 0; sy < SECTIONS_PER_CHUNK; sy++) {
       const key = sectionKey(cx, sy, cz);
+      this.failures.delete(key);
       if (this.meshed.delete(key)) this.backend.setSectionMesh(key, 0, 0, 0, null);
     }
   }
@@ -143,11 +180,12 @@ export class SectionMesher {
     this.disposed = true;
     for (const key of this.meshed) this.backend.setSectionMesh(key, 0, 0, 0, null);
     this.meshed.clear();
+    this.failures.clear();
     this.results.length = 0;
     this.queue.clear();
   }
 
-  private dispatch(key: number, pool: WorkerPool<MeshResponse> | null): void {
+  private dispatch(key: number, pool: WorkerPool<MeshResponse> | null): Dispatched {
     const cx = sectionKeyCx(key);
     const sy = sectionKeySy(key);
     const cz = sectionKeyCz(key);
@@ -155,14 +193,14 @@ export class SectionMesher {
     try {
       input = snapshotSection(this.world, cx, sy, cz);
     } catch (e) {
-      this.onError('section snapshot', e);
-      this.queue.complete(key);
-      return;
+      this.failed(key, 'section snapshot', e);
+      return Dispatched.Failed;
     }
     if (isTriviallyEmpty(input)) {
       this.stats.trivial++;
+      this.failures.delete(key);
       if (this.queue.complete(key) === 'install') this.results.push({ key, data: null });
-      return;
+      return Dispatched.Trivial;
     }
     if (pool) {
       const accepted = pool.submit(
@@ -174,7 +212,7 @@ export class SectionMesher {
           if (!this.disposed) this.queue.retry(key);
         },
       );
-      if (accepted) return;
+      if (accepted) return Dispatched.Job;
     }
     // Main-thread fallback.
     let data: MeshData;
@@ -182,12 +220,32 @@ export class SectionMesher {
       this.local ??= new Mesher();
       data = this.local.build(input);
     } catch (e) {
-      this.onError('meshing', e);
-      this.queue.complete(key);
-      return;
+      this.failed(key, 'meshing', e);
+      return Dispatched.Failed;
     }
     this.stats.syncMeshed++;
+    this.failures.delete(key);
     if (this.queue.complete(key) === 'install') this.results.push({ key, data });
+    return Dispatched.Job;
+  }
+
+  /**
+   * The snapshot or main-thread mesh of `key` threw. Report it; queue it again while attempts
+   * remain, otherwise settle it as it is (like a worker's error reply: whatever is on screen
+   * stays, and a later edit re-queues it). Never leaves the section unsettled for good, which
+   * kept the loading screen up forever.
+   */
+  private failed(key: number, what: string, err: unknown): void {
+    this.onError(what, err);
+    const n = (this.failures.get(key) ?? 0) + 1;
+    if (n < MAX_MESH_ATTEMPTS) {
+      this.failures.set(key, n);
+      this.queue.retry(key);
+      return;
+    }
+    this.failures.delete(key);
+    this.queue.complete(key);
+    if (this.world.getChunk(sectionKeyCx(key), sectionKeyCz(key))) this.meshed.add(key);
   }
 
   private onReply(key: number, res: MeshResponse): void {

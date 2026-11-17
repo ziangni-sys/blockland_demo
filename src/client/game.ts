@@ -9,7 +9,6 @@
  * inventory is open (movement zeroed); it does NOT tick on the main menu, loading, pause,
  * settings or death screens, so nothing on a deck moves while paused.
  */
-import { DAY_TICKS } from '../core/constants';
 import { hashString } from '../core/rng';
 import { paintAllTiles } from '../art/tiles';
 import { renderItemIcon } from '../art/icons';
@@ -127,6 +126,12 @@ export class Game implements InputHost {
   private loading: { text: string; progress: number } | null = null;
   /** A menu action (create / load / quit) is in progress; further ones are ignored. */
   private busy = false;
+  /**
+   * The last "Save & quit" could not write the world: the world stays open and the pause /
+   * death screen offers an explicit "Quit without saving" (window.confirm does nothing in the
+   * host page). Cleared by the next successful save and when the session ends.
+   */
+  private quitUnsaved = false;
   private envTime = 0;
   private lastCarriedYaw = 0;
   private lastRender = -Infinity;
@@ -445,6 +450,7 @@ export class Game implements InputHost {
       deleteWorld: (id) => void this.deleteWorld(id),
       resume: () => this.resume(),
       saveAndQuit: () => void this.saveAndQuit(),
+      quitWithoutSaving: () => this.quitWithoutSaving(),
       respawn: () => this.respawn(),
       openSettings: () => {
         if (this.screen !== 'mainMenu' && this.screen !== 'pause') return;
@@ -502,7 +508,7 @@ export class Game implements InputHost {
     this.renderDirty = true;
     this.debugAt = -Infinity;
     const sim = this.sim;
-    if (rdChanged && sim) sim.loadRadius = next.renderDistance;
+    if (rdChanged && sim) sim.loadRadius = loadRadiusFor(next.renderDistance);
   }
 
   private setMode(mode: GameMode): void {
@@ -562,7 +568,7 @@ export class Game implements InputHost {
       const mode: GameMode = opts.mode === 'survival' ? 'survival' : 'creative';
       const name = (typeof opts.name === 'string' && opts.name.trim()) || 'World';
       const generator = new TerrainGenerator(seed);
-      const sim = new Simulation({ seed, mode, generator, loadRadius: this.settings.renderDistance });
+      const sim = new Simulation({ seed, mode, generator, loadRadius: loadRadiusFor(this.settings.renderDistance) });
       giveStarterKit(sim);
       const id = makeWorldId(Date.now(), Math.random);
       const meta = newWorldMeta(id, name.slice(0, 64), seedText, seed, mode, Date.now());
@@ -600,7 +606,15 @@ export class Game implements InputHost {
       await this.nextFrame();
       const meta = res.meta;
       const generator = new TerrainGenerator(meta.seedHash);
-      const sim = new Simulation({ seed: meta.seedHash, mode: meta.mode, generator, loadRadius: this.settings.renderDistance });
+      // deferInitialLoad: importSave() throws the constructor's spawn-area chunks away and loads
+      // the ground under the saved player itself.
+      const sim = new Simulation({
+        seed: meta.seedHash,
+        mode: meta.mode,
+        generator,
+        loadRadius: loadRadiusFor(this.settings.renderDistance),
+        deferInitialLoad: true,
+      });
       try {
         importSave(sim, res.bundle);
       } catch (e) {
@@ -683,22 +697,49 @@ export class Game implements InputHost {
     const s = this.session;
     if (!s || this.busy) return;
     this.busy = true;
+    const from = this.screen;
+    let saved = false;
     try {
       this.binder.exitLock();
       this.showLoading('loading.saving', 1);
-      await this.saveNow('quit');
+      saved = await this.saveNow('quit');
       await this.saves?.idle();
+    } catch (e) {
+      this.faults.report('save & quit', e);
     } finally {
-      this.endSession();
       this.busy = false;
-      this.backToMenu();
     }
+    // Leave only when the world is safely written, or when it can never be written by this
+    // build anyway (a newer version owns it, or there is no storage at all). Otherwise closing
+    // would throw away everything since the last good save: keep the world open, say so, and
+    // let the player retry or choose "Quit without saving" explicitly.
+    if (saved || s.saveBlocked || !this.saves || this.session !== s) {
+      this.leaveWorld();
+      return;
+    }
+    this.quitUnsaved = true;
+    this.loading = null;
+    this.setScreen(from === 'death' ? 'death' : 'pause');
+    this.toast(clientText(this.settings.language, 'save.quitFailed'), 'error');
+  }
+
+  /** The explicit choice offered after a failed "Save & quit": close the world unsaved. */
+  quitWithoutSaving(): void {
+    if (!this.session || this.busy || !this.quitUnsaved) return;
+    if (this.screen !== 'pause' && this.screen !== 'death') return;
+    this.leaveWorld();
+  }
+
+  private leaveWorld(): void {
+    this.endSession();
+    this.backToMenu();
   }
 
   private endSession(): void {
     const s = this.session;
     if (!s) return;
     this.session = null;
+    this.quitUnsaved = false;
     this.genPool?.cancelAll();
     this.meshPool?.cancelAll();
     s.dispose();
@@ -723,6 +764,7 @@ export class Game implements InputHost {
         return { meta, bundle };
       });
       s.savedOnce = true;
+      if (this.session === s) this.quitUnsaved = false;
       if (reason !== 'autosave' || this.worlds.every((w) => w.id !== s.meta.id)) void this.refreshWorlds();
       return true;
     } catch (e) {
@@ -935,6 +977,7 @@ export class Game implements InputHost {
         loading: this.screen === 'loading' ? this.loading : null,
         pointerLocked: this.binder.dragLook ? this.binder.engaged : this.binder.locked,
         dragLook: this.binder.dragLook,
+        quitUnsaved: this.quitUnsaved,
         renderer: this.backendInfo ? (this.backendInfo.api === 'webgpu' ? 'WebGPU' : 'WebGL2') : this.backendError ? '—' : '…',
         version: this.version,
       });
@@ -1006,16 +1049,14 @@ export class Game implements InputHost {
       };
     },
     /**
-     * Jump the world clock forward to the next moment of day `t` (0..1, 0 = sunrise) — for
-     * night screenshots. Debug only: block ticks scheduled inside the skipped span never fire.
+     * Set the time of day `t` (0..1, 0 = sunrise) — for night screenshots. Goes through
+     * Simulation.setDayTime, which moves only the day offset: the world clock (which drives
+     * scheduled block ticks) is never written.
      */
     setDayTime: (t: number): void => {
       const sim = this.sim;
       if (!sim || !Number.isFinite(t)) return;
-      const now = sim.world.time;
-      let target = Math.floor(now / DAY_TICKS) * DAY_TICKS + Math.floor((((t % 1) + 1) % 1) * DAY_TICKS);
-      if (target < now) target += DAY_TICKS;
-      sim.world.time = target;
+      sim.setDayTime(t);
       this.renderDirty = true;
     },
     /** Point the view (radians). */
@@ -1027,7 +1068,9 @@ export class Game implements InputHost {
     teleport: (x: number, y: number, z: number): void => {
       const sim = this.sim;
       if (!sim) return;
-      sim.player.setPosition(x, y, z);
+      // The sim's scripted-control path: lets go of the helm / carrier, clears velocity and
+      // fall distance (a bare setPosition is undone by the helm seat on the next tick).
+      sim.teleport(x, y, z);
       this.renderDirty = true;
     },
     /** World cell value at integer coordinates. */
@@ -1044,6 +1087,15 @@ export class Game implements InputHost {
     save: (): Promise<boolean> => this.saveNow('autosave'),
     backendStats: () => this.backend.stats(),
   };
+}
+
+/**
+ * Chunk radius the simulation keeps loaded for a render distance: one ring more, because a
+ * section is meshed only once all 8 neighbouring chunks exist, so the outermost loaded ring is
+ * never drawn. Render distance N therefore shows N chunks.
+ */
+function loadRadiusFor(renderDistance: number): number {
+  return renderDistance + 1;
 }
 
 /** True when the page address asks for the WebGL2 backend (#webgl2). */

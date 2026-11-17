@@ -3,11 +3,15 @@
  * fallback. Translates DOM events into InputState calls and client commands.
  *
  * The game runs in a sandboxed iframe: keyboard events only arrive after a click focused it,
- * and Pointer Lock may be refused (no allow-pointer-lock) or unsupported. If the very first
- * lock request fails, the binder switches to drag-to-look for good (holding a button and
- * moving turns the view; a still click is a normal click). A later failure after a lock once
- * worked is just "not locked right now" (e.g. Chrome refuses a re-lock right after the user
- * pressed Esc): the click-to-play veil stays up and the next click retries.
+ * and Pointer Lock may be refused (no allow-pointer-lock) or unsupported. Pointer lock is
+ * always tried from the first canvas click, also in a frame with an opaque origin (a host may
+ * sandbox without allow-same-origin and still grant allow-pointer-lock). If a request made
+ * from a click fails before any lock ever worked, the binder switches to drag-to-look for good
+ * (holding a button and moving turns the view; a still click is a normal click). A refusal of
+ * a request made without a click (Esc / key resume: no user activation) proves nothing and
+ * changes nothing. A later failure after a lock once worked is just "not locked right now"
+ * (e.g. Chrome refuses a re-lock right after the user pressed Esc): the click-to-play veil
+ * stays up and the next click retries.
  */
 import { DragGesture, isGameKey, type InputCommand, type InputState, type LookSettings } from './input';
 
@@ -29,16 +33,15 @@ export interface InputHost {
 }
 
 /**
- * True inside a sandboxed frame without allow-same-origin (an opaque origin served over a
- * network scheme). Such strict hosts virtually never grant allow-pointer-lock either, and a
- * refused request makes the browser log a console error, so drag-to-look is used from the
- * start. Local files also have an opaque origin but are not sandboxed: they keep pointer lock.
+ * False when the browser reports that the page has no transient user activation right now (a
+ * pointer-lock request would be refused for that reason alone). Unknown = true.
  */
-function sandboxedOpaqueOrigin(win: Window): boolean {
+function hasUserActivation(win: Window): boolean {
   try {
-    return win.origin === 'null' && win.location.protocol !== 'file:';
+    const ua = (win.navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
+    return ua === undefined || ua.isActive !== false;
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -58,6 +61,14 @@ export class InputBinder {
   /** Drop the first movement after locking (see onMouseMove). */
   private skipNextMove = false;
   private pendingSince = -1;
+  /** The pending lock request came from a canvas click (its refusal means "unavailable"). */
+  private requestFromClick = false;
+  /**
+   * The current drag-mode press is the one that engaged the game (dismissed the veil): it may
+   * turn the view, but it never mines or places (as in pointer-lock mode, where the first
+   * click only asks for the lock).
+   */
+  private engagingPress = false;
   private readonly cleanups: Array<() => void> = [];
 
   constructor(
@@ -80,23 +91,30 @@ export class InputBinder {
     on(canvas, 'contextmenu', (e: Event) => e.preventDefault());
     on(doc, 'pointerlockchange', () => this.onLockChange());
     on(doc, 'pointerlockerror', () => this.onLockError());
-    if (typeof canvas.requestPointerLock !== 'function' || sandboxedOpaqueOrigin(win)) this.dragLook = true;
+    if (typeof canvas.requestPointerLock !== 'function') this.dragLook = true;
   }
 
   /** Per frame: promotes a still drag-mode press to a held button; detects silent lock refusals. */
   update(now: number): void {
     const ev = this.gesture.update(now);
-    if (ev === 'startHold') this.host.input.buttonDown(this.gesture.button);
+    if (ev === 'startHold' && !this.engagingPress) this.host.input.buttonDown(this.gesture.button);
     if (this.pendingSince >= 0 && !this.locked && now - this.pendingSince > LOCK_SILENCE_MS) {
       this.pendingSince = -1;
-      if (!this.everLocked) this.enterDragLook();
+      if (!this.everLocked && this.requestFromClick) this.enterDragLook(true);
     }
   }
 
-  /** Ask for pointer lock (call from a user gesture: click, key press). */
-  requestLock(): void {
+  /**
+   * Ask for pointer lock (call from a user gesture). `fromClick`: the request comes from a
+   * canvas click, so a refusal means the host does not allow locking. A request without user
+   * activation (Esc does not grant it) is not even made: it would be refused and the
+   * click-to-play veil asks for the click that can lock.
+   */
+  requestLock(fromClick = false): void {
     if (this.dragLook || this.locked) return;
+    if (!fromClick && !hasUserActivation(this.win)) return;
     const c = this.canvas as HTMLCanvasElement & { requestPointerLock(opts?: unknown): Promise<void> | void };
+    this.requestFromClick = fromClick;
     try {
       const r = c.requestPointerLock();
       if (r && typeof (r as Promise<void>).catch === 'function') (r as Promise<void>).catch(() => this.onLockError());
@@ -121,7 +139,8 @@ export class InputBinder {
   /** The drag gesture is aborted and any held button released. */
   cancelGesture(): void {
     const button = this.gesture.button; // cancel() forgets it
-    if (this.gesture.cancel() === 'endHold') this.host.input.buttonUp(button);
+    if (this.gesture.cancel() === 'endHold' && !this.engagingPress) this.host.input.buttonUp(button);
+    this.engagingPress = false;
   }
 
   dispose(): void {
@@ -174,16 +193,19 @@ export class InputBinder {
       return;
     }
     if (this.dragLook) {
+      let engaging = false;
       if (!this.engaged) {
         this.engaged = true;
+        engaging = true;
         this.host.onPointerStateChange();
       }
-      this.gesture.down(e.button, e.clientX, e.clientY, e.timeStamp);
+      // The press that dismisses the veil may drag the view but never mines or places.
+      if (this.gesture.down(e.button, e.clientX, e.clientY, e.timeStamp)) this.engagingPress = engaging;
       e.preventDefault();
       return;
     }
     // First click only engages: it asks for the lock and does not mine or place.
-    this.requestLock();
+    this.requestLock(true);
   }
 
   private onMouseMove(e: MouseEvent): void {
@@ -204,7 +226,10 @@ export class InputBinder {
         this.cancelGesture();
         return;
       }
-      if (this.gesture.move(e.clientX, e.clientY)) this.host.input.look(this.gesture.delta.x, this.gesture.delta.y, this.host.lookSettings());
+      const turned = this.gesture.move(e.clientX, e.clientY);
+      // A hold that turned into a real drag was a look after all: let go of the button.
+      if (this.gesture.takeHoldCancel() && !this.engagingPress) this.host.input.buttonUp(this.gesture.button);
+      if (turned) this.host.input.look(this.gesture.delta.x, this.gesture.delta.y, this.host.lookSettings());
     }
   }
 
@@ -215,8 +240,10 @@ export class InputBinder {
     }
     if (this.dragLook) {
       const button = this.gesture.button;
+      const engaging = this.engagingPress;
       const ev = this.gesture.up(e.button);
-      if (ev === 'click' && this.host.isPlaying()) this.host.input.click(button);
+      if (this.gesture.state === 'idle') this.engagingPress = false;
+      if (ev === 'click' && this.host.isPlaying() && !engaging) this.host.input.click(button);
       else if (ev === 'endHold') this.host.input.buttonUp(button);
     }
     // Releases always go through (a button pressed before a screen opened must not stick).
@@ -249,15 +276,22 @@ export class InputBinder {
 
   private onLockError(): void {
     this.pendingSince = -1;
-    // Never locked: the host does not allow it (sandbox without allow-pointer-lock, no
-    // support). After a successful lock it is a transient refusal; keep the click-to-play veil.
-    if (!this.everLocked) this.enterDragLook();
+    // Never locked and refused although asked from a click: the host does not allow it
+    // (sandbox without allow-pointer-lock, no support). A request without a click (key resume)
+    // may be refused for lack of user activation alone, and after a successful lock a refusal
+    // is transient: keep the click-to-play veil, the next click asks again.
+    if (!this.everLocked && this.requestFromClick) this.enterDragLook(true);
   }
 
-  private enterDragLook(): void {
+  /**
+   * Switch to drag-to-look for good. `engaged`: the refused request came from the player's
+   * click into the game, which therefore already counts as the engaging click (that click
+   * started no gesture, so nothing was mined).
+   */
+  private enterDragLook(engaged: boolean): void {
     if (this.dragLook) return;
     this.dragLook = true;
-    this.engaged = false;
+    this.engaged = engaged;
     this.host.onPointerStateChange();
   }
 }

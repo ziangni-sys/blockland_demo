@@ -1,9 +1,9 @@
 /** Death screen: a message over a crimson vignette, Respawn (primary) and Save & quit. */
 import type { UiContext } from '../context';
 import type { UiState } from '../model';
-import { h, svg } from '../dom';
+import { h, setHidden, svg } from '../dom';
 import { focusInto, type ScreenView } from './screen';
-import { button, ICON_RESPAWN, ICON_SAVE } from './widgets';
+import { button, ICON_CLOSE, ICON_RESPAWN, ICON_SAVE } from './widgets';
 
 /** A listing hull going down between waves: loss, in the game's own vocabulary. */
 const MARK =
@@ -12,6 +12,8 @@ const MARK =
 export class DeathView implements ScreenView {
   readonly el: HTMLElement;
   private readonly card: HTMLElement;
+  /** Shown only after a failed "Save & quit": the notice and the explicit unsaved exit. */
+  private readonly unsaved: HTMLElement;
 
   constructor(ctx: UiContext) {
     const d = ctx.doc;
@@ -19,11 +21,14 @@ export class DeathView implements ScreenView {
     const titleId = ctx.id('death');
     const respawn = button(ctx, { variant: 'primary', icon: ICON_RESPAWN, label: 'death.respawn', onClick: () => a.respawn() });
     const quit = button(ctx, { variant: 'ghost', icon: ICON_SAVE, label: 'pause.saveQuit', onClick: () => a.saveAndQuit() });
+    const noSave = button(ctx, { variant: 'ghost', icon: ICON_CLOSE, label: 'pause.quitNoSave', onClick: () => a.quitWithoutSaving() });
+    this.unsaved = h(d, 'div', 'bl-death-unsaved', { hidden: true }, [ctx.text(h(d, 'p', 'bl-death-sub', { role: 'alert' }), 'pause.saveFailed'), noSave]);
     this.card = h(d, 'div', 'bl-death-card bl-panel-modal', { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' }, [
       svg(d, MARK, 'bl-death-mark'),
       ctx.text(h(d, 'h2', 'bl-death-title', { id: titleId }), 'death.title'),
       ctx.text(h(d, 'p', 'bl-death-sub'), 'death.subtitle'),
       h(d, 'div', 'bl-actions', null, [respawn, quit]),
+      this.unsaved,
     ]);
     // Enter respawns, but only as a fresh press made while this screen is up: an auto-repeat
     // of a key held through the moment of death is not a choice.
@@ -35,7 +40,9 @@ export class DeathView implements ScreenView {
     this.el = h(d, 'div', 'bl-screen bl-death', { hidden: true, 'data-screen': 'death' }, [this.card]);
   }
 
-  update(_s: UiState): void {}
+  update(s: UiState): void {
+    setHidden(this.unsaved, s.quitUnsaved !== true);
+  }
 
   onShow(): void {
     // Focus the dialog, never the Respawn button: players die holding Space (swimming up,

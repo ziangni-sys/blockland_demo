@@ -109,6 +109,11 @@ export interface UiState {
   pointerLocked: boolean;
   /** True when the host cannot lock the pointer: show drag-to-look instructions instead. */
   dragLook: boolean;
+  /**
+   * The last "Save & quit" could not write the world, which therefore stayed open: the pause and
+   * death screens say so and offer "Quit without saving". Omitted = false.
+   */
+  quitUnsaved?: boolean;
   /** Graphics API line for menus, e.g. "WebGPU" or "WebGL2". */
   renderer: string;
   version: string;
@@ -128,6 +133,8 @@ export interface UiActions {
   deleteWorld(id: string): void;
   resume(): void;
   saveAndQuit(): void;
+  /** Close the world without saving; only offered after a failed "Save & quit" (quitUnsaved). */
+  quitWithoutSaving(): void;
   respawn(): void;
   openSettings(): void;
   closeSettings(): void;

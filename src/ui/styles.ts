@@ -778,7 +778,8 @@ ${twin('bl-hit', HIT)}
 .bl-pause-mode { display: flex; flex-direction: column; gap: 6px; margin: 6px 0; }
 .bl-pause-mode .bl-seg-ctl { width: 100%; }
 .bl-pause-mode .bl-seg-ctl button { flex: 1; }
-.bl-pause-quit { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--line-faint); }
+.bl-pause-quit { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--line-faint); display: flex; flex-direction: column; gap: 10px; }
+.bl-pause-unsaved, .bl-death-unsaved { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
 .bl-pause-ref { min-width: 0; padding-left: 26px; border-left: 1px solid var(--line-faint); }
 .bl-pause-ref > .bl-subtitle { margin-bottom: 14px; }
 .bl-ref-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 24px; }

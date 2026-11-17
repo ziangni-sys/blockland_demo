@@ -1,15 +1,17 @@
 /** Pause menu: resume, settings, creative/survival toggle, save & quit, full controls reference. */
 import type { UiContext } from '../context';
 import type { GameMode, Screen, UiState } from '../model';
-import { h } from '../dom';
+import { h, setHidden } from '../dom';
 import { focusInto, type ScreenView } from './screen';
-import { button, controlsReference, ICON_RESUME, ICON_SAVE, ICON_SLIDERS, Segmented } from './widgets';
+import { button, controlsReference, ICON_CLOSE, ICON_RESUME, ICON_SAVE, ICON_SLIDERS, Segmented } from './widgets';
 
 export class PauseView implements ScreenView {
   readonly el: HTMLElement;
   private readonly panel: HTMLElement;
   private readonly settingsBtn: HTMLButtonElement;
   private readonly modeSeg: Segmented<GameMode>;
+  /** Shown only after a failed "Save & quit": the notice and the explicit unsaved exit. */
+  private readonly unsaved: HTMLElement;
 
   constructor(ctx: UiContext) {
     const d = ctx.doc;
@@ -30,6 +32,8 @@ export class PauseView implements ScreenView {
     );
     this.modeSeg.el.setAttribute('aria-labelledby', modeLbl);
     const quit = button(ctx, { variant: 'danger', icon: ICON_SAVE, label: 'pause.saveQuit', cls: 'bl-btn--wide', onClick: () => a.saveAndQuit() });
+    const noSave = button(ctx, { variant: 'ghost', icon: ICON_CLOSE, label: 'pause.quitNoSave', cls: 'bl-btn--wide', onClick: () => a.quitWithoutSaving() });
+    this.unsaved = h(d, 'div', 'bl-pause-unsaved', { hidden: true }, [ctx.text(h(d, 'p', 'bl-subtitle', { role: 'alert' }), 'pause.saveFailed'), noSave]);
 
     this.panel = h(d, 'div', 'bl-panel bl-panel-modal bl-pause-panel', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' }, [
       h(d, 'div', 'bl-pause-main', null, [
@@ -37,7 +41,7 @@ export class PauseView implements ScreenView {
         resume,
         this.settingsBtn,
         h(d, 'div', 'bl-pause-mode', null, [ctx.text(h(d, 'span', 'bl-subtitle', { id: modeLbl }), 'pause.mode'), this.modeSeg.el]),
-        h(d, 'div', 'bl-pause-quit', null, [quit]),
+        h(d, 'div', 'bl-pause-quit', null, [quit, this.unsaved]),
       ]),
       h(d, 'div', 'bl-pause-ref', null, [ctx.text(h(d, 'h3', 'bl-subtitle'), 'pause.controls'), controlsReference(ctx)]),
     ]);
@@ -46,6 +50,7 @@ export class PauseView implements ScreenView {
 
   update(s: UiState): void {
     this.modeSeg.set(s.mode);
+    setHidden(this.unsaved, s.quitUnsaved !== true);
   }
 
   onShow(_s: UiState, from: Screen | null): void {

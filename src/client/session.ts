@@ -119,7 +119,7 @@ export class WorldSession {
         }
       }
     }
-    const structuresReady = this.structures.count >= this.sim.structures.all().length;
+    const structuresReady = this.structures.allMeshed(this.sim);
     const done = loaded === needed && ready === sections && structuresReady;
     const progress = Math.min(1, 0.45 * (loaded / needed) + 0.55 * (ready / sections));
     const phase = loaded < needed ? 'terrain' : ready < sections ? 'meshing' : 'finishing';

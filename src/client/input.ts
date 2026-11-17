@@ -292,8 +292,19 @@ export class InputState {
 
 /** Pointer travel (px) after which a press becomes a drag (look) instead of a click. */
 export const DRAG_THRESHOLD_PX = 5;
-/** A press held still this long becomes a held button (mining / using) instead of a click. */
-export const HOLD_DELAY_MS = 220;
+/**
+ * A press held still this long becomes a held button (mining / using) instead of a click: the
+ * usual long-press time. Long enough that the natural hesitation before starting a look drag
+ * (~0.3 s, plus input lag on a slow frame) is not taken for a hold — in creative mode one held
+ * frame already breaks the block under the crosshair.
+ */
+export const HOLD_DELAY_MS = 500;
+/**
+ * A hold whose pointer then travels this far (px) from where the hold started was a look drag
+ * after all: the held button is released (survival mining stops before the block breaks) and
+ * the rest of the press only turns the view. Small aiming moves while mining stay a hold.
+ */
+export const HOLD_CANCEL_PX = 16;
 
 export type GestureEvent = 'none' | 'click' | 'startHold' | 'endHold';
 
@@ -301,7 +312,8 @@ export type GestureEvent = 'none' | 'click' | 'startHold' | 'endHold';
  * Drag-to-look gesture, used when the host refuses pointer lock. One button at a time:
  *  - press + move beyond DRAG_THRESHOLD_PX before HOLD_DELAY_MS -> a pure look drag;
  *  - press held still for HOLD_DELAY_MS                          -> a held button (moving
- *    afterwards still turns the view, like aiming while mining);
+ *    afterwards still turns the view, like aiming while mining; travelling beyond
+ *    HOLD_CANCEL_PX releases the button and makes it a look drag, see takeHoldCancel);
  *  - press released quickly without moving                       -> a click.
  */
 export class DragGesture {
@@ -312,6 +324,9 @@ export class DragGesture {
   private lastX = 0;
   private lastY = 0;
   private startT = 0;
+  private holdX = 0;
+  private holdY = 0;
+  private holdCancelled = false;
   /** Rotation delta of the last move() (pixels). */
   readonly delta = { x: 0, y: 0 };
 
@@ -322,6 +337,7 @@ export class DragGesture {
     this.startX = this.lastX = x;
     this.startY = this.lastY = y;
     this.startT = t;
+    this.holdCancelled = false;
     return true;
   }
 
@@ -341,6 +357,14 @@ export class DragGesture {
     } else {
       this.delta.x = x - this.lastX;
       this.delta.y = y - this.lastY;
+      if (this.state === 'hold') {
+        const hx = x - this.holdX;
+        const hy = y - this.holdY;
+        if (hx * hx + hy * hy > HOLD_CANCEL_PX * HOLD_CANCEL_PX) {
+          this.state = 'drag';
+          this.holdCancelled = true;
+        }
+      }
     }
     this.lastX = x;
     this.lastY = y;
@@ -351,9 +375,21 @@ export class DragGesture {
   update(t: number): GestureEvent {
     if (this.state === 'pending' && t - this.startT >= HOLD_DELAY_MS) {
       this.state = 'hold';
+      this.holdX = this.lastX;
+      this.holdY = this.lastY;
       return 'startHold';
     }
     return 'none';
+  }
+
+  /**
+   * True once after move() turned a hold into a look drag: the caller releases the held button
+   * (the gesture's button stays readable until the press ends).
+   */
+  takeHoldCancel(): boolean {
+    const c = this.holdCancelled;
+    this.holdCancelled = false;
+    return c;
   }
 
   up(button: number): GestureEvent {
@@ -371,6 +407,7 @@ export class DragGesture {
     const s = this.state;
     this.state = 'idle';
     this.button = -1;
+    this.holdCancelled = false;
     return s === 'hold' ? 'endHold' : 'none';
   }
 }

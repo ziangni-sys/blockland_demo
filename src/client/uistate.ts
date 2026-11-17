@@ -40,6 +40,8 @@ export interface UiInputs {
   loading: { text: string; progress: number } | null;
   pointerLocked: boolean;
   dragLook: boolean;
+  /** The last "Save & quit" failed: offer "Quit without saving". Omitted = false. */
+  quitUnsaved?: boolean;
   renderer: string;
   version: string;
 }
@@ -134,6 +136,7 @@ export class UiStateBuilder {
       loadingSame &&
       prev.pointerLocked === x.pointerLocked &&
       prev.dragLook === x.dragLook &&
+      prev.quitUnsaved === (x.quitUnsaved === true) &&
       prev.renderer === x.renderer &&
       prev.version === x.version
     ) {
@@ -160,6 +163,7 @@ export class UiStateBuilder {
       loading: loadingSame && prev ? prev.loading : x.loading,
       pointerLocked: x.pointerLocked,
       dragLook: x.dragLook,
+      quitUnsaved: x.quitUnsaved === true,
       renderer: x.renderer,
       version: x.version,
     };

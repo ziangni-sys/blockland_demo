@@ -78,7 +78,13 @@ export class ViewBuilder {
   // overlay caches (rebuilt only when the simulation publishes a new object)
   private readonly targetCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0 };
   private readonly anchorCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0 };
-  private lastPreview: InteractionView['preview'] | undefined = undefined;
+  /**
+   * What the cached preview list was built from. Keyed on the parts, not the wrapper: the
+   * simulation publishes a fresh `preview` object every tick around the same `cells` array.
+   */
+  private lastPreviewCells: Int32Array | null | undefined = undefined;
+  private lastPreviewGrid = -1;
+  private lastPreviewKind: string | null = null;
   private lastConflicts: InteractionView['conflicts'] | undefined = undefined;
   private glueAt = -Infinity;
   private glueKey = '';
@@ -129,8 +135,11 @@ export class ViewBuilder {
 
   updateEnvironment(sim: Simulation, alpha: number, timeSec: number, renderDistance: number): EnvironmentState {
     const env = this.env;
-    const t = (sim.world.time % DAY_TICKS) + alpha;
-    env.dayTime = (t / DAY_TICKS) % 1;
+    // THE time of day is the simulation's (world.time + dayOffset, see Simulation.dayTime):
+    // world.time alone is wrong once setDayTime() was used or a save restored an offset.
+    // sim.dayTime is the current tick's; alpha interpolates from the previous one.
+    const d = sim.dayTime + (alpha - 1) / DAY_TICKS;
+    env.dayTime = d - Math.floor(d);
     env.viewDistance = renderDistance * 16;
     env.time = timeSec;
     const c = this.camera;
@@ -200,10 +209,15 @@ export class ViewBuilder {
       o.target = null;
     }
     o.breakProgress = v.target ? Math.max(0, Math.min(1, v.breakProgress)) : 0;
-    if (v.preview !== this.lastPreview) {
-      this.lastPreview = v.preview;
+    const pv = v.preview;
+    const pvCells = pv ? pv.cells : null;
+    const pvGrid = pv ? pv.gridId : -1;
+    const pvKind = pv ? pv.kind : null;
+    if (pvCells !== this.lastPreviewCells || pvGrid !== this.lastPreviewGrid || pvKind !== this.lastPreviewKind) {
+      this.lastPreviewCells = pvCells;
+      this.lastPreviewGrid = pvGrid;
+      this.lastPreviewKind = pvKind;
       const cells: OverlayCell[] = [];
-      const pv = v.preview;
       if (pv) {
         const a = pv.cells;
         for (let i = 0; i + 2 < a.length; i += 3) cells.push({ structureId: pv.gridId, x: a[i]!, y: a[i + 1]!, z: a[i + 2]! });

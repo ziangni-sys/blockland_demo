@@ -188,6 +188,10 @@ const actions: UiActions = {
     set({ screen: 'mainMenu', helm: null });
     toast(state.settings.language === 'en' ? 'World saved' : '世界已保存');
   },
+  quitWithoutSaving() {
+    record('quitWithoutSaving', []);
+    set({ screen: 'mainMenu', helm: null, quitUnsaved: false });
+  },
   respawn() {
     record('respawn', []);
     set({ screen: 'none', health: state.maxHealth, air: state.maxAir });

@@ -25,6 +25,10 @@ const STRINGS = {
     en: 'Another open Blocklands tab blocks the save upgrade — close it and reload; progress will not be saved',
   },
   'save.failed': { zh: '保存失败：{msg}', en: 'Saving failed: {msg}' },
+  'save.quitFailed': {
+    zh: '世界没能保存，已保持打开：可以稍后重试，或选择“不保存退出”',
+    en: 'The world could not be saved, so it stays open — try again, or choose “Quit without saving”',
+  },
   'save.quota': { zh: '浏览器存储空间已满，无法保存', en: 'Browser storage is full — cannot save' },
   'save.newerWorld': {
     zh: '这个世界已被更新版本的游戏保存过，为保护存档不再写入',

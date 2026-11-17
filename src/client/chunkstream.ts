@@ -7,6 +7,7 @@
  * within a per-frame time budget. When workers are unavailable the same generator runs on
  * the main thread, one column per frame.
  */
+import { CHUNK_VOLUME } from '../core/constants';
 import { chunkKey } from '../voxel/chunk';
 import type { ChunkGenerator } from '../worldgen/generator';
 import type { GenErrorResponse, GenRequest, GenResponse } from '../worldgen/protocol';
@@ -19,6 +20,12 @@ export const MAX_CHUNKS_IN_FLIGHT = 6;
 const IDLE_QUERY_FRAMES = 8;
 /** Worker failures of one column before it is generated on the main thread instead. */
 const MAX_WORKER_FAILURES = 2;
+/**
+ * Main-thread generator failures of one column before it is given up: it is then provided
+ * empty (air; not modified, so never saved and regenerated next session). Otherwise it stayed
+ * pending in the ChunkManager forever and loading never finished when it was near the player.
+ */
+const MAX_SYNC_FAILURES = 3;
 
 type GenReply = GenResponse | GenErrorResponse;
 
@@ -40,6 +47,7 @@ export class ChunkStreamer {
   private readonly ready: GenResponse[] = [];
   private readonly syncQueue: Column[] = [];
   private readonly failures = new Map<number, number>();
+  private readonly syncFailures = new Map<number, number>();
   private inFlight = 0;
   private frame = 0;
   private nextQuery = 0;
@@ -73,20 +81,34 @@ export class ChunkStreamer {
     }
     // Main-thread generation (no workers): one column per frame, more while within budget.
     let generated = 0;
+    const retry: Column[] = [];
     while (this.syncQueue.length > 0 && (generated === 0 || this.now() - frameStart < budgetMs * 0.5)) {
       const c = this.syncQueue.shift()!;
       let cells: Uint16Array;
       try {
         cells = this.generator.generate(c.cx, c.cz);
       } catch (e) {
-        // Leave the column pending forever rather than retrying a generator bug every frame.
         this.onError('terrain generation', e);
+        generated++;
+        const key = chunkKey(c.cx, c.cz);
+        const n = (this.syncFailures.get(key) ?? 0) + 1;
+        if (n < MAX_SYNC_FAILURES) {
+          // Try again on a later frame (a transient failure), not in a tight loop.
+          this.syncFailures.set(key, n);
+          retry.push(c);
+          continue;
+        }
+        // A deterministic generator bug: give the column up (empty) so the game goes on.
+        this.syncFailures.delete(key);
+        this.provide(c.cx, c.cz, new Uint16Array(CHUNK_VOLUME));
         continue;
       }
+      this.syncFailures.delete(chunkKey(c.cx, c.cz));
       this.stats.syncGenerated++;
       this.provide(c.cx, c.cz, cells);
       generated++;
     }
+    for (let i = 0; i < retry.length; i++) this.syncQueue.push(retry[i]!);
     this.stats.inFlight = this.inFlight;
     this.stats.waiting = this.ready.length + this.syncQueue.length;
   }
