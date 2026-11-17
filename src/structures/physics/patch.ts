@@ -80,12 +80,19 @@ export class WorldPatch implements ProbeTarget {
     this.sy = sy;
     this.sz = sz;
     const f = this.flags;
-    let any = 0;
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
+    let waterTop = -Infinity;
     for (let z = z0; z <= z1; z++) {
       for (let x = x0; x <= x1; x++) {
         const chunk = world.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
         const col = (x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4);
         let i = ((z - z0) * sx + (x - x0)) * sy;
+        let colSolid = false;
         for (let y = y0; y <= y1; y++, i++) {
           let cell: number;
           if (y < 0) cell = CELL_BELOW_WORLD;
@@ -94,11 +101,30 @@ export class WorldPatch implements ProbeTarget {
           else cell = chunk.cells[col | (y << 8)]!;
           const fl = cellFlags(cell);
           f[i] = fl;
-          any |= fl;
+          if (fl === PF_SOLID) {
+            colSolid = true;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          } else if (fl === PF_WATER && y + 1 > waterTop) {
+            waterTop = y + 1;
+          }
+        }
+        if (colSolid) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
         }
       }
     }
-    this.hasSolid = (any & PF_SOLID) !== 0;
+    this.hasSolid = minX !== Infinity;
+    this.solidMinX = minX;
+    this.solidMinY = minY;
+    this.solidMinZ = minZ;
+    this.solidMaxX = maxX;
+    this.solidMaxY = maxY;
+    this.solidMaxZ = maxZ;
+    this.waterTop = waterTop;
     this.cornerCount = 0;
   }
 

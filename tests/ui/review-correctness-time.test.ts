@@ -14,7 +14,7 @@ describe('review: "yesterday" means the previous calendar day', () => {
     expect(formatLastPlayed(played, now, 'zh')).not.toBe('昨天');
   });
 
-  it('a save from late yesterday evening is labelled by hours, and one from 30 h ago that was yesterday stays "yesterday"', () => {
+  it('guard for the fix: a save 46 h old that WAS on the previous calendar day stays "yesterday"', () => {
     const now = new Date(2026, 10, 18, 23, 0, 0).getTime(); // Wed 23:00
     const yesterdayMorning = new Date(2026, 10, 17, 1, 0, 0).getTime(); // Tue 01:00 (46 h earlier, still yesterday)
     expect(formatLastPlayed(yesterdayMorning, now, 'en')).toBe('yesterday');

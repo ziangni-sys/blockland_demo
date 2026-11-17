@@ -60,6 +60,7 @@ interface SectionRecord {
 }
 
 interface StructureRecord {
+  id: number;
   group: THREE.Group;
   meshes: [THREE.Mesh | null, THREE.Mesh | null, THREE.Mesh | null];
   /** Per-object light uniform shared by the structure's meshes. */
@@ -162,6 +163,8 @@ export class ThreeBackend implements RenderBackend {
 
   private readonly sections = new Map<number, SectionRecord>();
   private readonly structures = new Map<number, StructureRecord>();
+  /** Same records as `structures`, densely packed for allocation-free per-frame loops. */
+  private readonly structureList: StructureRecord[] = [];
   /** Bumped when structures appear / disappear (overlay layers re-parent then). */
   private topology = 0;
 
@@ -175,6 +178,7 @@ export class ThreeBackend implements RenderBackend {
   private height = 1;
 
   // Dry volume slot selection scratch (no allocation per frame).
+  /** Indices into structureList of the chosen slots. */
   private readonly slotIds = new Int32Array(DRY_SLOTS);
   private readonly slotDist = new Float64Array(DRY_SLOTS);
   private readonly scratchV = { x: 0, y: 0, z: 0 };
@@ -368,6 +372,7 @@ export class ThreeBackend implements RenderBackend {
       m.updateMatrix();
       m.matrixWorld.copy(m.matrix);
     }
+    if (!rec.meshes[0] && !rec.meshes[1] && !rec.meshes[2]) this.sections.delete(key);
   }
 
   private disposeMesh(m: THREE.Mesh): void {
@@ -383,8 +388,9 @@ export class ThreeBackend implements RenderBackend {
       const group = new THREE.Group();
       group.name = `structure-${id}`;
       group.matrixAutoUpdate = false;
-      rec = { group, meshes: [null, null, null], light: new THREE.Vector4(1, 0, 0, 0), pose: newPose(), hasPose: false, dryTex: null, dry: null };
+      rec = { id, group, meshes: [null, null, null], light: new THREE.Vector4(1, 0, 0, 0), pose: newPose(), hasPose: false, dryTex: null, dry: null };
       this.structures.set(id, rec);
+      this.structureList.push(rec);
       this.structuresRoot.add(group);
       this.topology++;
     }
@@ -399,6 +405,8 @@ export class ThreeBackend implements RenderBackend {
       rec.dryTex?.dispose();
       rec.group.removeFromParent();
       this.structures.delete(id);
+      const li = this.structureList.indexOf(rec);
+      if (li >= 0) this.structureList.splice(li, 1);
       this.topology++;
       return;
     }
@@ -537,8 +545,10 @@ export class ThreeBackend implements RenderBackend {
     const dist = this.slotDist;
     let count = 0;
     const cp = this.camera.position;
-    this.structures.forEach((rec, id) => {
-      if (!rec.dry || !rec.dryTex || !rec.hasPose) return;
+    const list = this.structureList;
+    for (let si = 0; si < list.length; si++) {
+      const rec = list[si]!;
+      if (!rec.dry || !rec.dryTex || !rec.hasPose) continue;
       const c = dryVolumeCenter(rec.pose, rec.dry, this.scratchV);
       const dx = c.x - cp.x;
       const dy = c.y - cp.y;
@@ -547,7 +557,7 @@ export class ThreeBackend implements RenderBackend {
       // Insertion into the sorted fixed-size list.
       let k = count < DRY_SLOTS ? count++ : DRY_SLOTS;
       if (k === DRY_SLOTS) {
-        if (d >= dist[DRY_SLOTS - 1]!) return;
+        if (d >= dist[DRY_SLOTS - 1]!) continue;
         k = DRY_SLOTS - 1;
       }
       while (k > 0 && dist[k - 1]! > d) {
@@ -556,13 +566,13 @@ export class ThreeBackend implements RenderBackend {
         k--;
       }
       dist[k] = d;
-      ids[k] = id;
-    });
+      ids[k] = si;
+    }
     for (let i = 0; i < DRY_SLOTS; i++) {
       const node = this.dryNodes[i];
       if (!node) continue;
       if (i < count) {
-        const rec = this.structures.get(ids[i]!)!;
+        const rec = list[ids[i]!]!;
         dryVolumeMatrix(rec.pose, rec.dry!, this.u.dryMatrices[i]!.value.elements);
         if (node.value !== rec.dryTex) node.value = rec.dryTex!;
       } else if (node.value !== this.dryPlaceholders[i]) {
@@ -615,6 +625,7 @@ export class ThreeBackend implements RenderBackend {
       rec.group.removeFromParent();
     }
     this.structures.clear();
+    this.structureList.length = 0;
     this.entities?.dispose();
     this.entityAssets?.dispose();
     this.overlays?.dispose();
