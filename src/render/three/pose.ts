@@ -64,13 +64,18 @@ export function poseToMatrix(pose: StructurePose, out: Mat4Out): Mat4Out {
 /**
  * World -> dry-mask texture coordinate matrix.
  *
+ * With an origin (ox0, oy0, oz0) the matrix takes positions RELATIVE to that origin
+ * (world - origin): the backend passes the camera position, so the shader can feed it
+ * camera-relative positions, which stay precise in float32 far from the world origin (the
+ * large translations cancel here, in float64).
+ *
  * local = pivot + q^-1 * (world - p); the mask is a 3D texture whose WIDTH runs along local
  * x, HEIGHT along local z and DEPTH along local y — exactly the DryVolume index order
  * (x fastest, then z, then y), so the mask bytes upload without re-layout. Output:
  *   u = (lx - ox) / sx,  v = (lz - oz) / sz,  w = (ly - oy) / sy
  * A world point is inside the volume box iff u, v, w are all in [0, 1).
  */
-export function dryVolumeMatrix(pose: StructurePose, dry: DryVolume, out: Mat4Out): Mat4Out {
+export function dryVolumeMatrix(pose: StructurePose, dry: DryVolume, out: Mat4Out, ox0 = 0, oy0 = 0, oz0 = 0): Mat4Out {
   const { qx: x, qy: y, qz: z, qw: w } = pose;
   const n = Math.sqrt(x * x + y * y + z * z + w * w);
   const s = n > 1e-12 ? 2 / (n * n) : 0;
@@ -96,10 +101,13 @@ export function dryVolumeMatrix(pose: StructurePose, dry: DryVolume, out: Mat4Ou
   const r20 = xz + wy;
   const r21 = yz - wx;
   const r22 = n > 1e-12 ? 1 - (xx + yy) : 1;
-  // local = Rinv * world + tl, with tl = pivot - Rinv * p
-  const tlx = pose.pivotX - (r00 * pose.px + r01 * pose.py + r02 * pose.pz);
-  const tly = pose.pivotY - (r10 * pose.px + r11 * pose.py + r12 * pose.pz);
-  const tlz = pose.pivotZ - (r20 * pose.px + r21 * pose.py + r22 * pose.pz);
+  // local = Rinv * rel + tl, with rel = world - origin and tl = pivot - Rinv * (p - origin)
+  const px = pose.px - ox0;
+  const py = pose.py - oy0;
+  const pz = pose.pz - oz0;
+  const tlx = pose.pivotX - (r00 * px + r01 * py + r02 * pz);
+  const tly = pose.pivotY - (r10 * px + r11 * py + r12 * pz);
+  const tlz = pose.pivotZ - (r20 * px + r21 * py + r22 * pz);
   const isx = 1 / Math.max(1, dry.sx);
   const isy = 1 / Math.max(1, dry.sy);
   const isz = 1 / Math.max(1, dry.sz);
@@ -132,6 +140,32 @@ export function dryVolumeMatrix(pose: StructurePose, dry: DryVolume, out: Mat4Ou
   out[13] = b3;
   out[14] = c3;
   out[15] = 1;
+  return out;
+}
+
+/**
+ * World -> structure-local point: local = pivot + q^-1 * (world - p). Inverse of
+ * poseToMatrix (normalizes the quaternion the same way).
+ */
+export function worldToLocal(pose: StructurePose, x: number, y: number, z: number, out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  const { qx, qy, qz, qw } = pose;
+  const n = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+  const inv = n > 1e-12 ? 1 / n : 0;
+  // Conjugate (inverse rotation) of the normalized quaternion.
+  const cx = -qx * inv;
+  const cy = -qy * inv;
+  const cz = -qz * inv;
+  const cw = n > 1e-12 ? qw * inv : 1;
+  const vx = x - pose.px;
+  const vy = y - pose.py;
+  const vz = z - pose.pz;
+  // v + 2w(c x v) + 2 c x (c x v)
+  const tx = 2 * (cy * vz - cz * vy);
+  const ty = 2 * (cz * vx - cx * vz);
+  const tz = 2 * (cx * vy - cy * vx);
+  out.x = pose.pivotX + vx + cw * tx + (cy * tz - cz * ty);
+  out.y = pose.pivotY + vy + cw * ty + (cz * tx - cx * tz);
+  out.z = pose.pivotZ + vz + cw * tz + (cx * ty - cy * tx);
   return out;
 }
 

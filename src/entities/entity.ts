@@ -76,11 +76,15 @@ export abstract class Entity {
   fallDistance = 0;
   /** The world stopped part of the carrier's motion this tick (the rider was scraped off). */
   carryBlocked = false;
-  /** Horizontal contact normal of the last tick (0,0 = none): world walls and structure sides. */
+  /** Horizontal contact normal of the WORLD walls that stopped the last tick's move (0,0 = none). */
   contactNx = 0;
   contactNz = 0;
   /** The last downward move was stopped by a WORLD block (as opposed to a structure). */
   onWorldGround = false;
+  /** Ticks to wait before the next free-spot search after failed ones (not saved). */
+  unstuckWait = 0;
+  /** Consecutive failed free-spot searches (not saved). */
+  unstuckFails = 0;
 
   constructor(id: number, halfWidth: number, height: number, eyeHeight: number) {
     if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`entity id must be a positive integer, got ${id}`);

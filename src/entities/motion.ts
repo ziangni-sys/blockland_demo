@@ -109,9 +109,11 @@ export function playerMotion(p: Player, rel: Vec3, fluid: number, lava: boolean,
     if (inp.sneak && w > 0.5) ay -= SWIM_DOWN_ACCEL;
     const drag = lava ? LAVA_DRAG : WATER_DRAG;
     vy1 = (vy0 + ay * DT) * (1 + (drag - 1) * w);
-    // Climbing out: holding jump while swimming INTO a wall or hull side lifts the swimmer
-    // over the ledge. Requires the intent (moving into it), so a swimmer merely treading
-    // water next to a hull is never lifted (ACCEPTANCE 19).
+    // Climbing out: holding jump while swimming INTO a WORLD wall lifts the swimmer over the
+    // ledge. contactNx / contactNz only ever hold world walls: swimming (W + space, the normal
+    // way to swim at the surface) toward a hull never lifts the swimmer aboard, at any angle
+    // (ACCEPTANCE 19 船转 45° 时在船角附近游泳，不会被拎上船; the brief: a swimmer next to a
+    // hull is never attached).
     if (inp.jump && wl > 0.1 && (p.contactNx !== 0 || p.contactNz !== 0)) {
       if (wx * p.contactNx + wz * p.contactNz < -0.3 * wl && vy1 < WATER_EXIT_SPEED) vy1 = WATER_EXIT_SPEED;
     }

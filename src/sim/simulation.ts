@@ -16,9 +16,9 @@
  * Block updates (falling sand, popping torches) queued by any phase run right after it.
  *
  * Scripted control (tests, tools, the debug console): lookAt / lookAtCell, use / attack,
- * hold / giveItem, teleport, advance. They only write what the client would write (input,
- * inventory) or what a command would (teleport), so a scripted session behaves exactly like
- * a played one.
+ * useOn / mine (aim + click, checked), targetCell, hold / giveItem, teleport, advance,
+ * setDayTime. They only write what the client would write (input, inventory) or what a
+ * command would (teleport), so a scripted session behaves exactly like a played one.
  */
 import { DAY_TICKS, ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../core/dirs';
@@ -43,7 +43,7 @@ import { ChunkManager, type LoadAnchor } from './chunks';
 import { explode } from './explosion';
 import { Interaction } from './interact';
 import { RabbitSpawner } from './rabbits';
-import { emptyView, type InteractionView, type SimEvent } from './view';
+import { emptyView, type GridCell, type InteractionView, type SimEvent } from './view';
 
 export type GameMode = 'creative' | 'survival';
 
@@ -319,15 +319,17 @@ export class Simulation {
   }
 
   /**
-   * Hold `item` in hand: a hotbar slot already holding it is selected, else the selected slot
-   * is replaced by a stack of `count` (default: a full stack).
+   * Hold `item` in hand: a hotbar slot already holding it is selected; otherwise a stack of
+   * `count` (default: a full stack) goes into the first empty hotbar slot, or replaces the
+   * selected one when the hotbar is full.
    */
   hold(item: number, count: number = maxStackOf(item)): void {
     const p = this.player;
     const inv = p.inventory;
     let slot = inv.hotbar.findIndex((s) => s !== null && s.item === item);
     if (slot < 0) {
-      slot = inv.selected;
+      slot = inv.hotbar.findIndex((s) => s === null);
+      if (slot < 0) slot = inv.selected;
       inv.hotbar[slot] = { item, count: Math.max(1, Math.floor(count)) };
     }
     inv.selected = slot;

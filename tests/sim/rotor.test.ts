@@ -4,7 +4,8 @@ import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { PX, PZ } from '../../src/core/dirs';
 import type { Simulation } from '../../src/sim/simulation';
-import { EventLog, FLAT_TOP, click, countId, fill, flatSim, idAt } from './helpers';
+import { NZ } from '../../src/core/dirs';
+import { EventLog, FLAT_TOP, SEA_TOP, click, countId, fill, flatSim, idAt, seaSim } from './helpers';
 
 const T = FLAT_TOP;
 
@@ -172,5 +173,49 @@ describe('bearing: preview, start, stop', () => {
     sim.player.input.slot = 4;
     sim.tick();
     expect(sim.view.preview).toBeNull();
+  });
+
+  it('works the same on a ship: the rotor mounts on the ship and stops back into it', () => {
+    const sim = seaSim({ spawn: { x: 5.5, y: SEA_TOP + 1, z: 1.5 } });
+    sim.player.flying = true;
+    const w = sim.world;
+    fill(w, 0, SEA_TOP - 1, 0, 4, SEA_TOP - 1, 4, B.PLANKS_OAK);
+    w.setCell(2, SEA_TOP, 4, makeCell(B.HELM, facingState(NZ)));
+    fill(w, 2, SEA_TOP, 2, 2, SEA_TOP + 3, 2, B.PLANKS_OAK);
+    const by = SEA_TOP + 3;
+    w.setCell(2, by, 1, makeCell(B.BEARING, facingState(NZ)));
+    for (const [dx, dy] of [[0, 0], [1, 0], [2, 0], [-1, 0], [-2, 0], [0, 1], [0, 2], [0, -1], [0, -2]] as const) {
+      w.setCell(2 + dx, by + dy, 0, makeCell(B.CANVAS));
+    }
+    sim.worldGlue.add(2, by, 0, PZ); // hub <-> bearing: the stopped windmill rides along
+    const sres = sim.structures.assembleShip(2, SEA_TOP, 4);
+    expect(sres.ok).toBe(true);
+    if (!sres.ok) return;
+    const ship = sres.structure;
+    expect(ship.grid.count).toBe(25 + 1 + 4 + 1 + 9);
+    sim.advance(5);
+    sim.teleport(5.5, SEA_TOP + 1, 1.5);
+    sim.player.flying = true;
+    sim.advance(2);
+
+    expect(sim.useOn(2, by, 1, PX, ship.id)).toBe(true);
+    expect(sim.view.preview).toMatchObject({ gridId: ship.id, kind: 'rotor' });
+    expect(sim.view.preview!.cells.length).toBe(27);
+    expect(sim.useOn(2, by, 1, PX, ship.id)).toBe(true);
+    const rotor = sim.structures.rotors()[0]!;
+    expect(rotor).toBeDefined();
+    expect(rotor.parent).toBe(ship);
+    expect(ship.glue.has(2, by, 0, PZ)).toBe(false); // removed while it spins
+    sim.advance(20);
+    expect(rotor.angularSpeed).toBeGreaterThan(0);
+    expect(ship.sails).toBe(9);
+    expect(sim.useOn(2, by, 1, PX, ship.id)).toBe(true);
+    expect(rotor.removed).toBe(true);
+    let canvas = 0;
+    ship.grid.forEachCell((_x, _y, _z, c) => {
+      if ((c & 1023) === B.CANVAS) canvas++;
+    });
+    expect(canvas).toBe(9);
+    expect(ship.glue.has(2, by, 0, PZ)).toBe(true); // ACCEPTANCE 14: back when it stops
   });
 });

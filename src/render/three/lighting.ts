@@ -131,6 +131,9 @@ const CLOUD_NIGHT: Readonly<RGB> = Object.freeze(hexToLinear(0x2a3550));
 
 const WATER_FOG: Readonly<RGB> = Object.freeze(hexToLinear(0x0f4f5c));
 const LAVA_FOG: Readonly<RGB> = Object.freeze(hexToLinear(0xd8500a));
+/** Surface tint under water / in lava (linear multipliers, not colours to show). */
+const WATER_TINT: Readonly<RGB> = Object.freeze({ r: 0.42, g: 0.8, b: 0.84 });
+const LAVA_TINT: Readonly<RGB> = Object.freeze({ r: 1, g: 0.42, b: 0.18 });
 
 /** Skylight multiplier at night (moonlight). */
 export const NIGHT_LIGHT = 0.2;
@@ -256,21 +259,35 @@ export function computeSkyState(dayTime: number, out: SkyState): SkyState {
 // ------------------------------------------------------------------ fog
 
 export interface FogParams {
+  /** Air fog: smoothstep from `start` to `end` (blocks, radial). */
   start: number;
   end: number;
-  /** Used only when submerged (otherwise the shader takes the sky horizon colour). */
+  /** Used only when submerged (otherwise the shader takes the sky gradient colour). */
   color: RGB;
-  /** 1 when the fog colour is the fixed `color` (submerged), 0 when it follows the sky. */
+  /** 1 when submerged: fixed `color`, exponential falloff with `density`, `tint` applied. */
   fixedColor: number;
+  /**
+   * Submerged fog coefficient per block: factor = 1 - exp(-distance * density). Unlike the
+   * air fog it rises from the very first block, so even geometry right in front of the camera
+   * reads as being seen through the medium.
+   */
+  density: number;
+  /** Multiplicative tint of every surface colour before fog ((1,1,1) in air). */
+  tint: RGB;
 }
 
 export function createFogParams(): FogParams {
-  return { start: 0, end: 1, color: { r: 0, g: 0, b: 0 }, fixedColor: 0 };
+  return { start: 0, end: 1, color: { r: 0, g: 0, b: 0 }, fixedColor: 0, density: 0, tint: { r: 1, g: 1, b: 1 } };
 }
+
+/** Blocks after which submerged fog is ~95 % opaque (1 - e^-3). */
+const WATER_VISIBILITY = 24;
+const LAVA_VISIBILITY = 2.5;
 
 /**
  * Distance fog fitted to the view distance: fully clear for the first ~55%, then blending to
- * the horizon colour so chunk loading at the edge is hidden. Submerged: short, tinted.
+ * the horizon colour so chunk loading at the edge is hidden. Submerged: a strong tint of
+ * everything plus short exponential fog (teal water, orange lava).
  */
 export function computeFog(
   viewDistance: number,
@@ -280,25 +297,40 @@ export function computeFog(
 ): FogParams {
   const vd = viewDistance > 8 ? viewDistance : 8;
   if (submerged === 'water') {
+    const visibility = Math.min(WATER_VISIBILITY, vd * 0.6);
     out.start = 0;
-    out.end = Math.min(28, vd * 0.6);
+    out.end = visibility;
+    out.density = 3 / visibility;
     const k = 0.25 + 0.75 * dayLight;
     out.color.r = WATER_FOG.r * k;
     out.color.g = WATER_FOG.g * k;
     out.color.b = WATER_FOG.b * k;
+    setRGB(out.tint, WATER_TINT);
     out.fixedColor = 1;
   } else if (submerged === 'lava') {
     out.start = 0;
-    out.end = 2.5;
+    out.end = LAVA_VISIBILITY;
+    out.density = 3 / LAVA_VISIBILITY;
     setRGB(out.color, LAVA_FOG);
+    setRGB(out.tint, LAVA_TINT);
     out.fixedColor = 1;
   } else {
     out.start = vd * 0.55;
     out.end = vd * 0.98;
+    out.density = 0;
     out.color.r = 0;
     out.color.g = 0;
     out.color.b = 0;
+    out.tint.r = 1;
+    out.tint.g = 1;
+    out.tint.b = 1;
     out.fixedColor = 0;
   }
   return out;
+}
+
+/** Fog blend factor 0..1 at `distance` blocks; mirrors applyFogNode in shading.ts. */
+export function fogFactor(f: Readonly<FogParams>, distance: number): number {
+  if (f.fixedColor > 0) return 1 - Math.exp(-distance * f.density);
+  return smoothstep(f.start, Math.max(f.end, f.start + 0.01), distance);
 }

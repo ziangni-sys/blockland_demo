@@ -7,7 +7,15 @@
  *     [structures move]  ->  syncCarried()  ->  update()
  * syncCarried() begins the entity tick: it first snapshots every entity (pos / yaw / pitch ->
  * prev*). A simulation that wants the snapshot earlier may call beginTick() itself; the
- * snapshot is taken only once per tick either way. update() ends the tick.
+ * snapshot is taken only once per tick either way. update() ends the tick (and runs
+ * syncCarried() itself first if it was not called since the previous update()).
+ * syncCarried() carries only the structure motion since the previous carry, so calling it
+ * again in the same tick, or between two ticks (LESSONS 打开界面：把被携带的玩家同步到结构体
+ * 当前位置), moves nobody twice and loses no motion.
+ *
+ * Re-entrancy: entities removed while the manager iterates (from an event listener, from
+ * host.explode(), ...) stay in all() with removed = true until the iteration ends; iterate a
+ * copy of all() if you add or remove entities while walking it outside the manager.
  *
  * Per entity, update() runs (docs/LESSONS.md 携带与实体: the ORDER matters):
  *   a. controller: input / AI / nothing -> own velocity relative to the carrier
@@ -30,6 +38,7 @@ import type { Ship, Structure } from '../structures/structure';
 import type { VoxelGrid } from '../voxel/grid';
 import { boxOverlapsSolid, columnHasSolidBelow, hasSupportBelow, nearestFreeOffset, sweepAxis } from '../voxel/shape';
 import {
+  BURIED_RISE_LIMIT,
   COLUMN_DEPTH,
   CRUSH_DAMAGE,
   CRUSH_SEARCH_RADIUS,
@@ -62,12 +71,14 @@ import {
   REGEN_DELAY_TICKS,
   REGEN_INTERVAL_TICKS,
   SPLASH_SPEED,
+  STEP_HEIGHT,
   SUPPORT_GAP,
   SWIM_UP_ACCEL,
   SWIMMING_WET,
   TNT_DEFAULT_FUSE,
   TNT_HOP_SPEED,
   TNT_POWER,
+  UNSTUCK_MAX_BACKOFF_TICKS,
   UNSTUCK_SEARCH_RADIUS,
   VOID_Y,
   WATER_DRAG,
@@ -89,6 +100,8 @@ const KIND_TAG: Readonly<Record<EntityKind, number>> = Object.freeze({ player: 1
 const NEAR_MARGIN = 0.5;
 /** A carrier that moves a rider farther than this in one tick was re-gridded / teleported: let go. */
 const MAX_CARRY_STEP = 4;
+/** spawnItem() splits a count above the item's stack size into at most this many drops. */
+const MAX_SPAWN_STACKS = 64;
 
 export class EntityManager {
   private readonly host: EntityHost;
@@ -100,11 +113,14 @@ export class EntityManager {
   private readonly cache = new StructureCache();
   private readonly mover: Mover;
   private readonly fluids: FluidSampler;
-  /** Ticks completed by update(); keys the per-tick structure cache. */
+  /** Ticks completed by update() (staggers the item merge scan). */
   private tickCount = 0;
-  private cacheTick = -1;
   private snapshotDone = false;
-  private iterating = false;
+  /** syncCarried() ran since the last update() (update() runs it itself otherwise). */
+  private carriedThisTick = false;
+  /** > 0 while the manager walks `list`: remove() then only marks (see compactIfNeeded). */
+  private iterDepth = 0;
+  private removedWhileIterating = false;
   private readonly pendingBlasts: TntEntity[] = [];
 
   // ---- scratch (instance-owned, never shared across modules)
@@ -116,7 +132,10 @@ export class EntityManager {
   private readonly t2: Vec3 = vec3();
   private readonly box1: AABB = aabb();
   private readonly box2: AABB = aabb();
+  private readonly box3: AABB = aabb();
   private readonly grids: VoxelGrid[] = [];
+  /** Structures a free-spot search can reach (wider than mover.near). */
+  private readonly relocNear: StructRec[] = [];
   private readonly items: ItemEntity[] = [];
   /** Vertical distance the last moveBody() teleported the body (crush / unstuck): not a fall. */
   private relocatedDy = 0;
@@ -164,7 +183,11 @@ export class EntityManager {
       if (this.localPlayer === e) this.localPlayer = null;
     }
     if (this.byId.get(e.id) === e) this.byId.delete(e.id);
-    if (!this.iterating) {
+    if (this.iterDepth > 0) {
+      // Someone is walking the list (this manager, or a callback it invoked): splicing now
+      // would make that loop skip the next entity. Compacted when the outermost walk ends.
+      this.removedWhileIterating = true;
+    } else {
       const i = this.list.indexOf(e);
       if (i >= 0) this.list.splice(i, 1);
     }
@@ -177,8 +200,24 @@ export class EntityManager {
     this.localPlayer = null;
     this.pendingBlasts.length = 0;
     this.snapshotDone = false;
-    this.cacheTick = -1;
+    this.carriedThisTick = false;
     this.cache.reset();
+  }
+
+  private beginIteration(): void {
+    this.iterDepth++;
+  }
+
+  private endIteration(): void {
+    if (--this.iterDepth > 0 || !this.removedWhileIterating) return;
+    this.removedWhileIterating = false;
+    const list = this.list;
+    let w = 0;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i]!;
+      if (!e.removed) list[w++] = e;
+    }
+    list.length = w;
   }
 
   // ================================================================== spawning
@@ -198,11 +237,30 @@ export class EntityManager {
 
   /**
    * An item drop whose box is CENTRED at (x, y, z). Without `vel` it gets a small random toss.
-   * Throws for ids that are not items (a drop table bug must not go unnoticed).
+   * A count above the item's stack size is split into several full drops (all with the same
+   * `vel`, or each with its own toss); the first one is returned.
+   * Throws a RangeError for ids that are not items and for counts that are not finite or below 1
+   * (a drop-table bug must not go unnoticed, nor create items from nothing / unsaveable stacks).
    */
   spawnItem(x: number, y: number, z: number, item: number, count: number, vel?: Vec3): ItemEntity {
     if (!isItem(item)) throw new RangeError(`spawnItem: ${item} is not an item id`);
-    const e = new ItemEntity(this.allocateId(), { item, count: Math.max(1, Math.floor(count)) });
+    if (!Number.isFinite(count) || count < 1) throw new RangeError(`spawnItem: bad count ${count}`);
+    if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z))) throw new RangeError('spawnItem: position is not finite');
+    const max = maxStackOf(item);
+    let left = Math.floor(count);
+    if (left > max * MAX_SPAWN_STACKS) throw new RangeError(`spawnItem: count ${count} exceeds ${MAX_SPAWN_STACKS} stacks`);
+    let first: ItemEntity | null = null;
+    while (left > 0) {
+      const n = left < max ? left : max;
+      left -= n;
+      const e = this.spawnStack(x, y, z, item, n, vel);
+      if (first === null) first = e;
+    }
+    return first!;
+  }
+
+  private spawnStack(x: number, y: number, z: number, item: number, count: number, vel: Vec3 | undefined): ItemEntity {
+    const e = new ItemEntity(this.allocateId(), { item, count });
     e.setPosition(x, y - ITEM_HEIGHT * 0.5, z);
     if (vel !== undefined) {
       e.vel.x = vel.x;
@@ -282,25 +340,33 @@ export class EntityManager {
    */
   syncCarried(): void {
     this.beginTick();
-    this.ensureCache();
+    // Always re-read the poses: only the motion since the previous carry is carried (see the
+    // tick contract), so a repeated call is harmless and a stale cache is never used.
+    this.cache.rebuild(this.host.structures());
+    this.carriedThisTick = true;
     const world = this.host.world;
     const list = this.list;
-    for (let i = 0; i < list.length; i++) {
-      const e = list[i]!;
-      e.carryBlocked = false;
-      if (e.removed || !world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
-      if (e instanceof Player && e.steeringShipId !== 0) this.syncSeat(e);
-      else if (e.carrierId !== 0) this.syncRider(e);
+    this.beginIteration();
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i]!;
+        e.carryBlocked = false;
+        if (e.removed || !world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
+        if (e instanceof Player && e.steeringShipId !== 0) this.syncSeat(e);
+        else if (e.carrierId !== 0) this.syncRider(e);
+      }
+    } finally {
+      this.endIteration();
     }
   }
 
   /** Tick steps 5–6: own motion, collision, push, crush, attach / detach, pickups, fuses, AI. */
   update(): void {
-    this.beginTick();
-    this.ensureCache();
-    this.iterating = true;
+    if (!this.carriedThisTick) this.syncCarried();
     const list = this.list;
     const n = list.length;
+    const blasts = this.pendingBlasts;
+    this.beginIteration();
     try {
       for (let i = 0; i < n; i++) {
         const e = list[i]!;
@@ -308,18 +374,20 @@ export class EntityManager {
       }
       this.pickups();
       this.merges();
+      // Still inside the iteration: the simulation's explosion walks all() and damages
+      // (removes) entities; those removals must not shift the list under it.
+      for (let i = 0; i < blasts.length; i++) {
+        const t = blasts[i]!;
+        this.host.explode(t.pos.x, t.pos.y + t.height * 0.5, t.pos.z, TNT_POWER, t);
+      }
     } finally {
-      this.iterating = false;
+      blasts.length = 0;
+      this.endIteration();
     }
-    const blasts = this.pendingBlasts;
-    for (let i = 0; i < blasts.length; i++) {
-      const t = blasts[i]!;
-      this.host.explode(t.pos.x, t.pos.y + t.height * 0.5, t.pos.z, TNT_POWER, t);
-    }
-    blasts.length = 0;
-    this.compact();
+    this.cache.commit();
     this.tickCount++;
     this.snapshotDone = false;
+    this.carriedThisTick = false;
   }
 
   // ================================================================== structures interface
@@ -335,22 +403,45 @@ export class EntityManager {
       for (const c of s.children) collect(c);
     };
     collect(structure);
+    // The blocks of a structure mounted on a surviving one (a turntable on a ship whose bearing
+    // was mined) end up in, or above, that parent and keep moving with it: its riders are handed
+    // to the parent with the parent's velocity under their feet. Stripping the whole carrier
+    // velocity there made them skid ~0.5 block across a sailing deck (review finding; the
+    // LESSONS 停靠时站在转盘上的人被瞬移 class). Only what becomes WORLD blocks stops dead.
+    let heir: Structure | null = structure.parent;
+    while (heir !== null && (heir.removed || ids.has(heir.id))) heir = heir.parent;
+    // Last tick's motion of the heir (the cache is not rebuilt mid-tick): its current velocity.
+    const heirRec = heir !== null ? this.cache.get(heir.id) : undefined;
     // Its frame is about to jump (blockify / dock / re-grid): never carry anything across that.
     for (const id of ids) this.cache.forget(id);
     const list = this.list;
-    for (let i = 0; i < list.length; i++) {
-      const e = list[i]!;
-      if (e instanceof Player && e.steeringShipId !== 0 && ids.has(e.steeringShipId)) this.releaseHelm(e, 'released');
-      if (e.carrierId !== 0 && ids.has(e.carrierId)) {
-        // The structure turns into blocks that do not move: keep only the own motion.
+    this.beginIteration();
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i]!;
+        if (e.removed) continue;
+        if (e instanceof Player && e.steeringShipId !== 0 && ids.has(e.steeringShipId)) this.releaseHelm(e, 'released');
+        if (e.carrierId === 0 || !ids.has(e.carrierId)) continue;
+        // Keep the own motion (relative to the old carrier).
         e.vel.x -= e.carrierVel.x;
         e.vel.y -= e.carrierVel.y;
         e.vel.z -= e.carrierVel.z;
-        e.carrierVel.x = 0;
-        e.carrierVel.y = 0;
-        e.carrierVel.z = 0;
-        e.carrierId = 0;
+        if (heir !== null) {
+          if (heirRec !== undefined) pointVelocity(heirRec, e.pos, e.carrierVel);
+          // (without a record of the heir the old carrier velocity is the best estimate)
+          e.carrierId = heir.id;
+        } else {
+          e.carrierVel.x = 0;
+          e.carrierVel.y = 0;
+          e.carrierVel.z = 0;
+          e.carrierId = 0;
+        }
+        e.vel.x += e.carrierVel.x;
+        e.vel.y += e.carrierVel.y;
+        e.vel.z += e.carrierVel.z;
       }
+    } finally {
+      this.endIteration();
     }
   }
 
@@ -390,7 +481,8 @@ export class EntityManager {
     player.pos.x = w.x;
     player.pos.y = w.y;
     player.pos.z = w.z;
-    const r = this.cacheTick === this.tickCount ? this.cache.get(ship.id) : undefined;
+    // The ship's velocity over its latest tick (the cache holds the last poses it read).
+    const r = this.cache.get(ship.id);
     if (r !== undefined) pointVelocity(r, player.pos, player.carrierVel);
     else player.carrierVel.x = player.carrierVel.y = player.carrierVel.z = 0;
     player.vel.x = player.carrierVel.x;
@@ -540,41 +632,46 @@ export class EntityManager {
     }
   }
 
-  /** Replace every entity with the saved ones. */
+  /**
+   * Replace every entity with the saved ones. Atomic: the whole blob is parsed first, so a
+   * corrupt or truncated one throws (SaveFormatError) and leaves the current entities untouched.
+   */
   deserialize(r: ByteReader): void {
     const v = r.u8();
     if (v !== SAVE_VERSION) r.fail(`unsupported entity save version ${v}`);
     const nextId = r.varuint();
     const count = r.count(8);
-    this.clear();
+    const parsed: Entity[] = [];
+    const seen = new Set<number>();
     for (let i = 0; i < count; i++) {
       const tag = r.u8();
       const id = r.varuint();
       if (id === 0) r.fail('entity id 0');
-      if (this.byId.has(id)) r.fail(`duplicate entity id ${id}`);
+      if (seen.has(id)) r.fail(`duplicate entity id ${id}`);
+      seen.add(id);
       const pos = readVec(r);
       const vel = readVec(r);
       const cvel = readVec(r);
-      const yaw = r.f64();
-      const pitch = r.f64();
+      const yaw = readFinite(r);
+      const pitch = readFinite(r);
       const onGround = r.bool();
-      const wet = r.f64();
+      const wet = readFinite(r);
       const headWet = r.bool();
       const inLava = r.bool();
       const carrierId = r.varuint();
       const noAttachTicks = r.varuint();
       const noAttachStructureId = r.varuint();
       const age = r.varuint();
-      const fallDistance = r.f64();
-      const cnx = r.f64();
-      const cnz = r.f64();
+      const fallDistance = readFinite(r);
+      const cnx = readFinite(r);
+      const cnz = readFinite(r);
       const onWorldGround = r.bool();
       let e: Entity;
       if (tag === KIND_TAG.player) {
         const mode: GameMode = r.u8() === 1 ? 'creative' : 'survival';
         const p = new Player(id, mode);
-        p.health = r.f64();
-        p.maxHealth = r.f64();
+        p.health = readFinite(r);
+        p.maxHealth = readFinite(r);
         p.air = r.varuint();
         p.maxAir = r.varuint();
         p.dead = r.bool();
@@ -614,7 +711,7 @@ export class EntityManager {
         rb.aiTimer = r.varint();
         rb.hopsLeft = r.varint();
         rb.hopCooldown = r.varint();
-        rb.wanderYaw = r.f64();
+        rb.wanderYaw = readFinite(r);
         e = rb;
       } else {
         r.fail(`unknown entity kind tag ${tag}`);
@@ -642,18 +739,14 @@ export class EntityManager {
       e.contactNx = cnx;
       e.contactNz = cnz;
       e.onWorldGround = onWorldGround;
-      this.add(e);
+      parsed.push(e);
     }
+    this.clear();
+    for (const e of parsed) this.add(e);
     if (nextId > this.nextId) this.nextId = nextId;
   }
 
   // ================================================================== carrying
-
-  private ensureCache(): void {
-    if (this.cacheTick === this.tickCount) return;
-    this.cache.rebuild(this.host.structures());
-    this.cacheTick = this.tickCount;
-  }
 
   private syncRider(e: Entity): void {
     let r = this.cache.get(e.carrierId);
@@ -670,7 +763,7 @@ export class EntityManager {
     // LESSONS 转盘在船上: a rider swept by a rotor into a cell of the rotor's PARENT lets go of
     // the rotor and stays with the parent; it may not re-attach to the rotor for a while.
     const parent = r.parent;
-    if (parent !== null && r.moved) {
+    if (parent !== null && r.carryMoved) {
       const bt = boxAt(e, target.x, target.y, target.z, this.box1);
       if (boxNearRec(bt, parent, 0) && boxOverlapsSolid(parent.grid, bt)) {
         const pt = carryPoint(parent, e.pos, this.t2);
@@ -691,7 +784,7 @@ export class EntityManager {
       this.detach(e, e.vel);
       return;
     }
-    const a = r.dyaw;
+    const a = r.carryDyaw;
     if (a !== 0) {
       const c = Math.cos(a);
       const s = Math.sin(a);
@@ -700,9 +793,9 @@ export class EntityManager {
       relx = x;
       this.turn(e, a);
     }
-    e.carrierVel.x = dx / DT;
-    e.carrierVel.y = dy / DT;
-    e.carrierVel.z = dz / DT;
+    // The carrier's velocity at the feet over this tick. Not the carry delta: a repeated
+    // syncCarried() carries nothing more but must not zero the carrier velocity.
+    pointVelocity(r, target, e.carrierVel);
     this.carryMove(e, dx, dy, dz);
     e.vel.x = relx + e.carrierVel.x;
     e.vel.y = rely + e.carrierVel.y;
@@ -743,7 +836,7 @@ export class EntityManager {
     p.pos.x = target.x;
     p.pos.y = target.y;
     p.pos.z = target.z;
-    if (r.dyaw !== 0) this.turn(p, r.dyaw);
+    if (r.carryDyaw !== 0) this.turn(p, r.carryDyaw);
     p.vel.x = p.carrierVel.x;
     p.vel.y = p.carrierVel.y;
     p.vel.z = p.carrierVel.z;
@@ -1458,8 +1551,14 @@ function writeVec(w: ByteWriter, v: Vec3): void {
   w.f64(v.y);
   w.f64(v.z);
 }
+/** A saved float that must be finite (a NaN position would poison every query it reaches). */
+function readFinite(r: ByteReader): number {
+  const v = r.f64();
+  if (!Number.isFinite(v)) r.fail(`non-finite value in an entity record`);
+  return v;
+}
 function readVec(r: ByteReader): Vec3 {
-  return vec3(r.f64(), r.f64(), r.f64());
+  return vec3(readFinite(r), readFinite(r), readFinite(r));
 }
 function copyVec(out: Vec3, v: Vec3): void {
   out.x = v.x;

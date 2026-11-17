@@ -4,7 +4,6 @@
  * a speed log in blocks per second and the sail count. Browser-only.
  */
 import type { UiContext } from '../context';
-import { helmEq } from '../diff';
 import { finite, formatSpeed, formatThrottle, RUDDER_MAX_DEG, rudderAngle, throttleLever, throttleNotch, type ThrottleNotch } from '../format';
 import type { StringKey } from '../i18n';
 import type { HelmView } from '../model';
@@ -62,7 +61,9 @@ export class HelmInstrument {
   private readonly thr: TextSlot;
   private readonly speed: TextSlot;
   private readonly sails: TextSlot;
-  private last: HelmView | null = null;
+  /** Last rendered (sanitized) values; meaningful while `shown`. */
+  private readonly memo: HelmView = { throttle: 0, rudder: 0, speed: 0, sails: 0 };
+  private shown = false;
   private leverPos = -1;
   private angle = NaN;
   private near = -1;
