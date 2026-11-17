@@ -9,5 +9,6 @@
 | [docs/DESIGN.md](docs/DESIGN.md) | 规则与架构要求（必须遵守） |
 | [docs/LESSONS.md](docs/LESSONS.md) | 原型踩过的坑和解法方向 |
 | [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) | 验收场景（实现成自动化测试） |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 前提、里程碑与完成标准（进度见 GitHub milestone / issue） |
 
 必须原创：名字、贴图、UI 都不能模仿 Minecraft。
