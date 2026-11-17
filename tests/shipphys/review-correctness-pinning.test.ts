@@ -115,6 +115,36 @@ describe('review: a blade must not pass through a ship wedged against another sh
   }
 });
 
+describe('review: a blade tip brushing a boat must not kick it (LESSONS 叶片侧面擦过船时船被猛踢)', () => {
+  // The blade (radius 7.5 to its end face) points north at 90 deg and sweeps west at ~7.4 blocks/s.
+  // A free floating boat is placed so that the tip's end face overlaps its south face by only 0.1
+  // block. The sweep-biased exit face (the hull's east face, 0.19 away) is chosen instead of the
+  // 0.1-deep radial one, and the velocity constraint along it hands the boat most of the tip speed:
+  // 5.7 blocks/s from a 0.1-block graze (0.6 blocks/s from a 0.02 graze).
+  it('a 0.1-block graze by the tip gives the boat only a small push', () => {
+    const graze = 0.1;
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const boat = launch(plankBoat(world, 1, -1, 46, -11, 3, 3), dyn); // x in [-1, 2), south face z = -8
+    for (let t = 0; t < 60; t++) tick(dyn, [boat]);
+    boat.grid.position.z += -7 + graze - -8; // south face at z = -7 + graze
+    boat.grid.snapshotPose();
+    dyn.wake(boat);
+    const rotor = blade(world, 0, 0, 45);
+    let contacts = 0;
+    let maxSpeed = 0;
+    for (let t = 0; t < 60; t++) {
+      tick(dyn, [boat], [rotor], 1);
+      contacts += dyn.getStats(boat)!.rotorContacts;
+      const v = boat.grid.linearVelocity;
+      maxSpeed = Math.max(maxSpeed, Math.hypot(v.x, v.z));
+    }
+    expect(contacts).toBeGreaterThan(0);
+    // tip speed ~7.5 blocks/s; a graze this shallow must not hand over a third of it
+    expect(maxSpeed).toBeLessThan(2.5);
+  });
+});
+
 describe('review: sleep next to a stopped rotor', () => {
   it('a ship resting on a STOPPED rotor blade comes to rest and falls asleep', () => {
     // Spec: sleep after ~2 s below the thresholds while supported; only a rotor that moves should

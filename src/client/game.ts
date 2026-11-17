@@ -540,7 +540,8 @@ export class Game implements InputHost {
     try {
       this.showLoading('loading.graphics', 0);
       if (!(await this.graphicsReady())) return this.backToMenu();
-      const saves = await (this.storageReady ?? this.openStorage());
+      // Storage first: the initial save of the new world needs it.
+      await (this.storageReady ?? this.openStorage());
       this.showLoading('loading.preparing', 0.02);
       await this.nextFrame();
       let seedText = typeof opts.seed === 'string' ? opts.seed.trim().slice(0, 64) : '';
@@ -554,7 +555,6 @@ export class Game implements InputHost {
       const sim = new Simulation({ seed, mode, generator, loadRadius: this.settings.renderDistance });
       const id = makeWorldId(Date.now(), Math.random);
       const meta = newWorldMeta(id, name.slice(0, 64), seedText, seed, mode, Date.now());
-      void saves;
       this.startSession(sim, meta, generator, true);
     } catch (e) {
       this.faults.report('new world', e);
@@ -674,8 +674,7 @@ export class Game implements InputHost {
     this.busy = true;
     try {
       this.binder.exitLock();
-      this.showLoading('loading.finishing', 1);
-      this.loading = { text: this.settings.language === 'en' ? 'Saving…' : '正在保存…', progress: 1 };
+      this.showLoading('loading.saving', 1);
       await this.saveNow('quit');
       await this.saves?.idle();
     } finally {
@@ -788,9 +787,7 @@ export class Game implements InputHost {
   }
 
   private loadingFrame(s: WorldSession, now: number, dt: number): boolean {
-    const sim = s.sim;
-    const p = sim.player;
-    const cam = s.view.camera;
+    const p = s.sim.player;
     const w0 = this.win.performance.now();
     s.work(now, LOADING_WORK_BUDGET_MS, p.pos.x, p.pos.y + p.eyeHeight, p.pos.z, this.input.yaw);
     this.stats.workMs = this.win.performance.now() - w0;
@@ -810,15 +807,13 @@ export class Game implements InputHost {
       s.present(this.clock.alpha, dt / 1000, this.input.yaw, this.input.pitch, this.settings.fov, this.settings.renderDistance, this.envTime, now);
       rendered = this.render(now);
     }
-    void cam;
     if (prog.done) this.finishLoading(s);
     return rendered;
   }
 
   private playFrame(s: WorldSession, now: number, dt: number): boolean {
     const sim = s.sim;
-    let player = sim.player;
-    if (player.dead && (this.screen === 'none' || this.screen === 'inventory')) {
+    if (sim.player.dead && (this.screen === 'none' || this.screen === 'inventory')) {
       if (this.screen === 'inventory') this.closeInventory(false);
       this.binder.exitLock();
       this.setScreen('death');
@@ -844,7 +839,6 @@ export class Game implements InputHost {
       s.sinceAutosave += dt;
       if (s.sinceAutosave >= AUTOSAVE_MS) void this.saveNow('autosave');
     }
-    player = sim.player;
     if (n > 0) this.checkTeleport();
     if (s.state !== 'ready') return false;
 
@@ -859,7 +853,6 @@ export class Game implements InputHost {
     // While nothing moves (pause, death, settings) a frame now and then is enough.
     if (!running && !this.renderDirty && now - this.lastRender < IDLE_RENDER_MS) return false;
     s.present(alpha, dt / 1000, yaw, this.input.pitch, this.settings.fov, this.settings.renderDistance, this.envTime, now);
-    void player;
     return this.render(now);
   }
 

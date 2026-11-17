@@ -11,6 +11,7 @@ const STRINGS = {
   'loading.terrain': { zh: '正在生成地形 {done}/{total}', en: 'Generating terrain {done}/{total}' },
   'loading.meshing': { zh: '正在构建地形网格 {done}/{total}', en: 'Building terrain meshes {done}/{total}' },
   'loading.finishing': { zh: '即将就绪…', en: 'Almost there…' },
+  'loading.saving': { zh: '正在保存世界…', en: 'Saving the world…' },
   'storage.memory': {
     zh: '无法使用浏览器存储：本次游戏进度不会被保存',
     en: 'Browser storage is unavailable — progress will not be saved',

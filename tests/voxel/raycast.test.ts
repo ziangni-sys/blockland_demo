@@ -510,7 +510,11 @@ describe('raycastGrid — exact edge and corner crossings', () => {
     expect([h2.x, h2.y, h2.z, h2.face]).toEqual([0, 0, 0, NY]);
     // Touching the bounds box only along an edge is a miss, even with a matching corner cell.
     expect(raycastGrid(s, vec3(-1, 1, 0.5), unit(1, 1, 0), 10)).toBeNull(); // passes the edge (0, 2)
-    expect(raycastGrid(s, vec3(3, -1, 0.5), unit(-1, 1, 0), 10)).toBeNull(); // passes the edge (2, 0)
+    expect(raycastGrid(s, vec3(1, -1, 0.5), unit(1, 1, 0), 10)).toBeNull(); // passes the edge (2, 0)
+    // ... while a ray crossing the same edge INTO the box enters the corner cell there.
+    const h3 = raycastGrid(s, vec3(3, -1, 0.5), unit(-1, 1, 0), 10)!;
+    expect([h3.x, h3.y, h3.z, h3.face]).toEqual([1, 0, 0, PX]);
+    expect(h3.dist).toBeCloseTo(Math.SQRT2, 14);
   });
 
   it('matches the positive-length reference on lattice-aligned rays with exact ties', () => {

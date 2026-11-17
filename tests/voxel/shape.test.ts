@@ -9,6 +9,8 @@ import {
   CONTACT_EPS,
   DEFAULT_PREFER_WEIGHT,
   FREE_OFFSET_STEP,
+  MAX_FREE_RADIUS,
+  MAX_RESOLVE_ITERATIONS,
   boxOverlapsSolid,
   columnHasSolidBelow,
   deepestPenetration,
@@ -273,6 +275,82 @@ describe('deepestPenetration — internal edges', () => {
   });
 });
 
+// The exposed-face rule only decides the push when the box is sunk DEEPER than its
+// horizontal overlap with every cell it touches (otherwise the cell ranking alone already
+// picks a cell whose shallowest face is the exposed top). These cases fail if the rule is
+// removed: the push would go sideways along an internal face.
+describe('deepestPenetration — exposed faces only (sunk deeper than the horizontal overlap)', () => {
+  it('world: player box straddling two floor cells 0.3/0.3 and sunk 0.4 is pushed UP', () => {
+    const w = emptyWorld();
+    fill(w, 0, 0, 0, 5, 1, 5); // floor top y = 1
+    const b = box(1.7, 0.6, 2.2, 2.3, 2.4, 2.8);
+    const p = deepestPenetration(w, b)!;
+    expect([p.nx, p.ny, p.nz]).toEqual([0, 1, 0]);
+    expect(p.depth).toBeCloseTo(0.4, 12);
+    const r = resolvePenetration(w, b);
+    expect(r.resolved).toBe(true);
+    expect([r.dx, r.dz, r.iterations]).toEqual([0, 0, 1]);
+    expect(r.dy).toBeCloseTo(0.4, 12);
+  });
+
+  it('world: item-sized box (0.25 wide) over an internal edge, sunk 0.2, is pushed UP', () => {
+    const w = emptyWorld();
+    fill(w, 0, 0, 0, 5, 1, 5);
+    const b = box(1.9, 0.8, 2.4, 2.15, 1.05, 2.65); // overlaps cell 1 by 0.1, cell 2 by 0.15
+    const p = deepestPenetration(w, b)!;
+    expect([p.nx, p.ny, p.nz]).toEqual([0, 1, 0]);
+    expect(p.depth).toBeCloseTo(0.2, 12);
+    // Same along z, across a chunk border at negative coordinates (cells -17 | -16).
+    fill(w, -20, 0, -20, -12, 1, -12);
+    const bz = box(-14.3, 0.75, -16.1, -14.05, 1.0, -15.85);
+    const pz = deepestPenetration(w, bz)!;
+    expect([pz.nx, pz.ny, pz.nz]).toEqual([0, 1, 0]);
+    expect(pz.depth).toBeCloseTo(0.25, 12);
+  });
+
+  it('yaw-rotated deck: box straddling an internal edge, sunk deeper than its overlap, is pushed along deck +Y', () => {
+    const world = new World();
+    const s = structure(world, 1, vec3(20.3, 64.1, -11.7), qfromYaw(0.65), vec3(2.5, 0.5, 2.5));
+    fill(s, 0, 0, 0, 5, 1, 5);
+    const ax = s.dirToLocal(vec3(1, 0, 0));
+    const az = s.dirToLocal(vec3(0, 0, 1));
+    const ex = 0.3 * Math.abs(ax.x) + 0.3 * Math.abs(az.x); // local half extent along x (~0.42)
+    const b = boxWithLocalMin(s, 2 - ex, 0.5, 2.0, 0.3, 0.9, 0.3); // centred on the edge x = 2, sunk 0.5
+    const up = s.dirToWorld(vec3(0, 1, 0));
+    const p = deepestPenetration(s, b)!;
+    expectVec(p, up, 9);
+    expect(p.depth).toBeCloseTo(0.5, 9);
+    const r = resolvePenetration(s, b);
+    expect(r.resolved).toBe(true);
+    expectVec({ x: r.dx, y: r.dy, z: r.dz }, vec3(up.x * 0.5, up.y * 0.5, up.z * 0.5), 9);
+  });
+});
+
+describe('deepestPenetration — cell ranking', () => {
+  it('largest TRUE overlap wins; an exact tie goes to the smaller exposed push', () => {
+    // B = (5,10,0) has solid neighbours at +X (N) and +Z (A); A = (5,10,1) has B at -Z.
+    // The thin box overlaps both by exactly 0.25 (dyadic: an exact tie). B's 0.25 faces are
+    // internal, so its exposed push is +Y 0.75; A's +X face (0.25) is exposed.
+    const w = emptyWorld();
+    w.setCell(5, 10, 0, STONE); // B
+    w.setCell(6, 10, 0, STONE); // N (the box does not reach it: maxX 5.875 < 6)
+    w.setCell(5, 10, 1, STONE); // A
+    const b = box(5.75, 10.25, 0.25, 5.875, 10.75, 1.25);
+    expect(visited(w, b)).toEqual(new Set(['5,10,0', '5,10,1']));
+    const p = deepestPenetration(w, b)!;
+    expect([p.cx, p.cy, p.cz, p.nx, p.ny, p.nz, p.depth]).toEqual([5, 10, 1, 1, 0, 0, 0.25]);
+    // Visit order must not matter: the mirrored layout (A first in y,z,x order) agrees.
+    const m = emptyWorld();
+    m.setCell(5, 10, 1, STONE); // B'
+    m.setCell(6, 10, 1, STONE); // N'
+    m.setCell(5, 10, 0, STONE); // A'
+    const bm = box(5.75, 10.25, 0.75, 5.875, 10.75, 1.75); // b mirrored about z = 1
+    expect(visited(m, bm)).toEqual(new Set(['5,10,0', '5,10,1']));
+    const pm = deepestPenetration(m, bm)!;
+    expect([pm.cx, pm.cy, pm.cz, pm.nx, pm.ny, pm.nz, pm.depth]).toEqual([5, 10, 0, 1, 0, 0, 0.25]);
+  });
+});
+
 describe('deepestPenetration — corners', () => {
   it('wall + floor corner on solid ground: wall first (+X 0.05), then floor (+Y 0.03)', () => {
     const w = emptyWorld();
@@ -406,17 +484,65 @@ describe('deepestPenetration — prefer bias, embedding, iteration cap', () => {
     expect(deepestPenetration(w, box(3, 3, 3, 4, 4, 4))).toBeNull();
   });
 
-  it('squeezed between floor and ceiling: hits the iteration cap and reports unresolved', () => {
+  it('squeezed between floor and ceiling: the push cycle is detected and reported unresolved', () => {
     const g = emptyWorld();
     fill(g, -5, 49, -5, 5, 50, 5); // floor top 50
     fill(g, -5, 51, -5, 5, 52, 5); // ceiling bottom 51
     const tall = box(0.2, 49.9, 0.2, 0.8, 51.7, 0.8);
+    // Ceiling first (overlap 0.7): down 0.7; then the floor (0.8): up 0.8. The next push (down
+    // 0.8) would return the box to where the previous push started: stop instead of looping.
     const r = resolvePenetration(g, tall);
-    expect(r.resolved).toBe(false);
-    expect(r.iterations).toBe(6);
-    const r3 = resolvePenetration(g, tall, 3);
-    expect(r3.iterations).toBe(3);
-    expect(r3.resolved).toBe(false);
+    expect([r.resolved, r.iterations, r.nx, r.ny, r.nz]).toEqual([false, 2, 0, 1, 0]);
+    expect(r.dy).toBeCloseTo(0.1, 12);
+    // The cap applies first when it is smaller.
+    const r1 = resolvePenetration(g, tall, 1);
+    expect([r1.resolved, r1.iterations]).toEqual([false, 1]);
+    expect(r1.dy).toBeCloseTo(-0.7, 12);
+    const r0 = resolvePenetration(g, tall, 0);
+    expect([r0.resolved, r0.iterations, r0.dx, r0.dy, r0.dz]).toEqual([false, 0, 0, 0, 0]);
+  });
+
+  it('a tall box wedged between two staggered cells stops after one back-and-forth (world and rotated structure)', () => {
+    // A = (0,10,0) and B = (0,11,1) touch along an edge; the box overlaps both by 0.25 in z.
+    // Clearing either pushes the box into the other: +Z 0.25, -Z 0.5, then +Z 0.5 would
+    // repeat the state after the first push.
+    const g = emptyWorld();
+    g.setCell(0, 10, 0, STONE);
+    g.setCell(0, 11, 1, STONE);
+    const b = box(0.25, 10.25, 0.75, 0.75, 12, 1.25);
+    const r = resolvePenetration(g, b, 50);
+    expect([r.resolved, r.iterations, r.dx, r.dy, r.dz, r.nz]).toEqual([false, 2, 0, 0, -0.25, -1]);
+    // The fallback finds the nearest free spot.
+    const off = nearestFreeOffset([g], b, 2)!;
+    expect(boxOverlapsSolid(g, aabbTranslate(b, off.x, off.y, off.z))).toBe(false);
+
+    const world = new World();
+    const s = structure(world, 1, vec3(4.2, 30, -8.6), qfromYaw(0.3), vec3(0.5, 0.5, 0.5));
+    s.setCell(0, 10, 0, STONE);
+    s.setCell(0, 11, 1, STONE);
+    const sb = boxWithLocalMin(s, 0.1, 10.2, 0.6, 0.15, 0.85, 0.15);
+    const rs = resolvePenetration(s, sb, 50);
+    expect(rs.resolved).toBe(false);
+    expect(rs.iterations).toBe(2);
+    const local = s.dirToLocal(vec3(rs.nx, rs.ny, rs.nz));
+    expect(Math.abs(local.z)).toBeCloseTo(1, 9); // the pushes alternate along local z
+  });
+
+  it('maxIterations: honoured, NaN or negative means 0, huge values are capped', () => {
+    const g = emptyWorld();
+    fill(g, -3, -2, -3, 6, 1, 6); // ground, top at y = 1
+    fill(g, 0, 1, 0, 1, 4, 5); // wall at x = 0
+    const b = box(0.95, 0.97, 2.2, 1.55, 2.77, 2.8); // needs two pushes: wall, then floor
+    expect([resolvePenetration(g, b, 1).resolved, resolvePenetration(g, b, 1).iterations]).toEqual([false, 1]);
+    expect([resolvePenetration(g, b, 2).resolved, resolvePenetration(g, b, 2).iterations]).toEqual([true, 2]);
+    expect([resolvePenetration(g, b, 2.9).resolved, resolvePenetration(g, b, 2.9).iterations]).toEqual([true, 2]);
+    for (const cap of [NaN, -1, -Infinity]) {
+      const r = resolvePenetration(g, b, cap);
+      expect([r.resolved, r.iterations, r.dx, r.dy, r.dz]).toEqual([false, 0, 0, 0, 0]);
+    }
+    const inf = resolvePenetration(g, b, Infinity);
+    expect([inf.resolved, inf.iterations]).toEqual([true, 2]);
+    expect(MAX_RESOLVE_ITERATIONS).toBeGreaterThanOrEqual(6);
   });
 
   it('never mutates the input box', () => {
