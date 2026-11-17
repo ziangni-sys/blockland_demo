@@ -230,14 +230,19 @@ function stampConiferLeaves(cells: Uint16Array, x0: number, z0: number, t: TreeS
     const tier = (tip - y) & 1;
     let r = t.radius * f + 0.35;
     if (tier === 0) r *= 0.62;
-    if (y === tip - 1) r = 1.0; // the plus-shaped cap just under the tip
+    // Every tier keeps at least a plus of leaves around the trunk: near the tip the narrow
+    // tiers would otherwise shrink to the trunk cell alone and leave bare trunk segments
+    // inside the cone. (This also makes the plus-shaped cap just under the tip.)
+    if (r < 1 || y === tip - 1) r = 1.0;
     const ir = Math.floor(r);
     const r2 = r * r;
     for (let dz = -ir; dz <= ir; dz++) {
       for (let dx = -ir; dx <= ir; dx++) {
         const d2 = dx * dx + dz * dz;
         if (d2 > r2) continue;
-        if (d2 > 0 && d2 > r2 * 0.6 && (latticeHash3(t.hash | 0, t.x + dx, y, t.z + dz) & 0xff) < 70) continue;
+        // Ragged outer ring; the four cells beside the trunk always stay, so no tier of the
+        // cone ever leaves the trunk bare.
+        if (d2 > 1 && d2 > r2 * 0.6 && (latticeHash3(t.hash | 0, t.x + dx, y, t.z + dz) & 0xff) < 70) continue;
         putLeaf(cells, x0, z0, t.x + dx, y, t.z + dz, leaf);
       }
     }

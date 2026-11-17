@@ -81,24 +81,41 @@ describe('review: lava pockets are contained', () => {
 
 describe('review: tree trunks are not cut by a neighbouring tree', () => {
   // Trunks may stand 2 cells apart; a large broadleaf's side branch reaches 2 cells along
-  // an axis, and logs are stamped in list order with "only into air or leaves", so the
-  // first tree's horizontal branch log can take a cell of the second tree's trunk.
-  it('every trunk run is vertical logs of one species (seed 6, trunk at x=73 z=130)', () => {
-    const gen = new TerrainGenerator(6);
-    const { cx, cz, lx, lz } = chunkOf(73, 130);
-    const c = gen.generate(cx, cz);
-    const ground = gen.heightAt(73, 130);
-    const base = c[lx | (lz << 4) | ((ground + 1) << 8)]!;
-    expect(LOGS.has(cellId(base)), 'a trunk stands here').toBe(true);
-    const bad: string[] = [];
-    for (let y = ground + 1; ; y++) {
-      const cell = c[lx | (lz << 4) | (y << 8)]!;
-      if (!LOGS.has(cellId(cell))) break;
-      if (cellId(cell) !== cellId(base) || stateAxis(cellState(cell)) !== AXIS_Y) {
-        bad.push(`y=${y}: id ${cellId(cell)} axis ${stateAxis(cellState(cell))}`);
+  // an axis, and logs used to be stamped tree by tree with "only into air or leaves", so
+  // the first tree's horizontal branch log could take a cell of the second tree's trunk.
+  // (The original repro, seed 6 trunk at x=73 z=130, no longer holds a tree since the
+  // land balance moved the coasts; trees.test.ts rebuilds the exact geometry, and this
+  // test sweeps forested chunks of several seeds.)
+  it('every trunk run is vertical logs of one species (sweep)', () => {
+    let trunks = 0;
+    for (const [seed, x, z] of [
+      [6, 73, 130],
+      [9, 115, 3],
+      [9, 105, 30],
+      [2024, -53, 67],
+    ] as const) {
+      const gen = new TerrainGenerator(seed);
+      const { cx, cz } = chunkOf(x, z);
+      for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1], [-1, 0], [0, -1]] as const) {
+        const c = gen.generate(cx + dx, cz + dz);
+        for (let col = 0; col < 256; col++) {
+          for (let y = SEA_LEVEL; y < 127; y++) {
+            const base = c[col | (y << 8)]!;
+            // The lowest log of a trunk: a vertical log on non-log ground.
+            if (!LOGS.has(cellId(base)) || stateAxis(cellState(base)) !== AXIS_Y) continue;
+            if (LOGS.has(cellId(c[col | ((y - 1) << 8)]!)) || !SOLID[cellId(c[col | ((y - 1) << 8)]!)]) continue;
+            trunks++;
+            for (let k = y + 1; k < 128 && LOGS.has(cellId(c[col | (k << 8)]!)); k++) {
+              const cell = c[col | (k << 8)]!;
+              if (cellId(cell) !== cellId(base) || stateAxis(cellState(cell)) !== AXIS_Y) {
+                throw new Error(`seed ${seed}: foreign log in a trunk at chunk (${cx + dx},${cz + dz}) col ${col} y ${k}`);
+              }
+            }
+          }
+        }
       }
     }
-    expect(bad, 'foreign cells inside the trunk').toEqual([]);
+    expect(trunks).toBeGreaterThan(50);
   });
 });
 

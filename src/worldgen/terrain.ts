@@ -144,22 +144,15 @@ export class TerrainSampler {
     this.balance = new LandBalance(this, deriveSeed(s, S_BALANCE));
   }
 
-  /** Continentalness at a column (the land/sea field: < 0 sea, > 0 land). */
-  continentalness(x: number, z: number): number {
-    const wx = x + 70 * fbm2(this.sWarpX, x / 320, z / 320, 3);
-    const wz = z + 70 * fbm2(this.sWarpZ, x / 320, z / 320, 3);
-    return this.rawCont(wx, wz, x, z) + this.balance.offset(x, z);
-  }
-
   /**
    * Uncorrected continentalness from already-warped coordinates (wx, wz) of column (x, z).
    * Island field: a very low-frequency "region" field blends a broad scale (larger
    * landmasses with bays) and a fine scale (scattered archipelago), so regions differ in
    * CHARACTER. Its land/sea balance still drifts from window to window (the island
    * features are only 2-3 times smaller than a 512-block window); LandBalance removes
-   * that drift.
+   * that drift. (The corrected value is ColumnSample.cont.)
    */
-  rawCont(wx: number, wz: number, x: number, z: number): number {
+  private rawCont(wx: number, wz: number, x: number, z: number): number {
     const t = smoothstep(-0.15, 0.15, fbm2(this.sRegion, x / 1500, z / 1500, 2));
     const fine = t < 1 ? fbm2(this.sContM, wx / 180, wz / 180, 3) : 0;
     const broad = t > 0 ? fbm2(this.sContB, wx / 330, wz / 330, 3) : 0;

@@ -38,12 +38,23 @@ describe('tree stamping', () => {
     });
   }
 
-  it('stamps identical cells whatever the tree order', () => {
+  it('stamps the same logs whatever the tree order', () => {
+    // (Where two crowns overlap, the leaf species follows the list order, which is a world
+    // order and the same in every chunk; logs must not depend on it at all.)
     const a = new Uint16Array(CHUNK_VOLUME);
     const b = new Uint16Array(CHUNK_VOLUME);
     stampTrees(a, 0, 0, pair('oak-first').list);
     stampTrees(b, 0, 0, pair('pine-first').list);
-    expect(b).toEqual(a);
+    let logs = 0;
+    for (let i = 0; i < CHUNK_VOLUME; i++) {
+      const la = cellId(a[i]!) === B.LOG_OAK || cellId(a[i]!) === B.LOG_PINE;
+      const lb = cellId(b[i]!) === B.LOG_OAK || cellId(b[i]!) === B.LOG_PINE;
+      if (la || lb) {
+        logs++;
+        expect(b[i], `cell ${i}`).toBe(a[i]);
+      }
+    }
+    expect(logs).toBe(7 + 9 + 3); // the oak's far +x branch cell is the pine's trunk
   });
 
   it('only fills air and leaves: terrain and other logs are kept', () => {

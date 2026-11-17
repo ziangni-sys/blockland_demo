@@ -150,12 +150,9 @@ export class ChunkManager {
   private insert(chunk: Chunk): Chunk {
     this.world.addChunk(chunk);
     this.light.initChunk(chunk);
-    // Liquids at the borders of already-loaded neighbours may now have somewhere to go.
+    // Wakes the chunk's restless liquid and re-checks the facing border columns of the
+    // already-loaded neighbours (their liquid may now have somewhere to go).
     this.fluids.rescheduleChunk(chunk);
-    for (let d = 0; d < 4; d++) {
-      const n = this.world.getChunk(chunk.cx + (d === 0 ? 1 : d === 1 ? -1 : 0), chunk.cz + (d === 2 ? 1 : d === 3 ? -1 : 0));
-      if (n) this.fluids.rescheduleChunk(n);
-    }
     this.onLoad?.(chunk);
     return chunk;
   }

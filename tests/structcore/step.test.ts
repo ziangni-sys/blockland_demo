@@ -5,8 +5,11 @@ import { qclone, qfromYaw, vclone, vec3 } from '../../src/core/math';
 import { GlueStore } from '../../src/structures/glue';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import { SET_STRUCTURE_MOVE } from '../../src/voxel/grid';
+import { StructureManager } from '../../src/structures/manager';
+import { Chunk } from '../../src/voxel/chunk';
 import { StructureGrid } from '../../src/voxel/sgrid';
-import { c, facing, fill, loadArea, log, MILL_BEARING, millShip, scene, SHIP_HELM, windmill, type Scene } from './helpers';
+import { World } from '../../src/voxel/world';
+import { c, facing, FakeHost, fill, loadArea, log, MILL_BEARING, millShip, scene, SHIP_HELM, windmill, type Scene } from './helpers';
 
 const [BX, BY, BZ] = MILL_BEARING;
 
@@ -40,8 +43,8 @@ describe('frozen near unloaded chunks (LESSONS 船被弹飞)', () => {
 
   it('a world rotor near unloaded chunks holds still; a ship rotor follows its ship', () => {
     const s = scene();
-    windmill(s.world, 25, 64, 10, 3);
-    const rr = s.mgr.startRotor(s.world, 25, 64, 10);
+    windmill(s.world, 27, 64, 10, 3); // its blades sweep x 24..30, + 2 reaches chunk x = 2
+    const rr = s.mgr.startRotor(s.world, 27, 64, 10);
     if (!rr.ok) throw new Error(rr.reason);
     const r = rr.structure;
     for (let i = 0; i < 10; i++) s.mgr.step();
@@ -65,6 +68,106 @@ describe('frozen near unloaded chunks (LESSONS 船被弹飞)', () => {
     expect(rotor.angle).toBe(angle);
     expect(rotor.grid.angularVelocity).toEqual(vec3());
     expect(rotor.angularSpeed).toBeGreaterThan(0); // resumes at speed once thawed
+  });
+});
+
+describe('world rotor freeze box: the cells\' world box over a full turn, grown by 2', () => {
+  /** Chunk loading as sim/chunks.ts does it: every column with dx^2 + dz^2 <= r^2 + r around the anchor chunk. */
+  function discWorld(pcx: number, pcz: number, r = 8): World {
+    const world = new World(1);
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dz * dz <= r * r + r) world.addChunk(new Chunk(pcx + dx, pcz + dz));
+      }
+    }
+    return world;
+  }
+
+  /** Bearing at (0,64,0) facing +Z on a planks support; felt arms in the plane z = 1. */
+  function bigWindmill(world: World, px: number, nx: number, py: number, ny: number): void {
+    world.setCell(0, 64, -1, c(B.PLANKS_OAK));
+    world.setCell(0, 64, 0, facing(B.BEARING, 4));
+    world.setCell(0, 64, 1, c(B.CANVAS));
+    for (let i = 1; i <= px; i++) world.setCell(i, 64, 1, c(B.WOOL_RED));
+    for (let i = 1; i <= nx; i++) world.setCell(-i, 64, 1, c(B.WOOL_BLUE));
+    for (let i = 1; i <= py; i++) world.setCell(0, 64 + i, 1, c(B.WOOL_WHITE));
+    for (let i = 1; i <= ny; i++) world.setCell(0, 64 - i, 1, c(B.WOOL_YELLOW));
+  }
+
+  /** Is the world AABB of the rotor's cells in their current pose, grown by 2, loaded? */
+  function poseBoxLoaded(world: World, r: Rotor): boolean {
+    let minX = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxZ = -Infinity;
+    r.grid.forEachCell((x, y, z) => {
+      for (let k = 0; k < 8; k++) {
+        const p = r.grid.toWorld(vec3(x + (k & 1), y + ((k >> 1) & 1), z + ((k >> 2) & 1)));
+        minX = Math.min(minX, p.x);
+        minZ = Math.min(minZ, p.z);
+        maxX = Math.max(maxX, p.x);
+        maxZ = Math.max(maxZ, p.z);
+      }
+    });
+    return world.isAreaLoaded(minX - 2, minZ - 2, maxX + 2, maxZ + 2);
+  }
+
+  function start(world: World): { mgr: StructureManager; rotor: Rotor } {
+    const mgr = new StructureManager(new FakeHost(world), null);
+    const res = mgr.startRotor(world, 0, 64, 0);
+    if (!res.ok) throw new Error(res.reason);
+    return { mgr, rotor: res.structure };
+  }
+
+  it('a legal 322-cell windmill turns with the player standing at its bearing', () => {
+    const world = discWorld(0, 0);
+    bigWindmill(world, 99, 99, 63, 60); // 1 + 99 + 99 + 63 + 60 = 322 cells <= ROTOR_MAX_CELLS
+    const { mgr, rotor } = start(world);
+    expect(rotor.grid.count).toBe(322);
+    for (let i = 0; i < 40; i++) {
+      mgr.step();
+      expect(poseBoxLoaded(world, rotor)).toBe(true);
+      expect(rotor.frozen).toBe(false);
+    }
+    expect(rotor.angle).not.toBe(0);
+  });
+
+  it('a 161-cell windmill keeps turning with the player ~5 chunks away', () => {
+    const world = discWorld(5, 0);
+    bigWindmill(world, 40, 40, 40, 40);
+    const { mgr, rotor } = start(world);
+    for (let i = 0; i < 40; i++) {
+      mgr.step();
+      expect(poseBoxLoaded(world, rotor)).toBe(true);
+      expect(rotor.frozen).toBe(false);
+    }
+    expect(rotor.angle).not.toBe(0);
+  });
+
+  it('a turntable whose long arm will swing over an unloaded chunk is frozen at angle 0 already, and stays so', () => {
+    const s = scene();
+    // Bearing facing up at (20,60,10); arms +X 3 (the only one reaching east now) and +Z 10.
+    s.world.setCell(20, 59, 10, c(B.PLANKS_OAK));
+    s.world.setCell(20, 60, 10, facing(B.BEARING, 2));
+    s.world.setCell(20, 61, 10, c(B.CANVAS));
+    for (let i = 1; i <= 3; i++) s.world.setCell(20 + i, 61, 10, c(B.WOOL_RED));
+    for (let i = 1; i <= 10; i++) s.world.setCell(20, 61, 10 + i, c(B.WOOL_BLUE));
+    const res = s.mgr.startRotor(s.world, 20, 60, 10);
+    if (!res.ok) throw new Error(res.reason);
+    const r = res.structure;
+    expect(poseBoxLoaded(s.world, r)).toBe(true); // right now nothing reaches x = 32
+    s.mgr.step();
+    expect(r.frozen).toBe(true); // a quarter turn later the +Z arm would reach x = 31 (+2)
+    expect(r.angle).toBe(0);
+    loadArea(s.world, 32, -32, 47, 31);
+    s.mgr.step();
+    expect(r.frozen).toBe(false);
+    // Over a whole turn the flag never flickers: the box does not depend on the angle.
+    for (let i = 0; i < 400; i++) {
+      s.mgr.step();
+      expect(r.frozen).toBe(false);
+    }
+    expect(Math.abs(r.angle)).toBeGreaterThan(0);
   });
 });
 

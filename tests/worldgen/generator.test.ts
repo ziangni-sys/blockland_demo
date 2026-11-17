@@ -41,6 +41,27 @@ function spawnChunk(gen: TerrainGenerator): { cx: number; cz: number } {
   return { cx: Math.floor(s.x / CHUNK_SIZE), cz: Math.floor(s.z / CHUNK_SIZE) };
 }
 
+/** The chunk nearest to the spawn (outward rings) whose 3x3 neighbourhood is dense forest. */
+function forestChunk(gen: TerrainGenerator): { cx: number; cz: number } {
+  const { cx, cz } = spawnChunk(gen);
+  const s = createColumnSample();
+  for (let ring = 0; ring < 40; ring++) {
+    for (let dz = -ring; dz <= ring; dz++) {
+      for (let dx = -ring; dx <= ring; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue;
+        let forest = 0;
+        for (let k = 0; k < 9; k++) {
+          const x = (cx + dx + (k % 3) - 1) * CHUNK_SIZE + 8;
+          const z = (cz + dz + Math.floor(k / 3) - 1) * CHUNK_SIZE + 8;
+          forest += gen.sampler.sample(x, z, s).forest;
+        }
+        if (forest / 9 > 0.45) return { cx: cx + dx, cz: cz + dz };
+      }
+    }
+  }
+  throw new Error(`no forest near the spawn of seed ${gen.seed}`);
+}
+
 describe('TerrainGenerator: determinism', () => {
   it('returns identical, fresh arrays for the same chunk', () => {
     const gen = new TerrainGenerator(1234);
@@ -97,7 +118,7 @@ describe('TerrainGenerator: seams', () => {
   for (const seed of [11, 2024]) {
     it(`terrain and trees are continuous across chunk borders (seed ${seed})`, () => {
       const gen = new TerrainGenerator(seed);
-      const { cx, cz } = spawnChunk(gen);
+      const { cx, cz } = forestChunk(gen);
       const area = new ChunkArea(gen, cx - 2, cz - 2, 5);
       const ix0 = area.x0 + CHUNK_SIZE; // central 3x3 chunks
       const ix1 = area.x0 + 4 * CHUNK_SIZE;
@@ -155,7 +176,7 @@ describe('TerrainGenerator: seams', () => {
           }
         }
       }
-      expect(leaves).toBeGreaterThan(100);
+      expect(leaves).toBeGreaterThan(1000);
 
       // 3. Every trunk top carries a crown, including trunks right next to a chunk border
       //    (whose crowns were stamped by the neighbouring chunk).
@@ -183,8 +204,8 @@ describe('TerrainGenerator: seams', () => {
           }
         }
       }
-      expect(trunks).toBeGreaterThan(5);
-      expect(borderTrunks).toBeGreaterThan(0);
+      expect(trunks).toBeGreaterThan(20);
+      expect(borderTrunks).toBeGreaterThan(5);
     });
   }
 });
@@ -279,9 +300,10 @@ describe('TerrainGenerator: world shape', () => {
       }
     }
     const share = (d: number): number => (snow.get(d) ?? 0) / n.get(d)!;
-    for (let d = -10; d <= 12; d++) expect(n.get(d) ?? 0, `columns ${d} above the snow line`).toBeGreaterThanOrEqual(40);
-    for (let d = -10; d <= -8; d++) expect(share(d)).toBeLessThanOrEqual(0.02);
-    for (let d = 9; d <= 12; d++) expect(share(d)).toBe(1);
+    for (let d = -10; d <= 13; d++) expect(n.get(d) ?? 0, `columns ${d} above the snow line`).toBeGreaterThanOrEqual(40);
+    // Fade band: 4 below to 8 above the line, widened by the +-3 block patch field.
+    for (let d = -10; d <= -8; d++) expect(share(d)).toBe(0);
+    for (let d = 11; d <= 13; d++) expect(share(d)).toBe(1);
     let partial = 0;
     for (let d = -7; d <= 8; d++) {
       if (share(d) > 0.05 && share(d) < 0.95) partial++;

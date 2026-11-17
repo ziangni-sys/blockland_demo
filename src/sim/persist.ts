@@ -72,6 +72,7 @@ export function importSave(sim: Simulation, bundle: SaveBundle): void {
   }
 
   sim.world.ticks.clear();
+  sim.fluids.clear();
   const ticks = blob('ticks');
   if (ticks) {
     for (const t of decodeTicks(ticks, sim.world.time)) sim.world.ticks.schedule(t.x, t.y, t.z, t.id, t.at);

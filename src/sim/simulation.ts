@@ -99,14 +99,15 @@ export class Simulation {
     this.blocks = new BlockUpdates(this);
 
     const spawn = opts.spawn ?? opts.generator.spawnPoint();
+    // Start in the morning. The clock must be set BEFORE any chunk is loaded: loading
+    // schedules liquid ticks relative to world.time.
+    this.world.time = Math.floor(DAY_TICKS * 0.04);
     // The ground under the player must exist before the first tick.
     this.chunks.loadAround(opts.generator, spawn.x, spawn.z, 1);
     const player = this.entities.createPlayer(opts.mode, spawn.x, spawn.y, spawn.z);
     player.spawn.x = spawn.x;
     player.spawn.y = spawn.y;
     player.spawn.z = spawn.z;
-    // Start in the morning.
-    this.world.time = Math.floor(DAY_TICKS * 0.04);
 
     this.interaction = new Interaction(this);
   }

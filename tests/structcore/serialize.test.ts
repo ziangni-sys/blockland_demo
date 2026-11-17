@@ -1,11 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { B } from '../../src/blocks/defs';
 import { PX } from '../../src/core/dirs';
 import { qfromAxisAngle, qfromYaw, qmul, qrotate, vec3, vsub } from '../../src/core/math';
+import { Rng } from '../../src/core/rng';
 import { ByteReader, ByteWriter, SaveFormatError } from '../../src/save/bytes';
+import { STRUCTURES_FORMAT } from '../../src/structures/serialize';
 import { Rotor, Ship, type Structure } from '../../src/structures/structure';
 import type { StructureManager } from '../../src/structures/manager';
-import { c, facing, fill, MILL_BEARING, millShip, scene, SHIP_HELM, windmill, type Scene } from './helpers';
+import { StructureGrid } from '../../src/voxel/sgrid';
+import { c, cellMap, facing, fill, MILL_BEARING, millShip, scene, SHIP_HELM, windmill, type Scene } from './helpers';
 
 const [BX, BY, BZ] = MILL_BEARING;
 
@@ -153,6 +156,134 @@ describe('serialize / deserialize (ACCEPTANCE 23)', () => {
     expect(() => b.mgr.deserialize(new ByteReader(bad))).toThrow(SaveFormatError);
     expect(describeAll(b.mgr)).toEqual(before);
     expect(b.mgr.ships()[0]).toBe(b.ship);
+  });
+});
+
+/**
+ * A save holding one ship (id 1) whose cell section is written by `cells`; the rest of the
+ * record is a valid identity pose, no glue and default control fields.
+ */
+function shipSave(cells: (w: ByteWriter) => void, format = STRUCTURES_FORMAT): Uint8Array {
+  const w = new ByteWriter();
+  w.u8(format).varuint(2).varuint(1);
+  w.u8(0).varuint(1).varuint(0); // kind ship, id 1, parent: the world
+  cells(w);
+  for (const v of [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]) w.f64(v);
+  w.i32Array(new Int32Array(0));
+  w.varint(0).varint(0).varint(0).u8(5).f64(0).f64(0).bool(false).varuint(0);
+  return w.finish();
+}
+
+const P = c(B.PLANKS_OAK);
+
+/** Format 2 cell section: box, then runs of [gap, cells]. */
+function runs(box: [number, number, number, number, number, number], list: Array<[number, number[]]>): (w: ByteWriter) => void {
+  return (w) => {
+    w.varint(box[0]).varint(box[1]).varint(box[2]).varuint(box[3]).varuint(box[4]).varuint(box[5]);
+    w.varuint(list.length);
+    for (const [gap, cells] of list) w.varuint(gap).u16Array(cells);
+  };
+}
+
+function loadedCells(bytes: Uint8Array): Map<string, number> {
+  const s = scene();
+  s.mgr.deserialize(new ByteReader(bytes));
+  return cellMap(s.mgr.ships()[0]!.grid);
+}
+
+describe('structure cells on disk: proportional to the cell count, always readable', () => {
+  it('a ship edited far out (a huge, sparse box) saves small and loads back exactly', () => {
+    const s = scene();
+    fill(s.world, -2, 60, -2, 2, 60, 2, P);
+    s.world.setCell(0, 61, 0, facing(B.HELM, 5));
+    const r = s.mgr.assembleShip(0, 61, 0);
+    if (!r.ok) throw new Error(r.reason);
+    const g = r.structure.grid;
+    // Plain ship edits (allowed at any time). Tight box 421 x 68 x 601 = 17.2M cells, far
+    // beyond the 2^24-cell box the dense format 1 reader accepted.
+    g.setCell(-210, 60, -300, P);
+    g.setCell(210, 127, 300, c(B.PLANKS_PINE));
+    expect(g.count).toBe(28);
+    const bytes = save(s.mgr);
+    expect(bytes.length).toBeLessThan(2048);
+    const b = scene();
+    b.mgr.deserialize(new ByteReader(bytes));
+    const ship = b.mgr.ships()[0]!;
+    expect(cellMap(ship.grid)).toEqual(cellMap(g));
+    expect(ship.grid.cellBounds()).toEqual(g.cellBounds());
+    expect(save(b.mgr)).toEqual(bytes);
+  });
+
+  it('random structures round-trip exactly (runs across rows and layers)', () => {
+    const rng = new Rng(1234);
+    const ids = [B.PLANKS_OAK, B.PLANKS_PINE, B.COBBLE, B.WOOL_RED, B.CANVAS];
+    for (let trial = 0; trial < 60; trial++) {
+      const s = scene();
+      fill(s.world, 0, 60, 0, 1, 60, 0, P);
+      s.world.setCell(0, 61, 0, facing(B.HELM, 5));
+      const r = s.mgr.assembleShip(0, 61, 0);
+      if (!r.ok) throw new Error(r.reason);
+      const g = r.structure.grid;
+      const sx = rng.int(1, 7);
+      const sy = rng.int(1, 5);
+      const sz = rng.int(1, 7);
+      const ox = rng.int(-20, 20);
+      const oy = rng.int(40, 80);
+      const oz = rng.int(-20, 20);
+      const density = rng.next();
+      for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
+        if (rng.chance(density)) g.setCell(ox + x, oy + y, oz + z, c(ids[rng.int(0, ids.length - 1)]!));
+      }
+      const bytes = save(s.mgr);
+      expect(loadedCells(bytes)).toEqual(cellMap(g));
+    }
+  });
+
+  it('a hand-written section decodes runs that wrap over rows', () => {
+    // Box 3 x 1 x 2 at (5,60,7): indices 2 and 3 are (x=2,z=0) and (x=0,z=1).
+    const cells = loadedCells(shipSave(runs([5, 60, 7, 3, 1, 2], [[2, [P, c(B.COBBLE)]]])));
+    expect(cells).toEqual(new Map([['7,60,7', P], ['5,60,8', c(B.COBBLE)]]));
+  });
+
+  it('format 1 saves (dense boxes) still load', () => {
+    const bytes = shipSave((w) => {
+      w.varint(5).varint(60).varint(7).varuint(2).varuint(1).varuint(2);
+      w.u16Array([P, 0, 0, c(B.COBBLE)]);
+    }, 1);
+    expect(loadedCells(bytes)).toEqual(new Map([['5,60,7', P], ['6,60,8', c(B.COBBLE)]]));
+  });
+
+  it('malformed cell sections throw SaveFormatError', () => {
+    const bad: Array<[string, Uint8Array]> = [
+      ['box not tight', shipSave(runs([0, 60, 0, 4, 1, 1], [[0, [P, P, P]]]))],
+      ['box not tight (y)', shipSave(runs([0, 60, 0, 1, 2, 1], [[0, [P]]]))],
+      ['run past the box', shipSave(runs([0, 60, 0, 3, 1, 1], [[1, [P, P, P]]]))],
+      ['adjacent runs', shipSave(runs([0, 60, 0, 3, 1, 1], [[0, [P]], [0, [P, P]]]))],
+      ['air in a run', shipSave(runs([0, 60, 0, 3, 1, 1], [[0, [P, 0, P]]]))],
+      ['empty run', shipSave(runs([0, 60, 0, 1, 1, 1], [[0, [P]], [1, []]]))],
+      ['box without cells', shipSave(runs([0, 60, 0, 3, 1, 1], []))],
+      ['cells without a box', shipSave(runs([0, 60, 0, 0, 0, 0], [[0, [P]]]))],
+      ['unknown block id', shipSave(runs([0, 60, 0, 1, 1, 1], [[0, [1000]]]))],
+      ['absurd box', shipSave(runs([0, 0, 0, 1 << 28, 1 << 28, 1], [[0, [P]]]))],
+      ['format 1 size mismatch', shipSave((w) => w.varint(0).varint(60).varint(0).varuint(2).varuint(1).varuint(1).u16Array([P]), 1)],
+    ];
+    for (const [what, bytes] of bad) {
+      const s = scene();
+      expect(() => s.mgr.deserialize(new ByteReader(bytes)), what).toThrow(SaveFormatError);
+      expect(s.mgr.all(), what).toEqual([]);
+    }
+  });
+
+  it('a box that cannot be allocated is a SaveFormatError, not a crash', () => {
+    const spy = vi.spyOn(StructureGrid.prototype, 'resize').mockImplementation(() => {
+      throw new RangeError('Array buffer allocation failed');
+    });
+    try {
+      const s = scene();
+      expect(() => s.mgr.deserialize(new ByteReader(shipSave(runs([0, 60, 0, 1, 1, 1], [[0, [P]]]))))).toThrow(SaveFormatError);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

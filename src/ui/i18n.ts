@@ -124,7 +124,7 @@ export const STRINGS = {
   'inv.searchPlaceholder': { zh: '搜索中文或英文名…', en: 'Search by name…' },
   'inv.noResults': { zh: '没有匹配的物品', en: 'No matching items' },
   'inv.close': { zh: '关闭', en: 'Close' },
-  'inv.dropHint': { zh: '点击面板外丢弃手中物品', en: 'Click outside the panel to drop the held stack' },
+  'inv.dropHint': { zh: '在格子以外点击：丢弃手中物品', en: 'Click outside the slots to drop the held stack' },
   'inv.shiftHint': { zh: 'Shift + 点击：直接放进快捷栏', en: 'Shift-click: straight to the hotbar' },
   'inv.slotEmpty': { zh: '空格位', en: 'Empty slot' },
   'inv.slotLabel': { zh: '{name} ×{n}', en: '{name} ×{n}' },

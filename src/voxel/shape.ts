@@ -798,26 +798,60 @@ export function resolvePenetration(
 }
 
 // ====================================================================== sweep
+// Like worldRangeHasSolid, the column scans read World chunks directly: a getCell call inlined
+// into these loops was measured to allocate on some axes (z sweeps: ~16 bytes per call).
 
 /**
- * Does horizontal layer `k` (x = k for axis 0, z = k for axis 2) contain a solid cell inside
- * the cross-section? y is innermost so all reads of one column hit the same chunk.
+ * Lowest solid layer k in [k0, k1) of world column (x, z), or k1 when there is none.
+ * Integer arguments only. Same cell rules as World.getCell.
  */
-function worldLayerHasSolid(
-  grid: VoxelGrid,
-  axis: 0 | 2,
-  k: number,
-  a0: number,
-  a1: number,
-  y0: number,
-  y1: number,
-): boolean {
-  if (axis === 0) {
-    for (let z = a0; z <= a1; z++) for (let y = y0; y <= y1; y++) if (isSolid(grid.getCell(k, y, z))) return true;
-  } else {
-    for (let x = a0; x <= a1; x++) for (let y = y0; y <= y1; y++) if (isSolid(grid.getCell(x, y, k))) return true;
+function columnFirstSolidUp(grid: VoxelGrid, x: number, z: number, k0: number, k1: number): number {
+  if (!(grid instanceof World)) {
+    for (let k = k0; k < k1; k++) if (isSolid(grid.getCell(x, k, z))) return k;
+    return k1;
   }
-  return false;
+  let k = k0;
+  if (k < 0 && k < k1) {
+    if (SOLID[CELL_BELOW_WORLD & ID_MASK] === 1) return k;
+    k = 0;
+  }
+  const top = k1 < WORLD_HEIGHT ? k1 : WORLD_HEIGHT; // air at and above the build limit
+  if (k >= top) return k1;
+  const chunk = grid.chunkAt(x, z);
+  if (chunk === undefined) return SOLID[CELL_UNLOADED & ID_MASK] === 1 ? k : k1;
+  const cells = chunk.cells;
+  const lx = x & CHUNK_MASK;
+  const lz = z & CHUNK_MASK;
+  for (; k < top; k++) if (SOLID[cells[cellIndex(lx, k, lz)]! & ID_MASK] === 1) return k;
+  return k1;
+}
+
+/**
+ * Highest solid layer k with k1 < k <= k0 of world column (x, z), scanning down from k0, or
+ * k1 when there is none. Integer arguments only. Same cell rules as World.getCell.
+ */
+function columnFirstSolidDown(grid: VoxelGrid, x: number, z: number, k0: number, k1: number): number {
+  if (!(grid instanceof World)) {
+    for (let k = k0; k > k1; k--) if (isSolid(grid.getCell(x, k, z))) return k;
+    return k1;
+  }
+  let k = k0 < WORLD_HEIGHT ? k0 : WORLD_HEIGHT - 1; // air at and above the build limit
+  if (k <= k1) return k1;
+  if (k >= 0) {
+    const chunk = grid.chunkAt(x, z);
+    if (chunk === undefined) {
+      if (SOLID[CELL_UNLOADED & ID_MASK] === 1) return k;
+      k = -1;
+    } else {
+      const cells = chunk.cells;
+      const lx = x & CHUNK_MASK;
+      const lz = z & CHUNK_MASK;
+      const bottom = k1 >= 0 ? k1 + 1 : 0;
+      for (; k >= bottom; k--) if (SOLID[cells[cellIndex(lx, k, lz)]! & ID_MASK] === 1) return k;
+    }
+    if (k <= k1) return k1;
+  }
+  return SOLID[CELL_BELOW_WORLD & ID_MASK] === 1 ? k : k1; // k < 0: deeprock
 }
 
 /**
@@ -829,6 +863,8 @@ function worldLayerHasSolid(
  * Every crossed cell layer is scanned, so large deltas cannot tunnel; an infinite delta is
  * fine (the scan stops at deeprock, the build limit or the first unloaded chunk).
  * Returns 0 for a NaN delta and for an invalid box (a corrupt box is never moved further).
+ * Allocation-free except for the returned number itself when the move is blocked short of a
+ * whole cell (any JS function returning a fresh fractional double boxes it).
  */
 export function sweepAxis(grid: VoxelGrid, box: AABB, axis: 0 | 1 | 2, delta: number): number {
   if (!grid.isWorld) throw new Error('sweepAxis: only the world grid can be swept; use resolvePenetration for structures');
@@ -839,7 +875,7 @@ export function sweepAxis(grid: VoxelGrid, box: AABB, axis: 0 | 1 | 2, delta: nu
   const x0 = Math.floor(minX + CONTACT_EPS);
   const x1 = Math.ceil(maxX - CONTACT_EPS) - 1;
   const y0 = Math.floor(minY + CONTACT_EPS);
-  let y1 = Math.ceil(maxY - CONTACT_EPS) - 1;
+  const y1 = Math.ceil(maxY - CONTACT_EPS) - 1;
   const z0 = Math.floor(minZ + CONTACT_EPS);
   const z1 = Math.ceil(maxZ - CONTACT_EPS) - 1;
 
@@ -848,71 +884,57 @@ export function sweepAxis(grid: VoxelGrid, box: AABB, axis: 0 | 1 | 2, delta: nu
     // Vertical: column-major. Each column is scanned only up to the best blocking layer
     // found so far, so the total work is bounded by (columns x crossed layers).
     if (delta > 0) {
-      const end = maxY + delta - CONTACT_EPS; // layers k < end would be overlapped
       const kStart = Math.ceil(maxY - CONTACT_EPS); // first layer not already overlapped
-      let kStop = end < WORLD_HEIGHT ? end : WORLD_HEIGHT; // nothing solid above the limit
-      let hit = false;
+      // Layers k < maxY + delta - CONTACT_EPS would be entered; nothing at or above the build
+      // limit is solid, which also bounds an infinite delta.
+      let kEnd = Math.ceil(maxY + delta - CONTACT_EPS);
+      if (kEnd > WORLD_HEIGHT) kEnd = WORLD_HEIGHT;
+      let kStop = kEnd;
       for (let x = x0; x <= x1; x++) {
-        for (let z = z0; z <= z1; z++) {
-          for (let k = kStart; k < kStop; k++) {
-            if (isSolid(grid.getCell(x, k, z))) {
-              kStop = k;
-              hit = true;
-              break;
-            }
-          }
-        }
+        for (let z = z0; z <= z1; z++) kStop = columnFirstSolidUp(grid, x, z, kStart, kStop);
       }
-      if (!hit) return delta;
+      if (kStop >= kEnd) return delta;
       const d = kStop - maxY;
       return d > 0 ? d : 0;
     }
-    // Layers with k + 1 > end would be overlapped. Nothing below -MAX_BOX_COORD needs a scan
-    // (the world stops a fall at deeprock long before; this only bounds an infinite delta).
-    let end = minY + delta + CONTACT_EPS;
-    if (end < -MAX_BOX_COORD) end = -MAX_BOX_COORD;
-    let kStart = Math.floor(minY + CONTACT_EPS) - 1;
-    if (kStart > WORLD_HEIGHT - 1) kStart = WORLD_HEIGHT - 1; // air above the build limit
-    let kStop = -Infinity; // highest blocking layer found so far (exclusive lower scan bound)
+    const kStart = Math.floor(minY + CONTACT_EPS) - 1; // highest layer not already overlapped
+    // Layers k >= floor(minY + delta + CONTACT_EPS) would be entered. Nothing below
+    // -MAX_BOX_COORD needs a scan (the world stops a fall at deeprock long before; this only
+    // bounds an infinite delta on other world grids).
+    let kLow = Math.floor(minY + delta + CONTACT_EPS);
+    if (kLow < -MAX_BOX_COORD) kLow = -MAX_BOX_COORD;
+    let kStop = kLow - 1; // highest blocking layer found so far (exclusive lower scan bound)
     for (let x = x0; x <= x1; x++) {
-      for (let z = z0; z <= z1; z++) {
-        for (let k = kStart; k > kStop && k + 1 > end; k--) {
-          if (isSolid(grid.getCell(x, k, z))) {
-            kStop = k;
-            break;
-          }
-        }
-      }
+      for (let z = z0; z <= z1; z++) kStop = columnFirstSolidDown(grid, x, z, kStart, kStop);
     }
-    if (kStop === -Infinity) return delta;
+    if (kStop < kLow) return delta;
     const d = kStop + 1 - minY;
     return d < 0 ? d : 0;
   }
 
-  // Horizontal: layer by layer along the axis. Nothing at or above the build limit is solid.
-  if (y1 >= WORLD_HEIGHT) y1 = WORLD_HEIGHT - 1;
-  if (y0 > y1 || x0 > x1 || z0 > z1) return delta;
-  const a0 = axis === 0 ? z0 : x0;
-  const a1 = axis === 0 ? z1 : x1;
+  // Horizontal: layer by layer along the axis (worldRangeHasSolid clips at the build limit).
+  if (y0 > y1 || y0 >= WORLD_HEIGHT || x0 > x1 || z0 > z1) return delta;
   const lo = axis === 0 ? minX : minZ;
   const hi = axis === 0 ? maxX : maxZ;
-  // The scan never needs to pass ±MAX_BOX_COORD: the world's unloaded chunks stop it long
-  // before, and the clamp keeps an infinite delta finite on any other world grid.
+  // Layers are integers k; the scan never needs to pass ±MAX_BOX_COORD: the world's unloaded
+  // chunks stop it long before, and the clamp keeps an infinite delta finite on other grids.
   if (delta > 0) {
-    let end = hi + delta - CONTACT_EPS;
-    if (end > MAX_BOX_COORD) end = MAX_BOX_COORD;
-    for (let k = Math.ceil(hi - CONTACT_EPS); k < end; k++) {
-      if (worldLayerHasSolid(grid, axis, k, a0, a1, y0, y1)) {
+    let kEnd = Math.ceil(hi + delta - CONTACT_EPS); // layers k < kEnd would be entered
+    if (kEnd > MAX_BOX_COORD) kEnd = MAX_BOX_COORD;
+    for (let k = Math.ceil(hi - CONTACT_EPS); k < kEnd; k++) {
+      const hit = axis === 0 ? worldRangeHasSolid(grid, k, k, y0, y1, z0, z1) : worldRangeHasSolid(grid, x0, x1, y0, y1, k, k);
+      if (hit) {
         const d = k - hi;
         return d > 0 ? d : 0;
       }
     }
     return delta;
   }
-  let end = lo + delta + CONTACT_EPS;
-  if (end < -MAX_BOX_COORD) end = -MAX_BOX_COORD;
-  for (let k = Math.floor(lo + CONTACT_EPS) - 1; k + 1 > end; k--) {
-    if (worldLayerHasSolid(grid, axis, k, a0, a1, y0, y1)) {
+  let kLow = Math.floor(lo + delta + CONTACT_EPS); // layers k >= kLow would be entered
+  if (kLow < -MAX_BOX_COORD) kLow = -MAX_BOX_COORD;
+  for (let k = Math.floor(lo + CONTACT_EPS) - 1; k >= kLow; k--) {
+    const hit = axis === 0 ? worldRangeHasSolid(grid, k, k, y0, y1, z0, z1) : worldRangeHasSolid(grid, x0, x1, y0, y1, k, k);
+    if (hit) {
       const d = k + 1 - lo;
       return d < 0 ? d : 0;
     }

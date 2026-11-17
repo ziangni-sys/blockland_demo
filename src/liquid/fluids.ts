@@ -306,9 +306,10 @@ export class Fluids {
   private readonly unloadedFront = new Uint8Array(SLOPE_CELLS);
   private stamp = 0;
 
-  // Cells wakeSlopeArea() found at rest, valid while `restGen` stays the same: any world write
-  // (seen by the change hook, hence only while attached), chunk insert or world tick starts a
-  // new generation. Bulk callers wake thousands of cells whose slope areas overlap almost
+  // Cells wakeSlopeArea() has already handled (found at rest, or scheduled), valid while
+  // `restGen` stays the same: any world write (seen by the change hook, hence only while
+  // attached), chunk insert or world tick starts a new generation, and nothing else changes
+  // the verdict. Bulk callers wake thousands of cells whose slope areas overlap almost
   // entirely (a hull assembled in a lake): without the memo every resting lake cell nearby is
   // re-checked once per call. Direct-mapped: a collision only costs a re-check.
   private readonly restKey = new Float64Array(REST_MEMO_SIZE);
@@ -574,13 +575,10 @@ export class Fluids {
           const qz = z + dz;
           const key = posKey(qx, ly, qz);
           const slot = (qx * 73 + qz * 179 + ly * 31) & (REST_MEMO_SIZE - 1);
-          if (stamps[slot] === gen && keys[slot] === key) continue;
-          if (this.isRestless(qx, ly, qz, c, L)) {
-            this.scheduleCell(qx, ly, qz, c);
-          } else {
-            keys[slot] = key;
-            stamps[slot] = gen;
-          }
+          if (stamps[slot] === gen && keys[slot] === key) continue; // handled since the last change
+          if (this.isRestless(qx, ly, qz, c, L)) this.scheduleCell(qx, ly, qz, c);
+          keys[slot] = key;
+          stamps[slot] = gen;
         }
       }
     }

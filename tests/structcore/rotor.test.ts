@@ -13,7 +13,7 @@ import {
   ROTOR_SPINUP_SECONDS,
 } from '../../src/structures/rotor';
 import { Rotor } from '../../src/structures/structure';
-import { c, cellMap, facing, fill, log, rotZ, scene, WATER, windmill, worldCentre } from './helpers';
+import { c, cellMap, facing, fill, log, MILL_BEARING, millShip, rotZ, scene, SHIP_HELM, WATER, windmill, worldCentre } from './helpers';
 
 const BX = 0;
 const BY = 64;
@@ -119,6 +119,44 @@ describe('startRotor', () => {
     expect(s.mgr.startRotor(other.world, BX, BY, BZ)).toEqual({ ok: false, reason: 'not_world' });
   });
 
+  it('previewRotor gives exactly the verdict startRotor would, and never throws', () => {
+    const s = millScene();
+    const verdict = (g: Parameters<typeof s.mgr.startRotor>[0], x: number, y: number, z: number): [string, string] => {
+      const p = s.mgr.previewRotor(g, x, y, z);
+      const r = s.mgr.startRotor(g, x, y, z);
+      const res: [string, string] = [p.reason, r.ok ? 'ok' : r.reason];
+      if (r.ok) s.mgr.stopRotor(r.structure);
+      return res;
+    };
+    expect(verdict(s.world, BX, BY, BZ)).toEqual(['ok', 'ok']);
+    expect(verdict(s.world, BX, BY, BZ - 1)).toEqual(['not_a_bearing', 'not_a_bearing']);
+    const r = started(s);
+    // A block placed where the hub was, in front of the running rotor's bearing.
+    s.world.setCell(BX, BY, BZ + 1, c(B.CANVAS));
+    expect(verdict(s.world, BX, BY, BZ)).toEqual(['has_rotor', 'has_rotor']);
+    expect(verdict(r.grid, 0, 64, 1)).toEqual(['nested_rotor', 'nested_rotor']);
+    // A grid of another manager (a stale reference after loading another world).
+    const other = scene();
+    expect(verdict(other.world, BX, BY, BZ)).toEqual(['not_world', 'not_world']);
+    expect(s.mgr.previewRotor(other.world, BX, BY, BZ)).toEqual({ ok: false, reason: 'not_world', cells: new Int32Array(0), count: 0, sails: 0, bounds: null });
+  });
+
+  it('previewRotor on the grid of a ship that has docked meanwhile agrees with startRotor', () => {
+    const s = scene();
+    millShip(s.world, s.host.worldGlue, true); // hub glued: the stopped windmill comes along
+    const sr = s.mgr.assembleShip(SHIP_HELM[0], SHIP_HELM[1], SHIP_HELM[2]);
+    if (!sr.ok) throw new Error(sr.reason);
+    const ship = sr.structure;
+    const [mx, my, mz] = MILL_BEARING;
+    expect(s.mgr.previewRotor(ship.grid, mx, my, mz).ok).toBe(true); // first click
+    expect(s.mgr.dockShip(ship).ok).toBe(true); // the ship docks before the second click
+    expect(s.mgr.previewRotor(ship.grid, mx, my, mz).reason).toBe('not_world');
+    expect(s.mgr.startRotor(ship.grid, mx, my, mz)).toEqual({ ok: false, reason: 'not_world' });
+    // Another manager's ship grid neither throws nor previews a ghost.
+    const other = scene();
+    expect(other.mgr.previewRotor(ship.grid, mx, my, mz).reason).toBe('not_world');
+  });
+
   it('refuses a rotor with too few sails and leaves the world alone', () => {
     const s = scene();
     windmill(s.world, BX, BY, BZ, 3);
@@ -131,6 +169,18 @@ describe('startRotor', () => {
     // canvas hub + 1 yellow felt: planks do not stick to cloth
     expect(s.mgr.startRotor(s.world, BX, BY, BZ)).toEqual({ ok: false, reason: 'not_enough_sails' });
     expect(s.world.getCell(BX, BY, BZ + 1)).toBe(c(B.CANVAS));
+  });
+
+  it('a windmill next to a single water source leaves no water behind (nothing hangs in the air)', () => {
+    const s = scene();
+    windmill(s.world, BX, BY, BZ, 3); // arms in the plane z = 1, nothing below them but air
+    s.world.setCell(BX + 4, BY, BZ + 1, WATER); // one source just past the +X arm tip
+    expect(s.mgr.startRotor(s.world, BX, BY, BZ).ok).toBe(true);
+    for (let y = BY - 4; y <= BY + 4; y++) {
+      for (let x = BX - 4; x <= BX + 4; x++) {
+        expect(s.world.getCell(x, y, BZ + 1)).toBe(x === BX + 4 && y === BY ? WATER : 0);
+      }
+    }
   });
 
   it('a submerged rotor leaves water behind (water wheel)', () => {

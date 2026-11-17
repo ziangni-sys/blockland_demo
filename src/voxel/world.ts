@@ -47,6 +47,8 @@ export function posKey(x: number, y: number, z: number): number {
 export class TickQueue {
   private byPos = new Map<number, ScheduledTick>();
   private buckets = new Map<number, ScheduledTick[]>();
+  /** The last `now` passed to takeDue (ticks at or before it can no longer fire by themselves). */
+  private lastNow = -Infinity;
 
   get size(): number {
     return this.byPos.size;
@@ -55,7 +57,10 @@ export class TickQueue {
   schedule(x: number, y: number, z: number, id: number, at: number): void {
     const k = posKey(x, y, z);
     const cur = this.byPos.get(k);
-    if (cur && cur.id === id && cur.at <= at) return;
+    // Keep an earlier pending tick for the same block — unless it is already overdue
+    // (the clock jumped past it): such an entry would never fire and must not block
+    // rescheduling.
+    if (cur && cur.id === id && cur.at <= at && cur.at > this.lastNow) return;
     const t: ScheduledTick = { x, y, z, id, at };
     this.byPos.set(k, t);
     let b = this.buckets.get(at);
@@ -73,13 +78,30 @@ export class TickQueue {
   }
 
   /**
-   * Remove and return every tick due at exactly `now`, in scheduling order.
-   * The caller must call this once per world tick with consecutive `now` values.
+   * Remove and return every tick due at or before `now`, earliest first and in scheduling
+   * order within one time. Normally called once per world tick with consecutive `now`
+   * values; if the clock jumps, overdue ticks fire on the next call instead of being lost.
    */
   takeDue(now: number): ScheduledTick[] {
-    const b = this.buckets.get(now);
-    if (!b) return [];
-    this.buckets.delete(now);
+    const prev = this.lastNow;
+    this.lastNow = now;
+    let b = this.buckets.get(now);
+    if (now !== prev + 1 && this.buckets.size > 0) {
+      // Clock jump: gather every overdue bucket.
+      const times: number[] = [];
+      for (const at of this.buckets.keys()) if (at <= now) times.push(at);
+      if (times.length === 0) return [];
+      times.sort((p, q) => p - q);
+      const merged: ScheduledTick[] = [];
+      for (const at of times) {
+        for (const t of this.buckets.get(at)!) merged.push(t);
+        this.buckets.delete(at);
+      }
+      b = merged;
+    } else {
+      if (!b) return [];
+      this.buckets.delete(now);
+    }
     const out: ScheduledTick[] = [];
     for (const t of b) {
       const k = posKey(t.x, t.y, t.z);
@@ -98,6 +120,7 @@ export class TickQueue {
   clear(): void {
     this.byPos.clear();
     this.buckets.clear();
+    this.lastNow = -Infinity;
   }
 }
 
