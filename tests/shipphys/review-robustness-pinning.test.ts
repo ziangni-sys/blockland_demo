@@ -14,6 +14,12 @@
  *     points almost straight into the wall once the boat slides along it, and so is "opposed" by
  *     the wall normal. The push direction (the contact normal, about 38 degrees from the wall
  *     normal) is never compared with the terrain normal.
+ *     Checked in a patched scratch copy of the module: feeding condition (2) the blade's OWN
+ *     velocity direction at the contact (F_VO / |F_VO|) instead of the relative velocity removes
+ *     every false pin here (0 cells lost for starts 110/120/130 deg) while the corner-pinning
+ *     cases of rotor.test.ts still break cells (14 at 1 rad/s, 18 at 0.1 rad/s). Using the contact
+ *     normal instead only reduces the damage (9 -> 6..9 cells), because rotor-corner-in-hull
+ *     contacts carry the hull's face normal, which points straight into the wall.
  *
  *  2. A blade pushing an outer boat against an inner boat that is moored at a wall drives the
  *     outer hull ~0.9 block into the inner one (the module's own ship/ship test bounds overlap at

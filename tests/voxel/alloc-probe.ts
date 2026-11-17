@@ -22,10 +22,11 @@ const ROUNDS = 6;
 
 const world = emptyWorld();
 fill(world, -10, 0, -10, 10, 5, 10); // ground, top at y = 5
-// All boxes lie inside chunk (0,0), so World's single-entry chunk cache always hits (its
-// misses allocate inside World itself: a known contract issue, not this module's).
-const FREE: AABB[] = [box(0.2, 5, 0.2, 0.8, 6.8, 0.8), box(1.4, 5.3, 3.1, 2.2, 7.1, 3.7), box(7.7, 5.01, 4.7, 8.3, 6.81, 5.3)];
-const SUNK: AABB[] = [box(0.2, 4.9, 0.2, 0.8, 6.7, 0.8), box(1.4, 4.3, 3.1, 2.2, 6.1, 3.7), box(7.7, 4.5, 4.7, 8.3, 6.3, 5.3)];
+// All boxes, and every layer the sweeps below scan, lie inside chunk (0,0), so World's
+// single-entry chunk cache always hits (a miss allocates inside World itself: a known
+// contract issue, not this module's).
+const FREE: AABB[] = [box(2.2, 5, 2.2, 2.8, 6.8, 2.8), box(1.4, 5.3, 3.1, 2.2, 7.1, 3.7), box(7.7, 5.01, 4.7, 8.3, 6.81, 5.3)];
+const SUNK: AABB[] = [box(2.2, 4.9, 2.2, 2.8, 6.7, 2.8), box(1.4, 4.3, 3.1, 2.2, 6.1, 3.7), box(7.7, 4.5, 4.7, 8.3, 6.3, 5.3)];
 
 // One function per case so each gets its own optimised code and feedback.
 const cases: Record<string, (n: number) => number> = {
@@ -61,7 +62,17 @@ const cases: Record<string, (n: number) => number> = {
     for (let i = 0; i < n; i++) if (sweepAxis(world, FREE[i % 3]!, 0, 0.5) === 0.5) s++;
     return s;
   },
+  'sweepAxis -x free': (n) => {
+    let s = 0;
+    for (let i = 0; i < n; i++) if (sweepAxis(world, FREE[i % 3]!, 0, -0.5) === -0.5) s++;
+    return s;
+  },
   'sweepAxis z free': (n) => {
+    let s = 0;
+    for (let i = 0; i < n; i++) if (sweepAxis(world, FREE[i % 3]!, 2, 0.5) === 0.5) s++;
+    return s;
+  },
+  'sweepAxis -z free': (n) => {
     let s = 0;
     for (let i = 0; i < n; i++) if (sweepAxis(world, FREE[i % 3]!, 2, -0.5) === -0.5) s++;
     return s;

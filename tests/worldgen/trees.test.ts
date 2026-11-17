@@ -57,6 +57,37 @@ describe('tree stamping', () => {
     expect(logs).toBe(7 + 9 + 3); // the oak's far +x branch cell is the pine's trunk
   });
 
+  it('conifer cones have leaves beside the trunk on every tier (no bare trunk segments)', () => {
+    // Narrow tiers near the tip used to shrink to the trunk cell alone, or lose all four
+    // side cells to the ragged-edge hash, leaving bare trunk segments inside the cone.
+    const list = new TreeList();
+    for (let trunk = 6; trunk <= 10; trunk++) {
+      for (let k = 0; k < 8; k++) {
+        for (let h = 0; h < 64; h++) {
+          list.clear();
+          Object.assign(list.push(), {
+            x: 8,
+            z: 8,
+            ground: 40,
+            kind: TREE_CONIFER,
+            trunk,
+            radius: 2 + k * 0.16,
+            hash: Math.imul(h + 1, 0x9e3779b1) | 0,
+          } satisfies TreeSpec);
+          const cells = new Uint16Array(CHUNK_VOLUME);
+          stampTrees(cells, 0, 0, list);
+          // The lowest tier starts at ground + 2..4; check from there to just under the tip.
+          for (let y = 40 + 4; y <= 40 + trunk; y++) {
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+              expect(cellId(cells[at(8 + dx, y, 8 + dz)]!), `trunk ${trunk} r ${k} hash ${h} y ${y}`).toBe(B.LEAVES_PINE);
+            }
+          }
+          expect(cellId(cells[at(8, 40 + trunk + 1, 8)]!)).toBe(B.LEAVES_PINE); // tip
+        }
+      }
+    }
+  });
+
   it('only fills air and leaves: terrain and other logs are kept', () => {
     const { list, oak } = pair('oak-first');
     const cells = new Uint16Array(CHUNK_VOLUME);

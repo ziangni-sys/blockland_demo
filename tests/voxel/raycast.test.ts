@@ -416,3 +416,152 @@ describe('raycastGrid — box surface edge cases', () => {
     expect(h2.dist).toBeCloseTo(Math.SQRT2, 12);
   });
 });
+
+// Positive-length convention (raycast.ts header): a cell the ray only touches along an edge or
+// at a corner is not on the ray. Before the DDA stepped tied axes together it reported such a
+// cell for one axis order and not for its mirror image.
+describe('raycastGrid — exact edge and corner crossings', () => {
+  it('a 45-degree ray through a lattice edge sees neither of the two edge-only cells (mirror symmetric)', () => {
+    const d = unit(1, 1, 0);
+    for (const cell of [
+      [0, 1, 0],
+      [1, 0, 0],
+    ] as const) {
+      const w = emptyWorld();
+      w.setCell(cell[0], cell[1], cell[2], STONE);
+      expect(raycastGrid(w, vec3(0.5, 0.5, 0.5), d, 5)).toBeNull();
+    }
+    // The diagonal cell beyond the edge is entered at the edge point, through the face of the
+    // steeper axis (x before y on equal slopes).
+    const w = emptyWorld();
+    w.setCell(1, 1, 0, STONE);
+    const h = raycastGrid(w, vec3(0.5, 0.5, 0.5), d, 5)!;
+    expect([h.x, h.y, h.z, h.face]).toEqual([1, 1, 0, NX]);
+    expect(h.dist).toBeCloseTo(Math.SQRT1_2, 15);
+    // Same in the -x/-y octant, with negative coordinates across a chunk border.
+    const w2 = emptyWorld();
+    w2.setCell(-17, 3, 5, STONE); // edge-only
+    w2.setCell(-16, 2, 5, STONE); // edge-only
+    expect(raycastGrid(w2, vec3(-15.5, 3.5, 5.5), unit(-1, -1, 0), 5)).toBeNull();
+    w2.setCell(-17, 2, 5, STONE);
+    const h2 = raycastGrid(w2, vec3(-15.5, 3.5, 5.5), unit(-1, -1, 0), 5)!;
+    expect([h2.x, h2.y, h2.z, h2.face]).toEqual([-17, 2, 5, PX]);
+  });
+
+  it('a body-diagonal ray through a lattice corner skips all six corner/edge-only cells', () => {
+    const w = emptyWorld();
+    const touched = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+      [1, 1, 0],
+      [1, 0, 1],
+      [0, 1, 1],
+    ] as const;
+    for (const [x, y, z] of touched) w.setCell(x, 20 + y, z, STONE);
+    const d = unit(1, 1, 1);
+    const o = vec3(0.5, 20.5, 0.5);
+    expect(raycastGrid(w, o, d, 1.5)).toBeNull(); // reaches (1,21,1) only at 0.866 + ... no: stops before 1.73
+    w.setCell(1, 21, 1, STONE);
+    const h = raycastGrid(w, o, d, 5)!;
+    expect([h.x, h.y, h.z, h.face]).toEqual([1, 21, 1, NX]);
+    expect(h.dist).toBeCloseTo(Math.sqrt(3) / 2, 15);
+    // Without the diagonal cell the ray continues through the next corner: still nothing.
+    w.setCell(1, 21, 1, makeCell(B.AIR));
+    expect(raycastGrid(w, o, d, 5)).toBeNull();
+  });
+
+  it('mixed-sign edge crossing: the cell holding only the crossing point is not hit', () => {
+    // Points (0.5 + s, 1.5 - s): at s = 0.5 the ray is exactly at the lattice edge (1, 1).
+    // Half-open cells would put that single point in cell (1,1,0); it holds no length.
+    const w = emptyWorld();
+    w.setCell(1, 1, 0, STONE);
+    expect(raycastGrid(w, vec3(0.5, 1.5, 0.5), unit(1, -1, 0), 5)).toBeNull();
+    w.setCell(1, 0, 0, STONE);
+    const h = raycastGrid(w, vec3(0.5, 1.5, 0.5), unit(1, -1, 0), 5)!;
+    expect([h.x, h.y, h.z, h.face]).toEqual([1, 0, 0, NX]);
+    expect(h.dist).toBeCloseTo(Math.SQRT1_2, 15);
+  });
+
+  it('the entry face on an edge crossing is the steeper axis; placement stays face-adjacent', () => {
+    // Direction (2,1): from (0, 0.5) the ray crosses x = 1 and y = 1 at the same parameter.
+    const w = emptyWorld();
+    w.setCell(1, 31, 0, STONE);
+    const hx = raycastGrid(w, vec3(0, 30.5, 0.5), unit(2, 1, 0), 5)!;
+    expect([hx.x, hx.y, hx.face]).toEqual([1, 31, NX]);
+    expect(placementCell(hx)).toEqual({ x: 0, y: 31, z: 0 });
+    // Direction (1,2) from (0.5, 0): crosses y = 1 and x = 1 together; y is steeper.
+    const w2 = emptyWorld();
+    w2.setCell(1, 31, 0, STONE);
+    const hy = raycastGrid(w2, vec3(0.5, 30, 0.5), unit(1, 2, 0), 5)!;
+    expect([hy.x, hy.y, hy.face]).toEqual([1, 31, NY]);
+    expect(placementCell(hy)).toEqual({ x: 1, y: 30, z: 0 });
+  });
+
+  it('a ray entering a structure\'s bounds exactly through an edge reports the steeper face', () => {
+    const world = new World();
+    const s = structure(world, 1, vec3(0, 0, 0), qidentity());
+    fill(s, 0, 0, 0, 2, 2, 2);
+    // From (-1, -0.5) along (2,1): reaches the bounds edge (x = 0, y = 0) at t = sqrt(5)/2.
+    const h = raycastGrid(s, vec3(-1, -0.5, 0.5), unit(2, 1, 0), 10)!;
+    expect([h.x, h.y, h.z, h.face]).toEqual([0, 0, 0, NX]);
+    expect(h.dist).toBeCloseTo(Math.sqrt(5) / 2, 14);
+    const h2 = raycastGrid(s, vec3(-0.5, -1, 0.5), unit(1, 2, 0), 10)!;
+    expect([h2.x, h2.y, h2.z, h2.face]).toEqual([0, 0, 0, NY]);
+    // Touching the bounds box only along an edge is a miss, even with a matching corner cell.
+    expect(raycastGrid(s, vec3(-1, 1, 0.5), unit(1, 1, 0), 10)).toBeNull(); // passes the edge (0, 2)
+    expect(raycastGrid(s, vec3(3, -1, 0.5), unit(-1, 1, 0), 10)).toBeNull(); // passes the edge (2, 0)
+  });
+
+  it('matches the positive-length reference on lattice-aligned rays with exact ties', () => {
+    // Origins on a quarter lattice and directions with components in {-2..2}: boundary
+    // crossings on different axes coincide exactly (bit for bit), so every edge and corner
+    // case is exercised thousands of times.
+    const rng = new Rng(4242);
+    const w = emptyWorld();
+    const cells: Array<[number, number, number]> = [];
+    for (let i = 0; i < 500; i++) {
+      const x = rng.int(-8, 7);
+      const y = rng.int(40, 51);
+      const z = rng.int(-8, 7);
+      if (w.getCell(x, y, z) === STONE) continue;
+      w.setCell(x, y, z, STONE);
+      cells.push([x, y, z]);
+    }
+    let hits = 0;
+    let misses = 0;
+    for (let i = 0; i < 3000; i++) {
+      const o = vec3(rng.int(-40, 40) / 4, rng.int(160, 204) / 4, rng.int(-40, 40) / 4);
+      let a = 0;
+      let b = 0;
+      let c = 0;
+      while (a === 0 && b === 0 && c === 0) {
+        a = rng.int(-2, 2);
+        b = rng.int(-2, 2);
+        c = rng.int(-2, 2);
+      }
+      const d = unit(a, b, c);
+      const h = raycastGrid(w, o, d, 12);
+      const ref = referenceRay(w, cells, o, d, 12);
+      expect(h === null, `ray ${i}`).toBe(ref === null);
+      if (h === null || ref === null) {
+        misses++;
+        continue;
+      }
+      hits++;
+      expect(h.dist).toBeCloseTo(ref.t, 12);
+      // The reported cell itself holds positive length of the ray from that distance on.
+      const r2 = referenceRay(w, [[h.x, h.y, h.z]], o, d, 12)!;
+      expect(r2).not.toBeNull();
+      expect(r2.t).toBeCloseTo(ref.t, 12);
+      // The entry face is one whose plane contains the hit point (any of them on an edge).
+      if (h.dist > 0) {
+        const coord = [h.point.x, h.point.y, h.point.z][h.face >> 1]!;
+        const plane = [h.x, h.y, h.z][h.face >> 1]! + ((h.face & 1) === 0 ? 1 : 0);
+        expect(Math.abs(coord - plane)).toBeLessThan(1e-12);
+      }
+    }
+    expect(hits).toBeGreaterThan(800);
+    expect(misses).toBeGreaterThan(200);
+  });
+});

@@ -172,8 +172,11 @@ export interface RefHit {
 }
 
 /**
- * Brute-force ray cast: intersect the local ray with every listed solid cell's unit cube
- * (slab method) and keep the earliest entry. Independent of raycast.ts's DDA.
+ * Brute-force ray cast: intersect the local ray with every listed cell's unit cube (slab
+ * method) and keep the earliest entry. Independent of raycast.ts's DDA, but with the same
+ * documented convention: a cell is on the ray only if the ray runs a POSITIVE length through
+ * it (touching an edge or a corner is not a hit), cells are half-open along axes the ray does
+ * not move on, and a cell entered at exactly maxDist counts.
  */
 export function referenceRay(
   grid: VoxelGrid,
@@ -187,7 +190,7 @@ export function referenceRay(
   let best: RefHit | null = null;
   for (const [x, y, z] of cells) {
     let t0 = 0;
-    let t1 = maxDist;
+    let t1 = Infinity;
     let ok = true;
     const lo = [x, y, z];
     const oo = [o.x, o.y, o.z];
@@ -202,9 +205,8 @@ export function referenceRay(
       if (tn > tf) [tn, tf] = [tf, tn];
       if (tn > t0) t0 = tn;
       if (tf < t1) t1 = tf;
-      if (t0 > t1) ok = false;
     }
-    if (ok && (best === null || t0 < best.t)) best = { x, y, z, t: t0 };
+    if (ok && t0 < t1 && t0 <= maxDist && (best === null || t0 < best.t)) best = { x, y, z, t: t0 };
   }
   return best;
 }

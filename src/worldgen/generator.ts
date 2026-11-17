@@ -175,8 +175,8 @@ export class TerrainGenerator implements ChunkGenerator {
   /**
    * y of the top solid terrain cell of column (x, z) as generate() produces it, before
    * trees and plants: where a cave breaks the surface this is the floor below the mouth.
-   * Costs about one 2D column sample plus a few cave-field samples; columns with a cave
-   * mouth (well under 1 % of land) cost ~25 column samples more.
+   * About 4 us (one 2D column sample plus the cave fields at the surface cell); columns
+   * where a cave reaches the surface (under 1 % of land) cost ~25 column samples more.
    */
   heightAt(x: number, z: number): number {
     const ix = Math.floor(x);

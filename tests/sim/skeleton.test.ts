@@ -31,8 +31,9 @@ describe('simulation skeleton', () => {
     p.input.forward = 0;
     expect(p.pos.z).toBeLessThan(z0 - 3); // yaw 0 looks toward -Z
     expect(p.pos.y).toBeCloseTo(y0, 3);
-    // look straight down and place a block under... in front
-    p.input.pitch = -1.2;
+    // look down at the ground a little more than a block ahead and place a block there
+    // (steeper, the new block would overlap the player's own body and is refused)
+    p.input.pitch = -0.9;
     p.inventory.creativePick(B.PLANKS_OAK, true);
     p.input.slot = p.inventory.hotbar.findIndex((s) => s?.item === B.PLANKS_OAK);
     p.input.usePresses = 1;
@@ -48,7 +49,9 @@ describe('simulation skeleton', () => {
     const sim2 = new Simulation({ seed: 1, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2 });
     importSave(sim2, bundle);
     for (let i = 0; i < 5; i++) sim2.tick();
-    expect(sim2.player.pos.z).toBeCloseTo(sim.player.pos.z, 1);
+    // The original keeps going too: the loaded copy must continue exactly like it.
+    for (let i = 0; i < 5; i++) sim.tick();
+    expect(sim2.player.pos.z).toBeCloseTo(sim.player.pos.z, 6);
     let found = 0;
     for (const c of sim2.world.chunks.values()) {
       for (let i = 0; i < c.cells.length; i++) if ((c.cells[i]! & 1023) === B.PLANKS_OAK) found++;

@@ -107,10 +107,12 @@ describe('TerrainGenerator: determinism', () => {
     // Unmodified chunks are not saved: they are re-generated from the seed on load. Any
     // change to these hashes changes every existing world, so update them only on purpose.
     const gen = new TerrainGenerator(12345);
-    expect(chunkHash(gen.generate(0, 0)).toString(16)).toBe('7353bb3');
-    expect(chunkHash(gen.generate(-3, 7)).toString(16)).toBe('f830bcce');
-    expect(chunkHash(gen.generate(25, -40)).toString(16)).toBe('d48d4278');
-    expect(gen.spawnPoint()).toEqual({ x: 7.5, y: 52, z: -216.5 });
+    // Last changed on purpose by the review fixes (component-interpolated caves, lava rims,
+    // land balance, ore range clamp, trunk-first trees, snow fade, cactus spacing).
+    expect(chunkHash(gen.generate(0, 0)).toString(16)).toBe('4a8c060c');
+    expect(chunkHash(gen.generate(-3, 7)).toString(16)).toBe('6f890279');
+    expect(chunkHash(gen.generate(25, -40)).toString(16)).toBe('20a8884');
+    expect(gen.spawnPoint()).toEqual({ x: -27.5, y: 51, z: -195.5 });
   });
 });
 
@@ -212,13 +214,16 @@ describe('TerrainGenerator: seams', () => {
 
 describe('TerrainGenerator: world shape', () => {
   it('roughly half of the surface is sea (32x32 chunk samples, several seeds)', () => {
+    // A column holds water exactly where the 2D model's surface is below SEA_LEVEL - 1
+    // (heightAt can dip below it in a dry cave mouth, so it is not the measure here).
+    const s = createColumnSample();
     for (const seed of [1, 2, 3, 4, 5, 77, 2024]) {
       const gen = new TerrainGenerator(seed);
       let sea = 0;
       let n = 0;
       for (let z = -256; z < 256; z += 2) {
         for (let x = -256; x < 256; x += 2) {
-          if (gen.heightAt(x, z) < SEA_LEVEL - 1) sea++;
+          if (gen.sampler.sample(x, z, s).height < SEA_LEVEL - 1) sea++;
           n++;
         }
       }
@@ -318,17 +323,21 @@ describe('TerrainGenerator: world shape', () => {
     // reasons the terrain must look like terrain anywhere else. (Labels that depend on
     // height — shore, peaks, highland, and conifer through the altitude lapse — sit on
     // slopes by definition and are left out.)
+    // The 2D model is what is under test here (cave mouths are not biome borders).
     const climate = new Set<Biome>(['meadow', 'broadleaf', 'scrub']);
     const border: number[] = [];
     const inner: number[] = [];
+    const s = createColumnSample();
     for (const seed of [1, 3, 5]) {
       const gen = new TerrainGenerator(seed);
       for (let z = -384; z < 384; z += 3) {
-        let prevH = gen.heightAt(-385, z);
-        let prevB = gen.biomeAt(-385, z);
+        gen.sampler.sample(-385, z, s);
+        let prevH = s.height;
+        let prevB = BIOME_NAMES[s.biome]!;
         for (let x = -384; x < 384; x++) {
-          const h = gen.heightAt(x, z);
-          const b = gen.biomeAt(x, z);
+          gen.sampler.sample(x, z, s);
+          const h = s.height;
+          const b = BIOME_NAMES[s.biome]!;
           const d = Math.abs(h - prevH);
           if (b !== prevB) {
             if (climate.has(b) && climate.has(prevB)) border.push(d);
@@ -358,7 +367,8 @@ describe('TerrainGenerator: spawn', () => {
       expect(Number.isInteger(s.y)).toBe(true);
       const x = Math.floor(s.x);
       const z = Math.floor(s.z);
-      const area = new ChunkArea(gen, Math.floor((x - 24) / 16), Math.floor((z - 24) / 16), 5);
+      // 4 chunks always cover x - 24 .. x + 24 (49 columns).
+      const area = new ChunkArea(gen, Math.floor((x - 24) / 16), Math.floor((z - 24) / 16), 4);
       const ground = area.get(x, s.y - 1, z);
       expect(SOLID[cellId(ground)], `seed ${seed}: ground`).toBe(1);
       expect(LEAVES.has(cellId(ground))).toBe(false);

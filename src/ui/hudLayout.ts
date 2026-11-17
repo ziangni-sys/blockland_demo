@@ -85,7 +85,8 @@ export interface HelmPlacement {
 
 export interface HudLayout {
   helm: HelmPlacement | null;
-  /** Vertical shift of the banner / toast column from their natural spot. */
+  /** Shift of the banner / toast column from their natural spot. */
+  bannerDx: number;
   bannerDy: number;
   toastsDy: number;
 }
@@ -156,16 +157,18 @@ function placeHelm(inp: HudLayoutInput, obstacles: readonly Rect[]): HelmPlaceme
 }
 
 /**
- * Vertical shift that moves `r` down past the obstacles it would cover: tries its natural
- * spot, then just below each obstacle, top to bottom; falls back to the least overlap.
+ * Move `r` to the first of these spots that covers no obstacle: each x in `xs` at its natural
+ * height, then the same just below each obstacle, top to bottom. Falls back to the spot with
+ * the least overlap. Returns the shift from the natural spot.
  */
-function shiftDown(r: Rect, obstacles: readonly Rect[], gap: number, vw: number, vh: number): number {
+function slide(r: Rect, xs: readonly number[], obstacles: readonly Rect[], gap: number, vw: number, vh: number): { dx: number; dy: number } {
   const ys = [r.y];
   for (const o of obstacles) if (o.y + o.h + gap > r.y) ys.push(o.y + o.h + gap);
   ys.sort((a, b) => a - b);
-  const cands: Candidate[] = ys.map((y) => ({ rect: { ...r, y }, spot: 'top', scale: 1 }));
+  const cands: Candidate[] = [];
+  for (const y of ys) for (const x of xs) cands.push({ rect: { ...r, x, y }, spot: 'top', scale: 1 });
   const c = pick(cands, obstacles, vw, vh);
-  return c ? c.rect.y - r.y : 0;
+  return c ? { dx: c.rect.x - r.x, dy: c.rect.y - r.y } : { dx: 0, dy: 0 };
 }
 
 export function layoutHud(inp: HudLayoutInput): HudLayout {
@@ -176,24 +179,32 @@ export function layoutHud(inp: HudLayoutInput): HudLayout {
   if (inp.debug) fixed.push(inflate(inp.debug, gap / 2));
 
   const helm = placeHelm(inp, fixed);
+  const placed = helm ? [...fixed, helm.rect] : fixed;
 
-  // Top-of-screen widgets only need to clear what sits at the top: the debug overlay and a
-  // helm moved up there. (Long toast stacks may run down over the scene; they are brief.)
-  const top: Rect[] = [];
-  if (inp.debug) top.push(inp.debug);
-  if (helm) top.push(helm.rect);
-
+  // The drag banner stays up for the whole session, so it must clear everything: centred at
+  // the top if it can, else flush left (beside a raised helm), else lower down.
+  let bannerDx = 0;
   let bannerDy = 0;
+  let banner: Rect | null = null;
   if (inp.banner) {
-    bannerDy = shiftDown(inp.banner, top, gap, vw, vh);
-    top.push({ ...inp.banner, y: inp.banner.y + bannerDy });
+    const b = inp.banner;
+    const s = slide(b, [b.x, Math.min(b.x, gap)], placed, gap, vw, vh);
+    bannerDx = s.dx;
+    bannerDy = s.dy;
+    banner = { ...b, x: b.x + s.dx, y: b.y + s.dy };
   }
 
+  // Toasts only need to clear what sits at the top (debug overlay, banner, a raised helm);
+  // a long stack may run down over the scene for the few seconds it is up.
   let toastsDy = 0;
   if (inp.toasts) {
+    const top: Rect[] = [];
+    if (inp.debug) top.push(inp.debug);
+    if (banner) top.push(banner);
+    if (helm) top.push(helm.rect);
     // An empty column still gets a lane (1 px tall) so the first toast lands in the right spot.
     const t = { ...inp.toasts, h: Math.max(1, inp.toasts.h) };
-    toastsDy = shiftDown(t, top, gap, vw, vh);
+    toastsDy = slide(t, [t.x], top, gap, vw, vh).dy;
   }
-  return { helm, bannerDy, toastsDy };
+  return { helm, bannerDx, bannerDy, toastsDy };
 }

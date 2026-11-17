@@ -7,8 +7,12 @@
  *   worlds=<n>  icons=placeholder  panel=1  cursor=<itemId>  from=pause|mainMenu  progress=<0..1>
  *   animate=1 (helm / debug values change every frame, like a running game)
  *   clamp=1   (the fake client caps FOV at 100, to test that the UI shows what the client kept)
+ *   refuse=1  (the fake client ignores invertY / showDebug / language changes entirely)
+ *   async=<ms> (world actions switch screens / update the list after a delay, like IndexedDB)
+ *   newest=1  (toasts are kept newest-first)
+ *   icons=art (real procedural icons from src/art; icons=placeholder: no provider)
  *
- * window.harness: { state(), set(patch), show(screen), log, clearLog(), perf(n), ui }
+ * window.harness: { state(), set(patch), show(screen), toast(text, kind), log, clearLog(), perf(n) }
  * Every UiActions call is appended to window.harness.log as { name, args }.
  */
 import { allItems, I, itemDef } from '../../src/blocks/items';
@@ -118,10 +122,18 @@ function set(patch: Partial<UiState>): void {
   ui.update(state);
 }
 
-function toast(text: string, kind: Toast['kind'] = 'info'): void {
+function toast(text: string, kind: Toast['kind'] = 'info', ms = 3500): void {
   const id = ++toastSeq;
-  set({ toasts: [...state.toasts, { id, text, kind }] });
-  setTimeout(() => set({ toasts: state.toasts.filter((t) => t.id !== id) }), 3500);
+  const t = { id, text, kind };
+  set({ toasts: flag('newest') ? [t, ...state.toasts] : [...state.toasts, t] });
+  if (ms > 0) setTimeout(() => set({ toasts: state.toasts.filter((x) => x.id !== id) }), ms);
+}
+
+/** World actions of a real client resolve after an IndexedDB round trip. */
+const asyncMs = num('async', 0);
+function later(fn: () => void): void {
+  if (asyncMs > 0) setTimeout(fn, asyncMs);
+  else fn();
 }
 
 function record(name: string, args: unknown[]): void {
@@ -156,15 +168,15 @@ function startLoading(): void {
 const actions: UiActions = {
   newWorld(opts) {
     record('newWorld', [opts]);
-    startLoading();
+    later(startLoading);
   },
   loadWorld(id) {
     record('loadWorld', [id]);
-    startLoading();
+    later(startLoading);
   },
   deleteWorld(id) {
     record('deleteWorld', [id]);
-    set({ worlds: state.worlds.filter((w) => w.id !== id) });
+    later(() => set({ worlds: state.worlds.filter((w) => w.id !== id) }));
   },
   resume() {
     record('resume', []);
@@ -189,6 +201,8 @@ const actions: UiActions = {
   },
   changeSettings(patch) {
     record('changeSettings', [patch]);
+    // ?refuse=1 simulates a client that turns some changes down without sending a new state.
+    if (flag('refuse') && ('invertY' in patch || 'showDebug' in patch || 'language' in patch)) return;
     const settings = { ...state.settings, ...patch };
     // ?clamp=1 simulates a client that refuses part of a change (FOV capped at 100).
     if (flag('clamp')) settings.fov = Math.min(100, settings.fov);
@@ -271,9 +285,12 @@ const sceneCanvas = document.getElementById('scene') as HTMLCanvasElement;
 paintScene(sceneCanvas);
 window.addEventListener('resize', () => paintScene(sceneCanvas));
 
-const ui = createUi(document.getElementById('ui-root')!, actions, {
-  iconProvider: params.get('icons') === 'placeholder' ? undefined : fakeIconProvider,
-});
+// ?icons=art: the real procedural icons, loaded on demand so the harness still runs while the
+// art module is being worked on.
+const iconMode = params.get('icons');
+const iconProvider =
+  iconMode === 'placeholder' ? undefined : iconMode === 'art' ? (await import('../../src/art/icons')).renderItemIcon : fakeIconProvider;
+const ui = createUi(document.getElementById('ui-root')!, actions, { iconProvider });
 ui.update(state);
 
 // Clicking the "3D view" stands in for pointer lock.
@@ -376,6 +393,7 @@ declare global {
       state(): UiState;
       set(patch: Partial<UiState>): void;
       show(screen: Screen): void;
+      toast(text: string, kind?: Toast['kind'], ms?: number): void;
       log: LoggedAction[];
       clearLog(): void;
       perf(n: number): Record<string, number>;
@@ -389,6 +407,7 @@ window.harness = {
   state: () => state,
   set,
   show: (screen) => set({ screen }),
+  toast,
   log,
   clearLog: () => {
     log.length = 0;

@@ -386,7 +386,7 @@ ${twin('bl-hit', HIT)}
 /* Drag-to-look hosts can never lock the pointer, so there the veil is a compact standing
    banner; the layout pass moves it (via the unzoomed veil) below the debug overlay or a
    raised helm. Hidden outright (not faded) so the layout pass sees it go. */
-.bl-veil[data-drag="1"] { align-items: flex-start; background: none; translate: 0 var(--banner-dy, 0px); }
+.bl-veil[data-drag="1"] { align-items: flex-start; background: none; translate: var(--banner-dx, 0px) var(--banner-dy, 0px); }
 .bl-veil[data-drag="1"][data-show="0"] { display: none; }
 .bl-veil[data-drag="1"] .bl-veil-card {
   transform: none; margin-top: max(14px, env(safe-area-inset-top, 0px)); padding: 10px 16px 10px 12px; gap: 12px;

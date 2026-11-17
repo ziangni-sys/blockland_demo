@@ -9,6 +9,13 @@
  * Predicates are expected to reject AIR: cells outside a structure's cellBounds() and world
  * cells at y >= WORLD_HEIGHT are never visited (that is what makes the bounds clip a valid
  * prefilter when many structures exist).
+ *
+ * Which cells count as "on the ray": those containing a POSITIVE length of it (or the origin
+ * itself). Cells are half-open, which settles rays lying exactly in a face plane (they see
+ * the cells on the + side) and origins exactly on a boundary (moving in -axis direction they
+ * start in the lower cell). A cell the ray only touches along an edge or at a corner is never
+ * reported, whatever the axis order: on an exact edge/corner crossing the DDA steps every
+ * tied axis at once.
  */
 import { WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, NX, NY, NZ, PX, PY, PZ, nearestDir, opposite, type Dir } from '../core/dirs';
@@ -25,8 +32,10 @@ export interface GridHit {
   y: number;
   z: number;
   /**
-   * Face of the cell the ray entered through, in the grid's LOCAL axes. When the ray starts
-   * inside a matching cell this is the face opposite to the ray's dominant local direction.
+   * Face of the cell the ray entered through, in the grid's LOCAL axes. When the ray enters
+   * exactly through an edge or corner, the crossed face whose normal is most aligned with the
+   * ray. When the ray starts strictly inside a matching cell, the face opposite to the ray's
+   * dominant local direction (an origin exactly on a face, moving in, reports that face).
    */
   face: Dir;
   /** The cell value that matched. */
@@ -73,8 +82,9 @@ const DIR_ZERO = 1e-14;
 
 /**
  * Nearest cell of `grid` along the ray that satisfies `pred` (default: targetable), or null.
- * `origin` and `dir` are in WORLD space; `dir` must be unit length. A hit exactly at
- * `maxDist` counts. Bounded grids are first clipped against their cellBounds() box.
+ * `origin` and `dir` are in WORLD space; `dir` must be unit length (distances are measured in
+ * units of |dir|). A cell entered exactly at `maxDist` counts. Bounded grids are first
+ * clipped against their cellBounds() box; non-finite input returns null.
  */
 export function raycastGrid(
   grid: VoxelGrid,
@@ -119,10 +129,13 @@ export function raycastGrid(
   if (Math.abs(dy) < DIR_ZERO) dy = 0;
   if (Math.abs(dz) < DIR_ZERO) dz = 0;
 
-  // ---- slab test. t0 = entry parameter, t1 = exit parameter (already capped by maxDist).
+  // ---- slab test. t0 = entry parameter, tExit = exit parameter of the clip box.
   let t0 = 0;
-  let t1 = maxDist < RAY_HARD_LIMIT ? maxDist : RAY_HARD_LIMIT;
+  let tExit = Infinity;
+  // Axis whose slab is entered last (-1: the origin is already inside). When the box is
+  // entered exactly through an edge or corner, the steepest of the tied axes, like the DDA.
   let enterAxis = -1;
+  let enterSlope = 0;
   {
     // X
     if (dx === 0) {
@@ -136,11 +149,12 @@ export function raycastGrid(
         tn = tf;
         tf = s;
       }
-      if (tn > t0) {
+      if (tn > t0 || (tn === t0 && enterAxis >= 0 && Math.abs(dx) > enterSlope)) {
         t0 = tn;
         enterAxis = 0;
+        enterSlope = Math.abs(dx);
       }
-      if (tf < t1) t1 = tf;
+      if (tf < tExit) tExit = tf;
     }
     // Y
     if (dy === 0) {
@@ -154,11 +168,12 @@ export function raycastGrid(
         tn = tf;
         tf = s;
       }
-      if (tn > t0) {
+      if (tn > t0 || (tn === t0 && enterAxis >= 0 && Math.abs(dy) > enterSlope)) {
         t0 = tn;
         enterAxis = 1;
+        enterSlope = Math.abs(dy);
       }
-      if (tf < t1) t1 = tf;
+      if (tf < tExit) tExit = tf;
     }
     // Z
     if (dz === 0) {
@@ -172,22 +187,27 @@ export function raycastGrid(
         tn = tf;
         tf = s;
       }
-      if (tn > t0) {
+      if (tn > t0 || (tn === t0 && enterAxis >= 0 && Math.abs(dz) > enterSlope)) {
         t0 = tn;
         enterAxis = 2;
+        enterSlope = Math.abs(dz);
       }
-      if (tf < t1) t1 = tf;
+      if (tf < tExit) tExit = tf;
     }
   }
-  if (!(t0 <= t1)) return null;
+  // The ray must run a positive length inside the box (one that only touches an edge or a
+  // face of the box touches no cell along a positive length) and enter it within range.
+  const range = maxDist < RAY_HARD_LIMIT ? maxDist : RAY_HARD_LIMIT;
+  if (!(t0 < tExit) || t0 > range) return null;
+  const t1 = tExit < range ? tExit : range;
 
   // ---- starting cell. On the entry axis the cell is known exactly (the boundary layer of
   // the box); recomputing it with floor() could land one cell outside because of rounding.
   // On other axes: the cell containing the ray just AFTER t0 (an origin exactly on a cell
   // boundary while moving in -axis direction belongs to the lower cell). For an entering ray
-  // that cell is clamped into the box (rounding when entering exactly at an edge); for an
-  // origin inside the box it can only be outside when the origin sits on the box's surface
-  // and the ray leaves immediately.
+  // that cell is clamped into the box (rounding when entering close to an edge of the box);
+  // for an origin on the box's surface moving out, the positive-length test above already
+  // returned, so the remaining check is only a guard against rounding.
   let cx: number;
   let cy: number;
   let cz: number;
@@ -262,13 +282,16 @@ export function raycastGrid(
   const invX = dx !== 0 ? 1 / dx : 0;
   const invY = dy !== 0 ? 1 / dy : 0;
   const invZ = dz !== 0 ? 1 / dz : 0;
+  const adx = Math.abs(dx);
+  const ady = Math.abs(dy);
+  const adz = Math.abs(dz);
   let tMaxX = stepX === 0 ? Infinity : (cx + (stepX > 0 ? 1 : 0) - ox) * invX;
   let tMaxY = stepY === 0 ? Infinity : (cy + (stepY > 0 ? 1 : 0) - oy) * invY;
   let tMaxZ = stepZ === 0 ? Infinity : (cz + (stepZ > 0 ? 1 : 0) - oz) * invZ;
   let t = t0;
   // Upper bound on boundary crossings inside [t0, t1]: guarantees termination even if
   // rounding ever made the comparisons below misbehave.
-  let budget = Math.ceil((Math.abs(dx) + Math.abs(dy) + Math.abs(dz)) * (t1 - t0)) + 8;
+  let budget = Math.ceil((adx + ady + adz) * (t1 - t0)) + 8;
 
   for (;;) {
     const cell = grid.getCell(cx, cy, cz);
@@ -285,29 +308,35 @@ export function raycastGrid(
       };
     }
     if (--budget < 0) return null;
-    // Ties step the later axis first; either order is a valid traversal of an edge/corner.
-    if (tMaxX < tMaxY) {
-      if (tMaxX < tMaxZ) {
-        if (tMaxX > t1) return null;
-        if (tMaxX > t) t = tMaxX;
-        cx += stepX;
-        tMaxX = (cx + (stepX > 0 ? 1 : 0) - ox) * invX;
-        face = stepX > 0 ? NX : PX;
-        continue;
-      }
-    } else if (tMaxY < tMaxZ) {
-      if (tMaxY > t1) return null;
-      if (tMaxY > t) t = tMaxY;
+    let tn = tMaxX < tMaxY ? tMaxX : tMaxY;
+    if (tMaxZ < tn) tn = tMaxZ;
+    if (tn > t1) return null; // also the all-Infinity case (zero direction)
+    if (tn > t) t = tn;
+    // Every axis crossing at exactly tn steps now: on an edge (corner) crossing the cells
+    // that share only that edge (corner) with the ray hold none of its length. The entry face
+    // is the steepest of the crossed ones (x, y, z order on equal slopes).
+    let fa = -1;
+    let fs = -1;
+    if (tMaxX === tn) {
+      cx += stepX;
+      tMaxX = (cx + (stepX > 0 ? 1 : 0) - ox) * invX;
+      fa = 0;
+      fs = adx;
+    }
+    if (tMaxY === tn) {
       cy += stepY;
       tMaxY = (cy + (stepY > 0 ? 1 : 0) - oy) * invY;
-      face = stepY > 0 ? NY : PY;
-      continue;
+      if (ady > fs) {
+        fa = 1;
+        fs = ady;
+      }
     }
-    if (tMaxZ > t1) return null; // also the all-Infinity case (zero direction)
-    if (tMaxZ > t) t = tMaxZ;
-    cz += stepZ;
-    tMaxZ = (cz + (stepZ > 0 ? 1 : 0) - oz) * invZ;
-    face = stepZ > 0 ? NZ : PZ;
+    if (tMaxZ === tn) {
+      cz += stepZ;
+      tMaxZ = (cz + (stepZ > 0 ? 1 : 0) - oz) * invZ;
+      if (adz > fs) fa = 2;
+    }
+    face = fa === 0 ? (stepX > 0 ? NX : PX) : fa === 1 ? (stepY > 0 ? NY : PY) : stepZ > 0 ? NZ : PZ;
   }
 }
 

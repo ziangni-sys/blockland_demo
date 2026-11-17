@@ -34,7 +34,7 @@ describe('World fast paths do not allocate (bundled, optimised code)', () => {
     const report = Object.entries(bytesPerCall)
       .map(([k, v]) => `${k}: ${v.toFixed(2)} B/call`)
       .join('\n');
-    expect(Object.keys(bytesPerCall).length).toBeGreaterThanOrEqual(9);
+    expect(Object.keys(bytesPerCall).length).toBeGreaterThanOrEqual(11);
     // Sampling noise from the profiler's own promise plumbing is ~0.01 B/call at 100k calls;
     // one boxed double per call would be >= 12.
     for (const v of Object.values(bytesPerCall)) expect(v, report).toBeLessThan(0.25);

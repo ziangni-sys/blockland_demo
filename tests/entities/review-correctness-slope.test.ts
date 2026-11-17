@@ -41,4 +41,28 @@ describe('review: a push uphill along a slightly rolled deck is judged a crush',
     expect(b.host.count('crush', p)).toBe(0);
     expect(p.health).toBe(20);
   });
+
+  it('ACCEPTANCE 17 gunwale scene (same as push.test.ts) on a ship pitched by 0.02 rad: not a crush', () => {
+    const b = new Bench();
+    const cells = deck(-10, -3, 10, 3, 60);
+    for (let x = -10; x <= 10; x++) {
+      cells.push([x, 61, -3, B.PLANKS_OAK]);
+      cells.push([x, 62, -3, B.PLANKS_OAK]);
+    }
+    const ship = b.ship(1, cells, vec3(0.5, 60.5, 0.5));
+    // ~1 degree of pitch (rotation about +Z): the paddle now pushes the player slightly uphill.
+    ship.grid.setPoseImmediate(vec3(0.5, 60.5, 0.5), qfromAxisAngle(vec3(0, 0, 1), 0.02));
+    const paddleCells: Array<[number, number, number, number]> = [];
+    for (let z = -2; z <= 2; z++) for (let y = 61; y <= 62; y++) paddleCells.push([-8, y, z, B.CANVAS]);
+    const paddle = b.rotor(20, null, [-8, 61, 0], 2, paddleCells);
+    const p0 = vec3(-7.5, 62, 0.5);
+    b.drive(paddle, (t) => ({ p: vec3(p0.x + 3 * t * TICK_DT, p0.y, p0.z), q: qfromAxisAngle(vec3(0, 1, 0), 0.35) }));
+    const p = b.entities.createPlayer('survival', -4.5, 61.3, -1.65);
+    b.tick(83);
+    expect(p.pos.x).toBeGreaterThan(-1); // swept along the gunwale
+    expect(p.carrierId).toBe(ship.id);
+    // Measured: 22 crush events, health 20 -> 8.
+    expect(b.host.count('crush', p)).toBe(0);
+    expect(p.health).toBe(20);
+  });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   arcDash,
+  calendarDaysBetween,
   clamp,
   formatCount,
   formatDate,
@@ -19,6 +20,7 @@ import {
   rudderAngle,
   segmentFills,
   throttleLever,
+  throttleNotch,
 } from '../../src/ui/format';
 
 const MIN = 60_000;
@@ -94,7 +96,9 @@ describe('number formatting', () => {
 });
 
 describe('last-played labels', () => {
-  const now = Date.UTC(2026, 10, 17, 12, 0, 0);
+  // Built from local time so the calendar-day rules hold in any test-runner time zone.
+  const local = (d: number, h: number, m = 0): number => new Date(2026, 10, d, h, m, 0).getTime();
+  const now = local(17, 12); // Tue 17 Nov, 12:00 local
 
   it('uses relative times for recent saves in both languages', () => {
     expect(formatLastPlayed(now - 10_000, now, 'zh')).toBe('刚刚');
@@ -104,6 +108,26 @@ describe('last-played labels', () => {
     expect(formatLastPlayed(now - 3 * HOUR - 59 * MIN, now, 'en')).toBe('3 h ago');
     expect(formatLastPlayed(now - DAY - HOUR, now, 'zh')).toBe('昨天');
     expect(formatLastPlayed(now - 3 * DAY, now, 'en')).toBe('3 days ago');
+  });
+
+  it('says "yesterday" only for the previous calendar day', () => {
+    // 47 h old but from the day before yesterday (review finding): two days ago.
+    expect(formatLastPlayed(local(16, 9), local(18, 8), 'en')).toBe('2 days ago');
+    expect(formatLastPlayed(local(16, 9), local(18, 8), 'zh')).toBe('2 天前');
+    // 46 h old and still on the previous calendar day: yesterday.
+    expect(formatLastPlayed(local(17, 1), local(18, 23), 'en')).toBe('yesterday');
+    // 27 h old across two midnights: Monday seen on Wednesday.
+    expect(formatLastPlayed(local(16, 22), local(18, 1), 'en')).toBe('2 days ago');
+    // Under 24 h reads as hours even across midnight.
+    expect(formatLastPlayed(local(16, 23), local(17, 1, 30), 'en')).toBe('2 h ago');
+    expect(formatLastPlayed(local(16, 20), local(17, 19), 'en')).toBe('23 h ago');
+  });
+
+  it('counts calendar days for older saves', () => {
+    expect(calendarDaysBetween(local(10, 23), local(17, 0, 30))).toBe(7);
+    expect(formatLastPlayed(local(11, 23), local(17, 1), 'en')).toBe('6 days ago');
+    expect(formatLastPlayed(local(10, 23), local(17, 1), 'en')).toBe(formatDate(local(10, 23)));
+    expect(calendarDaysBetween(local(17, 0), local(17, 23, 59))).toBe(0);
   });
 
   it('uses a calendar date after a week', () => {
@@ -164,6 +188,22 @@ describe('gauge geometry', () => {
     expect(rudderAngle(-1)).toBe(-RUDDER_MAX_DEG);
     expect(rudderAngle(5)).toBe(RUDDER_MAX_DEG);
     expect((rudderAngle(0.123) * 2) % 1).toBe(0);
+  });
+
+  it('reads the telegraph notch by direction first, then magnitude', () => {
+    // Backing at 40 % must not read "Stop" (review finding), nor at 6 %.
+    expect(throttleNotch(-0.4)).toBe('halfAstern');
+    expect(throttleNotch(-0.06)).toBe('halfAstern');
+    expect(throttleNotch(-0.75)).toBe('astern');
+    expect(throttleNotch(-1)).toBe('astern');
+    expect(throttleNotch(-0.03)).toBe('stop');
+    expect(throttleNotch(0)).toBe('stop');
+    expect(throttleNotch(0.04)).toBe('stop');
+    expect(throttleNotch(0.2)).toBe('half');
+    expect(throttleNotch(0.74)).toBe('half');
+    expect(throttleNotch(0.75)).toBe('full');
+    expect(throttleNotch(3)).toBe('full');
+    expect(throttleNotch(Number.NaN)).toBe('stop');
   });
 
   it('maps throttle to a lever position (top = full ahead)', () => {

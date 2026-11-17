@@ -98,14 +98,18 @@ describe('review: caves are not shaped by the 4-block interpolation lattice', ()
     for (const seed of [123, 9]) {
       const { gen, area } = spawnArea(seed, 6);
       const carver = new CaveCarver(gen.seed);
+      // heightAt of every column of the area, computed once (the dry test reads 7x7 of them).
+      const heights = new Int16Array(area.size * area.size);
+      for (let z = 0; z < area.size; z++) for (let x = 0; x < area.size; x++) heights[x + z * area.size] = gen.heightAt(area.x0 + x, area.z0 + z);
+      const heightAt = (x: number, z: number): number => heights[x - area.x0 + (z - area.z0) * area.size]!;
       for (let z = area.z0 + 3; z < area.z0 + area.size - 3; z++) {
         for (let x = area.x0 + 3; x < area.x0 + area.size - 3; x++) {
           // Only columns where neither the surface taper (12 blocks) nor the water margin
           // (radius 2) applies between y = 8 and y = 29.
-          if (gen.heightAt(x, z) < 44) continue;
+          if (heightAt(x, z) < 44) continue;
           let dry = true;
           for (let dz = -3; dz <= 3 && dry; dz++) {
-            for (let dx = -3; dx <= 3 && dry; dx++) if (gen.heightAt(x + dx, z + dz) < 47) dry = false;
+            for (let dx = -3; dx <= 3 && dry; dx++) if (heightAt(x + dx, z + dz) < 47) dry = false;
           }
           if (!dry) continue;
           for (let y = 8; y < 30; y++) {

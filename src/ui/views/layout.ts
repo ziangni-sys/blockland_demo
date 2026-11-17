@@ -46,6 +46,7 @@ function px(v: number): string {
 export class HudLayoutController {
   private readonly ro: ResizeObserver | null;
   private readonly win: (Window & typeof globalThis) | null;
+  private bannerDx = 0;
   private bannerDy = 0;
   private toastsDy = 0;
   private helmStyle = '';
@@ -106,7 +107,7 @@ export class HudLayoutController {
     let banner: Rect | null = null;
     if (t.veil.dataset.drag === '1') {
       const r = rectOf(t.veilCard);
-      if (r) banner = { ...r, y: r.y - this.bannerDy };
+      if (r) banner = { ...r, x: r.x - this.bannerDx, y: r.y - this.bannerDy };
     }
     const tb = t.toasts.getBoundingClientRect();
     const toasts: Rect | null = tb.width > 0 ? { x: tb.left, y: tb.top - this.toastsDy, w: tb.width, h: tb.height } : null;
@@ -124,6 +125,10 @@ export class HudLayoutController {
         s.transform = `scale(${h.scale.toFixed(3)})`;
         t.helm.dataset.spot = h.spot;
       }
+    }
+    if (out.bannerDx !== this.bannerDx) {
+      this.bannerDx = out.bannerDx;
+      t.root.style.setProperty('--banner-dx', px(out.bannerDx));
     }
     if (out.bannerDy !== this.bannerDy) {
       this.bannerDy = out.bannerDy;

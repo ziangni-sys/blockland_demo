@@ -1,7 +1,7 @@
 // Scratch exploration (reviewer). Will be removed.
 import { describe, it } from 'vitest';
 import { NZ, PX } from '../../src/core/dirs';
-import { launch, makeSea, newRotor, plankBoat, setup, tick } from './helpers';
+import { hullExtent, launch, makeSea, newRotor, plankBoat, setup, tick } from './helpers';
 
 describe('explore10', () => {
   for (const drift of [0, -0.3, -1]) {
@@ -21,6 +21,7 @@ describe('explore10', () => {
       let maxVyz = 0;
       let contacts = 0;
       let maxDepth = 0;
+      let minX = Infinity;
       for (let t = 0; t < 120; t++) {
         tick(dyn, [boat], [r], 1);
         const v = boat.grid.linearVelocity;
@@ -28,8 +29,10 @@ describe('explore10', () => {
         maxVyz = Math.max(maxVyz, Math.hypot(v.y, v.z));
         contacts += dyn.getStats(boat)!.rotorContacts;
         maxDepth = Math.max(maxDepth, dyn.getStats(boat)!.maxDepth);
+        if (drift === -0.3 && dyn.getStats(boat)!.rotorContacts > 0 && contacts < 40) console.log(`  t=${t} v=(${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}) w=(${boat.grid.angularVelocity.x.toFixed(2)},${boat.grid.angularVelocity.y.toFixed(2)},${boat.grid.angularVelocity.z.toFixed(2)}) rot=${dyn.getStats(boat)!.rotorContacts} depth=${dyn.getStats(boat)!.maxDepth.toFixed(3)} minX=${hullExtent(boat).minX.toFixed(3)} ang=${(r.angle*180/Math.PI).toFixed(0)}`);
+        if (dyn.getStats(boat)!.rotorContacts > 0) minX = Math.min(minX, hullExtent(boat).minX);
       }
-      console.log(`drift=${drift}: settled v=(${v0.x.toFixed(3)},${v0.y.toFixed(3)}) contacts=${contacts} max|vy|=${maxVy.toFixed(2)} max|vyz|=${maxVyz.toFixed(2)} maxDepth=${maxDepth.toFixed(3)} x=${boat.grid.position.x.toFixed(2)} y=${boat.grid.position.y.toFixed(2)} cellsLost=${0} drops=${host.drops.length}`);
+      console.log(`drift=${drift}: settled v=(${v0.x.toFixed(3)},${v0.y.toFixed(3)}) contacts=${contacts} max|vy|=${maxVy.toFixed(2)} max|vyz|=${maxVyz.toFixed(2)} maxDepth=${maxDepth.toFixed(3)} minHullX(in contact)=${minX.toFixed(3)} x=${boat.grid.position.x.toFixed(2)} y=${boat.grid.position.y.toFixed(2)} cellsLost=${0} drops=${host.drops.length}`);
     });
   }
 });

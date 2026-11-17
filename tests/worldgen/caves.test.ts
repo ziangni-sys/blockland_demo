@@ -57,43 +57,46 @@ describe('caves', () => {
     // Lava zones are a per-column 2D field; where a cave crosses a zone border the
     // neighbouring column keeps a stone rim at y <= LAVA_MAX_Y. Before the rim, ~17 % of
     // chunks had lava sources standing next to cave air (they spill on the first update).
+    // 2x2-chunk areas, so chunk borders inside each area are checked too.
     const rng = new Rng(99);
     let lava = 0;
     let lavaChunks = 0;
     let chunks = 0;
     for (const seed of [1, 9, 123, 2024]) {
       const gen = new TerrainGenerator(seed);
-      for (let k = 0; k < 25; k++) {
-        const cx = rng.int(-400, 400);
-        const cz = rng.int(-400, 400);
-        const area = new ChunkArea(gen, cx - 1, cz - 1, 3);
-        chunks++;
-        let here = 0;
-        const x0 = cx * CHUNK_SIZE;
-        const z0 = cz * CHUNK_SIZE;
-        for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
-          for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
-            for (let y = 1; y < MIN_CAVE_Y; y++) expect(SOLID[cellId(area.get(x, y, z))]).toBe(1);
-            for (let y = MIN_CAVE_Y; y <= LAVA_MAX_Y + 1; y++) {
-              if (cellId(area.get(x, y, z)) !== B.LAVA) continue;
-              if (y > LAVA_MAX_Y) throw new Error(`lava above ${LAVA_MAX_Y} at ${x},${y},${z}`);
-              here++;
-              for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-                const n = cellId(area.get(x + dx, y, z + dz));
-                if (n !== B.LAVA && SOLID[n] !== 1) throw new Error(`seed ${seed}: lava beside block ${n} at ${x},${y},${z}`);
+      for (let k = 0; k < 20; k++) {
+        const area = new ChunkArea(gen, rng.int(-400, 400), rng.int(-400, 400), 2);
+        for (let c = 0; c < 4; c++) {
+          chunks++;
+          let here = 0;
+          const x0 = area.x0 + (c & 1) * CHUNK_SIZE;
+          const z0 = area.z0 + (c >> 1) * CHUNK_SIZE;
+          for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
+            for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+              for (let y = 1; y < MIN_CAVE_Y; y++) expect(SOLID[cellId(area.get(x, y, z))]).toBe(1);
+              for (let y = MIN_CAVE_Y; y <= LAVA_MAX_Y + 1; y++) {
+                if (cellId(area.get(x, y, z)) !== B.LAVA) continue;
+                if (y > LAVA_MAX_Y) throw new Error(`lava above ${LAVA_MAX_Y} at ${x},${y},${z}`);
+                here++;
+                for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+                  const nc = area.get(x + dx, y, z + dz);
+                  if (nc < 0) continue; // outside the area
+                  const n = cellId(nc);
+                  if (n !== B.LAVA && SOLID[n] !== 1) throw new Error(`seed ${seed}: lava beside block ${n} at ${x},${y},${z}`);
+                }
+                const below = cellId(area.get(x, y - 1, z));
+                if (below !== B.LAVA && SOLID[below] !== 1) throw new Error(`floating lava at ${x},${y},${z}`);
               }
-              const below = cellId(area.get(x, y - 1, z));
-              if (below !== B.LAVA && SOLID[below] !== 1) throw new Error(`floating lava at ${x},${y},${z}`);
             }
           }
+          lava += here;
+          if (here > 0) lavaChunks++;
         }
-        lava += here;
-        if (here > 0) lavaChunks++;
       }
     }
-    expect(chunks).toBe(100);
-    expect(lavaChunks).toBeGreaterThan(30);
-    expect(lava).toBeGreaterThan(2000);
+    expect(chunks).toBe(320);
+    expect(lavaChunks).toBeGreaterThan(100);
+    expect(lava).toBeGreaterThan(5000);
   });
 
   it('keeps water and caves apart, and opens a few caves on dry land', () => {
