@@ -360,6 +360,30 @@ describe('placeCamera: back, nothing in the way', () => {
     }
   });
 
+  it('one rig kept while the pitch sweeps through +-60..85 degrees (side0 changes every frame): still exactly side0 and b = 4 in every frame', () => {
+    const sim = flatSim();
+    const high = vec3(3.3, FLAT_TOP + 20, -2.7);
+    const real = worldQueries(sim);
+    const degs: number[] = [];
+    for (let d = 85; d >= -85; d--) degs.push(d);
+    for (let d = -85; d <= 85; d++) degs.push(d);
+    for (const [q, e] of [
+      [open, eye],
+      [real, high],
+    ] as const) {
+      for (const yaw of [-48 * DEG, 0, 2.2]) {
+        const rig = cameraRig();
+        for (const d of degs) {
+          const pitch = d * DEG;
+          const out = placeCamera('back', e, yaw, pitch, q, rig, 1 / 60, cameraPose());
+          expect(rig.side, `yaw ${yaw} pitch ${d}`).toBe(side0(pitch));
+          expect(rig.back).toBe(THIRD_PERSON_DISTANCE);
+          expect(out).toEqual(place('back', e, yaw, pitch, open));
+        }
+      }
+    }
+  });
+
   it('sweeps once from the eye along the right (graded, pivot clearance), once from the pivot backwards (plain clearance)', () => {
     const calls: { o: Vec3; d: Vec3; max: number; half: number; graded: boolean }[] = [];
     const rec: CameraQueries = {
@@ -810,6 +834,23 @@ describe('placeCamera: back easing (T5)', () => {
     for (let i = 0; i < steps; i++) frame(rig, open, eye, 0, 0, 1 / 60);
     expect((rig.side - 0.2) / (SHOULDER_OFFSET - 0.2)).toBeGreaterThan(0.6);
     expect((rig.side - 0.2) / (SHOULDER_OFFSET - 0.2)).toBeLessThan(0.66);
+    // From a step left of the eye (body against a wall on the right that then goes away): the
+    // whole way from -0.1 to side0 is eased alike, 63 % in one time constant; a few seconds later
+    // the pose is exactly the open one again.
+    const sc = wallRight(0.3);
+    const q = worldQueries(sc.sim);
+    const r2 = cameraRig();
+    frame(r2, q, sc.eye, 0, 0, 1 / 60);
+    expect(r2.side).toBeCloseTo(0.3 - PIVOT_CLEARANCE, 5);
+    fill(sc.sim.world, 1, FLAT_TOP, -12, 1, FLAT_TOP + 6, 12, B.AIR);
+    for (let i = 0; i < steps; i++) frame(r2, q, sc.eye, 0, 0, 1 / 60);
+    const part = (r2.side - (0.3 - PIVOT_CLEARANCE)) / (SHOULDER_OFFSET - (0.3 - PIVOT_CLEARANCE));
+    expect(part).toBeGreaterThan(0.6);
+    expect(part).toBeLessThan(0.66);
+    for (let i = 0; i < 5 * 60; i++) frame(r2, q, sc.eye, 0, 0, 1 / 60);
+    expect(r2.side).toBe(SHOULDER_OFFSET);
+    expect(r2.back).toBe(THIRD_PERSON_DISTANCE);
+    expect(frame(r2, q, sc.eye, 0.3, -0.2, 1 / 60)).toEqual(place('back', sc.eye, 0.3, -0.2, open));
   });
 
   it('the same motion at 30 and at 144 frames per second ends at the same place', () => {
@@ -853,6 +894,59 @@ describe('placeCamera: back easing (T5)', () => {
         }
         expect(pulled).toBeGreaterThan(0);
       }
+    }
+  });
+
+  it('the back distance is the one allowed for the EASED side offset (R5 order): a wall on the right vanishes with a pillar straight behind', () => {
+    for (const fps of [30, 60, 144]) {
+      const sim = flatSim();
+      fill(sim.world, 1, FLAT_TOP, -12, 1, FLAT_TOP + 6, 0, B.STONE); // on the right, face x = 1
+      fill(sim.world, 0, FLAT_TOP, 3, 0, FLAT_TOP + 4, 3, B.STONE); // pillar behind the eye, cells x 0..1, z 3..4
+      const e = vec3(0.5, EYE_Y, 0.5);
+      const q = worldQueries(sim);
+      const rig = cameraRig();
+      frame(rig, q, e, 0, 0, 1 / fps);
+      expect(rig.side).toBeCloseTo(0.5 - PIVOT_CLEARANCE, 5);
+      expect(rig.back).toBeCloseTo(3 - CAMERA_CLEARANCE - 0.5, 5);
+      fill(sim.world, 1, FLAT_TOP, -12, 1, FLAT_TOP + 6, 0, B.AIR);
+      // Allowed now: the full side offset, and from that pivot the pillar is just out of the way.
+      const fresh = cameraRig();
+      frame(fresh, q, e, 0, 0, 1 / fps);
+      expect(fresh.side).toBe(SHOULDER_OFFSET);
+      expect(fresh.back).toBe(THIRD_PERSON_DISTANCE);
+      // The eased pivot is still in line with the pillar: the camera must stay in front of it.
+      let lagging = 0;
+      for (let i = 0; i < fps; i++) {
+        const out = frame(rig, q, e, 0, 0, 1 / fps);
+        expect(nearestBlock(sim, out), `fps ${fps} frame ${i}`).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
+        expect(centreRayMiss(out, convergence(e, 0, 0))).toBeLessThan(1e-6);
+        if (rig.side < SHOULDER_OFFSET - 0.05 && rig.back < 2.3) lagging++;
+      }
+      expect(lagging).toBeGreaterThan(0);
+    }
+  });
+
+  it('walking backwards past the end of a wall on the right, a pillar behind: every eased frame keeps the clearance (real ViewBuilder)', () => {
+    const sim = flatSim();
+    fill(sim.world, 0, FLAT_TOP, 4, 0, FLAT_TOP + 4, 4, B.STONE); // pillar on the centre line behind
+    fill(sim.world, 1, FLAT_TOP, -6, 3, FLAT_TOP + 4, 0, B.STONE); // on the right (face x = 1), ends at z = 1
+    const p = sim.player;
+    for (const fps of [30, 60, 144]) {
+      const v = new ViewBuilder();
+      let lagging = 0;
+      for (let i = 0; i <= 2.5 * fps; i++) {
+        const z = -1 + (1.2 * i) / fps;
+        p.pos.x = p.prevPos.x = 0.5;
+        p.pos.y = p.prevPos.y = FLAT_TOP;
+        p.pos.z = p.prevPos.z = z;
+        const cam = v.updateCamera(sim, 1, 0, 0, 70, 1 / fps, 'back');
+        const e = vec3(0.5, FLAT_TOP + p.eyeHeight, z);
+        if (collapsed(cam, e)) continue;
+        expect(nearestBlock(sim, cam), `fps ${fps} z ${z}`).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
+        const { side } = shoulderParts(cam, e, 0, 0);
+        if (z > 1 && side < SHOULDER_OFFSET - 0.05 && cam.z - z < 3) lagging++;
+      }
+      expect(lagging, `fps ${fps}`).toBeGreaterThan(0);
     }
   });
 
@@ -970,6 +1064,36 @@ describe('ViewBuilder third person', () => {
     expect(v.updateEntities(sim, 1).some((e) => e.id === p.id)).toBe(false);
   });
 
+  it('the local player is hidden exactly when the camera is nearer than SELF_HIDE_CLEARANCE to its model box', () => {
+    // Back to a wall (face z = 2, the eye 0.5 from it: b = 0.25) and a wall on the right (face
+    // x = 2) at d from the eye: s = d - PIVOT_CLEARANCE, so the camera is s - SELF_BOX_HALF from the box.
+    const sim = flatSim();
+    const w = sim.world;
+    fill(w, -6, FLAT_TOP, 2, 2, FLAT_TOP + 4, 2, B.STONE);
+    fill(w, 2, FLAT_TOP, -6, 2, FLAT_TOP + 4, 1, B.STONE);
+    const p = sim.player;
+    const v = new ViewBuilder();
+    for (const [d, shown] of [
+      [0.95, false], // gap 0.10 (above the near plane's own 0.05, below the near-plane reach)
+      [1.09, false], // gap 0.24
+      [1.12, true], // gap 0.27
+      [1.4, true], // full side offset, gap 0.30
+    ] as const) {
+      sim.teleport(2 - d, FLAT_TOP, 1.5);
+      p.prevPos.x = p.pos.x;
+      p.prevPos.y = p.pos.y;
+      p.prevPos.z = p.pos.z;
+      const cam = v.updateCamera(sim, 1, 0, 0, 70, 1 / 60, 'back');
+      const e = vec3(p.pos.x, p.pos.y + p.eyeHeight, p.pos.z);
+      const gap = selfModelGap(cam.x, cam.y, cam.z, e, 0, p.eyeHeight);
+      expect(gap, `d ${d}`).toBeCloseTo(Math.min(SHOULDER_OFFSET, d - PIVOT_CLEARANCE) - SELF_BOX_HALF, 5);
+      expect(cam.z - e.z).toBeCloseTo(0.5 - CAMERA_CLEARANCE, 5);
+      expect(Math.hypot(cam.x - e.x, cam.z - e.z), `d ${d}`).toBeGreaterThan(0.6);
+      expect(v.updateEntities(sim, 1).some((x) => x.id === p.id), `d ${d}`).toBe(shown);
+      v.updateCamera(sim, 1, 0, 0, 70, 1 / 60, 'first'); // fresh easing for the next case
+    }
+  });
+
   it('eases out after an obstacle is gone; a view mode change resets the easing', () => {
     const sim = flatSim();
     fill(sim.world, -3, FLAT_TOP, 2, 3, FLAT_TOP + 4, 2, B.STONE);
@@ -1059,6 +1183,29 @@ describe('ViewBuilder third person', () => {
           expect(lz, `alpha ${alpha} pitch ${pitch}`).toBeLessThanOrEqual(5 - CAMERA_CLEARANCE + 1e-6);
         }
       }
+    }
+  });
+
+  it('the back 0.3 from a wall of a turned ship: the pivot still slides to the full side offset (the eye clearance sees structures)', () => {
+    const sim = helmScene((s) => fill(s.world, 5, SEA_TOP - 1, 0, 5, SEA_TOP + 4, 5, B.PLANKS_OAK));
+    const ship = sim.structures.ships()[0]!;
+    sim.releaseHelm();
+    sim.structures.dynamics = null;
+    const rot = qmul(qfromAxisAngle(vec3(0, 1, 0), 33 * DEG), qfromAxisAngle(vec3(1, 0, 0), 12 * DEG), quat());
+    ship.grid.setPoseImmediate(vec3(40.3, 70.1, -20.6), rot);
+    const g = ship.grid;
+    const n = g.dirToWorld(vec3(-1, 0, 0)); // the wall face's normal (horizontal: the tilt is about local X)
+    const onFace = g.toWorld(vec3(5, SEA_TOP + 2.2, 3));
+    const e = vec3(onFace.x + n.x * 0.3, onFace.y + n.y * 0.3, onFace.z + n.z * 0.3);
+    expect(nearestBlock(sim, e)).toBeCloseTo(0.3, 3);
+    // Facing away from the wall: forward = n.
+    const yaw = Math.atan2(-n.x, -n.z);
+    const q = worldQueries(sim);
+    for (const pd of [0, -30, 20]) {
+      const rig = cameraRig();
+      const out = placeCamera('back', e, yaw, pd * DEG, q, rig, 0, cameraPose());
+      expect(rig.side, `pitch ${pd}`).toBe(side0(pd * DEG));
+      expect(nearestBlock(sim, out)).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
     }
   });
 
