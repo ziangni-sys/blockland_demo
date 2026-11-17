@@ -8,11 +8,11 @@
  * pass over them and nothing else.
  */
 import * as THREE from 'three/webgpu';
-import { abs, Discard, float, Fn, max, sin, smoothstep, texture, uniform, uv, vec3, vec4 } from 'three/tsl';
+import { abs, Discard, float, Fn, max, positionWorld, sin, smoothstep, texture, uniform, uv, vec3, vec4 } from 'three/tsl';
 import type { OverlayCell, OverlayFace, OverlayState } from '../backend';
 import { boxEdges } from './boxgeom';
 import { crackLayer, crackStage, tileLayer } from './blocktiles';
-import { encodeOutput, type SharedUniforms } from './shading';
+import { applyFogNode, encodeOutput, type SharedUniforms } from './shading';
 
 /** Resolves the parent object of a structure id (0 = world overlay root); null = unknown structure. */
 export type ParentResolver = (structureId: number) => THREE.Object3D | null;
@@ -286,7 +286,7 @@ export class OverlayLayer {
         const rim = smoothstep(0.8, 0.96, e);
         const pulse = sin(u.time.mul(4.2)).mul(0.22).add(0.78);
         const a = float(base).add(rim.mul(edge)).mul(pulse);
-        return vec4(encodeOutput(tint.mul(rim.mul(0.6).add(1))), a);
+        return vec4(encodeOutput(applyFogNode(u, tint.mul(rim.mul(0.6).add(1)), positionWorld)), a);
       })();
       this.materials.push(m);
       return m;
@@ -306,7 +306,7 @@ export class OverlayLayer {
       tileNodes.push(tex);
       m.colorNode = Fn(() => {
         Discard(tex.a.lessThan(0.04));
-        return vec4(encodeOutput(tex.rgb.mul(brighten)), tex.a.mul(alpha));
+        return vec4(encodeOutput(applyFogNode(u, tex.rgb.mul(brighten), positionWorld)), tex.a.mul(alpha));
       })();
       this.materials.push(m);
       return m;
@@ -325,8 +325,8 @@ export class OverlayLayer {
     const lineMat = (hex: number, opacity: number): THREE.LineBasicNodeMaterial => {
       const m = new THREE.LineBasicNodeMaterial({ transparent: opacity < 1, opacity, depthWrite: false });
       m.fog = false;
-      // Written straight to the sRGB canvas: use the hex's sRGB components as they are.
-      m.colorNode = vec3(((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255);
+      const c = new THREE.Color(hex);
+      m.colorNode = encodeOutput(applyFogNode(u, vec3(c.r, c.g, c.b), positionWorld));
       this.materials.push(m);
       return m;
     };
@@ -348,7 +348,7 @@ export class OverlayLayer {
     const gold = new THREE.Color(0xffc93a);
     anchorMat.colorNode = Fn(() => {
       const pulse = sin(u.time.mul(5)).mul(0.15).add(0.95);
-      return vec4(encodeOutput(vec3(gold.r, gold.g, gold.b).mul(pulse)), 1);
+      return vec4(encodeOutput(applyFogNode(u, vec3(gold.r, gold.g, gold.b).mul(pulse), positionWorld)), 1);
     })();
     this.materials.push(anchorMat);
     this.anchor = new THREE.Mesh(this.anchorGeo, anchorMat);

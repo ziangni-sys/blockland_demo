@@ -28,6 +28,11 @@ export interface MeshInput {
 /**
  * One draw group. Indexed triangles, 4 vertices + 6 indices per quad.
  * Positions are in the box's own space: interior cell (x,y,z) spans [x,x+1]^3.
+ *
+ * WINDING / CULLING: triangles are counter-clockwise seen from outside. The renderer
+ * culls back faces (FrontSide) in ALL passes; anything that must be visible from both
+ * sides (plants, helm wheel, propeller blades, liquid faces) is emitted twice by the
+ * mesher, as a front and a back copy. Never draw these groups DoubleSide.
  */
 export interface GeometryData {
   vertexCount: number;
@@ -43,8 +48,13 @@ export interface GeometryData {
   /**
    * 4 bytes per vertex: [sky, block, ao, flags].
    *  sky, block : smooth light 0..255 (255 = level 15)
-   *  ao         : ambient occlusion 0..255 (255 = unoccluded)
-   *  flags      : bit 0 = emissive (ignore lighting), bit 1 = liquid surface (wave in shader),
+   *  ao         : ambient occlusion as LINEAR openness: level * 85 (0 = both sides blocked,
+   *               255 = open). The renderer owns the brightness curve.
+   *  flags      : bit 0 = emissive (ignore lighting)
+   *               bit 1 = liquid surface, PER VERTEX: the vertex follows the wave. Set on
+   *                       liquid vertices on a free surface (corner height < 1); coincident
+   *                       vertices always agree, so a vertical displacement that depends
+   *                       only on world xz keeps the liquid watertight.
    *               bit 2 = plant (sway in shader)
    */
   light: Uint8Array;
@@ -94,4 +104,9 @@ export interface MeshResponse {
   type: 'mesh';
   id: number;
   data: MeshData;
+  /**
+   * Set when the job failed. `data` is then empty and the client must KEEP the mesh it
+   * already shows (a legitimately empty section has no `error`).
+   */
+  error?: string;
 }
