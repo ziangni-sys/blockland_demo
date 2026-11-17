@@ -85,7 +85,7 @@ describe('ui i18n table', () => {
       'ctl.move', 'ctl.jump', 'ctl.fly', 'ctl.flyUpDown', 'ctl.sneak', 'ctl.mine', 'ctl.place', 'ctl.select',
       'ctl.inventory', 'ctl.pause', 'ctl.debug', 'ctl.helmPreview', 'ctl.helmAssemble', 'ctl.helmThrottle',
       'ctl.helmRudder', 'ctl.helmRelease', 'ctl.helmDock', 'ctl.bearingPreview', 'ctl.bearingStart',
-      'ctl.bearingStop', 'ctl.glueApply', 'ctl.glueRemove',
+      'ctl.bearingStop', 'ctl.glueApply', 'ctl.glueRemove', 'ctl.pick', 'ctl.view',
     ] satisfies StringKey[]) {
       expect(descs.has(k), k).toBe(true);
     }

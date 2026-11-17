@@ -46,6 +46,7 @@ export const CONTROLS: readonly ControlSection[] = [
       { keys: [k('key.leftClick')], desc: 'ctl.mine' },
       { keys: [RC], desc: 'ctl.place' },
       { keys: [k('1–9'), OR, k('key.wheel')], desc: 'ctl.select' },
+      { keys: [k('key.middleClick')], desc: 'ctl.pick' },
     ],
   },
   {
@@ -53,6 +54,7 @@ export const CONTROLS: readonly ControlSection[] = [
     rows: [
       { keys: [k('E')], desc: 'ctl.inventory' },
       { keys: [k('Esc')], desc: 'ctl.pause' },
+      { keys: [k('F5')], desc: 'ctl.view' },
       { keys: [k('F3')], desc: 'ctl.debug' },
     ],
   },
