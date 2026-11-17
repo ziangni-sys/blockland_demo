@@ -113,6 +113,19 @@ export async function saveThroughStorage(sim: Simulation, worldId: string, seedT
   return { exported, loaded: res.bundle, meta: res.meta, storage };
 }
 
+/** Read the same save out of its storage once more (a second, independent copy of the bytes). */
+export async function readAgain(saved: StoredSave): Promise<SaveBundle> {
+  const res = await new SaveManager(saved.storage).load(saved.meta.id);
+  if (!res.ok) throw new Error(`SaveManager.load failed: ${res.reason} ${String(res.error)}`);
+  return res.bundle;
+}
+
+/** The bytes of one named blob of a bundle. */
+export function blobOf(bundle: SaveBundle, name: string): Uint8Array {
+  for (const [n, b] of bundle.blobs) if (n === name) return b;
+  throw new Error(`the save has no '${name}' blob`);
+}
+
 // ------------------------------------------------------------------ player actions
 
 /** Aim at a cell of a grid and right-click once (one tick). Throws when the ray hits something else. */

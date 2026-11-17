@@ -186,17 +186,84 @@ function worldOf(sim: Simulation, id: number, x: number, y: number, z: number): 
   return [p.x, p.y, p.z];
 }
 
+// =====================================================================================
+// Scenario 23, part 2: a bucket of water on a big platform, saved mid-flow
+// =====================================================================================
+
+/** Top cell layer of a 31 x 31 stone platform floating in the void (x, z in -15..15). */
+const PLATFORM_Y = 64;
+const PLATFORM_HALF = 15;
+/** The layer the water spreads on. */
+const WY = PLATFORM_Y + 1;
+
+const POUR: SimSpec = {
+  seed: 2323,
+  mode: 'creative',
+  generator: () => new VoidGenerator(),
+  spawn: { x: 0.5, y: WY, z: 3.5 },
+  loadRadius: 2,
+};
+
+/** Every water cell on the platform's layer, with its full cell value (level / source bits). */
+function waterLayer(sim: Simulation): string[] {
+  const out: string[] = [];
+  for (let z = -PLATFORM_HALF; z <= PLATFORM_HALF; z++) {
+    for (let x = -PLATFORM_HALF; x <= PLATFORM_HALF; x++) {
+      const c = sim.world.getCell(x, WY, z);
+      if (idAt(sim.world, x, WY, z) === B.WATER) out.push(`${x},${z}:${c}`);
+    }
+  }
+  return out;
+}
+
+/** "x,z" of the radius-7 diamond around the poured cell (0, 0): |x| + |z| <= 7. */
+function diamond(r: number): string[] {
+  const out: string[] = [];
+  for (let z = -PLATFORM_HALF; z <= PLATFORM_HALF; z++) for (let x = -PLATFORM_HALF; x <= PLATFORM_HALF; x++) if (Math.abs(x) + Math.abs(z) <= r) out.push(`${x},${z}`);
+  return out;
+}
+
+/** Run until no block tick is pending (the water has settled), at most `max` ticks. */
+function runUntilQuiet(sim: Simulation, max: number): number {
+  for (let i = 0; i < max; i++) {
+    if (sim.world.ticks.size === 0) return i;
+    sim.tick();
+  }
+  return max;
+}
+
+/** The player pours one bucket on the middle of the platform; 0.4 s (8 ticks) later the game is saved. */
+function pourWater(): Simulation {
+  const sim = newWorld(POUR);
+  fill(sim.world, -PLATFORM_HALF, PLATFORM_Y, -PLATFORM_HALF, PLATFORM_HALF, PLATFORM_Y, PLATFORM_HALF, B.STONE);
+  sim.advance(2);
+  sim.hold(I.BUCKET_WATER, 1);
+  rightClick(sim, 0, PLATFORM_Y, 0, PY); // the source appears during this tick
+  sim.advance(8); // 0.4 s
+  return sim;
+}
+
 describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度都一致。在大平台上倒一格水，0.4 秒后存档；读档后水会继续流，最终流满 113 格（半径 7 的菱形）。', () => {
   let played: Harbour;
   let before: Snapshot;
   let saved: StoredSave;
   let loaded: Simulation;
 
+  let pour: Simulation;
+  let pourTime: number;
+  let waterAtSave: string[];
+  let pourSaved: StoredSave;
+
   beforeAll(async () => {
     played = playHarbour();
     before = snapshot(played.sim);
     saved = await saveThroughStorage(played.sim, 'harbour', 'harbour', HARBOUR.seed);
     loaded = loadWorld(HARBOUR, saved.loaded);
+
+    pour = pourWater();
+    pourTime = pour.world.time;
+    waterAtSave = waterLayer(pour);
+    pourSaved = await saveThroughStorage(pour, 'platform', 'platform', POUR.seed);
   });
 
   it('the save is written to the storage and read back byte for byte (SaveManager -> MemoryStorage -> SaveManager.load)', () => {
