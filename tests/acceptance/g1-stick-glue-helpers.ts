@@ -5,11 +5,11 @@
  * observe results.
  */
 import { expect } from 'vitest';
-import { ID_MASK, makeCell } from '../../src/blocks/cell';
-import '../../src/blocks/defs';
+import { ID_MASK, facingState, makeCell } from '../../src/blocks/cell';
+import { B } from '../../src/blocks/defs';
 import { BLOCKS } from '../../src/blocks/registry';
 import { TICK_DT } from '../../src/core/constants';
-import { PZ, type Dir } from '../../src/core/dirs';
+import { NZ, PZ, type Dir } from '../../src/core/dirs';
 import { Simulation, type GameMode } from '../../src/sim/simulation';
 import type { Message } from '../../src/sim/view';
 import type { Rotor, Ship } from '../../src/structures/structure';
@@ -33,6 +33,49 @@ export function makeSim(mode: GameMode = 'creative', spawn = { x: 0.5, y: T, z: 
   });
   sim.advance(6); // the remaining chunks of the load radius arrive (4 columns per tick)
   return sim;
+}
+
+/** Sea world: deeprock y=0, stone 1..19, water 20..29 (surface cells at y = 29); first air SEA_TOP = 30. */
+export const SEA_TOP = 30;
+
+export function makeSeaSim(mode: GameMode = 'creative', spawn = { x: 2.5, y: SEA_TOP, z: 7.5 }): Simulation {
+  const sim = new Simulation({
+    seed: 0x5eed02,
+    mode,
+    generator: new FlatGenerator([
+      { id: B.DEEPROCK, thickness: 1 },
+      { id: B.STONE, thickness: 19 },
+      { id: B.WATER, thickness: 10 },
+    ]),
+    syncChunks: true,
+    loadRadius: 2,
+    rabbits: false,
+    spawn,
+  });
+  sim.advance(6);
+  return sim;
+}
+
+/**
+ * On the sea: a rubble dock (x 0..4, z 6..8, from the sea floor up to the surface) with the
+ * player on it, and touching its north side a 5x6 plank raft at the surface (x 0..4, z 0..5,
+ * y = SEA_TOP - 1) carrying a helm at (2, SEA_TOP, 4). The player assembles it with two
+ * right-clicks on the helm, lets go of the wheel and steps back onto the dock at (2.5, SEA_TOP, 6.5).
+ */
+export function raftShipByHand(sim: Simulation): Ship {
+  for (let y = 20; y <= SEA_TOP - 1; y++) for (let z = 6; z <= 8; z++) for (let x = 0; x <= 4; x++) put(sim, x, y, z, B.COBBLE);
+  for (let z = 0; z <= 5; z++) for (let x = 0; x <= 4; x++) put(sim, x, SEA_TOP - 1, z, B.PLANKS_OAK);
+  put(sim, 2, SEA_TOP, 4, B.HELM, facingState(NZ));
+  sim.advance(2);
+  const a = assembleShipByHand(sim, 2, SEA_TOP, 4, PZ);
+  expect(a.cells.length, 'raft + helm').toBe(31);
+  expect(sim.player.steeringShipId).toBe(a.structure.id);
+  sim.use(); // a plain right-click lets go of the wheel
+  sim.tick();
+  expect(sim.player.steeringShipId).toBe(0);
+  sim.teleport(2.5, SEA_TOP, 6.5);
+  sim.advance(10);
+  return a.structure;
 }
 
 export function put(sim: Simulation, x: number, y: number, z: number, id: number, state = 0): void {

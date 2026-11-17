@@ -194,6 +194,32 @@ export class Events {
   }
 }
 
+/** Look yaw (input convention: 0 = toward -Z, CCW positive) that faces from `a` toward `b`. */
+export function yawToward(a: Vec3, b: Vec3): number {
+  return Math.atan2(-(b.x - a.x), -(b.z - a.z));
+}
+
+/**
+ * Walk (held W, looking where it goes, like a player steering with the mouse) until the feet
+ * are within `tol` of the world point `target()` returns each tick. Returns the ticks used.
+ */
+export function walkTo(sim: Simulation, target: () => Vec3, tol = 0.1, maxTicks = 200): number {
+  const p = sim.player;
+  for (let t = 0; t < maxTicks; t++) {
+    const g = target();
+    const d = hdist(p.pos, g);
+    if (d < tol) {
+      p.input.forward = 0;
+      return t;
+    }
+    p.input.yaw = yawToward(p.pos, g);
+    p.input.forward = Math.min(1, d / 0.6);
+    sim.tick();
+  }
+  p.input.forward = 0;
+  return maxTicks;
+}
+
 /** Idle the held input. */
 export function stopInput(sim: Simulation): void {
   const i = sim.player.input;

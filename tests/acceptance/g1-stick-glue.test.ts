@@ -15,16 +15,20 @@ import { I } from '../../src/blocks/items';
 import { NX, NZ, PX, PY, PZ, type Dir } from '../../src/core/dirs';
 import type { Simulation } from '../../src/sim/simulation';
 import {
+  SEA_TOP,
   T,
   Toasts,
   assembleShipByHand,
   hardnessTicks,
   idAt,
   labels,
+  makeSeaSim,
   makeSim,
   measureMiningTicks,
   put,
+  raftShipByHand,
   startRotorByHand,
+  structureLabels,
   type CellSpec,
 } from './g1-stick-glue-helpers';
 
@@ -505,6 +509,21 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
     expectWorld(sim, [[3, T, -3, B.DEEPROCK]]);
   });
 
+  it('a deeprock block the player puts on the deck of a ship does not become part of the ship (a stone put the same way does)', () => {
+    const sim = makeSeaSim();
+    const ship = raftShipByHand(sim);
+    const n0 = ship.grid.count;
+    sim.hold(B.STONE);
+    expect(sim.useOn(3, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 3, SEA_TOP, 5)).toBe(B.STONE); // building on a deck works
+    expect(ship.grid.count).toBe(n0 + 1);
+    sim.hold(B.DEEPROCK);
+    expect(sim.useOn(1, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
+    const inShip = structureLabels(ship.grid).filter((l) => l.endsWith(':deeprock'));
+    expect(inShip).toEqual([]);
+    expect(ship.grid.count).toBe(n0 + 1);
+  });
+
   it('a bearing with deeprock in front has nothing to turn: no rotor starts, even with sails glued to the deeprock', () => {
     const sim = makeSim('creative', { x: 0.5, y: T, z: -1.5 });
     const toasts = new Toasts(sim);
@@ -658,6 +677,31 @@ describe('4. 两次右键涂胶、潜行两次右键拆胶；挖掉任一侧方�
     expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(false);
     expect(sim.worldGlue.has(-1, T, -2, NZ)).toBe(true);
     expect(sim.worldGlue.size).toBe(1);
+  });
+
+  it('on a ship as well: two right-clicks glue deck blocks, sneak + two right-clicks unglue, mining one side removes the glue', () => {
+    const sim = makeSeaSim();
+    const ship = raftShipByHand(sim);
+    const D = SEA_TOP - 1; // deck row
+    sim.hold(I.GLUE);
+    expect(sim.useOn(0, D, 4, PY, ship.id)).toBe(true);
+    expect(sim.useOn(0, D, 5, PY, ship.id)).toBe(true);
+    expect(ship.glue.has(0, D, 4, PZ)).toBe(true);
+    expect(sim.useOn(1, D, 4, PY, ship.id)).toBe(true);
+    expect(sim.useOn(1, D, 5, PY, ship.id)).toBe(true);
+    expect(ship.glue.has(1, D, 4, PZ)).toBe(true);
+    expect(ship.glue.size).toBe(2);
+    expect(sim.worldGlue.size).toBe(0);
+    sim.player.input.sneak = true;
+    expect(sim.useOn(1, D, 4, PY, ship.id)).toBe(true);
+    expect(sim.useOn(1, D, 5, PY, ship.id)).toBe(true);
+    sim.player.input.sneak = false;
+    expect(ship.glue.has(1, D, 4, PZ)).toBe(false);
+    expect(ship.glue.size).toBe(1);
+    expect(sim.mine(0, D, 5, PY, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 0, D, 5)).toBe(AIR);
+    expect(ship.glue.has(0, D, 4, PZ)).toBe(false);
+    expect(ship.glue.size).toBe(0);
   });
 
   it('a block put back where the mined one was is not glued (the glue went with the block)', () => {

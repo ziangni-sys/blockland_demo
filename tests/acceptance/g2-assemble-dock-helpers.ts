@@ -227,7 +227,7 @@ export function rotDirY(k: number, d: Dir): Dir {
  * they are now. Computed from the current pose only (the ship must be upright).
  */
 export function expectedDock(ship: Ship): { k: number; dest: Map<ShipCell, { x: number; y: number; z: number }>; maxMove: number } {
-  const k = Math.round(headingDeg(ship) / 90);
+  const k = (((Math.round(headingDeg(ship) / 90) % 4) + 4) % 4) as number;
   const cells = shipCells(ship);
   // Mean of (world centre - 0.5 - rotated local) over all cells = the common real offset.
   let sx = 0;

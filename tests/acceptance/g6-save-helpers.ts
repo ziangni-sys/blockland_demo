@@ -3,7 +3,7 @@
  *
  * Scenes are built with world.setCell; everything the PLAYER does (gluing, assembling, starting
  * windmills, steering, pouring) goes through the simulation's input path (look + right-click
- * with an item in hand). Saves go through the same path the browser uses: exportSave ->
+ * with an item in hand). Saves go through the storage path the browser uses: exportSave ->
  * SaveManager.save (SaveStorage.putAll with a WorldMeta) -> SaveManager.load
  * (listChunkKeys / getChunks / getBlob) -> new Simulation({ deferInitialLoad: true }) -> importSave.
  */
@@ -19,7 +19,7 @@ import { Simulation, type GameMode } from '../../src/sim/simulation';
 import type { Message, SimEvent } from '../../src/sim/view';
 import { Rotor, Ship, type Structure } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
-import { FlatGenerator, VoidGenerator, type ChunkGenerator } from '../../src/worldgen/generator';
+import { FlatGenerator, type ChunkGenerator } from '../../src/worldgen/generator';
 
 // ------------------------------------------------------------------ worlds
 
@@ -70,7 +70,6 @@ export function loadWorld(spec: SimSpec, bundle: SaveBundle): Simulation {
   return sim;
 }
 
-export { VoidGenerator };
 
 // ------------------------------------------------------------------ storage round trip
 
@@ -236,7 +235,7 @@ export function stateOf(s: Structure): Record<string, unknown> {
     };
   }
   if (s instanceof Ship) {
-    return { helm: [s.helmX, s.helmY, s.helmZ], forward: s.forward, throttle: s.throttle, rudder: s.rudder };
+    return { helm: [s.helmX, s.helmY, s.helmZ], forward: s.forward, throttle: s.throttle, rudder: s.rudder, asleep: s.asleep, restTicks: s.restTicks };
   }
   return {};
 }
@@ -276,11 +275,4 @@ export function countId(grid: VoxelGrid, id: number, x0: number, y0: number, z0:
   let n = 0;
   for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) if ((grid.getCell(x, y, z) & ID_MASK) === id) n++;
   return n;
-}
-
-/** "x,z" of every cell with block `id` on one layer of a box. */
-export function cellsWithId(grid: VoxelGrid, id: number, y: number, x0: number, z0: number, x1: number, z1: number): string[] {
-  const out: string[] = [];
-  for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) if ((grid.getCell(x, y, z) & ID_MASK) === id) out.push(`${x},${z}`);
-  return out;
 }

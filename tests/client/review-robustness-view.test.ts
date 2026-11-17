@@ -91,10 +91,12 @@ describe('review: mesh worker utilisation', () => {
     // turf layer of every inner chunk) are queued and the pool has room for size * 3 = 6 jobs.
     mesher.update(0, 1e9, p.x, p.y + 1.6, p.z, 0, -1);
     expect(mesher.queue.size).toBeGreaterThan(20);
-    // Fails today: the sky / bedrock sections nearest to the camera are taken out of the queue
-    // against the same 6 slots and finished on the main thread, so only 1-2 real jobs are
-    // posted and the workers idle for the rest of the frame (at 13 fps in SwiftShader this left
-    // ~1000 sections queued and a visible hole in front of a flying player).
+    // Fails today (4 jobs): the sky / buried sections nearest to the camera are taken out of the
+    // queue against the same 6 slots and finished on the main thread, so the workers get fewer
+    // jobs than they have room for, and the rest waits for the next frame. Mesh throughput is
+    // already bounded by "6 per rendered frame"; losing slots to trivial sections makes it
+    // worse (at ~13 fps in SwiftShader, 15 s of flying left ~1000 sections queued and a visible
+    // hole in front of the player).
     expect(pool.jobs).toBe(6);
   });
 });

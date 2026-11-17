@@ -7,15 +7,23 @@
     <!-- An empty inline icon: the page must not make any network request, not even /favicon.ico. -->
     <link rel="icon" href="data:," />
     <style>
+      /* Single dark look. The root keeps whatever padding the host page gives it (safe
+         areas); the canvas and the UI are fixed to the viewport, so nothing depends on it. */
+      :root {
+        color-scheme: dark;
+      }
       html,
       body {
         margin: 0;
-        padding: 0;
         width: 100%;
         height: 100%;
         overflow: hidden;
         background: #0b1422;
+        color: #e9dfc9;
         overscroll-behavior: none;
+      }
+      body {
+        padding: 0;
       }
       #bl-canvas {
         position: fixed;

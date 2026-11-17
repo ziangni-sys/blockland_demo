@@ -4,21 +4,25 @@
  * The player builds what gets saved through the real input path (glue clicks, helm and bearing
  * clicks, steering, pouring a bucket); the scene's blocks are placed with world.setCell. Saves go
  * through the client's SaveManager into a MemoryStorage (putAll with a WorldMeta) and come back
- * through SaveManager.load (listChunkKeys / getChunks / getBlob) into a fresh Simulation built
- * with deferInitialLoad, exactly like a browser reload.
+ * through SaveManager.load (listChunkKeys / getChunks / getBlob) into a fresh Simulation with the
+ * same seed and generator, built with deferInitialLoad (as src/sim/persist.ts recommends); one
+ * test also loads the way src/client/game.ts does (a normally constructed Simulation).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
+import { liquidState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NX, NY, NZ, PX, PY, PZ } from '../../src/core/dirs';
-import type { Simulation } from '../../src/sim/simulation';
+import { decodeTicks } from '../../src/save/codec';
+import { exportSave, importSave, type SaveBundle } from '../../src/sim/persist';
+import { Simulation } from '../../src/sim/simulation';
 import { Rotor, Ship } from '../../src/structures/structure';
 import { FlatGenerator, VoidGenerator } from '../../src/worldgen/generator';
 import {
   EventLog,
   SEA_TOP,
+  blobOf,
   cellsOf,
-  cellsWithId,
   countId,
   fill,
   glueFace,
@@ -28,6 +32,7 @@ import {
   newWorld,
   playerState,
   poseOf,
+  readAgain,
   rightClick,
   saveThroughStorage,
   seaGenerator,
@@ -180,6 +185,17 @@ function snapshot(sim: Simulation): Snapshot {
   };
 }
 
+/** A bundle as comparable plain data: chunks keyed (order-free), blobs by name. */
+function bundleBytes(b: SaveBundle): { chunks: Record<string, number[]>; blobs: Record<string, number[]> } {
+  return {
+    chunks: Object.fromEntries(b.chunks.map(([k, v]) => [String(k), Array.from(v)])),
+    blobs: Object.fromEntries(b.blobs.map(([n, v]) => [n, Array.from(v)])),
+  };
+}
+
+/** Cells of the ship's windmill whose world positions are compared (hub, a side sail, the top sail). */
+const MILL_PROBES = [RAFT.hub, [0, T + 3, 0], [2, T + 5, 0]] as const;
+
 /** World position of a cell centre of structure `id`. */
 function worldOf(sim: Simulation, id: number, x: number, y: number, z: number): [number, number, number] {
   const p = sim.structures.get(id)!.grid.toWorld({ x: x + 0.5, y: y + 0.5, z: z + 0.5 });
@@ -246,6 +262,7 @@ function pourWater(): Simulation {
 describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度都一致。在大平台上倒一格水，0.4 秒后存档；读档后水会继续流，最终流满 113 格（半径 7 的菱形）。', () => {
   let played: Harbour;
   let before: Snapshot;
+  let millWorldBefore: Array<[number, number, number]>;
   let saved: StoredSave;
   let loaded: Simulation;
 
@@ -257,6 +274,7 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
   beforeAll(async () => {
     played = playHarbour();
     before = snapshot(played.sim);
+    millWorldBefore = MILL_PROBES.map(([x, y, z]) => worldOf(played.sim, 3, x, y, z));
     saved = await saveThroughStorage(played.sim, 'harbour', 'harbour', HARBOUR.seed);
     loaded = loadWorld(HARBOUR, saved.loaded);
 
@@ -266,38 +284,40 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     pourSaved = await saveThroughStorage(pour, 'platform', 'platform', POUR.seed);
   });
 
-  it('the save is written to the storage and read back byte for byte (SaveManager -> MemoryStorage -> SaveManager.load)', () => {
-    const sortChunks = (c: Array<[number, Uint8Array]>): Array<[number, number[]]> =>
-      c.map(([k, b]) => [k, Array.from(b)] as [number, number[]]).sort((a, b) => a[0] - b[0]);
+  it('存档往返: the save goes into the storage and comes back byte for byte (SaveManager.save -> putAll, SaveManager.load)', () => {
     expect(saved.loaded.chunks.length).toBeGreaterThan(0);
-    expect(sortChunks(saved.loaded.chunks)).toEqual(sortChunks(saved.exported.chunks));
-    const blobs = (bs: Array<[string, Uint8Array]>): Record<string, number[]> => Object.fromEntries(bs.map(([n, b]) => [n, Array.from(b)]));
-    expect(blobs(saved.loaded.blobs)).toEqual(blobs(saved.exported.blobs));
+    expect(saved.loaded.blobs.map(([n]) => n).sort()).toEqual(saved.exported.blobs.map(([n]) => n).sort());
+    expect(bundleBytes(saved.loaded)).toEqual(bundleBytes(saved.exported));
     expect(saved.meta.time).toBe(before.time);
   });
 
-  it('what was saved is a nested scene in motion: a world windmill, a ship carrying a windmill, glue in every store', () => {
-    // (guards the comparisons below against comparing empty or resting things)
+  it('存档往返: saving the reloaded game again, before it runs, gives back exactly the same bytes', async () => {
+    const again = exportSave(loadWorld(HARBOUR, await readAgain(saved)));
+    expect(bundleBytes(again)).toEqual(bundleBytes(saved.exported));
+  });
+
+  it('(premise) what was saved is a nested scene in motion: a world windmill, a ship carrying a windmill, glue in every store', () => {
+    // guards the comparisons below against comparing empty or resting things
     expect(before.tree).toEqual([
       [1, 'rotor', 0, 0, []],
       [2, 'ship', 0, 0, [3]],
       [3, 'rotor', 2, 2, []],
     ]);
-    const sim = played.sim;
-    const [world, ship, shipMill] = sim.structures.all() as [Rotor, Ship, Rotor];
-    expect(world.angle).not.toBe(0);
-    expect(shipMill.angle).not.toBe(0);
-    expect(shipMill.hubGlue).toBe(true);
-    expect(ship.grid.rotation.w).toBeLessThan(0.9999); // the ship has turned
-    expect(Math.hypot(ship.grid.linearVelocity.x, ship.grid.linearVelocity.z)).toBeGreaterThan(0.05);
-    expect(Math.abs(ship.grid.angularVelocity.y)).toBeGreaterThan(1e-3);
-    expect(sim.worldGlue.size).toBe(1);
-    expect(world.glue.size).toBe(1);
-    expect(ship.glue.size).toBe(1);
-    expect(sim.player.steeringShipId).toBe(ship.id);
+    const [worldMill, , shipMill] = before.states as Array<{ angle: number; angularSpeed: number; hubGlue: boolean }>;
+    expect(worldMill!.angle).not.toBe(0);
+    expect(worldMill!.angularSpeed).not.toBe(0);
+    expect(shipMill!.angle).not.toBe(0);
+    expect(shipMill!.angularSpeed).not.toBe(0);
+    expect(shipMill!.hubGlue).toBe(true);
+    const ship = before.poses[1]!;
+    expect(ship.rotation![3]).toBeLessThan(0.9999); // the ship has turned
+    expect(Math.hypot(ship.linearVelocity![0]!, ship.linearVelocity![2]!)).toBeGreaterThan(0.05);
+    expect(Math.abs(ship.angularVelocity![1]!)).toBeGreaterThan(1e-3);
+    expect(Object.values(before.glue).map((g) => g.length / 4)).toEqual([1, 1, 1, 0]); // world, mill 1, ship 2, mill 3
+    expect(before.player.steeringShipId).toBe(2);
   });
 
-  it('structures: the same ids, kinds and nesting — the windmill on the ship is still mounted on the ship', () => {
+  it('结构体（含嵌套）一致: the same ids, kinds and nesting — the windmill on the ship is still mounted on the ship', () => {
     expect(structureTree(loaded)).toEqual(before.tree);
     const ship = loaded.structures.get(2);
     const mill = loaded.structures.get(3);
@@ -309,27 +329,25 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     expect(loaded.structures.ships().map((s) => s.id)).toEqual([2]);
   });
 
-  it('structures: every cell of every structure is identical', () => {
+  it('结构体（含嵌套）一致: every cell of every structure is identical', () => {
     expect(loaded.structures.all().map(cellsOf)).toEqual(before.cells);
     expect(loaded.structures.all().map((s) => s.grid.count)).toEqual(before.cells.map((c) => c.length));
   });
 
-  it('structures: poses and velocities are identical (pivot, position, rotation, linear and angular velocity)', () => {
+  it('结构体（含嵌套）一致: poses and velocities are identical (pivot, position, rotation, linear and angular velocity)', () => {
     expect(loaded.structures.all().map(poseOf)).toEqual(before.poses);
     // The nested windmill is where it was in the world: its pose is relative to the ship.
-    for (const [x, y, z] of [RAFT.hub, [0, T + 3, 0], [2, T + 5, 0]] as const) {
-      expect(worldOf(loaded, 3, x, y, z)).toEqual(worldOf(played.sim, 3, x, y, z));
-    }
+    expect(MILL_PROBES.map(([x, y, z]) => worldOf(loaded, 3, x, y, z))).toEqual(millWorldBefore);
   });
 
-  it('glue: every glue store is identical — the world, the ship, both windmills', () => {
+  it('胶水一致: every glue store is identical — the world, the ship, both windmills', () => {
     expect(glueStores(loaded)).toEqual(before.glue);
     expect(loaded.worldGlue.has(-6, T, 5, PY)).toBe(true);
     expect(loaded.structures.get(2)!.glue.has(RAFT.stone[0], RAFT.stone[1], RAFT.stone[2], PX)).toBe(true);
     expect(loaded.structures.get(1)!.glue.has(-9, WM.hy, 0, PX)).toBe(true);
   });
 
-  it('windmill angles: both windmills have exactly the saved angle, speed and hub glue', () => {
+  it('风车角度一致: both windmills have exactly the saved angle, speed and hub glue', () => {
     expect(loaded.structures.all().map(stateOf)).toEqual(before.states);
     const angles = loaded.structures.rotors().map((r) => [r.angle, r.angularSpeed]);
     expect(angles).toEqual(
@@ -337,15 +355,45 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     );
   });
 
-  it('the player is back at the wheel where he was, with the same inventory', () => {
+  it("存档往返: the client's own way of loading (a Simulation constructed normally, then importSave) gives the same game back", async () => {
+    const sim = new Simulation({ seed: HARBOUR.seed, mode: HARBOUR.mode, generator: HARBOUR.generator(), syncChunks: true, rabbits: false, loadRadius: HARBOUR.loadRadius });
+    importSave(sim, await readAgain(saved));
+    expect(snapshot(sim)).toEqual(before);
+  });
+
+  it('存档往返: a player standing on the deck of a sailing ship (not steering) stays aboard through the round trip, in step', async () => {
+    const { sim } = playHarbour();
+    sim.player.input.forward = 0;
+    sim.player.input.strafe = 0;
+    sim.use(); // let go of the wheel: the ship coasts on, turning, with the player on its deck
+    sim.tick();
+    sim.advance(5);
+    expect(sim.player.steeringShipId).toBe(0);
+    expect(sim.player.carrierId).toBe(2);
+    const ship = sim.structures.get(2)!;
+    expect(Math.hypot(ship.grid.linearVelocity.x, ship.grid.linearVelocity.z)).toBeGreaterThan(0.05);
+    const s = await saveThroughStorage(sim, 'rider', 'rider', HARBOUR.seed);
+    const b = loadWorld(HARBOUR, s.loaded);
+    expect(snapshot(b)).toEqual(snapshot(sim));
+    for (let i = 0; i < 40; i++) {
+      sim.tick();
+      b.tick();
+      expect(playerState(b)).toEqual(playerState(sim));
+    }
+    expect(snapshot(b)).toEqual(snapshot(sim));
+    expect(b.player.carrierId).toBe(2);
+  });
+
+  it('存档往返: the player is back at the wheel where he was, with the same inventory', () => {
     expect(playerState(loaded)).toEqual(before.player);
     expect(loaded.world.time).toBe(before.time);
     expect(loaded.rng.state).toBe(before.rng);
   });
 
-  it('after loading, the game goes on exactly as if it had never been saved (windmills, ship, player in step)', () => {
+  it('结构体、胶水、风车角度一致（读档后继续）: the reloaded game goes on exactly like the one never saved (windmills, ship, player in step)', async () => {
     const a = played.sim;
-    const b = loaded;
+    const b = loadWorld(HARBOUR, await readAgain(saved));
+    expect(snapshot(a)).toEqual(before); // (the unsaved game has not moved on yet)
     // The client re-applies the keys still held (W + D) to the reloaded game.
     b.player.input.forward = a.player.input.forward;
     b.player.input.strafe = a.player.input.strafe;
@@ -374,5 +422,247 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
       [1, null, false],
       [3, null, true],
     ]);
+  });
+
+  // ---------------------------------------------------------------- water on the platform
+
+  it('在大平台上倒一格水，0.4 秒后存档: the water is saved mid-flow, with its pending ticks', () => {
+    // the source and the four cells it has flowed into so far
+    expect(waterAtSave.length).toBe(5);
+    expect(waterAtSave.map((c) => c.split(':')[0])).toEqual(['0,-1', '-1,0', '0,0', '1,0', '0,1']);
+    const pending = decodeTicks(blobOf(pourSaved.loaded, 'ticks'), pourTime)
+      .filter((t) => t.id === B.WATER && t.y === WY)
+      .map((t) => `${t.x},${t.z}`)
+      .sort();
+    expect(pending).toEqual(expect.arrayContaining(['-1,0', '0,-1', '0,1', '1,0']));
+    // the reloaded game holds the same pending ticks, in the same order (re-saving gives the same bytes)
+    const again = exportSave(loadWorld(POUR, pourSaved.loaded));
+    expect(bundleBytes(again)).toEqual(bundleBytes(pourSaved.exported));
+  });
+
+  it('读档后水会继续流: after loading the water keeps flowing, tick for tick like the game that was never reloaded', async () => {
+    const b = loadWorld(POUR, await readAgain(pourSaved));
+    expect(b.world.time).toBe(pourTime);
+    expect(waterLayer(b)).toEqual(waterAtSave);
+    const a = pour;
+    expect(waterLayer(a)).toEqual(waterAtSave); // (the unsaved game has not moved on yet)
+    const counts: number[] = [];
+    for (let i = 0; i < 60; i++) {
+      a.tick();
+      b.tick();
+      expect(waterLayer(b)).toEqual(waterLayer(a));
+      counts.push(waterLayer(b).length);
+    }
+    // it did not stay frozen at the five saved cells
+    expect(counts[4]).toBeGreaterThan(5);
+    expect(counts[59]).toBeGreaterThan(counts[4]!);
+  });
+
+  it('最终流满 113 格（半径 7 的菱形）: the water ends up in exactly the 113 cells of the radius-7 diamond', async () => {
+    const b = loadWorld(POUR, await readAgain(pourSaved));
+    const settledAfter = runUntilQuiet(b, 600);
+    expect(settledAfter).toBeLessThan(600);
+    const layer = waterLayer(b);
+    expect(layer.length).toBe(113);
+    expect(layer.map((c) => c.split(':')[0]).sort()).toEqual(diamond(7).sort());
+    // nothing anywhere else: not above, not below, not beyond the platform
+    expect(countId(b.world, B.WATER, -24, 0, -24, 24, 127, 24)).toBe(113);
+    // the poured cell is still the one source; the rest is flowing water
+    const source = makeCell(B.WATER, liquidState(0, false));
+    expect(layer.filter((c) => c.endsWith(`:${source}`)).map((c) => c.split(':')[0])).toEqual(['0,0']);
+  });
+});
+
+// =====================================================================================
+// Scenario 24: a new world with the same seed
+// =====================================================================================
+
+/** Shallow sea: stone up to y = 27 (the sea floor), water 28..29, first air at y = SEA_TOP. */
+const FLOOR = T - 3;
+const SHALLOW: SimSpec = {
+  seed: 24,
+  mode: 'creative',
+  generator: () =>
+    new FlatGenerator([
+      { id: B.DEEPROCK, thickness: 1 },
+      { id: B.STONE, thickness: FLOOR },
+      { id: B.WATER, thickness: 2 },
+    ]),
+  spawn: { x: -1.5, y: T, z: 2.5 },
+  loadRadius: 2,
+};
+
+/** Two cells of the generated sea floor: identical in every world made from this seed. */
+const FLOOR_A = [0, FLOOR, 2] as const;
+const FLOOR_B = [0, FLOOR, 3] as const;
+const FLOOR_C = [0, FLOOR, 4] as const;
+const BAY = { helm: [2, T, 2] as const, stone: [1, T, 4] as const, plank: [1, T - 1, 4] as const, bearing: [-3, T + 3, -1] as const };
+
+/** A cobble pier (x -4..-2, z 0..5) for the player to stand on (spawn is on its east edge). */
+function buildPier(sim: Simulation): void {
+  fill(sim.world, -4, FLOOR + 1, 0, -2, T - 1, 5, B.COBBLE);
+}
+
+/** A raft (x 1..5, z 0..5) with a helm facing north and a loose stone on its deck. */
+function buildRaft(sim: Simulation): void {
+  const w = sim.world;
+  fill(w, 1, T - 1, 0, 5, T - 1, 5, B.PLANKS_OAK);
+  setBlock(w, BAY.helm[0], BAY.helm[1], BAY.helm[2], B.HELM, NZ);
+  setBlock(w, BAY.stone[0], BAY.stone[1], BAY.stone[2], B.STONE);
+}
+
+/** A windmill on a brick tower on the pier: bearing facing north, 9 canvas sails in the plane z = -2. */
+function buildWindmill(sim: Simulation): void {
+  const w = sim.world;
+  const [bx, by, bz] = BAY.bearing;
+  fill(w, bx, T, bz + 1, bx, by, bz + 1, B.STONE_BRICKS);
+  setBlock(w, bx, by, bz, B.BEARING, NZ);
+  setBlock(w, bx, by, bz - 1, B.CANVAS);
+  for (const [x, y, z] of cross(bx, by, bz - 1, FULL_CROSS)) setBlock(w, x, y, z, B.CANVAS);
+}
+
+/** The previous game: glue on the sea floor, a ship with a glued stone, a running windmill, a thrown item. */
+function playPreviousGame(): Simulation {
+  const sim = newWorld(SHALLOW);
+  buildPier(sim);
+  buildRaft(sim);
+  buildWindmill(sim);
+  sim.advance(2);
+  // Glue two cells of the generated sea floor (through the water), and the stone to the deck.
+  glueFace(sim, [FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY], [FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY]);
+  glueFace(sim, [BAY.stone[0], BAY.stone[1], BAY.stone[2], NX], [BAY.plank[0], BAY.plank[1], BAY.plank[2], NX]);
+  // Start the windmill.
+  sim.hold(B.PLANKS_OAK);
+  rightClick(sim, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
+  rightClick(sim, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
+  // Throw a stack of dirt out of the inventory screen.
+  sim.giveItem(B.DIRT, 5);
+  const inv = sim.player.inventory;
+  const slot = inv.hotbar.findIndex((s) => s !== null && s.item === B.DIRT);
+  inv.slotClick('hotbar', slot, 0, false);
+  sim.dropCursorStack();
+  // Assemble the raft at its helm (takes the wheel) and let the game run.
+  sim.emptyHand();
+  rightClick(sim, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
+  rightClick(sim, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
+  sim.advance(20);
+  return sim;
+}
+
+/** "Open a new world" with the same seed, in the same process, as the client does. */
+function openNewWorld(): Simulation {
+  return newWorld(SHALLOW);
+}
+
+describe('24. 用同一个种子开新世界时，没有上一局的胶水。', () => {
+  let old: Simulation;
+  let oldGlue: number[];
+  let oldShipGlue: number[];
+
+  beforeAll(() => {
+    old = playPreviousGame();
+    oldGlue = Array.from(old.worldGlue.toArray());
+    // (read defensively: the premise test reports a scene that did not come out as planned)
+    oldShipGlue = Array.from(old.structures.get(2)?.glue.toArray() ?? []);
+  });
+
+  it('(premise) the previous game had glue on the generated sea floor and on its ship, a ship, a windmill and a thrown item', () => {
+    expect(oldGlue).toEqual([FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], 2]); // the face between FLOOR_A and FLOOR_B (z axis)
+    expect(structureTree(old)).toEqual([
+      [1, 'rotor', 0, 0, []],
+      [2, 'ship', 0, 0, []],
+    ]);
+    expect(oldShipGlue.length / 4).toBe(1);
+    expect(old.structures.get(2)?.grid.count).toBe(30 + 1 + 1); // planks + helm + the glued stone
+    expect(old.entities.all().filter((e) => e.kind === 'item').length).toBe(1);
+    // a new world from the same seed has the same terrain: the glued sea-floor cells exist there too
+    const fresh = openNewWorld();
+    expect(idAt(fresh.world, FLOOR_A[0], FLOOR_A[1], FLOOR_A[2])).toBe(B.STONE);
+    expect(idAt(fresh.world, FLOOR_B[0], FLOOR_B[1], FLOOR_B[2])).toBe(B.STONE);
+  });
+
+  it('没有上一局的胶水（世界）: the sea-floor face glued in the previous game is not glued — the player is offered to apply it', () => {
+    const fresh = openNewWorld();
+    expect(fresh.worldGlue.size).toBe(0);
+    expect(fresh.worldGlue.has(FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PZ)).toBe(false);
+    const log = new EventLog(fresh);
+    buildPier(fresh); // somewhere to stand (does not touch the sea floor)
+    fresh.advance(2);
+    fresh.hold(I.GLUE);
+    rightClick(fresh, FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY);
+    expect(fresh.view.glueAnchor).toEqual({ gridId: 0, x: FLOOR_A[0], y: FLOOR_A[1], z: FLOOR_A[2] });
+    fresh.lookAtCell(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY);
+    fresh.tick();
+    expect(fresh.view.hint?.key).toBe('hint.glue.apply'); // 'hint.glue.already' if the old glue were there
+    fresh.player.input.sneak = true;
+    fresh.tick();
+    expect(fresh.view.hint?.key).toBe('hint.glue.notGlued'); // nothing to remove either
+    fresh.player.input.sneak = false;
+    rightClick(fresh, FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY);
+    expect(log.toastKeys()).toContain('toast.glue.added');
+    expect(log.toastKeys()).not.toContain('toast.glue.already');
+    expect(fresh.worldGlue.size).toBe(1);
+  });
+
+  it('没有上一局的胶水（结构体）: none of the previous structures (which carried glue) exist, and structure ids start again at 1', () => {
+    const fresh = openNewWorld();
+    expect(fresh.structures.all().length).toBe(0);
+    expect(fresh.structures.get(1)).toBeUndefined();
+    expect(fresh.structures.get(2)).toBeUndefined();
+    // the player builds the same raft and windmill again: they get the first ids of a new world
+    buildPier(fresh);
+    buildRaft(fresh);
+    buildWindmill(fresh);
+    fresh.advance(2);
+    fresh.emptyHand();
+    rightClick(fresh, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
+    rightClick(fresh, BAY.helm[0], BAY.helm[1], BAY.helm[2], NX);
+    fresh.use(); // let go of the wheel
+    fresh.tick();
+    fresh.teleport(SHALLOW.spawn.x, SHALLOW.spawn.y, SHALLOW.spawn.z);
+    fresh.advance(1);
+    fresh.hold(B.PLANKS_OAK);
+    rightClick(fresh, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
+    rightClick(fresh, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
+    expect(structureTree(fresh)).toEqual([
+      [1, 'ship', 0, 0, []],
+      [2, 'rotor', 0, 0, []],
+    ]);
+  });
+
+  it('新世界里没有上一局的东西: only the new player, at the spawn, with an empty inventory', () => {
+    const fresh = openNewWorld();
+    expect(fresh.entities.all().map((e) => [e.id, e.kind])).toEqual([[1, 'player']]);
+    const p = fresh.player;
+    expect([p.pos.x, p.pos.y, p.pos.z]).toEqual([SHALLOW.spawn.x, SHALLOW.spawn.y, SHALLOW.spawn.z]);
+    expect([p.steeringShipId, p.carrierId]).toEqual([0, 0]);
+    expect(p.inventory.hotbar.every((st) => st === null)).toBe(true);
+    expect(p.inventory.main.every((st) => st === null)).toBe(true);
+    expect(fresh.worldGlue.size).toBe(0);
+    expect(fresh.structures.all().length).toBe(0);
+  });
+
+  it('互不影响: the previous game keeps its glue, ship and windmill, and glue added in the new world does not reach it', () => {
+    const fresh = openNewWorld();
+    buildPier(fresh);
+    fresh.advance(2);
+    // glue a face in the new world that the previous game never glued
+    glueFace(fresh, [FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY], [FLOOR_C[0], FLOOR_C[1], FLOOR_C[2], PY]);
+    expect(fresh.worldGlue.has(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PZ)).toBe(true);
+    expect(old.worldGlue.has(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PZ)).toBe(false);
+    expect(Array.from(old.worldGlue.toArray())).toEqual(oldGlue);
+    expect(structureTree(old)).toEqual([
+      [1, 'rotor', 0, 0, []],
+      [2, 'ship', 0, 0, []],
+    ]);
+    expect(Array.from(old.structures.get(2)?.glue.toArray() ?? [])).toEqual(oldShipGlue);
+    // and the previous game still runs: its windmill turns on
+    const mill = old.structures.get(1) as Rotor;
+    const angle = mill.angle;
+    old.advance(10);
+    expect(mill.removed).toBe(false);
+    expect(mill.angle).not.toBe(angle);
+    expect(Array.from(old.worldGlue.toArray())).toEqual(oldGlue);
+    expect(old.entities.all().filter((e) => e.kind === 'item').length).toBe(1);
   });
 });

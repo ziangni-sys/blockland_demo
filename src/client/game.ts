@@ -15,6 +15,8 @@ import { paintAllTiles } from '../art/tiles';
 import { renderItemIcon } from '../art/icons';
 import type { BackendInfo, RenderBackend } from '../render/backend';
 import { createThreeBackend } from '../render/three/index';
+import { B } from '../blocks/defs';
+import { I } from '../blocks/items';
 import { openBestStorage } from '../save/idb';
 import { SAVE_VERSION, type WorldMeta } from '../save/codec';
 import { formatMessage } from '../sim/messages';
@@ -155,7 +157,9 @@ export class Game implements InputHost {
       (rec) => this.toast(clientText(this.settings.language, 'fault', { what: rec.what, msg: rec.message }), 'error'),
       (msg, err) => console.error(msg, err),
     );
-    this.backend = createThreeBackend();
+    // Adding #webgl2 to the page address forces the WebGL2 backend (an escape hatch for
+    // machines where the WebGPU path misbehaves).
+    this.backend = createThreeBackend({ forceWebGL: wantsWebGL2(env.win) });
     this.actions = this.makeActions();
     this.ui = createUi(env.uiRoot, this.actions, {
       iconProvider: (item, size) => {
@@ -559,6 +563,7 @@ export class Game implements InputHost {
       const name = (typeof opts.name === 'string' && opts.name.trim()) || 'World';
       const generator = new TerrainGenerator(seed);
       const sim = new Simulation({ seed, mode, generator, loadRadius: this.settings.renderDistance });
+      giveStarterKit(sim);
       const id = makeWorldId(Date.now(), Math.random);
       const meta = newWorldMeta(id, name.slice(0, 64), seedText, seed, mode, Date.now());
       this.startSession(sim, meta, generator, true);
@@ -1039,4 +1044,32 @@ export class Game implements InputHost {
     save: (): Promise<boolean> => this.saveNow('autosave'),
     backendStats: () => this.backend.stats(),
   };
+}
+
+/** True when the page address asks for the WebGL2 backend (#webgl2). */
+function wantsWebGL2(win: Window): boolean {
+  try {
+    return /webgl2/i.test(win.location?.hash ?? '');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What a new world starts with: enough to build a raft with a helm and a small windmill
+ * right away, so the core of the game is in the player's hands from the first minute.
+ */
+function giveStarterKit(sim: Simulation): void {
+  const kit: Array<[number, number]> = [
+    [B.PLANKS_OAK, 64],
+    [B.WOOL_WHITE, 32],
+    [B.CANVAS, 32],
+    [B.HELM, 1],
+    [B.BEARING, 2],
+    [I.GLUE, 16],
+    [B.LOG_OAK, 16],
+    [B.COBBLE, 32],
+    [I.BUCKET_WATER, 1],
+  ];
+  for (const [item, count] of kit) sim.giveItem(item, count);
 }

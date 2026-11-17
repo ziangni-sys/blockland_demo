@@ -1,12 +1,12 @@
 /**
  * Helpers for the "推与挤" acceptance scenarios (docs/ACCEPTANCE.md 15-18, group g4-push-crush).
  *
- * Scenes are built with world.setCell (blocks, walls, cages, windmill blocks) and, for ships,
- * with the helm assembly of the structure manager. The player starts every windmill the way the
- * game does it: look at the bearing, right-click once (preview), right-click again (start).
- * Everything else the scenarios are about — blades sweeping, ships being pushed or wedged,
- * players and rabbits being pushed or crushed — is the simulation's own tick; the tests only
- * observe it.
+ * Scenes are built with world.setCell (walls, cages, the windmill's blocks, the boat's blocks)
+ * and ships are assembled from their world helm (scene building). The PLAYER starts every
+ * windmill the way the game does it: look at the bearing, right-click once (preview), right-click
+ * again (start), each click checked to hit that bearing. Everything the scenarios are about —
+ * blades sweeping, ships pushed or wedged, players and rabbits pushed or crushed — is the
+ * simulation's own tick; the tests only observe it.
  */
 import { vi } from 'vitest';
 import { ID_MASK, facingState, makeCell } from '../../src/blocks/cell';
@@ -17,7 +17,7 @@ import { aabb, vec3, type Vec3 } from '../../src/core/math';
 import type { Entity } from '../../src/entities/entity';
 import type { EntityEvent } from '../../src/entities/host';
 import type { ShipDynamicsImpl, ShipPhysicsStats } from '../../src/structures/physics';
-import { Rotor, Ship } from '../../src/structures/structure';
+import type { Rotor, Ship } from '../../src/structures/structure';
 import { Simulation, type GameMode } from '../../src/sim/simulation';
 import type { SimEvent } from '../../src/sim/view';
 import type { VoxelGrid } from '../../src/voxel/grid';
@@ -90,12 +90,9 @@ export function buildWindmill(sim: Simulation, bearing: Cell3, facing: Dir, canv
 /**
  * The player starts the windmill on the world bearing at `bearing` like a player does: look at
  * the bearing's `face`, right-click (preview), right-click again (start). Each click is checked
- * to hit that very bearing (Simulation.useOn). `from`, when given, is where the player stands
- * while clicking (a teleport, as with a command); the player is NOT moved back.
- * Returns the started rotor.
+ * to hit that very bearing (Simulation.useOn runs one tick per click). Returns the new rotor.
  */
-export function startWindmillByClicks(sim: Simulation, bearing: Cell3, face: Dir, from?: Vec3): Rotor {
-  if (from !== undefined) sim.teleport(from.x, from.y, from.z);
+export function startWindmillByClicks(sim: Simulation, bearing: Cell3, face: Dir): Rotor {
   const before = new Set(sim.structures.rotors());
   const [x, y, z] = bearing;
   if (!sim.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) face ${face}`);
@@ -104,6 +101,15 @@ export function startWindmillByClicks(sim: Simulation, bearing: Cell3, face: Dir
   const started = sim.structures.rotors().filter((r) => !before.has(r));
   if (started.length !== 1) throw new Error(`windmill: the second right-click started ${started.length} rotors`);
   return started[0]!;
+}
+
+/**
+ * Lowest integer hub height (cell y) such that the circle swept by a straight arm of `len`
+ * cells about a horizontal axis stays at least `clearance` above `floorY`.
+ */
+export function hubAbove(floorY: number, len: number, clearance: number): number {
+  const reach = Math.hypot(len + 0.5, 0.5); // farthest corner of the tip cell from the pivot
+  return Math.ceil(floorY + clearance + reach - 0.5);
 }
 
 // ------------------------------------------------------------------ ships
@@ -139,10 +145,10 @@ export function shipStats(sim: Simulation, ship: Ship): Readonly<ShipPhysicsStat
   return st;
 }
 
-/** Ids of the hard cells of a ship, keyed by local cell. */
-export function shipCells(ship: Ship): Map<string, number> {
+/** Block id of every cell of a grid, keyed by local cell. */
+export function cellMap(grid: VoxelGrid & { forEachCell(f: (x: number, y: number, z: number, c: number) => void): void }): Map<string, number> {
   const out = new Map<string, number>();
-  ship.grid.forEachCell((x, y, z, c) => out.set(`${x},${y},${z}`, c & ID_MASK));
+  grid.forEachCell((x, y, z, c) => out.set(`${x},${y},${z}`, c & ID_MASK));
   return out;
 }
 
@@ -177,8 +183,17 @@ export function hullSamples(ship: Ship): Vec3[] {
   return out;
 }
 
+export interface Box3 {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+}
+
 /** World AABB of the given points. */
-export function extent(pts: readonly Vec3[]): { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number } {
+export function extent(pts: readonly Vec3[]): Box3 {
   const e = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
   for (const p of pts) {
     e.minX = Math.min(e.minX, p.x);
@@ -191,49 +206,27 @@ export function extent(pts: readonly Vec3[]): { minX: number; maxX: number; minY
   return e;
 }
 
-/**
- * How deep a world point lies inside cells for which `solid` holds: 0 outside, otherwise the
- * distance to the nearest face of a free neighbour (1 when all 26 neighbours are solid).
- */
-export function depthIn(solid: (x: number, y: number, z: number) => boolean, p: Vec3): number {
-  const cx = Math.floor(p.x);
-  const cy = Math.floor(p.y);
-  const cz = Math.floor(p.z);
-  if (!solid(cx, cy, cz)) return 0;
-  let best = 1;
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        if ((dx | dy | dz) === 0 || solid(cx + dx, cy + dy, cz + dz)) continue;
-        const ex = dx < 0 ? p.x - cx : dx > 0 ? cx + 1 - p.x : 0;
-        const ey = dy < 0 ? p.y - cy : dy > 0 ? cy + 1 - p.y : 0;
-        const ez = dz < 0 ? p.z - cz : dz > 0 ? cz + 1 - p.z : 0;
-        best = Math.min(best, Math.sqrt(ex * ex + ey * ey + ez * ez));
-      }
-    }
-  }
-  return best;
-}
-
 // ------------------------------------------------------------------ entities
 
-/** Does the entity's body overlap a hard cell of `grid` (the push / crush test)? */
+/** Does the entity's body overlap a hard cell of `grid` (the same test the push and crush use)? */
 export function bodyIn(grid: VoxelGrid, e: Entity): boolean {
   return boxOverlapsSolid(grid, e.box(aabb()));
 }
 
 /** Live item entities (and their total count), optionally of one item. */
-export function drops(sim: Simulation, item?: number): { entities: number; count: number } {
+export function drops(sim: Simulation, item?: number): { entities: number; count: number; items: Set<number> } {
   let entities = 0;
   let count = 0;
+  const items = new Set<number>();
   for (const e of sim.entities.all()) {
     if (e.removed || e.kind !== 'item') continue;
     const st = (e as unknown as { stack: { item: number; count: number } }).stack;
     if (item !== undefined && st.item !== item) continue;
     entities++;
     count += st.count;
+    items.add(st.item);
   }
-  return { entities, count };
+  return { entities, count, items };
 }
 
 export interface CrushRecord {
@@ -243,9 +236,10 @@ export interface CrushRecord {
 }
 
 /**
- * Records the entities module's 'crush' events. The simulation publishes no SimEvent for a crush
- * (only 'playerHurt' when a survival player takes damage), so this listens where the simulation
- * forwards entity events to the interaction layer — observation only, the call goes through.
+ * Records the entities module's 'crush' events (squeezed by a structure and moved to a free
+ * spot). The simulation publishes no SimEvent for a crush — only 'playerHurt' when a survival
+ * player takes damage — so this listens where the simulation hands entity events to its
+ * interaction layer. Observation only: every event still goes through.
  */
 export function watchCrushes(sim: Simulation): CrushRecord[] {
   const list: CrushRecord[] = [];
@@ -269,12 +263,14 @@ export function hurtEvents(events: readonly SimEvent[]): Array<Extract<SimEvent,
   return events.filter((e): e is Extract<SimEvent, { type: 'playerHurt' }> => e.type === 'playerHurt');
 }
 
-export function dist(a: Vec3, b: Vec3): number {
-  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
 export function copy(v: Vec3): Vec3 {
   return vec3(v.x, v.y, v.z);
 }
 
-export { Rotor, Ship };
+export function dist(a: Vec3, b: Vec3): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+export function hdist(a: Vec3, b: Vec3): number {
+  return Math.hypot(a.x - b.x, a.z - b.z);
+}
