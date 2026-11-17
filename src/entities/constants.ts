@@ -4,6 +4,7 @@
  * Units: blocks, seconds, blocks/second (velocities), blocks/second^2 (accelerations), ticks
  * where the name says so. "Per tick" factors are applied once per 1/20 s tick.
  */
+import { TICK_DT } from '../core/constants';
 
 // ====================================================================== bodies
 
@@ -132,6 +133,8 @@ export const UNSTUCK_MAX_BACKOFF_TICKS = 64;
 export const BURIED_RISE_LIMIT = 48;
 /** World velocity a body may keep when it lets go of a carrier. */
 export const MAX_INHERITED_SPEED = 30;
+/** A seated body pushed farther than this from its seat (a blade swept through the helm) no longer sits there. */
+export const SEAT_LEAVE_DISTANCE = 0.5;
 
 // ====================================================================== player movement
 
@@ -253,3 +256,80 @@ export const RABBIT_SWIM_SPEED = 1.2;
 /** A hop that would land above a drop deeper than this is refused. */
 export const RABBIT_MAX_DROP = 3;
 export const RABBIT_CRUSH_LIMIT = 3;
+
+// ====================================================================== client-driven players
+//
+// A client-driven player's body is moved by its client against the client's copy of the world
+// and the structures (BodyMover, body.ts); the server checks every move report (entities/drive.ts).
+// The client's copies of moving structures lag the server's by up to the network delay; the
+// checks run in the carrier's frame (where that lag cancels) and tolerate what lag can explain.
+
+/** Largest lead of the server's structure poses over a client's copy the checks allow for (seconds). */
+export const REPORT_MAX_LAG = 0.4;
+/** A claimed carrier must have a cell within this many blocks of the reported feet (in its own frame). */
+export const REPORT_CARRIER_REACH = 3;
+/**
+ * Movement time a client-driven player may have in store: server ticks that passed minus client
+ * ticks it reported (each report claims its seq gap). At most this many ticks (a quiet spell
+ * followed by a burst) ...
+ */
+export const REPORT_CREDIT_TICKS = 10;
+/**
+ * ... and at least minus this many: reports may run ahead of the server's clock by
+ * REPORT_MAX_LAG (the uplink delay dropping delivers several in one tick). A client must pace its
+ * ticks by the server's clock; one that runs faster is corrected once the debt is spent.
+ */
+export const REPORT_DEBT_TICKS = Math.round(REPORT_MAX_LAG / TICK_DT);
+/**
+ * Distance (blocks) by which reports may exceed their speed and rise allowances (rounding, push-outs
+ * at the client's lagging copies of structures): a budget, not a per-report amount, so it cannot
+ * be spent tick after tick. It holds at most REPORT_SLACK_BURST ...
+ */
+export const REPORT_SLACK_BURST = 0.5;
+/** ... and refills at this many blocks per second (the sustained excess any client can get away with). */
+export const REPORT_SLACK_RATE = 0.4;
+/**
+ * The path from the accepted position to the reported one is sampled this finely (blocks) against
+ * hard cells of the world and of the carrier: a report may not pass through a wall.
+ */
+export const REPORT_PATH_STEP = 0.1;
+/**
+ * A report's claim to stand on something is checked with the support probe grown this much
+ * deeper and wider (blocks): the world-aligned box sits on a deck the server's pose tilts or turns
+ * a little differently than the client's copy did.
+ */
+export const REPORT_SUPPORT_REACH = 0.1;
+/**
+ * A client-driven player whose reports stop for this many ticks while nothing holds it up
+ * (ground, liquid, flight) falls on the server's own authority until something does.
+ */
+export const REPORT_STALL_TICKS = 10;
+/** Reports a player may have waiting for the next tick; older ones are dropped. */
+export const REPORT_QUEUE_LIMIT = 16;
+/**
+ * Penetration (blocks) of the reported body into hard cells of the world or of its carrier that is
+ * tolerated: the body box is world-aligned, so a body standing against a wall of a deck that turned
+ * a little more on the server than on the client dips into it by a few hundredths.
+ */
+export const REPORT_HARD_TOLERANCE = 0.2;
+/**
+ * Squeeze of a client-driven player: after the server's own push-out at its present poses, a
+ * structure still overlaps the reported body by more than this (blocks), or the push could only
+ * free it by moving it this much deeper into world blocks it already overlapped (the server's
+ * leading pose of its deck carries a pinned rider into the wall that pins it) ...
+ */
+export const SQUEEZE_DEPTH = 0.3;
+/**
+ * ... for this many consecutive ticks: then the server moves it to a free spot and the squeeze
+ * rules apply. Tests (tests/drive/lag.test.ts): a blade cage that breaks after one or two such
+ * ticks hurts nobody; real squeezes are judged within lag + SQUEEZE_TICKS + 2 ticks of a
+ * server-driven player's.
+ */
+export const SQUEEZE_TICKS = 3;
+/**
+ * The second push-out of that judgement leans this hard (blocks of depth per unit of alignment)
+ * toward the structure's motion in the body's carrier frame: the way the client, whose copy of the
+ * structure lags, is pushed (the face of least depth at the server's pose may be one the client
+ * never met, e.g. the underside of a bowsprit that the server already sees a block deep in the body).
+ */
+export const SQUEEZE_PREFER_WEIGHT = 4;

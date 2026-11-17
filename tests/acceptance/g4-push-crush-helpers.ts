@@ -24,6 +24,7 @@ import type { VoxelGrid } from '../../src/voxel/grid';
 import { boxOverlapsSolid } from '../../src/voxel/shape';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { soloSim } from '../solo';
+import { withDrive } from './drive-modes';
 
 // ------------------------------------------------------------------ worlds
 
@@ -33,7 +34,7 @@ export const LAND_TOP = 35;
 export const SEA_TOP = 30;
 
 export function landSim(mode: GameMode, spawn: Vec3, seed = 41): Simulation {
-  return soloSim({
+  return withDrive(soloSim({
     seed,
     mode,
     generator: new FlatGenerator(),
@@ -41,11 +42,11 @@ export function landSim(mode: GameMode, spawn: Vec3, seed = 41): Simulation {
     loadRadius: 2,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  });
+  }));
 }
 
 export function seaSim(mode: GameMode, spawn: Vec3, seed = 42): Simulation {
-  return soloSim({
+  return withDrive(soloSim({
     seed,
     mode,
     generator: new FlatGenerator([
@@ -57,7 +58,7 @@ export function seaSim(mode: GameMode, spawn: Vec3, seed = 42): Simulation {
     loadRadius: 2,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  });
+  }));
 }
 
 /** Fill an inclusive box of world cells with a block id (0 = air). */

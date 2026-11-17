@@ -1,6 +1,6 @@
 /**
- * Moving one entity body through the world and around structures (steps b–d of the entity
- * pipeline). Every collision query goes through the voxel query module (voxel/shape.ts) with
+ * Collider: moving one body through the world and around structures (steps b–d of the body
+ * pipeline in body.ts). Every collision query goes through the voxel query module (voxel/shape.ts) with
  * the one body box (Entity.box()); see constants.ts for the probe definitions.
  *
  * Priorities (docs/DESIGN.md 对象模型): hard blocks > structures > entities.
@@ -116,8 +116,8 @@ const DISK_PATTERN: readonly number[] = Object.freeze(
 /** Vertical sample spacing of a point probe through a structure's cells. */
 const POINT_PROBE_STEP = 0.1;
 
-export class Mover {
-  /** Structures near the current entity, innermost first. Filled by the manager before move(). */
+export class Collider {
+  /** Structures near the current body, innermost first. Filled by the BodyMover before move(). */
   readonly near: StructRec[] = [];
 
   // ---- results of the last move()
@@ -174,6 +174,16 @@ export class Mover {
   private readonly upOpts: PushOptions = { prefer: vec3(0, 1, 0), preferWeight: 4 };
   /** Push options leaning toward the top face by the distance the body came down (see groundBias). */
   private readonly landOpts: PushOptions = { prefer: vec3(0, 1, 0), preferWeight: 0 };
+  /**
+   * A fixed direction (world, unit) that deep pushes by structures other than the carrier lean
+   * toward, with weight `w`, instead of each structure's motion relative to the body; null = the
+   * motion, with PREFER_WEIGHT. Only for judging a body nobody moves (BodyMover.pushOut).
+   */
+  setLean(dir: Vec3 | null, w: number): void {
+    this.leanDir = dir;
+    this.opts.preferWeight = dir === null ? PREFER_WEIGHT : w;
+  }
+  private leanDir: Vec3 | null = null;
   /** Per near index: did the body overlap it before the current push / at the sub-step start? -1 unknown. */
   private beforeOverlap = new Int8Array(16);
   private startOverlap = new Int8Array(16);
@@ -183,12 +193,16 @@ export class Mover {
   }
 
   /**
-   * Move `e` by its own displacement (dx, dy, dz) this tick. `rel` is its velocity relative to
+   * Move `e` by its own displacement `d` this tick. `rel` is its velocity relative to
    * its carrier (world axes); blocked components are cancelled in it. With `sneakGuard` the
    * horizontal displacement is first shortened so the body keeps standing. With `walker` a body
    * that stands on something steps up onto world ledges of at most STEP_HEIGHT.
    */
-  move(e: Entity, rel: Vec3, dx: number, dy: number, dz: number, sneakGuard: boolean, walker: boolean): void {
+  move(e: Entity, rel: Vec3, d: Readonly<Vec3>, sneakGuard: boolean, walker: boolean): void {
+    // (The displacement comes as an object: doubles passed to a call that is not inlined are boxed.)
+    let dx = d.x;
+    const dy = d.y;
+    let dz = d.z;
     this.onWorldGround = false;
     this.groundRec = null;
     this.collidedH = false;
@@ -742,6 +756,14 @@ export class Mover {
 
   /** Push bias toward a structure's motion relative to the body (a blade sweeping into it). */
   private preferFor(e: Entity, rel: Vec3, r: StructRec, b: AABB): PushOptions | undefined {
+    const lean = this.leanDir;
+    if (lean !== null) {
+      if (r.id === e.carrierId) return undefined;
+      this.prefer.x = lean.x;
+      this.prefer.y = lean.y;
+      this.prefer.z = lean.z;
+      return this.opts;
+    }
     if (!r.moved || r.id === e.carrierId) return undefined;
     const c = this.c;
     c.x = (b.minX + b.maxX) * 0.5;

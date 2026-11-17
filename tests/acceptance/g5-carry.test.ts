@@ -7,7 +7,8 @@
  * remembered throttle / rudder (ship.throttle / ship.rudder written after the player let go of
  * the wheel): scene setup, the dynamics then move it as they would with a helmsman.
  */
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
+import { driveSuite } from './drive-modes';
 import { ID_MASK } from '../../src/blocks/cell';
 import { NX, PZ } from '../../src/core/dirs';
 import { vec3, type Vec3 } from '../../src/core/math';
@@ -96,7 +97,7 @@ function inWorldBlock(sim: Simulation): boolean {
 
 // ====================================================================================== 19
 
-describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水里时脱离；潜行走到甲板边缘不会掉下去；船体没对齐网格时贴墙走不扣血；船转 45° 时在船角附近游泳，不会被拎上船', () => {
+driveSuite('19. 站在船上的玩家：会被带着走；走上码头、跳进水里时脱离；潜行走到甲板边缘不会掉下去；船体没对齐网格时贴墙走不扣血；船转 45° 时在船角附近游泳，不会被拎上船', () => {
   it('会被带着走: a player standing on the deck (not at the wheel) keeps its deck spot and heading while the ship sails and turns for 300 ticks', () => {
     const { sim, ship } = raftA('survival');
     const p = sim.soloPlayer.player;
@@ -536,7 +537,7 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
 
 // ====================================================================================== 20
 
-describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘走到甲板会切换到跟船走，不会掉穿甲板。', () => {
+driveSuite('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘走到甲板会切换到跟船走，不会掉穿甲板。', () => {
   it('竖直轴的转盘会带人转: a rider on a turntable is carried round the axis and turned with it', () => {
     const T = FLAT_TOP;
     const sim = flatSim('survival', vec3(-3.5, T, 0.5));
@@ -725,7 +726,7 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
 
 // ====================================================================================== 21
 
-describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时舵会松开；暂停时甲板上的人和物品都不动。', () => {
+driveSuite('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时舵会松开；暂停时甲板上的人和物品都不动。', () => {
   it('掌舵时死亡会脱离船，复活在出生点', () => {
     const spawn = vec3(3.5, SEA_TOP, 9.5); // on the pier
     const { sim, ship } = raftA('survival', { pier: true, spawn });
@@ -861,7 +862,7 @@ describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时
 
 // ====================================================================================== 22
 
-describe('22. 沉船上的舵手会溺水。', () => {
+driveSuite('22. 沉船上的舵手会溺水。', () => {
   /**
    * A deep open hull: 5x5 floor (x 0..4, z 0..4) and a ring wall `wall` cells high around a 3x3
    * hold, helm in the hold (2, ., 2) facing north; the seat (2.5, ., 3.5) is in the hold. Built
