@@ -53,6 +53,7 @@ const EN = {
   'toast.place.support': 'This needs a supporting block below',
   'toast.place.occupied': 'Something is in the way',
   'toast.place.spinning': 'A spinning rotor cannot be edited',
+  'toast.place.notOnStructure': 'This block cannot be part of a structure',
   // ---- toasts: glue
   'toast.glue.none': 'You need superglue',
   'toast.glue.added': 'Glued',
@@ -117,6 +118,7 @@ const ZH: Record<MessageKey, string> = {
   'toast.place.support': '下方需要有支撑的方块',
   'toast.place.occupied': '有东西挡着',
   'toast.place.spinning': '转动中的转子不能编辑',
+  'toast.place.notOnStructure': '这种方块不能成为结构体的一部分',
   'toast.glue.none': '需要强力胶',
   'toast.glue.added': '已粘合',
   'toast.glue.removed': '已拆胶',

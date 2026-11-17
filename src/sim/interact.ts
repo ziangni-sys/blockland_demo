@@ -57,7 +57,7 @@ import { Player } from '../entities/entity';
 import type { EntityEvent } from '../entities/host';
 import { axisValue, finiteAngle } from '../entities/input';
 import { analyzeHull, isDryCell, type HullInfo } from '../structures/hull';
-import { canGlue } from '../structures/stick';
+import { canGlue, canJoinStructure } from '../structures/stick';
 import { Ship, type Structure } from '../structures/structure';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
 import {
@@ -928,6 +928,13 @@ export class Interaction {
       cell = makeCell(item, this.placementState(def, hit, p));
     }
     if (curId === AIR && !grid.isWorld && this.structureFull(grid)) return;
+    // A block that can never be part of a structure (unbreakable ones such as deeprock —
+    // DESIGN "挖不动的方块不能被连进结构体") cannot be put onto one either: it could not be
+    // mined off again and would break the dock / re-assemble round trip.
+    if (!grid.isWorld && !canJoinStructure(cell)) {
+      this.toastKey('toast.place.notOnStructure', 'warn');
+      return;
+    }
     if (!supportOk(def, grid.getCell(x, y - 1, z))) {
       this.toastKey('toast.place.support', 'warn');
       return;
