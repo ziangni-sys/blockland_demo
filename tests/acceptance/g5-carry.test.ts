@@ -9,13 +9,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import { ID_MASK } from '../../src/blocks/cell';
-import { I } from '../../src/blocks/items';
-import { NX, PX, PZ } from '../../src/core/dirs';
+import { NX, PZ } from '../../src/core/dirs';
 import { vec3, type Vec3 } from '../../src/core/math';
-import { ItemEntity } from '../../src/entities/entity';
+import type { ItemEntity } from '../../src/entities/entity';
 import { exportSave } from '../../src/sim/persist';
 import type { Simulation } from '../../src/sim/simulation';
-import { Rotor, type Ship } from '../../src/structures/structure';
+import type { Rotor, Ship } from '../../src/structures/structure';
 import { boxOverlapsSolid } from '../../src/voxel/shape';
 import {
   B,
@@ -56,18 +55,14 @@ import {
 const RAFT_A = { x0: 0, z0: 0, x1: 6, z1: 6, y: SEA_TOP - 1, block: B.PLANKS_OAK, gunwale: ['N', 'E', 'W'] as const, helm: { x: 3, z: 2 } };
 const DECK_TOP = SEA_TOP; // deck-local y of the deck's top face (deck cells are y = SEA_TOP - 1)
 
-function raftA(
-  mode: 'creative' | 'survival',
-  opts: { pier?: boolean; spawn?: Vec3; gunwaleHeight?: number } = {},
-): { sim: Simulation; ship: Ship } {
+function raftA(mode: 'creative' | 'survival', opts: { pier?: boolean; spawn?: Vec3 } = {}): { sim: Simulation; ship: Ship } {
   const sim = seaSim(mode, opts.spawn ?? vec3(3.5, SEA_TOP, 3.5));
   if (opts.pier) fillBox(sim.world, 0, SEA_FLOOR, 7, 6, SEA_TOP - 1, 10, B.COBBLE);
-  const gh = opts.gunwaleHeight ?? 1;
-  const helm = buildHull(sim, { ...RAFT_A, gunwale: [...RAFT_A.gunwale], gunwaleHeight: gh });
+  const helm = buildHull(sim, { ...RAFT_A, gunwale: [...RAFT_A.gunwale] });
   sim.advance(2);
   if (opts.spawn) walkTo(sim, () => vec3(3.5, 0, 4.2)); // from the pier onto the deck, behind the helm
   const ship = assembleAtHelm(sim, helm);
-  expect(ship.grid.count).toBe(49 + (7 + 6 + 6) * gh + 1);
+  expect(ship.grid.count).toBe(49 + 7 + 6 + 6 + 1);
   sim.advance(40); // settle on the water
   return { sim, ship };
 }
@@ -328,6 +323,36 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
     expect(local(ship, p.pos).z - p.halfWidth).toBeLessThan(7);
   });
 
+  it('潜行走到甲板边缘不会掉下去: on a raft without gunwale yawed 45 degrees, sneaking diagonally toward a corner stops there', () => {
+    // 7x7 plank raft, helm in the middle; every edge open
+    const sim = seaSim('survival', vec3(3.5, SEA_TOP, 4.5));
+    const helm = buildHull(sim, { x0: 0, z0: 0, x1: 6, z1: 6, y: SEA_TOP - 1, block: B.PLANKS_OAK, helm: { x: 3, z: 3 } });
+    sim.advance(2);
+    const ship = assembleAtHelm(sim, helm);
+    sim.advance(30);
+    steerToYaw(sim, ship, Math.PI / 4);
+    releaseWheelByClick(sim);
+    sim.advance(20);
+    const p = sim.player;
+    p.input.sneak = true;
+    p.input.forward = 1;
+    p.input.yaw = yawOf(ship.grid) + Math.atan2(-1, -1); // deck-local (+x, +z): the stern-starboard corner (7, 7)
+    let minY = Infinity;
+    for (let i = 0; i < 200; i++) {
+      sim.tick();
+      const l = local(ship, p.pos);
+      expect(p.carrierId).toBe(ship.id);
+      expect(p.wet).toBe(0);
+      minY = Math.min(minY, l.y);
+    }
+    stopInput(sim);
+    const l = local(ship, p.pos);
+    expect(minY).toBeGreaterThan(DECK_TOP - 0.05);
+    expect(Math.max(l.x, l.z)).toBeGreaterThan(6.6); // at an edge next to the corner
+    expect(Math.hypot(7 - l.x, 7 - l.z)).toBeLessThan(1.2);
+    expect(Math.min(l.x, l.z) - p.halfWidth).toBeLessThan(7); // still over the deck
+  });
+
   /**
    * Raft B: a 13x13 plank deck (x 0..12, z 0..12) without a gunwale, the helm in the middle
    * (6, ., 6) facing north. The ship is turned off the grid by its helmsman; then a WORLD wall is
@@ -408,6 +433,29 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
     }
     expect(Math.abs(yaw.total)).toBeGreaterThan(0.2);
     expect(contact).toBeGreaterThan(80);
+    expect(ev.of('playerHurt')).toEqual([]);
+  });
+
+  it('船体没对齐网格时贴墙走不扣血: survival, the yawed ship is pushed against the wall by its remembered throttle while the player walks along it', () => {
+    const { sim, ship } = wallScene(-0.5);
+    const p = sim.player;
+    const ev = new Events(sim);
+    walkTo(sim, () => vec3(p.pos.x, 0, 3.5), 0.1, 60);
+    ship.throttle = 1; // bow first under the wall until the helm (one block high) meets it
+    const start = copy(ship.grid.position);
+    let contact = 0;
+    for (let i = 0; i < 200; i++) {
+      p.input.yaw = Math.floor(i / 20) % 2 === 0 ? -Math.PI / 2 + 0.4 : Math.PI / 2 - 0.4;
+      p.input.forward = 1;
+      sim.tick();
+      expect(p.health).toBe(20);
+      expect(inWorldBlock(sim)).toBe(false);
+      expect(p.carrierId).toBe(ship.id);
+      if (Math.abs(p.pos.z - p.halfWidth - 3) < 0.01) contact++;
+    }
+    expect(start.z - ship.grid.position.z).toBeGreaterThan(1.5); // it sailed up to the wall
+    expect(Math.abs(Math.sin(2 * yawOf(ship.grid)))).toBeGreaterThan(0.2); // still off the grid
+    expect(contact).toBeGreaterThan(150);
     expect(ev.of('playerHurt')).toEqual([]);
   });
 
@@ -513,7 +561,6 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
     const axis = vec3(0.5, 0, 0.5);
     const r0 = local(rotor, p.pos);
     const ang0 = Math.atan2(-(p.pos.z - axis.z), p.pos.x - axis.x);
-    const rotorAngle0 = rotor.angle;
     const yaw0 = p.yaw;
     let turned = 0;
     let lastAngle = rotor.angle;
@@ -527,7 +574,6 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
       expect(Math.abs(hdist(p.pos, axis) - 2)).toBeLessThan(0.05);
     }
     expect(turned).toBeGreaterThan(1.5); // the turntable really turned (CCW from above)
-    void rotorAngle0;
     const ang = Math.atan2(-(p.pos.z - axis.z), p.pos.x - axis.x);
     expect(wrap(ang - ang0 - turned)).toBeCloseTo(0, 1); // carried round the axis
     expect(wrap(p.yaw - yaw0 - turned)).toBeCloseTo(0, 3); // and turned with it
@@ -539,16 +585,19 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
    * bearing facing up at (5, SEA_TOP, 4), glued to its felt hub; a 3x3 felt platform at
    * y = SEA_TOP + 1 (x 4..6, z 3..5): a turntable mounted on the ship.
    */
-  function turntableShip(): { sim: Simulation; ship: Ship; rotor: Rotor } {
+  function turntableShip(raised = false): { sim: Simulation; ship: Ship; rotor: Rotor } {
     const sim = seaSim('survival', vec3(9.5, SEA_TOP, 10.5));
     const w = sim.world;
     const helm = buildHull(sim, { x0: 0, z0: 0, x1: 10, z1: 10, y: SEA_TOP - 1, block: B.PLANKS_OAK, helm: { x: 9, z: 9 } });
     w.setCell(5, SEA_TOP, 4, makeCell(B.BEARING, facingState(PY)));
     fillBox(w, 4, SEA_TOP + 1, 3, 6, SEA_TOP + 1, 5, B.WOOL_RED);
     sim.worldGlue.add(5, SEA_TOP, 4, PY); // hub <-> bearing: the stopped turntable comes along
+    // raised: a two-high plank block on the deck east of the platform (x 7..10, z 1..7), its top
+    // flush with the platform top (the platform's corners sweep through its edge)
+    if (raised) fillBox(w, 7, SEA_TOP, 1, 10, SEA_TOP + 1, 7, B.PLANKS_OAK);
     sim.advance(2);
     const ship = assembleAtHelm(sim, helm);
-    expect(ship.grid.count).toBe(121 + 1 + 1 + 9);
+    expect(ship.grid.count).toBe(121 + 1 + 1 + 9 + (raised ? 56 : 0));
     sim.advance(20);
     releaseWheelByClick(sim);
     // walk to a spot from which the bearing shows under the platform, start it from there
@@ -632,6 +681,45 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
     }
     const rl = local(rotor, p.pos);
     expect(Math.hypot(rl.x - rl0.x, rl.z - rl0.z)).toBeGreaterThan(1); // the turntable went on turning without the player
+  });
+
+  it('从转盘走到甲板会切换到跟船走，不会掉穿甲板: walking from the platform onto a deck flush with it (level walk)', () => {
+    const { sim, ship, rotor } = turntableShip(true);
+    const p = sim.player;
+    const top = SEA_TOP + 2; // deck-local top of the platform and of the raised deck
+    ship.throttle = 1;
+    ship.rudder = 0.3;
+    sim.advance(10);
+    // toward ship-local east, onto the raised deck (the platform turns the look while on it)
+    p.input.yaw = yawToward(ship.grid.toWorld(vec3(5.5, 0, 4.5)), ship.grid.toWorld(vec3(9.5, 0, 4.5)));
+    p.input.forward = 1;
+    let switchedAt = -1;
+    let minY = Infinity;
+    for (let i = 0; i < 60; i++) {
+      sim.tick();
+      const l = local(ship, p.pos);
+      minY = Math.min(minY, l.y);
+      expect(p.carrierId === rotor.id || p.carrierId === ship.id, `carried by the turntable or the ship (tick ${i})`).toBe(true);
+      if (switchedAt < 0 && p.carrierId === ship.id) switchedAt = i;
+      if (Math.hypot(l.x - 5.5, l.z - 4.5) > 3.2) break; // clear of the platform's sweep (radius 2.12)
+    }
+    stopInput(sim);
+    expect(switchedAt, 'switched to the ship').toBeGreaterThanOrEqual(0);
+    expect(minY).toBeGreaterThan(top - 0.05); // a level walk: never dipped, never fell through
+    sim.advance(10);
+    const l0 = local(ship, p.pos);
+    expect(l0.x).toBeGreaterThan(7); // on the raised deck, east of the platform
+    // standing on it (the block lists the ship a few degrees: the world-axis body box rests on
+    // the deck with one edge, its feet centre a few hundredths above the local top)
+    expect(Math.abs(l0.y - top)).toBeLessThan(0.08);
+    expect(p.carrierId).toBe(ship.id);
+    for (let i = 0; i < 100; i++) {
+      sim.tick();
+      expect(p.carrierId).toBe(ship.id);
+      const l = local(ship, p.pos);
+      expect(Math.hypot(l.x - l0.x, l.z - l0.z)).toBeLessThan(0.03);
+      expect(l.y).toBeGreaterThan(top - 0.05);
+    }
   });
 });
 
@@ -768,7 +856,6 @@ describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时
     expect(p.pos).toEqual(b.sim.player.pos);
     expect(a.item.pos).toEqual(b.item.pos);
     expect(a.ship.grid.position).toEqual(b.ship.grid.position);
-    void I;
   });
 });
 
@@ -838,4 +925,3 @@ describe('22. 沉船上的舵手会溺水。', () => {
 function xyz(v: Vec3): [number, number, number] {
   return [v.x, v.y, v.z];
 }
-void PX;

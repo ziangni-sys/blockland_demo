@@ -60,7 +60,16 @@ const HARBOUR: SimSpec = {
 /** World windmill: bearing on a brick tower, axis north, 9 canvas sails in the plane z = 0. */
 const WM = { bx: -10, by: T + 4, bz: 1, hx: -10, hy: T + 4, hz: 0 };
 /** The raft (x 0..4, z 0..5 at y = T - 1), its helm, mast, bearing and windmill hub. */
-const RAFT = { helm: [2, T, 4] as const, bearing: [2, T + 3, 1] as const, hub: [2, T + 3, 0] as const, stone: [1, T, 2] as const, mast: [2, T, 2] as const };
+const RAFT = {
+  helm: [2, T, 4] as const,
+  bearing: [2, T + 3, 1] as const,
+  hub: [2, T + 3, 0] as const,
+  stone: [1, T, 2] as const,
+  mast: [2, T, 2] as const,
+  /** Two sails of the raft's windmill (east arm), glued together. */
+  sailA: [3, T + 3, 0] as const,
+  sailB: [4, T + 3, 0] as const,
+};
 
 function cross(hx: number, hy: number, hz: number, arms: ReadonlyArray<readonly [number, number]>): Array<[number, number, number]> {
   return arms.map(([dx, dy]) => [hx + dx, hy + dy, hz]);
@@ -139,6 +148,9 @@ function playHarbour(): Harbour {
   sim.advance(2);
   glueFace(sim, [RAFT.stone[0], RAFT.stone[1], RAFT.stone[2], NZ], [RAFT.mast[0], RAFT.mast[1], RAFT.mast[2], NZ]);
   glueFace(sim, [RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NY], [RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], NY]);
+  // Glue between two sails of the raft's windmill: it rides into the ship, then into the nested
+  // windmill, so the nested structure has a glue store of its own to save.
+  glueFace(sim, [RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], PZ], [RAFT.sailB[0], RAFT.sailB[1], RAFT.sailB[2], PZ]);
   sim.emptyHand();
   rightClick(sim, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], PX); // preview
   rightClick(sim, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], PX); // assemble (takes the wheel)
@@ -313,7 +325,8 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     expect(ship.rotation![3]).toBeLessThan(0.9999); // the ship has turned
     expect(Math.hypot(ship.linearVelocity![0]!, ship.linearVelocity![2]!)).toBeGreaterThan(0.05);
     expect(Math.abs(ship.angularVelocity![1]!)).toBeGreaterThan(1e-3);
-    expect(Object.values(before.glue).map((g) => g.length / 4)).toEqual([1, 1, 1, 0]); // world, mill 1, ship 2, mill 3
+    expect(Object.values(before.glue).map((g) => g.length / 4)).toEqual([1, 1, 1, 1]); // world, mill 1, ship 2, mill 3 (nested)
+    expect(before.glue['structure 3']).toEqual([RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], 0]); // the sail face (x axis)
     expect(before.player.steeringShipId).toBe(2);
   });
 
@@ -345,6 +358,9 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     expect(loaded.worldGlue.has(-6, T, 5, PY)).toBe(true);
     expect(loaded.structures.get(2)!.glue.has(RAFT.stone[0], RAFT.stone[1], RAFT.stone[2], PX)).toBe(true);
     expect(loaded.structures.get(1)!.glue.has(-9, WM.hy, 0, PX)).toBe(true);
+    // the nested windmill's own store (glue that rode world -> ship -> windmill on the ship)
+    expect(loaded.structures.get(3)!.glue.has(RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], PX)).toBe(true);
+    expect(loaded.structures.get(3)!.glue.size).toBe(1);
   });
 
   it('风车角度一致: both windmills have exactly the saved angle, speed and hub glue', () => {
@@ -422,6 +438,51 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
       [1, null, false],
       [3, null, true],
     ]);
+  });
+
+  it('结构体（含嵌套）、胶水、风车角度一致（读档后能用）: after loading, the player stops both windmills at their bearings — the same blocks and glue come back as in the game never saved, hub glue included', async () => {
+    const a = playHarbour().sim; // the same game again, never saved
+    const b = loadWorld(HARBOUR, await readAgain(saved));
+    expect(snapshot(a)).toEqual(before);
+    const logs = [new EventLog(a), new EventLog(b)];
+    for (const s of [a, b]) {
+      // let go of the wheel, walk (teleport) to the mast, stop the windmill on the ship
+      s.player.input.forward = 0;
+      s.player.input.strafe = 0;
+      s.use();
+      s.tick();
+      const ship = s.structures.get(2)!;
+      const stand = ship.grid.toWorld({ x: 3.5, y: T, z: 1.5 });
+      s.teleport(stand.x, stand.y, stand.z);
+      s.advance(2);
+      rightClick(s, RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NY, ship.id);
+      // over to the pier, stop the windmill on the tower
+      s.teleport(HARBOUR.spawn.x, HARBOUR.spawn.y, HARBOUR.spawn.z);
+      s.advance(2);
+      rightClick(s, WM.bx, WM.by, WM.bz, PX);
+    }
+    for (const log of logs) expect(log.toastKeys().filter((k) => k === 'toast.rotor.stopped').length).toBe(2);
+    // the loaded windmills were found at their bearings and stopped (not previewed as new ones)
+    expect(structureTree(b)).toEqual([[2, 'ship', 0, 0, []]]);
+    const shipA = a.structures.get(2)!;
+    const shipB = b.structures.get(2)!;
+    // the ship took its windmill back: the same cells, the same glue
+    expect(cellsOf(shipB)).toEqual(cellsOf(shipA));
+    expect(Array.from(shipB.glue.toArray())).toEqual(Array.from(shipA.glue.toArray()));
+    // stone-mast + the hub glue restored on stop + the sail glue (wherever the snapped angle put it)
+    expect(shipB.glue.size).toBe(3);
+    expect(shipB.glue.has(RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], PZ)).toBe(true); // hub <-> bearing
+    expect(countId(shipB.grid, B.CANVAS, -8, T - 4, -8, 12, T + 10, 12)).toBe(7); // hub + 6 sails, none lost
+    // the world windmill is blocks again, with its sail glue, exactly as in the game never saved
+    expect(Array.from(b.worldGlue.toArray())).toEqual(Array.from(a.worldGlue.toArray()));
+    expect(b.worldGlue.size).toBe(2); // pier stones + the sail glue
+    const region = (s: Simulation): number[] => {
+      const out: number[] = [];
+      for (let y = WM.hy - 3; y <= WM.hy + 3; y++) for (let x = WM.hx - 3; x <= WM.hx + 3; x++) out.push(s.world.getCell(x, y, WM.hz));
+      return out;
+    };
+    expect(region(b)).toEqual(region(a));
+    expect(countId(b.world, B.CANVAS, WM.hx - 3, WM.hy - 3, WM.hz, WM.hx + 3, WM.hy + 3, WM.hz)).toBe(9);
   });
 
   // ---------------------------------------------------------------- water on the platform

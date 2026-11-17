@@ -14,7 +14,7 @@ import { B } from '../../src/blocks/defs';
 import { SOLID } from '../../src/blocks/registry';
 import type { Dir } from '../../src/core/dirs';
 import { aabb, vec3, type Vec3 } from '../../src/core/math';
-import type { Entity } from '../../src/entities/entity';
+import { ItemEntity, type Entity } from '../../src/entities/entity';
 import type { EntityEvent } from '../../src/entities/host';
 import type { ShipDynamicsImpl, ShipPhysicsStats } from '../../src/structures/physics';
 import type { Rotor, Ship } from '../../src/structures/structure';
@@ -219,8 +219,8 @@ export function drops(sim: Simulation, item?: number): { entities: number; count
   let count = 0;
   const items = new Set<number>();
   for (const e of sim.entities.all()) {
-    if (e.removed || e.kind !== 'item') continue;
-    const st = (e as unknown as { stack: { item: number; count: number } }).stack;
+    if (e.removed || !(e instanceof ItemEntity)) continue;
+    const st = e.stack;
     if (item !== undefined && st.item !== item) continue;
     entities++;
     count += st.count;
