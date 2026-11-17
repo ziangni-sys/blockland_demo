@@ -201,7 +201,7 @@ describe('hostile lengths and counts', () => {
     });
 
     it('a full bitmap fails before its cells are allocated (one bit would become 12 bytes)', () => {
-      // A 2 MiB bitmap of ones (the largest box): 16.7 million cells if it were decoded.
+      // A 256 KiB bitmap of ones (the largest box): 2.1 million cells if it were decoded.
       const full = new Uint8Array(MAX_STRUCTURE_BOX_CELLS / 8).fill(0xff);
       const before = process.memoryUsage().arrayBuffers;
       fast(() => decodeServerMessage(view(8, MAX_STRUCTURE_BOX_CELLS / 8, 1, full), RELIABLE));

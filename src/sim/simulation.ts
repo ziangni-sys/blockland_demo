@@ -22,7 +22,7 @@
  * per world lives in `rules` (sim/rules.ts); nothing reads some player's mode to decide a world
  * effect.
  */
-import { DAY_TICKS, ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS } from '../core/constants';
+import { DAY_TICKS, ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import { Emitter } from '../core/events';
 import { mod } from '../core/math';
 import { Rng } from '../core/rng';
@@ -108,6 +108,7 @@ export class Simulation {
   readonly shipMaxCells = SHIP_MAX_CELLS;
   readonly rotorMaxCells = ROTOR_MAX_CELLS;
   readonly rotorMinSails = ROTOR_MIN_SAILS;
+  readonly structureMaxBoxCells = STRUCTURE_MAX_BOX_CELLS;
 
   /**
    * Offset (ticks) between the world clock and the time of day. The clock itself

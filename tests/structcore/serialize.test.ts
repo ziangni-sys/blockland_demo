@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { B } from '../../src/blocks/defs';
+import { STRUCTURE_MAX_BOX_CELLS } from '../../src/core/constants';
 import { PX } from '../../src/core/dirs';
 import { qfromAxisAngle, qfromYaw, qmul, qrotate, vec3, vsub } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
@@ -199,10 +200,10 @@ describe('structure cells on disk: proportional to the cell count, always readab
     const r = s.mgr.assembleShip(0, 61, 0);
     if (!r.ok) throw new Error(r.reason);
     const g = r.structure.grid;
-    // Plain ship edits (allowed at any time). Tight box 421 x 68 x 601 = 17.2M cells: a dense
-    // box would take 34 MB.
-    g.setCell(-210, 60, -300, P);
-    g.setCell(210, 127, 300, c(B.PLANKS_PINE));
+    // Plain ship edits (allowed at any time). Tight box 128 x 68 x 240 = 2.09M cells, just under
+    // STRUCTURE_MAX_BOX_CELLS (DESIGN 组装与方块化): a dense box would take 4 MB.
+    g.setCell(-63, 60, -120, P);
+    g.setCell(64, 127, 119, c(B.PLANKS_PINE));
     expect(g.count).toBe(28);
     const bytes = save(s.mgr);
     expect(bytes.length).toBeLessThan(2048);
@@ -212,6 +213,38 @@ describe('structure cells on disk: proportional to the cell count, always readab
     expect(cellMap(ship.grid)).toEqual(cellMap(g));
     expect(ship.grid.cellBounds()).toEqual(g.cellBounds());
     expect(save(b.mgr)).toEqual(bytes);
+  });
+
+  it('a ship whose box is exactly STRUCTURE_MAX_BOX_CELLS round-trips; one cell more is refused on both ends', () => {
+    const s = scene();
+    fill(s.world, -2, 60, -2, 2, 60, 2, P);
+    s.world.setCell(0, 61, 0, facing(B.HELM, 5));
+    const r = s.mgr.assembleShip(0, 61, 0);
+    if (!r.ok) throw new Error(r.reason);
+    const g = r.structure.grid;
+    // Tight box 128 x 128 x 128 (direct edits: test setup).
+    g.setCell(125, 60, -2, P);
+    g.setCell(-2, 187, -2, P);
+    g.setCell(-2, 60, 125, c(B.PLANKS_PINE));
+    const b0 = g.cellBounds()!;
+    expect((b0.maxX - b0.minX) * (b0.maxY - b0.minY) * (b0.maxZ - b0.minZ)).toBe(STRUCTURE_MAX_BOX_CELLS);
+    const bytes = save(s.mgr);
+    const b = scene();
+    b.mgr.deserialize(new ByteReader(bytes));
+    expect(cellMap(b.mgr.ships()[0]!.grid)).toEqual(cellMap(g));
+    expect(save(b.mgr)).toEqual(bytes);
+    // One cell wider: the game never builds it, and the save refuses to write it ...
+    g.setCell(126, 60, -2, P);
+    expect(() => save(s.mgr)).toThrow(/STRUCTURE_MAX_BOX_CELLS/);
+    // ... and to read it.
+    const over = shipSave(runs([0, 60, 0, 129, 128, 128], [[0, [P]], [129 * 128 * 128 - 2, [P]]]));
+    const t = scene();
+    expect(() => t.mgr.deserialize(new ByteReader(over))).toThrow(/STRUCTURE_MAX_BOX_CELLS/);
+    expect(t.mgr.all()).toEqual([]);
+    // The same hand-written section at exactly the limit loads (its first and last cells span the box).
+    expect(loadedCells(shipSave(runs([0, 60, 0, 128, 128, 128], [[0, [P]], [STRUCTURE_MAX_BOX_CELLS - 2, [P]]])))).toEqual(
+      new Map([['0,60,0', P], ['127,187,127', P]]),
+    );
   });
 
   it('random structures round-trip exactly (runs across rows and layers)', () => {

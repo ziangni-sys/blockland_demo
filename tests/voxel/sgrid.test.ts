@@ -131,6 +131,22 @@ describe('StructureGrid storage', () => {
     expect(g.count).toBe(2000);
     expect(g.cellBounds()).toEqual({ minX: 0, minY: 0, minZ: 0, maxX: 2000, maxY: 1, maxZ: 1 });
   });
+
+  it('storage follows the tight box, not the edit history (arms built and cleared along each axis)', () => {
+    const g = new StructureGrid(1, new World());
+    g.setCell(0, 0, 0, STONE);
+    const arm = (dx: number, dy: number, dz: number, cell: number): void => {
+      for (let i = 1; i <= 1000; i++) g.setCell(i * dx, i * dy, i * dz, cell);
+    };
+    for (const [dx, dy, dz] of [[1, 0, 0], [0, 0, 1], [0, 1, 0]] as const) {
+      arm(dx, dy, dz, STONE);
+      // A 1001-cell line: the storage holds a few times its box, never the earlier arms' extents.
+      expect(g.cells.length).toBeLessThan(4 * 1001 * 5 * 5 * 4);
+      arm(dx, dy, dz, AIR);
+    }
+    expect(g.count).toBe(1);
+    expect(g.getCell(0, 0, 0)).toBe(STONE);
+  });
 });
 
 describe('StructureGrid pose and transforms', () => {

@@ -5,7 +5,7 @@
  * the size limits are the same on both ends.
  */
 import { describe, expect, it } from 'vitest';
-import { CHUNK_VOLUME, SHIP_MAX_CELLS } from '../../src/core/constants';
+import { CHUNK_VOLUME, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../../src/core/constants';
 import { Chunk } from '../../src/voxel/chunk';
 import { encodeChunk } from '../../src/save/codec';
 import { ByteReader, ByteWriter, SaveFormatError } from '../../src/save/bytes';
@@ -264,12 +264,12 @@ describe('CellVolume', () => {
   it('handles run tokens above 2^32 (structure boxes up to MAX_STRUCTURE_BOX_CELLS)', () => {
     const cells = new Uint16Array(MAX_STRUCTURE_BOX_CELLS);
     for (let i = 0; i < 4096; i++) cells[i * 13] = i; // palette of 4096: B = 12
-    cells.fill(5, 4096 * 13); // one run of ~16.7 million cells: token ~ 2^36
+    cells.fill(5, 4096 * 13); // one run of ~2 million cells: token ~ 2^33
     const enc = encodeCellVolume(cells);
     expect(enc[0]).toBe(0);
     expect(enc.length).toBeLessThan(40_000);
     const back = decodeCellVolume(enc, MAX_STRUCTURE_BOX_CELLS);
-    // (toEqual over 16 million elements is slow: compare the bytes.)
+    // (toEqual over 2 million elements is slow: compare the bytes.)
     expect(Buffer.from(back.buffer).equals(Buffer.from(cells.buffer))).toBe(true);
   });
 
@@ -340,6 +340,28 @@ describe('limits are the same on both ends', () => {
     expect([...refuse]).toEqual([0x82, 1, 2, 0x68, 0x69]);
   });
 
+  it('the box limit is the game rule STRUCTURE_MAX_BOX_CELLS = 2^21, not a second number', () => {
+    expect(MAX_STRUCTURE_BOX_CELLS).toBe(STRUCTURE_MAX_BOX_CELLS);
+    expect(MAX_STRUCTURE_BOX_CELLS).toBe(2 ** 21);
+  });
+
+  it('a structure box of one cell more than MAX_STRUCTURE_BOX_CELLS is refused on both ends', () => {
+    const g = new Gen(2);
+    const rec = g.structureRecord();
+    // 2^21 + 1 = 3 x 699051.
+    const [sx, sy, sz] = [699051, 3, 1];
+    expect(sx * sy * sz).toBe(MAX_STRUCTURE_BOX_CELLS + 1);
+    const over = { ...rec, minX: 0, minY: 0, minZ: 0, sx, sy, sz, cells: new Uint16Array(sx * sy * sz) } as StructureRecord;
+    expect(() => encodeServerMessage({ ...emptyTickBatch(1), structureSpawns: [over] })).toThrow(/structure box volume/);
+    // The same header by hand, followed by a CellVolume of one run that would cover it.
+    const w = new ByteWriter();
+    w.u8(MSG.tickBatch).varuint(1).u16(1 << 4).varuint(1).u8(0).varuint(5).varuint(0);
+    w.varint(0).varint(0).varint(0).varuint(sx).varuint(sy).varuint(sz);
+    w.u8(0).varuint(1).varuint(1).varuint(sx * sy * sz - 1);
+    w.raw(new Uint8Array(200));
+    expect(() => decodeServerMessage(w.finish(), RELIABLE)).toThrow(/too large/);
+  });
+
   it('a structure box above MAX_STRUCTURE_BOX_CELLS is refused before anything is allocated', () => {
     const g = new Gen(1);
     const rec = g.structureRecord();
@@ -366,7 +388,7 @@ describe('limits are the same on both ends', () => {
     roundTripServer({ ...emptyTickBatch(9), structureSpawns: [ship] });
 
     // A thin frame (an x arm, a z arm, a y mast) whose box is exactly MAX_STRUCTURE_BOX_CELLS.
-    const [sx, sy, sz] = [1024, 64, 256];
+    const [sx, sy, sz] = [256, 64, 128];
     expect(sx * sy * sz).toBe(MAX_STRUCTURE_BOX_CELLS);
     const cells = new Uint16Array(MAX_STRUCTURE_BOX_CELLS);
     for (let x = 0; x < sx; x++) cells[x] = 3;
@@ -377,21 +399,22 @@ describe('limits are the same on both ends', () => {
     const bytes = encodeServerMessage(batch);
     const back = decodeServerMessage(bytes, RELIABLE) as TickBatchMsg;
     const got = back.structureSpawns[0]!;
-    // (toEqual over 16 million cells is slow: compare the bytes, then the rest.)
+    // (toEqual over 2 million cells is slow: compare the bytes, then the rest.)
     expect(Buffer.from(got.cells.buffer).equals(Buffer.from(cells.buffer))).toBe(true);
     expect({ ...got, cells: null }).toEqual({ ...frame, cells: null });
     expect(encodeServerMessage(back)).toEqual(bytes);
   });
 
   it('an assembly preview: MAX_PREVIEW_CELLS cells in a MAX_STRUCTURE_BOX_CELLS box round-trip; more is refused on both ends', () => {
-    // A diagonal across a 4096 x 1 x 4096 box (2 MiB of bitmap), both corners included.
-    const side = 4096;
-    expect(side * side).toBe(MAX_STRUCTURE_BOX_CELLS);
+    // Cells along the first rows of a 2048 x 1 x 1024 box (256 KiB of bitmap) and its far corner.
+    const [side, depth] = [2048, 1024];
+    expect(side * depth).toBe(MAX_STRUCTURE_BOX_CELLS);
     const diagonal = (n: number, dx = 0): Int32Array => {
       const c = new Int32Array(3 * n);
       for (let i = 0; i < n; i++) {
-        const t = i === n - 1 ? side - 1 : i; // in bitmap order: y, then z, then x
-        c.set([t + dx, 7, t - 50], 3 * i);
+        // In bitmap order: y, then z, then x.
+        if (i === n - 1) c.set([side - 1 + dx, 7, depth - 1 - 50], 3 * i);
+        else c.set([(i % side) + dx, 7, Math.floor(i / side) - 50], 3 * i);
       }
       return c;
     };

@@ -15,7 +15,7 @@
  */
 import { cellState, ID_MASK, stateFacing } from '../blocks/cell';
 import { CELL_UNLOADED } from '../blocks/defs';
-import { ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS } from '../core/constants';
+import { ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, dirSign, type Dir } from '../core/dirs';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
 import type { GlueStore } from './glue';
@@ -120,21 +120,53 @@ export class CellSet {
   }
 }
 
+// ------------------------------------------------------------ boxes
+
+/** Is cell (x,y,z) inside the half-open bounds `b`? */
+export function inBounds(b: CellBounds, x: number, y: number, z: number): boolean {
+  return x >= b.minX && x < b.maxX && y >= b.minY && y < b.maxY && z >= b.minZ && z < b.maxZ;
+}
+
+/**
+ * Cells in the smallest box holding the half-open bounds `b` (null = no cells) and cell
+ * (x,y,z): the tight box of a structure after a block is added at (x,y,z). Compared with
+ * STRUCTURE_MAX_BOX_CELLS; exact below 2^53, far beyond any limit above that.
+ */
+export function boxCellsWith(b: CellBounds | null, x: number, y: number, z: number): number {
+  if (b === null) return 1;
+  const sx = Math.max(b.maxX, x + 1) - Math.min(b.minX, x);
+  const sy = Math.max(b.maxY, y + 1) - Math.min(b.minY, y);
+  const sz = Math.max(b.maxZ, z + 1) - Math.min(b.minZ, z);
+  return sx * sy * sz;
+}
+
 // ------------------------------------------------------------ results
 
 /**
  * Why a collect failed. 'unloaded' (an extension of the contract list): the structure touches
  * a cell of an unloaded chunk, so it may continue there; `cells` holds the loaded part only.
- * When several apply: 'too_big' > 'unloaded' > 'not_enough_sails'.
+ * 'too_spread': the tight box of the cells found so far holds more than maxBoxCells cells
+ * (DESIGN 组装与方块化: the structure is spread over too large an area).
+ * 'too_big' and 'too_spread' stop the fill, so they exclude each other: the reason is the limit
+ * the fill broke first. Either beats 'unloaded', which beats 'not_enough_sails'.
  */
-export type CollectReason = 'ok' | 'not_a_helm' | 'not_a_bearing' | 'no_hub' | 'too_big' | 'not_enough_sails' | 'unloaded';
+export type CollectReason =
+  | 'ok'
+  | 'not_a_helm'
+  | 'not_a_bearing'
+  | 'no_hub'
+  | 'too_big'
+  | 'too_spread'
+  | 'not_enough_sails'
+  | 'unloaded';
 
 export interface CollectResult {
   ok: boolean;
   reason: CollectReason;
   /**
    * x,y,z triples in BFS order, start cell first; exactly `count` triples. When too_big, the
-   * fill stopped as soon as it found cell number maxCells + 1, so it holds maxCells + 1 cells.
+   * fill stopped as soon as it found cell number maxCells + 1, so it holds maxCells + 1 cells;
+   * when too_spread, it stopped at the first cell that took the box past maxBoxCells (included).
    * When unloaded, it holds every connected cell that is loaded.
    */
   cells: Int32Array;
@@ -172,6 +204,8 @@ interface Fill {
   sails: number;
   bounds: CellBounds;
   tooBig: boolean;
+  /** The tight box of the cells found grew past maxBoxCells (the fill stopped there). */
+  tooSpread: boolean;
   /** A neighbour the fill had to examine lies in an unloaded chunk. */
   unloaded: boolean;
 }
@@ -221,7 +255,11 @@ class FillQueue {
  * BFS from (sx,sy,sz) (cell value `start`, already validated) across connected faces.
  * halfAxis >= 0 restricts the fill to cells whose coordinate along that axis is strictly
  * beyond `plane` in direction `sign` (the rotor half-space). excludeFunc rejects functional
- * blocks (rotors). Stops as soon as more than maxCells cells were found.
+ * blocks (rotors). Stops as soon as more than maxCells cells were found, or as soon as the
+ * tight box of the cells found holds more than maxBoxCells cells. The box is kept as cells are
+ * pushed, so the box test costs a few comparisons per collected cell and a multiplication only
+ * when the box grows; a thin frame spanning millions of cells is refused after visiting at most
+ * as many cells as its arms have, before anything proportional to its box is allocated.
  *
  * `unloaded` is set when any neighbour the fill examines (inside the half-space) reads as
  * CELL_UNLOADED. Its content is unknown, so it may well belong to the structure (it could be
@@ -237,6 +275,7 @@ function flood(
   sz: number,
   start: number,
   maxCells: number,
+  maxBoxCells: number,
   halfAxis: number,
   plane: number,
   sign: number,
@@ -247,10 +286,18 @@ function flood(
   q.push(sx, sy, sz, start);
   visited.add(sx, sy, sz);
   let tooBig = maxCells < 1;
+  let tooSpread = maxBoxCells < 1;
   let unloaded = false;
+  let sails = 0;
+  let minX = sx;
+  let minY = sy;
+  let minZ = sz;
+  let maxX = sx;
+  let maxY = sy;
+  let maxZ = sz;
 
   let head = 0;
-  fill: while (head < q.n && !tooBig) {
+  fill: while (head < q.n && !tooBig && !tooSpread) {
     const xyz = q.xyz;
     const x = xyz[head * 3]!;
     const y = xyz[head * 3 + 1]!;
@@ -276,37 +323,34 @@ function flood(
       if (!connectedCells(cell, nc, d as Dir, glue, x, y, z)) continue;
       q.push(nx, ny, nz, nc);
       visited.add(nx, ny, nz);
+      // A neighbour differs from its cell in one coordinate by one, so it grows the box by at
+      // most one layer; only then can the volume have changed.
+      let grew = true;
+      if (nx < minX) minX = nx;
+      else if (nx > maxX) maxX = nx;
+      else if (ny < minY) minY = ny;
+      else if (ny > maxY) maxY = ny;
+      else if (nz < minZ) minZ = nz;
+      else if (nz > maxZ) maxZ = nz;
+      else grew = false;
+      // Keep the first cell over a limit so callers can tell "exactly at" from "over". The
+      // count is tested first, so a cell that breaks both limits is 'too_big'.
       if (q.n > maxCells) {
-        // Keep the first cell over the limit so callers can tell "exactly at" from "over".
         tooBig = true;
+        break fill;
+      }
+      // Exact below 2^53; above that it is far beyond any limit anyway.
+      if (grew && (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1) > maxBoxCells) {
+        tooSpread = true;
         break fill;
       }
     }
   }
 
-  // Sails and bounds in one pass over the result (cheaper than tracking them per push).
   const n = q.n;
   const xyz = q.xyz;
   const values = q.values;
-  let sails = 0;
-  let minX = sx;
-  let minY = sy;
-  let minZ = sz;
-  let maxX = sx;
-  let maxY = sy;
-  let maxZ = sz;
-  for (let i = 0; i < n; i++) {
-    if (isSailCell(values[i]!)) sails++;
-    const x = xyz[i * 3]!;
-    const y = xyz[i * 3 + 1]!;
-    const z = xyz[i * 3 + 2]!;
-    if (x < minX) minX = x;
-    else if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    else if (y > maxY) maxY = y;
-    if (z < minZ) minZ = z;
-    else if (z > maxZ) maxZ = z;
-  }
+  for (let i = 0; i < n; i++) if (isSailCell(values[i]!)) sails++;
 
   return {
     cells: xyz.length === n * 3 ? xyz : xyz.slice(0, n * 3),
@@ -314,6 +358,7 @@ function flood(
     sails,
     bounds: { minX, minY, minZ, maxX: maxX + 1, maxY: maxY + 1, maxZ: maxZ + 1 },
     tooBig,
+    tooSpread,
     unloaded,
   };
 }
@@ -327,7 +372,8 @@ function flood(
  * come along only when the rules reach them, e.g. through glue between the bearing and its hub.
  *
  * Reasons: 'not_a_helm' (start cell is not a helm), 'too_big' (more than maxCells cells),
- * 'unloaded' (the ship touches an unloaded chunk; `cells` is its loaded part).
+ * 'too_spread' (a tight box of more than maxBoxCells cells), 'unloaded' (the ship touches an
+ * unloaded chunk; `cells` is its loaded part).
  */
 export function collectShip(
   grid: VoxelGrid,
@@ -336,12 +382,14 @@ export function collectShip(
   hy: number,
   hz: number,
   maxCells: number = SHIP_MAX_CELLS,
+  maxBoxCells: number = STRUCTURE_MAX_BOX_CELLS,
 ): CollectResult {
   maxCells = checkLimit('maxCells', maxCells);
+  maxBoxCells = checkLimit('maxBoxCells', maxBoxCells);
   const start = grid.getCell(hx, hy, hz);
   if (cellFunc(start) !== 'helm') return failure('not_a_helm');
-  const f = flood(grid, glue, hx, hy, hz, start, maxCells, -1, 0, 0, false);
-  const reason: CollectReason = f.tooBig ? 'too_big' : f.unloaded ? 'unloaded' : 'ok';
+  const f = flood(grid, glue, hx, hy, hz, start, maxCells, maxBoxCells, -1, 0, 0, false);
+  const reason: CollectReason = f.tooBig ? 'too_big' : f.tooSpread ? 'too_spread' : f.unloaded ? 'unloaded' : 'ok';
   return {
     ok: reason === 'ok',
     reason,
@@ -359,7 +407,8 @@ export function collectShip(
  * every functional block (helm, bearing, propeller) are never included and stop the fill.
  *
  * Reasons: 'not_a_bearing'; 'no_hub' (the hub cannot join a structure, or is functional);
- * 'too_big' (more than maxCells cells); 'unloaded' (the hub, or a cell the rotor touches,
+ * 'too_big' (more than maxCells cells); 'too_spread' (a tight box of more than maxBoxCells
+ * cells); 'unloaded' (the hub, or a cell the rotor touches,
  * lies in an unloaded chunk; checked before the sails, which may be in the missing part);
  * 'not_enough_sails' (fewer than minSails sail cells, compared as given: 3 < 3.5).
  * For 'not_enough_sails' `cells` holds the complete rotor, so the preview can still show it.
@@ -372,8 +421,10 @@ export function collectRotor(
   bz: number,
   maxCells: number = ROTOR_MAX_CELLS,
   minSails: number = ROTOR_MIN_SAILS,
+  maxBoxCells: number = STRUCTURE_MAX_BOX_CELLS,
 ): CollectResult {
   maxCells = checkLimit('maxCells', maxCells);
+  maxBoxCells = checkLimit('maxBoxCells', maxBoxCells);
   checkLimit('minSails', minSails); // validated only: compared as given (see checkLimit)
   const bearing = grid.getCell(bx, by, bz);
   if (cellFunc(bearing) !== 'bearing') return failure('not_a_bearing');
@@ -386,14 +437,16 @@ export function collectRotor(
   if (!canJoinStructure(hub) || isFunctionalCell(hub)) return failure('no_hub');
   const axis = facing >> 1;
   const plane = axis === 0 ? bx : axis === 1 ? by : bz;
-  const f = flood(grid, glue, hx, hy, hz, hub, maxCells, axis, plane, dirSign(facing), true);
+  const f = flood(grid, glue, hx, hy, hz, hub, maxCells, maxBoxCells, axis, plane, dirSign(facing), true);
   const reason: CollectReason = f.tooBig
     ? 'too_big'
-    : f.unloaded
-      ? 'unloaded'
-      : f.sails < minSails
-        ? 'not_enough_sails'
-        : 'ok';
+    : f.tooSpread
+      ? 'too_spread'
+      : f.unloaded
+        ? 'unloaded'
+        : f.sails < minSails
+          ? 'not_enough_sails'
+          : 'ok';
   return {
     ok: reason === 'ok',
     reason,

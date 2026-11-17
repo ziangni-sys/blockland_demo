@@ -13,7 +13,7 @@
  *
  * Imports: core, blocks, save/bytes, and types from sim/view.ts only (NETCODE section 15).
  */
-import { ROTOR_MAX_CELLS, SHIP_MAX_CELLS } from '../core/constants';
+import { ROTOR_MAX_CELLS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import type { Axis, Dir } from '../core/dirs';
 import type { Quat, Vec3 } from '../core/math';
 import type { ItemStack } from '../blocks/items';
@@ -101,14 +101,12 @@ export const MAX_COORD = 1 << 28;
 /** A CellVolume with more distinct values than this is sent raw (section 14). */
 export const PALETTE_LIMIT = 4096;
 /**
- * Largest structure cell box (sx * sy * sz) a StructureRecord or an assembly preview may carry.
- * Both ends hold the box densely (a preview as a bitmap of at most 2 MiB, which fits a message);
+ * Largest structure cell box (sx * sy * sz) a StructureRecord or an assembly preview may carry:
+ * the game rule STRUCTURE_MAX_BOX_CELLS (2^21), so every structure the game can hold can be sent.
+ * Both ends hold the box densely (a preview as a bitmap of at most 256 KiB, which fits a message);
  * the bound keeps a corrupted size from allocating gigabytes on the client.
- * The game itself bounds a structure only by its cell count, so a thin frame of a few hundred
- * cells can have a larger box: the same number has to become a game rule (assembly and building
- * onto a structure), which is outside package 3.
  */
-export const MAX_STRUCTURE_BOX_CELLS = 1 << 24;
+export const MAX_STRUCTURE_BOX_CELLS = STRUCTURE_MAX_BOX_CELLS;
 /**
  * Most cells an assembly preview may show: the largest ship (or rotor; a preview is only made for
  * a structure the game would assemble, or for a rotor that lacks sails, both within their cell limit).

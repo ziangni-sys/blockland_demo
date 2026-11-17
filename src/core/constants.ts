@@ -30,3 +30,12 @@ export const DAY_TICKS = 24000;
 export const SHIP_MAX_CELLS = 4000;
 export const ROTOR_MAX_CELLS = 400;
 export const ROTOR_MIN_SAILS = 4;
+/**
+ * Most cells the TIGHT bounding box of a structure (ship or rotor) may hold (docs/DESIGN.md
+ * "组装与方块化"): 2^21, e.g. 128 x 128 x 128 or 256 x 64 x 128. A structure grid is stored
+ * densely over its box, hull analysis floods the box and the network sends it, so the cell
+ * count alone does not bound memory (a thin frame of 900 blocks can span 20 million cells).
+ * The single source for the game rule (assembly, building onto a structure, a rotor stopping on
+ * a ship), the structure save and the network protocol.
+ */
+export const STRUCTURE_MAX_BOX_CELLS = 1 << 21;

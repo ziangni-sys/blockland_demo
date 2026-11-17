@@ -47,6 +47,8 @@ export type StructureCellListener = (
 ) => void;
 
 const GROW_MARGIN = 2;
+/** grow() re-bases on the tight bounds when the storage is more than this many times the tight box. */
+const STORAGE_SLACK = 4;
 
 export class StructureGrid implements VoxelGrid {
   readonly gridId: number;
@@ -172,9 +174,17 @@ export class StructureGrid implements VoxelGrid {
    * Reallocate storage so that cell (x,y,z) is inside it. The box grows geometrically
    * (by half its size, at least GROW_MARGIN) on each side that has to move, so building a
    * structure cell by cell costs amortised O(1) per cell instead of a full copy each time.
+   *
+   * When the old storage is more than STORAGE_SLACK times the tight box that will hold the cells
+   * (cells were removed since it grew), the new storage starts from the tight bounds instead of
+   * the old storage. Without that, a grid built out along x, cleared and built out along z, then
+   * along y, would keep every old extent and multiply them (a 1000-cell arm per axis: 10^9 cells),
+   * although its tight box is small. So the storage stays within a small factor of the tight box,
+   * which is limited (docs/DESIGN.md 组装与方块化), and building normally never re-bases.
    */
   private grow(x: number, y: number, z: number): void {
-    if (this.cells.length === 0) {
+    const b = this.count > 0 ? this.cellBounds() : null;
+    if (b === null) {
       this.resize(
         x - GROW_MARGIN,
         y - GROW_MARGIN,
@@ -185,15 +195,27 @@ export class StructureGrid implements VoxelGrid {
       );
       return;
     }
-    const padX = Math.max(GROW_MARGIN, this.sx >> 1);
-    const padY = Math.max(GROW_MARGIN, this.sy >> 1);
-    const padZ = Math.max(GROW_MARGIN, this.sz >> 1);
     let x0 = this.ox;
     let y0 = this.oy;
     let z0 = this.oz;
     let x1 = this.ox + this.sx;
     let y1 = this.oy + this.sy;
     let z1 = this.oz + this.sz;
+    const tight =
+      (Math.max(b.maxX, x + 1) - Math.min(b.minX, x)) *
+      (Math.max(b.maxY, y + 1) - Math.min(b.minY, y)) *
+      (Math.max(b.maxZ, z + 1) - Math.min(b.minZ, z));
+    if (this.cells.length > STORAGE_SLACK * tight) {
+      x0 = b.minX;
+      y0 = b.minY;
+      z0 = b.minZ;
+      x1 = b.maxX;
+      y1 = b.maxY;
+      z1 = b.maxZ;
+    }
+    const padX = Math.max(GROW_MARGIN, (x1 - x0) >> 1);
+    const padY = Math.max(GROW_MARGIN, (y1 - y0) >> 1);
+    const padZ = Math.max(GROW_MARGIN, (z1 - z0) >> 1);
     if (x < x0) x0 = Math.min(x - GROW_MARGIN, x0 - padX);
     else if (x >= x1) x1 = Math.max(x + 1 + GROW_MARGIN, x1 + padX);
     if (y < y0) y0 = Math.min(y - GROW_MARGIN, y0 - padY);

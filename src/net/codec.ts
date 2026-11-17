@@ -1439,7 +1439,7 @@ function readGluing(r: ByteReader): GluingView {
 /**
  * Preview: vu gridId, u8 kind, vi minX..minZ, vu sx..sz, ceil(volume / 8) bytes of bitmap (bit i of
  * the box = byte i>>3, bit i&7). At most MAX_PREVIEW_CELLS cells in a box of at most
- * MAX_STRUCTURE_BOX_CELLS (a 2 MiB bitmap), every corner within MAX_COORD, on both ends.
+ * MAX_STRUCTURE_BOX_CELLS (a 256 KiB bitmap), every corner within MAX_COORD, on both ends.
  */
 function writePreview(w: ByteWriter, p: PreviewView): void {
   w.varuint(p.gridId);
