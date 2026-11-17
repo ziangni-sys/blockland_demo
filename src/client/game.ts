@@ -14,12 +14,11 @@ import { paintAllTiles } from '../art/tiles';
 import { renderItemIcon } from '../art/icons';
 import type { BackendInfo, RenderBackend } from '../render/backend';
 import { createThreeBackend } from '../render/three/index';
-import { B } from '../blocks/defs';
-import { I } from '../blocks/items';
 import { openBestStorage } from '../save/idb';
 import { SAVE_VERSION, type WorldMeta } from '../save/codec';
 import { formatMessage } from '../sim/messages';
 import { placeExampleShip } from '../sim/exampleShip';
+import { giveStarterItems } from '../sim/starter';
 import { exportSave, importSave } from '../sim/persist';
 import type { PlayerControl } from '../sim/players';
 import { Simulation } from '../sim/simulation';
@@ -613,7 +612,7 @@ export class Game implements InputHost {
       const generator = new TerrainGenerator(seed);
       const sim = new Simulation({ seed, mode, generator, loadRadius: loadRadiusFor(this.settings.renderDistance) });
       const me = sim.join(LOCAL_PLAYER_KEY);
-      giveStarterKit(me);
+      giveStarterItems(me);
       // A windmill boat moored near the spawn, as blocks (new worlds only, never on load).
       placeExampleShip(sim);
       const id = makeWorldId(Date.now(), Math.random);
@@ -1167,23 +1166,4 @@ function wantsWebGL2(win: Window): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * What a new world starts with: enough to build a raft with a helm and a small windmill
- * right away, so the core of the game is in the player's hands from the first minute.
- */
-function giveStarterKit(me: PlayerControl): void {
-  const kit: Array<[number, number]> = [
-    [B.PLANKS_OAK, 64],
-    [B.WOOL_WHITE, 32],
-    [B.CANVAS, 32],
-    [B.HELM, 1],
-    [B.BEARING, 2],
-    [I.GLUE, 16],
-    [B.LOG_OAK, 16],
-    [B.COBBLE, 32],
-    [I.BUCKET_WATER, 1],
-  ];
-  for (const [item, count] of kit) me.giveItem(item, count);
 }

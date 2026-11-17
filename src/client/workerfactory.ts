@@ -46,3 +46,22 @@ export function createMeshWorker(): WorkerLike {
 export function createMeshWorkerFromDataUrl(): WorkerLike {
   return withoutBlobUrls(MeshWorker, 'blocklands-mesh');
 }
+
+/**
+ * The game server (net/host/worker.ts: a ServerHost driven by host control messages). Its bundle
+ * is loaded on the first call (a chunk of its own in the normal build), so the page does not
+ * carry it before it starts a server. The browser game does not run on it yet (NETCODE package
+ * 9); window.__blocklands.serverProbe starts one (client/serverprobe.ts).
+ */
+export async function createServerWorker(): Promise<WorkerLike> {
+  return new (await serverWorkerCtor())({ name: 'blocklands-server' });
+}
+
+/** createServerWorker from a data: URL, for opaque-origin sandboxes (see the file comment). */
+export async function createServerWorkerFromDataUrl(): Promise<WorkerLike> {
+  return withoutBlobUrls(await serverWorkerCtor(), 'blocklands-server');
+}
+
+async function serverWorkerCtor(): Promise<WorkerCtor> {
+  return (await import('../net/host/worker?worker&inline')).default;
+}
