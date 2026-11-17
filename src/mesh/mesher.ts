@@ -1,0 +1,166 @@
+/**
+ * The mesher: voxels -> geometry. Pure and deterministic; runs in the mesh Worker and in
+ * Node tests. World sections and structures share it (docs/ARCHITECTURE.md).
+ *
+ * GEOMETRY CONVENTIONS (the render backend relies on these)
+ * --------------------------------------------------------
+ * Space      Box space of the MeshInput: interior cell (x,y,z) spans [x,x+1]^3. Every
+ *            vertex of a cell lies inside that cell's box.
+ * Quads      Everything is quads: 4 vertices + 6 indices, no shared vertices. Triangles
+ *            are COUNTER-CLOCKWISE seen from the front (outside): cull back faces.
+ *            Double-sided parts (plants, helm wheel, propeller blades, liquid surfaces)
+ *            are emitted twice: the front, and a back copy with reversed winding and
+ *            negated normal that reuses the same positions and uvs.
+ * Normals    Signed bytes, unit length * 127. Axis faces are exactly (+-127, 0, 0) etc.
+ * UV         0..1 across one tile, (0,0) = bottom-left of the tile IMAGE, (1,1) = top-right.
+ *            Side faces (+-X, +-Z): v grows with +Y; u grows to the viewer's right when the
+ *            face is seen from outside (+X: u = 1-z, -X: u = z, +Z: u = x, -Z: u = 1-x),
+ *            so tiles are never mirrored. Top (+Y): u = x, v = 1-z (north is up when looking
+ *            down). Bottom (-Y): u = x, v = z (looking up, south is up). Partial boxes use
+ *            the matching sub-rectangle of the tile (uv derived from position).
+ *            Rotated faces: logs turn their side tile so its v direction (the bark grain)
+ *            runs along the log axis; bearings turn their side tile so its top points to
+ *            the front face.
+ * Layers     Texture-array layer = BlockDef.tileIds entry for that face / part.
+ * Light      4 bytes per vertex [sky, block, ao, flags]:
+ *              sky, block  smooth light, level 0..15 scaled by 17 (0..255). Per vertex the
+ *                          average of the up-to-4 non-opaque cells touching the vertex in
+ *                          the layer just outside the face; the diagonal cell is ignored
+ *                          when both side cells are opaque. MeshInput.light === null
+ *                          (structures): sky 255, block 0.
+ *              ao          255 / 204 / 153 / 102 for 0 / 1 / 2 / 3-or-both-sides occluders
+ *                          (classic side1 + side2 + corner rule; only OPAQUE cubes occlude).
+ *                          A plain multiplier: lit colour * ao / 255.
+ *              flags       VFLAG_EMISSIVE on every face of a light-emitting block (torch,
+ *                          lava, lamp: draw unlit/full bright); VFLAG_LIQUID_SURFACE on both
+ *                          sides of liquid top surfaces; VFLAG_PLANT on cross plants (uv.v
+ *                          is 0 at the roots, 1 at the tips: scale sway by v).
+ * Diagonal   Each quad is split along its brighter diagonal by AO (ties: by light), which
+ *            keeps a lone dark corner from smearing a streak across the quad. Liquid top
+ *            surfaces fold along their flatter diagonal instead.
+ * Groups     BlockDef.layer picks opaque / cutout / translucent. Double-sided decal parts
+ *            (helm wheel, propeller blades) never go to the plain opaque pass: they need
+ *            alpha testing, so an 'opaque' block puts them in cutout.
+ *
+ * CULLING
+ * -------
+ * A cube face is skipped when the neighbour cell covers it (every OPAQUE cube covers all
+ * six faces; a snow-like 'layers' slab in the opaque pass covers the face below it) and
+ * between two cells of the same non-opaque full cube (glass, ice, leaves). Faces on the
+ * box border are tested against the margin cells. Shapes that only partly fill their cell
+ * are culled per part: a part's face is tested only when it lies on the cell boundary.
+ */
+import { ID_MASK } from '../blocks/cell';
+import type { MeshData, MeshInput } from './types';
+import { MeshContext } from './shapes/builder';
+import { emitCube } from './shapes/cube';
+import { LiquidScratch, emitLiquid } from './shapes/liquid';
+import { emitCactus, emitCross, emitHelm, emitLayers, emitPropeller, emitTorch } from './shapes/models';
+import {
+  G_CUTOUT,
+  G_OPAQUE,
+  G_TRANSLUCENT,
+  SHAPE,
+  SH_AXIS,
+  SH_BEARING,
+  SH_CACTUS,
+  SH_CROSS,
+  SH_CUBE,
+  SH_HELM,
+  SH_LAYERS,
+  SH_LIQUID,
+  SH_NONE,
+  SH_PROPELLER,
+  SH_TORCH,
+} from './shapes/tables';
+
+export { AO_BYTE } from './shapes/tables';
+export { LIQUID_FULL_HEIGHT } from './shapes/liquid';
+
+function checkInput(input: MeshInput): void {
+  const { sx, sy, sz } = input;
+  if (!Number.isInteger(sx) || !Number.isInteger(sy) || !Number.isInteger(sz) || sx < 0 || sy < 0 || sz < 0) {
+    throw new RangeError(`mesh input: bad dimensions ${sx}x${sy}x${sz}`);
+  }
+  const n = (sx + 2) * (sy + 2) * (sz + 2);
+  if (input.cells.length !== n) {
+    throw new RangeError(`mesh input: cells has ${input.cells.length} entries, expected ${n}`);
+  }
+  if (input.light !== null && input.light.length !== n) {
+    throw new RangeError(`mesh input: light has ${input.light.length} entries, expected ${n}`);
+  }
+}
+
+/**
+ * A reusable mesher. Owns growable scratch buffers, so a long-lived instance (the mesh
+ * Worker keeps one) builds without reallocating; every MeshData it returns is made of
+ * exact-size copies that never alias the scratch. Not safe for concurrent use — there is
+ * none in JS — but any sequence of build() calls is independent of the previous ones.
+ */
+export class Mesher {
+  private readonly ctx = new MeshContext();
+  private readonly liquid = new LiquidScratch();
+
+  build(input: MeshInput): MeshData {
+    checkInput(input);
+    const ctx = this.ctx;
+    ctx.begin(input);
+    try {
+      const { sx, sy, sz, cells } = input;
+      const px = sx + 2;
+      const slab = px * (sz + 2);
+      for (let y = 0; y < sy; y++) {
+        for (let z = 0; z < sz; z++) {
+          let p = 1 + (z + 1) * px + (y + 1) * slab;
+          for (let x = 0; x < sx; x++, p++) {
+            const cell = cells[p]!;
+            const id = cell & ID_MASK;
+            const shape = SHAPE[id]!;
+            if (shape === SH_NONE) continue;
+            switch (shape) {
+              case SH_CUBE:
+              case SH_AXIS:
+              case SH_BEARING:
+                emitCube(ctx, p, x, y, z, cell, id, shape);
+                break;
+              case SH_LIQUID:
+                emitLiquid(ctx, this.liquid, p, x, y, z, id);
+                break;
+              case SH_CROSS:
+                emitCross(ctx, p, x, y, z, id);
+                break;
+              case SH_TORCH:
+                emitTorch(ctx, p, x, y, z, id);
+                break;
+              case SH_LAYERS:
+                emitLayers(ctx, p, x, y, z, cell, id);
+                break;
+              case SH_CACTUS:
+                emitCactus(ctx, p, x, y, z, id);
+                break;
+              case SH_HELM:
+                emitHelm(ctx, p, x, y, z, cell, id);
+                break;
+              case SH_PROPELLER:
+                emitPropeller(ctx, p, x, y, z, cell, id);
+                break;
+            }
+          }
+        }
+      }
+      const g = ctx.groups;
+      return { opaque: g[G_OPAQUE]!.finish(), cutout: g[G_CUTOUT]!.finish(), translucent: g[G_TRANSLUCENT]!.finish() };
+    } finally {
+      ctx.end();
+    }
+  }
+}
+
+/**
+ * Mesh one box of cells (see MeshInput). Pure: the result depends only on `input`, and
+ * nothing survives the call. Hot callers should keep a Mesher and call build() instead,
+ * which reuses its scratch buffers between jobs.
+ */
+export function buildMesh(input: MeshInput): MeshData {
+  return new Mesher().build(input);
+}

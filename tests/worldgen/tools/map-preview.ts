@@ -1,0 +1,243 @@
+/**
+ * World preview renderer (a development tool, not a test).
+ *
+ * For each seed writes into `outDir`:
+ *   map_<seed>.png      top-down colour map of real generated chunks, hill-shaded,
+ *                       water shaded by depth, spawn marked with a red cross;
+ *   biome_<seed>.png    biome labels (from biomeAt) over the same area;
+ *   section_<seed>.png  vertical cross-section (x along the map's middle row, y 0..127,
+ *                       2 px per block vertically) showing caves, ores, lava and water.
+ *
+ * Run (env-guarded vitest entry, see map-preview.test.ts):
+ *   WORLDGEN_PREVIEW=1 WORLDGEN_OUT=/some/dir WORLDGEN_SEEDS=1,2,3 npx vitest run tests/worldgen/tools
+ */
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { CHUNK_SIZE, SEA_LEVEL, WORLD_HEIGHT } from '../../../src/core/constants';
+import { B } from '../../../src/blocks/defs';
+import { BIOME_NAMES, type Biome } from '../../../src/worldgen/biome';
+import { TerrainGenerator } from '../../../src/worldgen/generator';
+import { encodePng } from './png';
+
+type RGB = [number, number, number];
+
+const BLOCK_COLOR = new Map<number, RGB>([
+  [B.STONE, [128, 128, 132]],
+  [B.COBBLE, [110, 110, 110]],
+  [B.DIRT, [134, 96, 67]],
+  [B.TURF, [96, 156, 58]],
+  [B.SAND, [222, 210, 160]],
+  [B.GRAVEL, [140, 132, 128]],
+  [B.DEEPROCK, [40, 40, 44]],
+  [B.LOG_OAK, [110, 84, 52]],
+  [B.LOG_PINE, [74, 54, 34]],
+  [B.LEAVES_OAK, [56, 122, 40]],
+  [B.LEAVES_PINE, [36, 88, 58]],
+  [B.COAL_ORE, [30, 30, 30]],
+  [B.IRON_ORE, [214, 170, 140]],
+  [B.COPPER_ORE, [214, 112, 64]],
+  [B.SNOW_BLOCK, [242, 246, 252]],
+  [B.SNOW_LAYER, [236, 242, 250]],
+  [B.CLAY, [158, 164, 180]],
+  [B.WATER, [40, 92, 200]],
+  [B.LAVA, [240, 110, 20]],
+  [B.CACTUS, [70, 140, 60]],
+  [B.FLOWER_RED, [210, 40, 40]],
+  [B.FLOWER_YELLOW, [236, 210, 40]],
+  [B.TALL_GRASS, [110, 170, 66]],
+]);
+
+const BIOME_COLOR: Record<Biome, RGB> = {
+  sea: [30, 70, 170],
+  lake: [70, 140, 230],
+  shore: [230, 214, 150],
+  meadow: [140, 200, 80],
+  broadleaf: [40, 130, 40],
+  conifer: [30, 90, 80],
+  highland: [150, 150, 90],
+  peaks: [230, 230, 240],
+  scrub: [210, 160, 80],
+};
+
+const SKY: RGB = [180, 214, 240];
+
+export interface PreviewOptions {
+  seeds: number[];
+  /** Side of the square map in blocks (rounded to whole chunks). */
+  size: number;
+  outDir: string;
+  /** Centre the map on the spawn point instead of the origin. */
+  centreOnSpawn?: boolean;
+}
+
+export interface PreviewStats {
+  seed: number;
+  spawn: { x: number; y: number; z: number };
+  seaFraction: number;
+  biomeFractions: Record<string, number>;
+  maxHeight: number;
+  msPerChunk: number;
+  files: string[];
+}
+
+function colorOf(id: number): RGB {
+  return BLOCK_COLOR.get(id) ?? [255, 0, 255];
+}
+
+export function renderPreviews(opts: PreviewOptions): PreviewStats[] {
+  mkdirSync(opts.outDir, { recursive: true });
+  const stats: PreviewStats[] = [];
+  for (const seed of opts.seeds) stats.push(renderSeed(seed, opts));
+  return stats;
+}
+
+function renderSeed(seed: number, opts: PreviewOptions): PreviewStats {
+  const gen = new TerrainGenerator(seed);
+  const spawn = gen.spawnPoint();
+  const chunks = Math.max(1, Math.round(opts.size / CHUNK_SIZE));
+  const size = chunks * CHUNK_SIZE;
+  const ccx = opts.centreOnSpawn ? Math.floor(spawn.x / CHUNK_SIZE) : 0;
+  const ccz = opts.centreOnSpawn ? Math.floor(spawn.z / CHUNK_SIZE) : 0;
+  const c0x = ccx - (chunks >> 1);
+  const c0z = ccz - (chunks >> 1);
+  const x0 = c0x * CHUNK_SIZE;
+  const z0 = c0z * CHUNK_SIZE;
+
+  // Top block + height per column; one cross-section row.
+  const topId = new Uint16Array(size * size);
+  const topY = new Int16Array(size * size);
+  const groundY = new Int16Array(size * size); // highest non-liquid solid (for water depth)
+  const sectionZ = z0 + (size >> 1);
+  const section = new Uint16Array(size * WORLD_HEIGHT);
+  let genMs = 0;
+  let maxHeight = 0;
+  for (let cz = 0; cz < chunks; cz++) {
+    for (let cx = 0; cx < chunks; cx++) {
+      const t0 = performance.now();
+      const cells = gen.generate(c0x + cx, c0z + cz);
+      genMs += performance.now() - t0;
+      for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+          const px = cx * CHUNK_SIZE + lx;
+          const pz = cz * CHUNK_SIZE + lz;
+          let y = WORLD_HEIGHT - 1;
+          while (y > 0 && cells[lx | (lz << 4) | (y << 8)] === 0) y--;
+          const id = cells[lx | (lz << 4) | (y << 8)]! & 0x3ff;
+          topId[px + pz * size] = id;
+          topY[px + pz * size] = y;
+          let g = y;
+          while (g > 0 && (cells[lx | (lz << 4) | (g << 8)]! & 0x3ff) === B.WATER) g--;
+          groundY[px + pz * size] = g;
+          if (id !== B.WATER && y > maxHeight) maxHeight = y;
+          if (z0 + pz === sectionZ) {
+            for (let yy = 0; yy < WORLD_HEIGHT; yy++) section[px + yy * size] = cells[lx | (lz << 4) | (yy << 8)]! & 0x3ff;
+          }
+        }
+      }
+    }
+  }
+
+  // ---- map
+  const map = new Uint8Array(size * size * 3);
+  let sea = 0;
+  for (let pz = 0; pz < size; pz++) {
+    for (let px = 0; px < size; px++) {
+      const i = px + pz * size;
+      const id = topId[i]!;
+      let [r, g, b] = colorOf(id);
+      if (id === B.WATER) {
+        sea++;
+        const depth = SEA_LEVEL - 1 - groundY[i]!;
+        const k = Math.min(1, depth / 26);
+        r = 70 - 50 * k;
+        g = 170 - 110 * k;
+        b = 225 - 75 * k;
+      } else {
+        // Hill shading from the north-west plus a gentle height tint.
+        const nw = px > 0 && pz > 0 ? topY[i - 1 - size]! : topY[i]!;
+        const shade = Math.max(0.55, Math.min(1.45, 1 + (topY[i]! - nw) * 0.09));
+        const tint = 0.85 + ((topY[i]! - SEA_LEVEL) / 70) * 0.3;
+        r *= shade * tint;
+        g *= shade * tint;
+        b *= shade * tint;
+      }
+      map[i * 3] = clamp255(r);
+      map[i * 3 + 1] = clamp255(g);
+      map[i * 3 + 2] = clamp255(b);
+    }
+  }
+  // Spawn marker.
+  const sx = Math.floor(spawn.x) - x0;
+  const sz = Math.floor(spawn.z) - z0;
+  for (let d = -6; d <= 6; d++) {
+    plot(map, size, sx + d, sz, [255, 0, 0]);
+    plot(map, size, sx, sz + d, [255, 0, 0]);
+  }
+  // Section line marker (thin, every 4th pixel) so the cross-section can be located.
+  for (let px = 0; px < size; px += 4) plot(map, size, px, sectionZ - z0, [255, 255, 255]);
+
+  // ---- biome map (sampled at full resolution)
+  const biomeImg = new Uint8Array(size * size * 3);
+  const biomeCount = new Map<string, number>();
+  for (let pz = 0; pz < size; pz++) {
+    for (let px = 0; px < size; px++) {
+      const name = gen.biomeAt(x0 + px, z0 + pz);
+      biomeCount.set(name, (biomeCount.get(name) ?? 0) + 1);
+      const c = BIOME_COLOR[name];
+      const i = (px + pz * size) * 3;
+      biomeImg[i] = c[0];
+      biomeImg[i + 1] = c[1];
+      biomeImg[i + 2] = c[2];
+    }
+  }
+  for (let d = -6; d <= 6; d++) {
+    plot(biomeImg, size, sx + d, sz, [255, 0, 0]);
+    plot(biomeImg, size, sx, sz + d, [255, 0, 0]);
+  }
+
+  // ---- cross-section (y up, 2 px per block vertically)
+  const sh = WORLD_HEIGHT * 2;
+  const sec = new Uint8Array(size * sh * 3);
+  for (let y = 0; y < WORLD_HEIGHT; y++) {
+    for (let px = 0; px < size; px++) {
+      const id = section[px + y * size]!;
+      const c = id === 0 ? (y < SEA_LEVEL ? ([20, 20, 24] as RGB) : SKY) : colorOf(id);
+      for (let k = 0; k < 2; k++) {
+        const row = sh - 1 - (y * 2 + k);
+        const i = (px + row * size) * 3;
+        sec[i] = c[0];
+        sec[i + 1] = c[1];
+        sec[i + 2] = c[2];
+      }
+    }
+  }
+
+  const files = [join(opts.outDir, `map_${seed}.png`), join(opts.outDir, `biome_${seed}.png`), join(opts.outDir, `section_${seed}.png`)];
+  writeFileSync(files[0]!, encodePng(size, size, map));
+  writeFileSync(files[1]!, encodePng(size, size, biomeImg));
+  writeFileSync(files[2]!, encodePng(size, sh, sec));
+
+  const biomeFractions: Record<string, number> = {};
+  for (const name of BIOME_NAMES) biomeFractions[name] = (biomeCount.get(name) ?? 0) / (size * size);
+  return {
+    seed,
+    spawn,
+    seaFraction: sea / (size * size),
+    biomeFractions,
+    maxHeight,
+    msPerChunk: genMs / (chunks * chunks),
+    files,
+  };
+}
+
+function plot(img: Uint8Array, size: number, x: number, y: number, c: RGB): void {
+  if (x < 0 || y < 0 || x >= size || y >= size) return;
+  const i = (x + y * size) * 3;
+  img[i] = c[0];
+  img[i + 1] = c[1];
+  img[i + 2] = c[2];
+}
+
+function clamp255(v: number): number {
+  return v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
+}
