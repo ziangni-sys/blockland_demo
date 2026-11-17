@@ -613,6 +613,7 @@ describe('GlueStore: change events', () => {
     const s = new GlueStore();
     const other = new GlueStore();
     const { mirror } = mirrorOf(s);
+    const { mirror: otherMirror } = mirrorOf(other); // the target of the cross-store moves
     const c = (): number => rng.int(-12, 12);
     for (let i = 0; i < 6000; i++) {
       const op = rng.int(0, 9);
@@ -638,11 +639,17 @@ describe('GlueStore: change events', () => {
       } else {
         for (let k = 0; k < 4; k++) other.add(c(), c(), c(), rng.int(0, 5) as Dir);
       }
-      if (i % 500 === 0) expect(mirror.toArray()).toEqual(s.toArray());
+      if (i % 500 === 0) {
+        expect(mirror.toArray()).toEqual(s.toArray());
+        expect(otherMirror.toArray()).toEqual(other.toArray());
+      }
     }
     expect(s.size).toBeGreaterThan(0);
+    expect(other.size).toBeGreaterThan(0);
     expect(mirror.toArray()).toEqual(s.toArray());
     expect(mirror.size).toBe(s.size);
+    expect(otherMirror.toArray()).toEqual(other.toArray());
+    expect(otherMirror.size).toBe(other.size);
   });
 
   it('reports each face once per change, with the canonical cell and axis; no-ops report nothing', () => {

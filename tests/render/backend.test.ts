@@ -301,3 +301,58 @@ describe('upload primer and CPU array release (review: turn hitch, retained mesh
     expect(m.geometry.getAttribute('position').array.length).toBe(0);
   });
 });
+
+describe('glue on block surfaces (review: decals glowed at night and lay on top of water)', () => {
+  const decalOf = (root: THREE.Object3D): THREE.InstancedMesh | undefined => {
+    let found: THREE.InstancedMesh | undefined;
+    root.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh && o.visible && (o.material as THREE.Material).name === 'overlay-glue-decal') found = o;
+    });
+    return found;
+  };
+
+  it('the glue decal and bead are drawn before water, which then tints them like the block under them', () => {
+    const be = readyBackend();
+    const i = internals(be);
+    be.setSectionMesh(1, 0, 0, 0, { opaque: quad(0), cutout: null, translucent: quad(3) });
+    const water = i.sections.get(1)!.meshes[2]!;
+    expect((water.material as THREE.Material).transparent).toBe(true);
+    be.setOverlays({
+      target: null,
+      breakProgress: 0,
+      preview: [{ structureId: 0, x: 5, y: 0, z: 0 }],
+      conflicts: [],
+      glue: [
+        { structureId: 0, x: 0, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0 },
+        { structureId: 0, x: 2, y: 0, z: 0, face: 2, covered: true, sky: 0, block: 0 },
+      ],
+    });
+    const orders = new Map<string, number>();
+    i.overlayRoot.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh && o.visible) orders.set((o.material as THREE.Material).name, o.renderOrder);
+    });
+    // Transparent objects are drawn by ascending renderOrder: glue on surfaces first, then water,
+    // then the markers (preview cells) which must stay readable through water.
+    expect(orders.get('overlay-glue-decal')).toBeLessThan(water.renderOrder);
+    expect(orders.get('overlay-glue')).toBeLessThan(water.renderOrder);
+    expect(orders.get('overlay-cells')).toBeGreaterThan(water.renderOrder);
+    be.dispose();
+  });
+
+  it("a decal on a structure is lit with the structure's pose light; a world decal with the world's", () => {
+    const be = readyBackend();
+    const i = internals(be);
+    be.setStructureMesh(4, 0, 0, 0, mesh());
+    be.setStructurePose(4, { ...pose(10, 50, 10), sky: 6, block: 3 });
+    const face = { x: 1, y: 0, z: 1, face: 2, covered: false, sky: 15, block: 0 };
+    be.setOverlays({ target: null, breakProgress: 0, preview: [], conflicts: [], glue: [{ structureId: 4, ...face }, { structureId: 0, ...face }] });
+    const ship = decalOf(i.structures.get(4)!.group)!;
+    const bl = ship.userData.bl as THREE.Vector4;
+    expect([bl.x, bl.y]).toEqual([6 / 15, 3 / 15]);
+    // The pose light changes in place: the decal follows without a new overlay list.
+    be.setStructurePose(4, { ...pose(10, 50, 10), sky: 15, block: 0 });
+    expect([bl.x, bl.y]).toEqual([1, 0]);
+    expect(decalOf(i.overlayRoot)!.userData.bl).toBeUndefined(); // the backend's world light
+    be.dispose();
+  });
+});

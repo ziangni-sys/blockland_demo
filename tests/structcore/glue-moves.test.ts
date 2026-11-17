@@ -7,7 +7,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
-import { NY, PX, PY, PZ } from '../../src/core/dirs';
+import { NY, NZ, PX, PY, PZ } from '../../src/core/dirs';
+import { commitDock, planDock } from '../../src/structures/assembly';
 import { applyRotorPose } from '../../src/structures/rotor';
 import { c, millShip, scene, SHIP_HELM, windmill } from './helpers';
 
@@ -103,5 +104,26 @@ describe('glue moving between grids', () => {
     expect(g.has(hx - 2, hy, hz, 5 /* -Z */)).toBe(false); // the dropped tip's face is gone
     expect(g.has(hx - 1, hy, hz, 1 /* -X: towards the stone */)).toBe(true);
     expect(g.size).toBe(1);
+  });
+
+  it('docking onto a cell that became hard after planning: faces with no placed end are not carried into the world', () => {
+    const s = scene();
+    millShip(s.world, s.host.worldGlue);
+    const r = s.mgr.assembleShip(HX, HY, HZ);
+    if (!r.ok) throw new Error(r.reason);
+    const ship = r.structure;
+    const plan = planDock(s.world, ship.grid); // pose identity: docks where it was assembled
+    expect(plan.conflicts).toEqual([]);
+    ship.glue.add(3, 60, 3, PY); // deck corner's open top face
+    ship.glue.add(3, 60, 3, NZ); // between two deck cells that will both drop
+    ship.glue.add(1, 60, 1, PY); // a placed cell's open top face
+    // Stones appear at two destinations after planning (commitDock's defensive path).
+    s.world.setCell(3, 60, 3, c(B.STONE));
+    s.world.setCell(3, 60, 2, c(B.STONE));
+    const out = commitDock(s.host, ship, plan.t, null);
+    expect(out.report.dropped).toBe(2);
+    expect(s.host.worldGlue.has(3, 60, 3, PY)).toBe(false); // stone and air: never glued by the player
+    expect(s.host.worldGlue.has(3, 60, 3, NZ)).toBe(false); // stone to stone
+    expect(s.host.worldGlue.has(1, 60, 1, PY)).toBe(true);
   });
 });

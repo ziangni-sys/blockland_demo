@@ -37,9 +37,12 @@ export const GLUE_EXPOSED_RADIUS = 24;
 /**
  * Glue faces are re-collected at most this often unless a glue store changed or a hand started
  * or stopped holding glue. Also the longest a face that became covered / exposed (a block put
- * on it or taken off) waits before it is drawn the other way.
+ * on it or taken off) waits before it is drawn the other way, and the longest a decal keeps
+ * the old light after the light at its face changed (a torch placed or removed).
  */
 export const GLUE_REFRESH_MS = 250;
+/** Raw light byte (sky << 4 | block) of open sky: the light structure glue is collected with. */
+const FULL_SKY = 0xf0;
 /** Sprinting widens the view a little (smoothed). */
 const SPRINT_FOV_SCALE = 1.1;
 
@@ -120,7 +123,12 @@ export class ViewBuilder {
   private lastPreviewKind: string | null = null;
   private lastConflicts: InteractionView['conflicts'] | undefined = undefined;
   private glueAt = -Infinity;
-  private glueKey = '';
+  /**
+   * What the glue list was last collected from: [hand holds glue (0/1), world glue version,
+   * then (structure id, glue version) per structure]. Compared and rewritten in place each
+   * frame, so no string or array is built when nothing changed.
+   */
+  private readonly glueKey: number[] = [];
 
   // scratch
   private readonly framePrev: FramePose = { position: vec3(), rotation: quat() };
@@ -289,35 +297,53 @@ export class ViewBuilder {
    * COVERED faces (hard blocks on both sides) within GLUE_VIEW_RADIUS while glue is in the main
    * hand or the off-hand. Re-collected when a glue store changes or a hand starts / stops
    * holding glue, and at least every GLUE_REFRESH_MS (blocks placed on or taken off a glued face
-   * switch it between covered and exposed). An unchanged result keeps the previous array.
+   * switch it between covered and exposed; the light at a decal changes). An unchanged result
+   * keeps the previous array.
    */
   private updateGlue(sim: Simulation, nowMs: number): void {
     const o = this.overlay;
     const p = sim.player;
     if (p.dead) {
       if (o.glue.length > 0) o.glue = [];
-      this.glueKey = '';
+      this.glueKey.length = 0;
       return;
     }
     const inv = p.inventory;
     const main = inv.selectedStack();
     const off = inv.offhand;
     const inHand = (main !== null && main.item === I.GLUE) || (off !== null && off.item === I.GLUE);
-    let key = `${inHand ? 1 : 0}|${sim.worldGlue.version}`;
     const structures = sim.structures.all();
-    for (let i = 0; i < structures.length; i++) key += `,${structures[i]!.id}:${structures[i]!.glue.version}`;
-    if (key === this.glueKey && nowMs - this.glueAt < GLUE_REFRESH_MS) return;
-    this.glueKey = key;
+    const changed = this.updateGlueKey(inHand ? 1 : 0, sim.worldGlue.version, structures);
+    if (!changed && nowMs - this.glueAt < GLUE_REFRESH_MS) return;
     this.glueAt = nowMs;
     const faces: OverlayFace[] = [];
     const eye = p.eyePos(this.scratch2);
-    collectGlueFaces(sim.world, sim.worldGlue, 0, eye, inHand, faces);
+    collectGlueFaces(sim.world, sim.worldGlue, 0, eye, inHand, sim.world, faces);
     for (let i = 0; i < structures.length; i++) {
       const s = structures[i]!;
       if (s.removed || s.glue.size === 0) continue;
-      collectGlueFaces(s.grid, s.glue, s.id, s.grid.toLocal(eye, this.scratch), inHand, faces);
+      collectGlueFaces(s.grid, s.glue, s.id, s.grid.toLocal(eye, this.scratch), inHand, null, faces);
     }
     if (!sameFaces(o.glue, faces)) o.glue = faces;
+  }
+
+  /** Writes the glue key (see glueKey) in place; true when it differs from the previous one. */
+  private updateGlueKey(hand: number, worldVersion: number, structures: readonly { id: number; glue: GlueStore }[]): boolean {
+    const k = this.glueKey;
+    const len = 2 + 2 * structures.length;
+    let changed = k.length !== len;
+    if (k[0] !== hand || k[1] !== worldVersion) changed = true;
+    k[0] = hand;
+    k[1] = worldVersion;
+    for (let i = 0, j = 2; i < structures.length; i++, j += 2) {
+      const s = structures[i]!;
+      const v = s.glue.version;
+      if (k[j] !== s.id || k[j + 1] !== v) changed = true;
+      k[j] = s.id;
+      k[j + 1] = v;
+    }
+    k.length = len;
+    return changed;
   }
 }
 
@@ -325,9 +351,19 @@ export class ViewBuilder {
  * Append the glued faces of one grid around `at` (a point in that grid's local space) to `out`:
  * exposed ones within GLUE_EXPOSED_RADIUS, covered ones within GLUE_VIEW_RADIUS when `covered`
  * glue is to be shown. An exposed face is given as its hard cell plus the direction of the open
- * side (the decal lies on that side); a covered one as its canonical cell plus the positive face.
+ * side (the decal lies on that side) and the light of the open cell, read from `light` (the
+ * world, for world glue) or full sky light when null (a structure: its pose light is applied by
+ * the renderer); a covered one as its canonical cell plus the positive face.
  */
-export function collectGlueFaces(grid: VoxelGrid, glue: GlueStore, structureId: number, at: Vec3, showCovered: boolean, out: OverlayFace[]): void {
+export function collectGlueFaces(
+  grid: VoxelGrid,
+  glue: GlueStore,
+  structureId: number,
+  at: Vec3,
+  showCovered: boolean,
+  light: World | null,
+  out: OverlayFace[],
+): void {
   if (glue.size === 0) return;
   const R = GLUE_EXPOSED_RADIUS;
   const r = GLUE_VIEW_RADIUS;
@@ -342,11 +378,15 @@ export function collectGlueFaces(grid: VoxelGrid, glue: GlueStore, structureId: 
     const hardB = SOLID[grid.getCell(bx, by, bz) & ID_MASK] === 1;
     if (hardA && hardB) {
       if (!showCovered || Math.max(Math.abs(x - cx), Math.abs(y - cy), Math.abs(z - cz)) > r) return;
-      out.push({ structureId, x, y, z, face: axis * 2, covered: true });
+      out.push({ structureId, x, y, z, face: axis * 2, covered: true, sky: 0, block: 0 });
     } else if (hardB) {
-      out.push({ structureId, x: bx, y: by, z: bz, face: axis * 2 + 1, covered: false });
+      // The decal lies on B's negative face, in the open cell A.
+      const l = light === null ? FULL_SKY : light.getLightRaw(x, y, z);
+      out.push({ structureId, x: bx, y: by, z: bz, face: axis * 2 + 1, covered: false, sky: l >> 4, block: l & 15 });
     } else {
-      out.push({ structureId, x, y, z, face: axis * 2, covered: false });
+      // The decal lies on A's positive face, in the open cell B.
+      const l = light === null ? FULL_SKY : light.getLightRaw(bx, by, bz);
+      out.push({ structureId, x, y, z, face: axis * 2, covered: false, sky: l >> 4, block: l & 15 });
     }
   });
 }
@@ -357,6 +397,7 @@ function sameFaces(a: readonly OverlayFace[], b: readonly OverlayFace[]): boolea
     const p = a[i]!;
     const q = b[i]!;
     if (p.structureId !== q.structureId || p.x !== q.x || p.y !== q.y || p.z !== q.z || p.face !== q.face || p.covered !== q.covered) return false;
+    if (p.sky !== q.sky || p.block !== q.block) return false;
   }
   return true;
 }

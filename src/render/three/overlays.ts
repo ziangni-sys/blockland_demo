@@ -15,6 +15,9 @@
  * Glue (docs/DESIGN.md 强力胶: glue belongs to a face and outlives the block on one side).
  *   - An EXPOSED glued face (one side open) is a DECAL of the glue_face tile lying on the face,
  *     on the open side, depth tested: it shows like paint on the block and hides behind others.
+ *     It is lit like the face under it (OverlayFace.sky / block per instance, the parent's
+ *     per-object light on top, the time of day, the face term), and it is drawn BEFORE water,
+ *     so water over it tints it as it tints the block.
  *   - A COVERED glued face lies between two blocks, where a decal could never be seen. It is
  *     drawn twice instead:
  *       - a glue BEAD: a thin band straddling the seam on every surface of the pair that
@@ -26,11 +29,34 @@
  *         visible to a player holding glue.
  */
 import * as THREE from 'three/webgpu';
-import { abs, Discard, float, Fn, max, min, mix, sin, smoothstep, texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import {
+  abs,
+  attribute,
+  Discard,
+  float,
+  floor,
+  Fn,
+  max,
+  min,
+  mix,
+  modelWorldMatrix,
+  normalize,
+  select,
+  sin,
+  smoothstep,
+  texture,
+  uniform,
+  uv,
+  vec2,
+  vec3,
+  vec4,
+  vertexStage,
+} from 'three/tsl';
+import type { Node } from 'three/webgpu';
 import type { OverlayCell, OverlayFace, OverlayState } from '../backend';
 import { boxEdges } from './boxgeom';
 import { crackLayer, crackStage, tileLayer } from './blocktiles';
-import { applyFogNode, cameraRelativePosition, encodeOutput, type SharedUniforms } from './shading';
+import { applyFogNode, cameraRelativePosition, encodeOutput, faceShadeNode, skyBlockLightNode, type SharedUniforms } from './shading';
 
 /** Resolves the parent object of a structure id (0 = world overlay root); null = unknown structure. */
 export type ParentResolver = (structureId: number) => THREE.Object3D | null;
@@ -44,11 +70,21 @@ export interface OverlayAnchor {
 
 const ZERO_ANCHOR: OverlayAnchor = Object.freeze({ x: 0, y: 0, z: 0 });
 
-/** Render orders inside the transparent list: after water. */
+/**
+ * Render orders inside the transparent list. Glue lying on block surfaces (decal, bead) goes
+ * BEFORE water (renderOrder 0), so water in front of it blends over it as over the block; the
+ * other overlays are markers and go after water.
+ */
+const ORDER_GLUE_DECAL = -2;
+const ORDER_GLUE_BEAD = -1;
 const ORDER_CELLS = 60;
 const ORDER_DECALS = 61;
-const ORDER_GLUE = 62;
 const ORDER_LINES = 63;
+/**
+ * Per-instance attribute of the lit glue decal: (sky / 15, block / 15, face Dir, 0). The
+ * decal's material reads it as `attribute(LIGHT_ATTRIBUTE)`.
+ */
+export const LIGHT_ATTRIBUTE = 'olight';
 
 /** Width of the glue bead across the seam (blocks; half on each block). */
 export const GLUE_BEAD_WIDTH = 0.26;
@@ -70,7 +106,7 @@ const DIR_X = [1, -1, 0, 0, 0, 0];
 const DIR_Y = [0, 0, 1, -1, 0, 0];
 const DIR_Z = [0, 0, 0, 0, 1, -1];
 
-function cellsHash(cells: readonly OverlayCell[], withFace: boolean): number {
+function cellsHash(cells: readonly OverlayCell[], withFace: boolean, withLight: boolean): number {
   let h = 0x811c9dc5 ^ cells.length;
   for (let i = 0; i < cells.length; i++) {
     const c = cells[i]!;
@@ -79,6 +115,7 @@ function cellsHash(cells: readonly OverlayCell[], withFace: boolean): number {
     h = Math.imul(h ^ c.y, 0x01000193);
     h = Math.imul(h ^ c.z, 0x01000193);
     if (withFace) h = Math.imul(h ^ (c as OverlayFace).face, 0x01000193);
+    if (withLight) h = Math.imul(h ^ (((c as OverlayFace).sky << 4) | (c as OverlayFace).block), 0x01000193);
   }
   return h >>> 0;
 }
@@ -91,7 +128,13 @@ function cellsHash(cells: readonly OverlayCell[], withFace: boolean): number {
  */
 type Placement = { kind: 'cell'; inflate: number } | { kind: 'face'; offset: number };
 
-/** A set of instanced meshes (one per parent structure) drawing one cell list. */
+/**
+ * A set of instanced meshes (one per parent structure) drawing one cell list. A LIT layer
+ * (faces only) also writes each face's light and direction into the per-instance attribute
+ * LIGHT_ATTRIBUTE (each mesh then owns a copy of the geometry carrying it) and hands every
+ * mesh its parent's per-object light (userData.bl, see shading.ts), so a decal on a structure
+ * is lit by the structure's pose light like the structure's own mesh.
+ */
 class InstancedCellLayer {
   private readonly meshes = new Map<number, THREE.InstancedMesh>();
   private readonly counts = new Map<number, number>();
@@ -109,11 +152,31 @@ class InstancedCellLayer {
     private readonly material: THREE.Material,
     private readonly order: number,
     private readonly placement: Placement,
+    private readonly lit = false,
   ) {}
+
+  private newMesh(capacity: number): THREE.InstancedMesh {
+    let geo = this.geometry;
+    if (this.lit) {
+      geo = this.geometry.clone();
+      const a = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 4), 4);
+      a.setUsage(THREE.DynamicDrawUsage);
+      geo.setAttribute(LIGHT_ATTRIBUTE, a);
+    }
+    const m = new THREE.InstancedMesh(geo, this.material, capacity);
+    m.frustumCulled = false;
+    return m;
+  }
+
+  private disposeMesh(m: THREE.InstancedMesh): void {
+    m.removeFromParent();
+    m.dispose();
+    if (m.geometry !== this.geometry) m.geometry.dispose();
+  }
 
   update(cells: readonly OverlayCell[], resolve: ParentResolver, topology: number, anchor: OverlayAnchor): void {
     const faces = this.placement.kind === 'face';
-    const hash = cellsHash(cells, faces);
+    const hash = cellsHash(cells, faces, this.lit);
     if (
       hash === this.lastHash &&
       cells.length === this.lastLen &&
@@ -155,12 +218,8 @@ class InstancedCellLayer {
         return;
       }
       if (!m || m.instanceMatrix.count < n) {
-        if (m) {
-          m.removeFromParent();
-          m.dispose();
-        }
-        m = new THREE.InstancedMesh(this.geometry, this.material, Math.max(16, nextPow2(n)));
-        m.frustumCulled = false;
+        if (m) this.disposeMesh(m);
+        m = this.newMesh(Math.max(16, nextPow2(n)));
         m.renderOrder = this.order;
         m.matrixAutoUpdate = false;
         m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -173,6 +232,8 @@ class InstancedCellLayer {
         // this frame would leave the new child with an identity matrixWorld (drawn near the
         // world origin) until its next pose.
         m.matrixWorldNeedsUpdate = true;
+        // The parent's per-object light (a structure's pose light; none = the world's).
+        if (this.lit) m.userData.bl = parent.userData.bl;
       }
       m.count = 0;
       m.visible = true;
@@ -185,11 +246,21 @@ class InstancedCellLayer {
       if (!m || k === undefined || !m.parent) continue;
       const world = c.structureId === 0;
       this.writeMatrix(m.instanceMatrix.array as Float32Array, k * 16, c, world ? anchor.x : 0, world ? anchor.y : 0, world ? anchor.z : 0);
+      if (this.lit) {
+        const f = c as OverlayFace;
+        const l = m.geometry.getAttribute(LIGHT_ATTRIBUTE).array as Float32Array;
+        l[k * 4] = f.sky / 15;
+        l[k * 4 + 1] = f.block / 15;
+        l[k * 4 + 2] = f.face >= 0 && f.face < 6 ? f.face : 2;
+        l[k * 4 + 3] = 0;
+      }
       this.fill.set(c.structureId, k + 1);
       m.count = k + 1;
     }
     this.meshes.forEach((m) => {
-      if (m.count > 0) m.instanceMatrix.needsUpdate = true;
+      if (m.count === 0) return;
+      m.instanceMatrix.needsUpdate = true;
+      if (this.lit) m.geometry.getAttribute(LIGHT_ATTRIBUTE).needsUpdate = true;
     });
   }
 
@@ -241,9 +312,7 @@ class InstancedCellLayer {
 
   /** One instanced mesh for pipeline warm-up. */
   warmupMesh(): THREE.InstancedMesh {
-    const m = new THREE.InstancedMesh(this.geometry, this.material, 1);
-    m.frustumCulled = false;
-    return m;
+    return this.newMesh(1);
   }
 
   get drawn(): number {
@@ -255,10 +324,7 @@ class InstancedCellLayer {
   }
 
   dispose(): void {
-    this.meshes.forEach((m) => {
-      m.removeFromParent();
-      m.dispose();
-    });
+    this.meshes.forEach((m) => this.disposeMesh(m));
     this.meshes.clear();
   }
 }
@@ -361,7 +427,11 @@ export class OverlayLayer {
   private readonly glueLayerU = uniform(0, 'int');
   readonly materials: THREE.Material[] = [];
 
-  constructor(u: SharedUniforms, placeholder: THREE.DataArrayTexture, tileNodes: THREE.TextureNode[]) {
+  /**
+   * `objLight` is the backend's per-object light uniform (shading.ts: x = sky scale, y = minimum
+   * block light, read from the drawn object's userData.bl); the glue decal is lit with it.
+   */
+  constructor(u: SharedUniforms, objLight: Node<'vec4'>, placeholder: THREE.DataArrayTexture, tileNodes: THREE.TextureNode[]) {
     this.cellBox = new THREE.BoxGeometry(1, 1, 1);
     this.decalQuad = new THREE.PlaneGeometry(1, 1);
     this.beadGeo = glueBeadGeometry();
@@ -453,9 +523,23 @@ export class OverlayLayer {
     })();
     this.materials.push(ghostMat);
 
-    // Decal of an exposed glued face: the glue_face tile on the block surface, depth tested.
+    // Decal of an exposed glued face: the glue_face tile on the block surface, depth tested and
+    // lit like that surface (shading.ts lightColor without AO): the instance's light of the open
+    // cell scaled by the parent's per-object light, the time of day, and the face term of the
+    // face direction turned into world space (a rotated structure's faces shade like its mesh).
     const decalTex = texture(placeholder, uv()).depth(this.glueLayerU);
     tileNodes.push(decalTex);
+    const inst = attribute(LIGHT_ATTRIBUTE, 'vec4');
+    const decalSky = vertexStage(inst.x.mul(objLight.x));
+    const decalBlock = vertexStage(max(inst.y, objLight.y));
+    const faceAxis = floor(inst.z.mul(0.5));
+    const faceSign = float(1).sub(inst.z.sub(faceAxis.mul(2)).mul(2));
+    const faceDir = vec3(
+      select(faceAxis.equal(0), faceSign, float(0)),
+      select(faceAxis.equal(1), faceSign, float(0)),
+      select(faceAxis.equal(2), faceSign, float(0)),
+    );
+    const decalNormal = vertexStage(normalize(modelWorldMatrix.mul(vec4(faceDir, 0)).xyz));
     const decalMat = new THREE.NodeMaterial();
     decalMat.name = 'overlay-glue-decal';
     decalMat.lights = false;
@@ -465,18 +549,20 @@ export class OverlayLayer {
     decalMat.polygonOffset = true;
     decalMat.polygonOffsetFactor = -1;
     decalMat.polygonOffsetUnits = -2;
-    decalMat.colorNode = Fn(() => {
-      Discard(decalTex.a.lessThan(0.04));
-      const a = min(decalTex.a.mul(1.6), float(0.95));
-      return vec4(encodeOutput(applyFogNode(u, decalTex.rgb.mul(1.1), cameraRelativePosition())), a);
-    })();
+    // Built eagerly (no Fn): the texel test is the mask, and the graph stays inspectable.
+    decalMat.maskNode = decalTex.a.greaterThanEqual(0.04);
+    const decalLight = skyBlockLightNode(u, decalSky, decalBlock).mul(faceShadeNode(decalNormal));
+    decalMat.colorNode = vec4(
+      encodeOutput(applyFogNode(u, decalTex.rgb.mul(1.1).mul(decalLight), cameraRelativePosition())),
+      min(decalTex.a.mul(1.6), float(0.95)),
+    );
     this.materials.push(decalMat);
 
     this.preview = new InstancedCellLayer(this.cellBox, cellMat(0x52e0ff, 0.16, 0.5), ORDER_CELLS, { kind: 'cell', inflate: 0.03 });
     this.conflicts = new InstancedCellLayer(this.cellBox, cellMat(0xff3b30, 0.3, 0.55), ORDER_CELLS, { kind: 'cell', inflate: 0.04 });
     this.glueGhost = new InstancedCellLayer(this.decalQuad, ghostMat, ORDER_DECALS, { kind: 'face', offset: 0.5 });
-    this.glueBead = new InstancedCellLayer(this.beadGeo, beadMat, ORDER_GLUE, { kind: 'face', offset: 0.5 });
-    this.glueDecal = new InstancedCellLayer(this.decalQuad, decalMat, ORDER_DECALS, { kind: 'face', offset: 0.5 + GLUE_DECAL_LIFT });
+    this.glueBead = new InstancedCellLayer(this.beadGeo, beadMat, ORDER_GLUE_BEAD, { kind: 'face', offset: 0.5 });
+    this.glueDecal = new InstancedCellLayer(this.decalQuad, decalMat, ORDER_GLUE_DECAL, { kind: 'face', offset: 0.5 + GLUE_DECAL_LIFT }, true);
 
     this.crack = new THREE.Mesh(this.crackBox, crackMat);
     this.crack.renderOrder = ORDER_DECALS;

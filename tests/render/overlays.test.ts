@@ -3,7 +3,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
-import { GLUE_BEAD_LIFT, GLUE_BEAD_WIDTH, GLUE_DECAL_LIFT, glueBeadGeometry, OverlayLayer } from '../../src/render/three/overlays';
+import { uniform } from 'three/tsl';
+import { GLUE_BEAD_LIFT, GLUE_BEAD_WIDTH, GLUE_DECAL_LIFT, glueBeadGeometry, LIGHT_ATTRIBUTE, OverlayLayer } from '../../src/render/three/overlays';
 import { SharedUniforms } from '../../src/render/three/shading';
 import type { OverlayFace, OverlayState } from '../../src/render/backend';
 
@@ -22,7 +23,7 @@ function state(partial: Partial<OverlayState>): OverlayState {
 
 function layer(): { layer: OverlayLayer; tex: THREE.DataArrayTexture } {
   const tex = new THREE.DataArrayTexture(new Uint8Array(4 * 4 * 4).fill(255), 4, 4, 1);
-  return { layer: new OverlayLayer(new SharedUniforms(), tex, []), tex };
+  return { layer: new OverlayLayer(new SharedUniforms(), uniform(new THREE.Vector4(1, 0, 0, 1)), tex, []), tex };
 }
 
 function instancesOf(root: THREE.Object3D, name: string): { box: THREE.Box3; matrix: THREE.Matrix4; mat: THREE.Material }[] {
@@ -48,7 +49,7 @@ describe('glued faces (review: glue between two blocks was invisible)', () => {
     const root = new THREE.Group();
     const cell = { structureId: 0, x: 4, y: 2, z: -3 };
     for (let face = 0; face < 6; face++) {
-      l.update(state({ glue: [{ ...cell, face, covered: false }] }), () => root, face);
+      l.update(state({ glue: [{ ...cell, face, covered: false, sky: 15, block: 0 }] }), () => root, face);
       expect(instancesOf(root, 'overlay-glue')).toEqual([]);
       expect(instancesOf(root, 'overlay-glue-xray')).toEqual([]);
       const decals = instancesOf(root, 'overlay-glue-decal');
@@ -83,9 +84,9 @@ describe('glued faces (review: glue between two blocks was invisible)', () => {
     l.update(
       state({
         glue: [
-          { structureId: 0, x: 0, y: 0, z: 0, face: 0, covered: true },
-          { structureId: 0, x: 5, y: 0, z: 0, face: 2, covered: false },
-          { structureId: 0, x: 9, y: 0, z: 0, face: 4, covered: false },
+          { structureId: 0, x: 0, y: 0, z: 0, face: 0, covered: true, sky: 15, block: 0 },
+          { structureId: 0, x: 5, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0 },
+          { structureId: 0, x: 9, y: 0, z: 0, face: 4, covered: false, sky: 15, block: 0 },
         ],
       }),
       () => root,
@@ -106,7 +107,7 @@ describe('glued faces (review: glue between two blocks was invisible)', () => {
     const root = new THREE.Group();
     const cell = { structureId: 0, x: 4, y: 2, z: -3 };
     for (let face = 0; face < 6; face++) {
-      l.update(state({ glue: [{ ...cell, face, covered: true }] }), () => root, face);
+      l.update(state({ glue: [{ ...cell, face, covered: true, sky: 15, block: 0 }] }), () => root, face);
       expect(instancesOf(root, 'overlay-glue-decal')).toEqual([]);
       const beads = instancesOf(root, 'overlay-glue');
       expect(beads.length).toBe(1);
@@ -168,6 +169,75 @@ describe('glued faces (review: glue between two blocks was invisible)', () => {
   });
 });
 
+describe('glue decal lighting (review: the decal glowed at full brightness at night and in caves)', () => {
+  function decalMeshes(root: THREE.Object3D): THREE.InstancedMesh[] {
+    const out: THREE.InstancedMesh[] = [];
+    root.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh && o.visible && (o.material as THREE.Material).name === 'overlay-glue-decal') out.push(o);
+    });
+    return out;
+  }
+  const lightOf = (m: THREE.InstancedMesh, k: number): number[] => {
+    const a = m.geometry.getAttribute(LIGHT_ATTRIBUTE);
+    return [a.getX(k), a.getY(k), a.getZ(k), a.getW(k)];
+  };
+
+  it('each decal carries the light of its open cell and its face, re-sent when only the light changes', () => {
+    const { layer: l, tex } = layer();
+    const root = new THREE.Group();
+    const a: OverlayFace = { structureId: 0, x: 1, y: 2, z: 3, face: 1, covered: false, sky: 3, block: 9 };
+    const b: OverlayFace = { structureId: 0, x: 4, y: 2, z: 3, face: 2, covered: false, sky: 15, block: 0 };
+    l.update(state({ glue: [a, b] }), () => root, 1);
+    const [m] = decalMeshes(root);
+    expect(m!.geometry.getAttribute(LIGHT_ATTRIBUTE)).toBeInstanceOf(THREE.InstancedBufferAttribute);
+    expect(lightOf(m!, 0)).toEqual([3 / 15, 9 / 15, 1, 0].map(Math.fround));
+    expect(lightOf(m!, 1)).toEqual([1, 0, 2, 0]);
+    // A torch put next to the face: same cells, new light.
+    const version = (m!.geometry.getAttribute(LIGHT_ATTRIBUTE) as THREE.InstancedBufferAttribute).version;
+    l.update(state({ glue: [{ ...a, block: 14 }, b] }), () => root, 1);
+    expect(lightOf(m!, 0)[1]).toBeCloseTo(14 / 15, 6);
+    expect((m!.geometry.getAttribute(LIGHT_ATTRIBUTE) as THREE.InstancedBufferAttribute).version).toBeGreaterThan(version);
+    l.dispose();
+    tex.dispose();
+  });
+
+  it("a decal under a structure takes the structure's per-object light; a world decal the default", () => {
+    const { layer: l, tex } = layer();
+    const world = new THREE.Group();
+    const ship = new THREE.Group();
+    const shipLight = new THREE.Vector4(0.2, 0.4, 0, 0);
+    ship.userData.bl = shipLight;
+    const face = { x: 0, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0 };
+    l.update(state({ glue: [{ structureId: 0, ...face }, { structureId: 7, ...face }] }), (id) => (id === 0 ? world : id === 7 ? ship : null), 1);
+    expect(decalMeshes(ship)[0]!.userData.bl).toBe(shipLight);
+    expect(decalMeshes(world)[0]!.userData.bl).toBeUndefined();
+    l.dispose();
+    tex.dispose();
+  });
+
+  it('the decal colour depends on the instance light, the per-object light, the time of day and the light tints', () => {
+    const u = new SharedUniforms();
+    const objLight = uniform(new THREE.Vector4(1, 0, 0, 1));
+    const tex = new THREE.DataArrayTexture(new Uint8Array(4 * 4 * 4).fill(255), 4, 4, 1);
+    const l = new OverlayLayer(u, objLight, tex, []);
+    const mat = l.materials.find((m) => m.name === 'overlay-glue-decal') as THREE.NodeMaterial;
+    expect(mat.lights).toBe(false); // lit by the voxel light model, not three's lights
+    const seen = new Set<unknown>();
+    const attributes = new Set<string>();
+    const walk = (n: THREE.Node): void => {
+      if (seen.has(n)) return;
+      seen.add(n);
+      if (n instanceof THREE.AttributeNode) attributes.add((n as unknown as { _attributeName: string })._attributeName);
+      for (const c of n.getChildren()) walk(c as THREE.Node);
+    };
+    walk(mat.colorNode!);
+    expect(attributes.has(LIGHT_ATTRIBUTE)).toBe(true);
+    for (const node of [objLight, u.dayLight, u.skyTint, u.blockTint]) expect(seen.has(node)).toBe(true);
+    l.dispose();
+    tex.dispose();
+  });
+});
+
 describe('overlay parenting', () => {
   // Review finding: a new instanced mesh added under a structure whose pose did not change
   // that frame kept an identity matrixWorld (drawn near the world origin).
@@ -179,7 +249,7 @@ describe('overlay parenting', () => {
     group.matrix.makeRotationY(0.6).setPosition(100, 47.5, -20);
     scene.add(group);
     scene.updateMatrixWorld(); // the structure's pose is settled before the overlay appears
-    const face: OverlayFace = { structureId: 5, x: 2, y: 1, z: 2, face: 2, covered: true };
+    const face: OverlayFace = { structureId: 5, x: 2, y: 1, z: 2, face: 2, covered: true, sky: 15, block: 0 };
     l.update(state({ glue: [face], preview: [{ structureId: 5, x: 1, y: 1, z: 1 }] }), (id) => (id === 5 ? group : id === 0 ? scene : null), 1);
     scene.updateMatrixWorld();
     let meshes = 0;

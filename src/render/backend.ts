@@ -86,6 +86,15 @@ export interface OverlayFace extends OverlayCell {
    * lying on the face: then the cell is the hard side and `face` points to the open side.
    */
   covered: boolean;
+  /**
+   * Light (0..15 each) of the cell on the open side, where the decal of an exposed face lies;
+   * the decal is lit like the face under it. World faces carry the world's light there.
+   * Structure faces carry sky 15 / block 0: a structure is lit by its pose
+   * (StructurePose.sky / block), which the renderer applies on top, as for its mesh.
+   * Unused for a covered face.
+   */
+  sky: number;
+  block: number;
 }
 
 export interface OverlayState {

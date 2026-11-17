@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { B } from '../../src/blocks/defs';
 import { NY, PX, PY } from '../../src/core/dirs';
 import { qclone, qfromYaw, vclone, vec3 } from '../../src/core/math';
@@ -254,15 +254,24 @@ describe('glue hooks: the lifetime rule (a glued face stays while one side is a 
     expect(ship.glue.has(2, 61, 0, 3)).toBe(false);
   });
 
-  it('costs nothing noticeable with empty stores: many terrain writes do not touch the glue', () => {
+  it('costs nothing noticeable with an empty store: terrain writes never look up a face', () => {
     const s = scene();
     const g = s.host.worldGlue;
-    let changes = 0;
-    g.onChange(() => changes++);
-    for (let x = -20; x < 20; x++) for (let z = -20; z < 20; z++) s.world.setCell(x, 65, z, c(B.STONE));
-    for (let x = -20; x < 20; x++) for (let z = -20; z < 20; z++) s.world.setCell(x, 65, z, 0);
-    expect(changes).toBe(0);
+    const lookups = (['has', 'dirMaskAt', 'forEach', 'forEachInBox', 'facesInBox'] as const).map((m) => vi.spyOn(g, m));
+    const looked = (): number => lookups.reduce((n, spy) => n + spy.mock.calls.length, 0);
+    const writeLayer = (): void => {
+      for (let x = -20; x < 20; x++) for (let z = -20; z < 20; z++) s.world.setCell(x, 65, z, c(B.STONE));
+      for (let x = -20; x < 20; x++) for (let z = -20; z < 20; z++) s.world.setCell(x, 65, z, 0);
+    };
+    writeLayer();
+    expect(looked()).toBe(0);
     expect(g.size).toBe(0);
+    // The same writes with one face stored far away do run the lifetime check (one lookup per
+    // changed cell), so the zero above comes from the empty-store shortcut, not a missing hook.
+    g.add(0, 10, 0, PY);
+    writeLayer();
+    expect(looked()).toBe(2 * 40 * 40);
+    expect(g.size).toBe(1);
   });
 
   it('glueFor answers for the world, live and just-removed structures, and rejects foreign grids', () => {

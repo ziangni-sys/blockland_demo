@@ -73,22 +73,66 @@ describe('superglue in the main hand: one face at a time (DESIGN 强力胶)', ()
     expect(sim.player.inventory.count(I.GLUE)).toBe(2);
   });
 
-  it('never on soft or unbreakable blocks', () => {
+  it('never on unbreakable blocks', () => {
     const sim = flatSim();
     sim.world.setCell(0, Y, -2, makeCell(B.DEEPROCK));
-    sim.world.setCell(-1, T, -2, makeCell(B.TORCH));
     const log = new EventLog(sim);
     sim.hold(I.GLUE);
     sim.lookAtCell(0, Y, -2, PZ);
     sim.tick();
     expect(sim.view.hint?.key).toBe('hint.glue.cannot');
     click(sim);
-    sim.lookAtCell(-1, T, -2);
-    sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.glue.cannot');
-    click(sim);
     expect(sim.worldGlue.size).toBe(0);
-    expect(log.toastKeys().filter((k) => k === 'toast.glue.cannot').length).toBe(2);
+    expect(log.toastKeys()).toEqual(['toast.glue.cannot']);
+  });
+});
+
+describe('the glue ray passes through soft blocks: every exposed glued face can be clicked (DESIGN 强力胶)', () => {
+  const softBlocks: Array<[string, number]> = [
+    ['a torch', makeCell(B.TORCH)],
+    ['a snow layer', makeCell(B.SNOW_LAYER, layersState(1))],
+    ['tall grass', makeCell(B.TALL_GRASS)],
+  ];
+  for (const [what, soft] of softBlocks) {
+    it(`with ${what} in front of a glued face: glue in hand aims at the face, sneak removes it, a click glues it again, a left-click breaks the soft block`, () => {
+      const sim = flatSim();
+      sim.world.setCell(0, T, -3, makeCell(B.STONE));
+      sim.hold(I.GLUE);
+      expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+      sim.world.setCell(0, T, -2, soft); // put in front of the glued face afterwards
+      expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
+      const log = new EventLog(sim);
+      // The outline and hint are on the stone's face behind the soft block, not on the soft block.
+      sim.lookAtCell(0, T, -3, PZ);
+      sim.tick();
+      expect(sim.view.target).toEqual({ gridId: 0, x: 0, y: T, z: -3, face: PZ });
+      expect(sim.view.hint?.key).toBe('hint.glue.already');
+      sim.player.input.sneak = true;
+      sim.tick();
+      expect(sim.view.hint?.key).toBe('hint.glue.remove');
+      expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+      sim.player.input.sneak = false;
+      expect(sim.worldGlue.size).toBe(0);
+      expect(log.toastKeys()).toEqual(['toast.glue.removed']);
+      expect(sim.useOn(0, T, -3, PZ)).toBe(true);
+      expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
+      // The mining ray still stops at the soft block: a left-click with glue in hand breaks it.
+      expect(sim.mineTargetCell()).toMatchObject({ gridId: 0, x: 0, y: T, z: -2 });
+      expect(sim.mine(0, T, -2)).toBe(true);
+      expect(idAt(sim.world, 0, T, -2)).toBe(0);
+      expect(idAt(sim.world, 0, T, -3)).toBe(B.STONE);
+      expect(sim.worldGlue.has(0, T, -3, PZ)).toBe(true);
+    });
+  }
+
+  it('a soft block alone is no target for glue: the ray goes on to the hard block behind it', () => {
+    const sim = flatSim();
+    sim.world.setCell(0, T, -2, makeCell(B.TORCH));
+    sim.hold(I.GLUE);
+    sim.lookAtCell(0, T, -2);
+    expect(sim.targetCell()).not.toMatchObject({ x: 0, y: T, z: -2 });
+    sim.hold(B.STONE); // any other item: the torch is the target
+    expect(sim.targetCell()).toMatchObject({ gridId: 0, x: 0, y: T, z: -2 });
   });
 });
 
@@ -137,6 +181,8 @@ describe('survival: the timed glue operation', () => {
       },
     ],
     ['swapping hands', (sim) => sim.swapHands()],
+    // Any write path that turns one glueable block straight into another: the time is the block's own.
+    ['the block turning into another glueable block', (sim) => sim.world.setCell(0, T, -2, makeCell(B.IRON_BLOCK))],
   ];
   for (const [what, act] of cancels) {
     it(`${what} cancels it: no glue, none used, and it does not resume`, () => {
@@ -284,13 +330,20 @@ describe('glue in the off-hand: placed blocks stick to the clicked face (DESIGN 
     expect(sim.useOn(0, T, -3, PY)).toBe(true);
     expect(idAt(sim.world, 0, T + 1, -3)).toBe(B.TORCH);
     expect(sim.worldGlue.size).toBe(0);
-    // A snow layer is replaced in place by the block put on it: no face was clicked against.
+    // A snow layer or tall grass is replaced in place by the block put on it: no face was
+    // clicked against. Stone does not stick to stone, so only that rule keeps the clicked face
+    // (now between the new stone and the open air) from being glued.
+    const log = new EventLog(sim);
+    sim.hold(B.STONE, 8);
     sim.world.setCell(2, T, -3, makeCell(B.SNOW_LAYER, layersState(1)));
-    sim.hold(B.BRICKS, 8);
     expect(sim.useOn(2, T, -3, PY)).toBe(true);
-    expect(idAt(sim.world, 2, T, -3)).toBe(B.BRICKS);
+    expect(idAt(sim.world, 2, T, -3)).toBe(B.STONE);
+    sim.world.setCell(-2, T, -3, makeCell(B.TALL_GRASS));
+    expect(sim.useOn(-2, T, -3, PZ)).toBe(true);
+    expect(idAt(sim.world, -2, T, -3)).toBe(B.STONE);
     expect(sim.worldGlue.size).toBe(0);
     expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 3 });
+    expect(log.of('sound').map((e) => e.name)).not.toContain('glue');
   });
 
   it('other items in the off-hand have no effect', () => {

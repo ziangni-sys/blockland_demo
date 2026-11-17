@@ -163,7 +163,10 @@ export const UI_CSS = String.raw`
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Zen Hei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
   --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif SC", "Songti SC", "STSong", serif;
-  --slot: clamp(30px, min(calc((100vw - 56px) / 13.4), calc(4.4vh + 22px)), calc(92px * var(--ui-zoom)));
+  /* Width limit: the centred hotbar (9.972 slot + 2px with gap = 0.09 slot) plus the off-hand
+     socket hanging off its left (1.377 slot + 2px, counted on both sides to keep the hotbar
+     centred) fit in the window with 28px margins: 12.726 slot + 6px <= 100vw - 56px. */
+  --slot: clamp(30px, min(calc((100vw - 62px) / 12.726), calc(4.4vh + 22px)), calc(92px * var(--ui-zoom)));
   --gap: clamp(3px, calc(var(--slot) * 0.09), 8px);
   --islot: clamp(31px, min(calc((100vw - 84px) / 9), calc(4.2vh + 18px)), 54px);
   --igap: clamp(3px, calc(var(--islot) * 0.1), 6px);

@@ -421,7 +421,10 @@ export interface DockOutcome {
  * destination is hard; should one have become hard since, that cell drops like a rotor cell
  * would). Overwritten soft non-liquid blocks drop (not in creative); liquids at the
  * destinations of the hull's dry cells are removed (DESIGN: 方块化时，清掉密封舱位置里的液体);
- * the ship's glue moves to the world. The ship's own grid and pose are left untouched.
+ * the ship's glue moves to the world like a rotor's on blockify: every face with a placed end,
+ * re-keyed by the rotation, then the lifetime rule where it landed; faces with no placed end
+ * stay in the ship's store. The ship's own grid and pose are left untouched, apart from the
+ * glue that moves.
  */
 export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hull: HullInfo | null): DockOutcome {
   const world = host.world;
@@ -430,10 +433,14 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
   const report = emptyReport();
   const { xyz, cells, n } = gridCells(grid);
   const touched: number[] = [];
+  const placedSrc = new CellSet(n);
   const d = vec3();
   const tmp = vec3();
   for (let i = 0; i < n; i++) {
-    snapCell(t, xyz[i * 3]!, xyz[i * 3 + 1]!, xyz[i * 3 + 2]!, d);
+    const x = xyz[i * 3]!;
+    const y = xyz[i * 3 + 1]!;
+    const z = xyz[i * 3 + 2]!;
+    snapCell(t, x, y, z, d);
     const cell = cells[i]!;
     if (isHardDestination(world, d.x, d.y, d.z)) {
       report.dropped++;
@@ -448,6 +455,7 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
     world.setCell(d.x, d.y, d.z, rotCell(t.r, cell), MOVE_FLAGS);
     report.placed++;
     touched.push(d.x, d.y, d.z);
+    placedSrc.add(x, y, z);
   }
   if (hull) {
     const { ox, oy, oz, sx, sy, sz } = hull;
@@ -462,14 +470,7 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
       }
     }
   }
-  // Every face of a ship's glue has at least one glueable ship cell (the hooks keep it so), so
-  // all of it moves; the lifetime rule then runs where it landed.
-  ship.glue.moveTo(
-    worldGlue,
-    (x, y, z) => grid.getCell(x, y, z) !== AIR,
-    (x, y, z) => snapCell(t, x, y, z, d),
-    nothingStays,
-  );
+  ship.glue.moveTo(worldGlue, (x, y, z) => placedSrc.has(x, y, z), (x, y, z) => snapCell(t, x, y, z, d), nothingStays);
   const out = Int32Array.from(touched);
   pruneGlueAround(world, worldGlue, out, out.length / 3);
   return { report, touched: out };

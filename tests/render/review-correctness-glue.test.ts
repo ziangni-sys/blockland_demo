@@ -16,6 +16,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
+import { uniform } from 'three/tsl';
 import { OverlayLayer } from '../../src/render/three/overlays';
 import { SharedUniforms } from '../../src/render/three/shading';
 import type { OverlayFace, OverlayState } from '../../src/render/backend';
@@ -50,14 +51,14 @@ function glueInstances(root: THREE.Object3D): { box: THREE.Box3; depthTested: bo
 describe('review: glue overlay visibility', () => {
   const cases: { name: string; face: OverlayFace; pair: [number, number, number, number, number, number] }[] = [
     // canonical cell (0,0,0), neighbour along +X / +Y / +Z (exactly what client/view.ts emits)
-    { name: '+X', face: { structureId: 0, x: 0, y: 0, z: 0, face: 0, covered: true }, pair: [0, 0, 0, 2, 1, 1] },
-    { name: '+Y', face: { structureId: 0, x: 0, y: 0, z: 0, face: 2, covered: true }, pair: [0, 0, 0, 1, 2, 1] },
-    { name: '+Z', face: { structureId: 0, x: 0, y: 0, z: 0, face: 4, covered: true }, pair: [0, 0, 0, 1, 1, 2] },
+    { name: '+X', face: { structureId: 0, x: 0, y: 0, z: 0, face: 0, covered: true, sky: 15, block: 0 }, pair: [0, 0, 0, 2, 1, 1] },
+    { name: '+Y', face: { structureId: 0, x: 0, y: 0, z: 0, face: 2, covered: true, sky: 15, block: 0 }, pair: [0, 0, 0, 1, 2, 1] },
+    { name: '+Z', face: { structureId: 0, x: 0, y: 0, z: 0, face: 4, covered: true, sky: 15, block: 0 }, pair: [0, 0, 0, 1, 1, 2] },
   ];
   for (const c of cases) {
     it(`a glued face between two blocks (${c.name}) is not hidden inside them`, () => {
       const placeholder = new THREE.DataArrayTexture(new Uint8Array(4 * 4 * 4).fill(255), 4, 4, 1);
-      const layer = new OverlayLayer(new SharedUniforms(), placeholder, []);
+      const layer = new OverlayLayer(new SharedUniforms(), uniform(new THREE.Vector4(1, 0, 0, 1)), placeholder, []);
       const root = new THREE.Group();
       layer.update(overlays([c.face]), () => root, 0);
       const inst = glueInstances(root);

@@ -252,12 +252,12 @@ const overlays: OverlayState = {
   // Real glue, as the client sends it. Covered faces: the smaller cell of two adjacent BLOCKS
   // plus the positive face along the glue axis. Exposed faces: the block plus the open side.
   glue: [
-    { structureId: SHIP, x: 2, y: 3, z: 3, face: 0, covered: true }, // deck plank | deck plank (x)
-    { structureId: SHIP, x: 3, y: 3, z: 2, face: 4, covered: true }, // deck plank | deck plank (z)
-    { structureId: SHIP, x: 4, y: 0, z: 0, face: 2, covered: true }, // floor | wall (y)
-    { structureId: SHIP, x: 6, y: 1, z: 0, face: 2, covered: true }, // wall | wall (y)
-    { structureId: SHIP, x: 7, y: 2, z: 0, face: 0, covered: true }, // wall | wall (x)
-    { structureId: SHIP, x: 2, y: 3, z: 3, face: 2, covered: false }, // deck plank top, open
+    { structureId: SHIP, x: 2, y: 3, z: 3, face: 0, covered: true, sky: 15, block: 0 }, // deck plank | deck plank (x)
+    { structureId: SHIP, x: 3, y: 3, z: 2, face: 4, covered: true, sky: 15, block: 0 }, // deck plank | deck plank (z)
+    { structureId: SHIP, x: 4, y: 0, z: 0, face: 2, covered: true, sky: 15, block: 0 }, // floor | wall (y)
+    { structureId: SHIP, x: 6, y: 1, z: 0, face: 2, covered: true, sky: 15, block: 0 }, // wall | wall (y)
+    { structureId: SHIP, x: 7, y: 2, z: 0, face: 0, covered: true, sky: 15, block: 0 }, // wall | wall (x)
+    { structureId: SHIP, x: 2, y: 3, z: 3, face: 2, covered: false, sky: 15, block: 0 }, // deck plank top, open
   ],
 };
 

@@ -29,11 +29,15 @@
  * from the helm therefore takes sneak + right-click with an EMPTY hand (glue and buckets are handled before the helm);
  * from the wheel (steering) sneak + right-click docks whatever is in hand.
  *
- * TWO RAYS. The use ray (outline, right-click, glue) is the bucket ray while a bucket is held:
- * it stops at liquid sources, except world liquid displaced by a ship's hull (the water the
- * renderer cuts out of a floating hold) — DESIGN 结构体里没有液体: a bucket never reaches world
- * water inside or behind a structure. The mining ray never stops at liquid: a left-click with
- * a bucket in hand digs the block under the water like any other.
+ * TWO RAYS. The use ray (outline, right-click, glue) depends on the held item (useRayOf). It is
+ * the bucket ray while a bucket is held: it stops at liquid sources, except world liquid
+ * displaced by a ship's hull (the water the renderer cuts out of a floating hold) — DESIGN
+ * 结构体里没有液体: a bucket never reaches world water inside or behind a structure. It is the
+ * glue ray while glue is held: it passes through soft blocks (torches, plants, snow cover), which
+ * can carry no glue, and stops at the first HARD block, so every glued face the client draws as
+ * exposed (DESIGN 强力胶: 露出的胶面) can be clicked from its open side. The mining ray is always the
+ * plain ray: a left-click with a bucket in hand digs the block under the water, one with glue in
+ * hand breaks the torch in front of the block like any other.
  *
  * STALE HITS. Both rays are cast before the right-click runs. The right-click may remove what
  * they hit (docking turns the ship into world blocks, a crate is lit), so they are checked again
@@ -212,6 +216,8 @@ interface GlueOp {
   readonly z: number;
   /** The glued face: towards the neighbour the ray came from. */
   readonly face: Dir;
+  /** The block's cell value when the operation started: any change cancels it (like mining). */
+  readonly cell: number;
   /** Seconds needed: the block's survival mining time. */
   readonly total: number;
   progress: number;
@@ -219,6 +225,21 @@ interface GlueOp {
 
 function isBucket(item: number): boolean {
   return item === I.BUCKET || item === I.BUCKET_WATER || item === I.BUCKET_LAVA;
+}
+
+/** Which use ray the held item casts (see TWO RAYS in the header). */
+type UseRay = 'plain' | 'bucket' | 'glue';
+
+function useRayOf(item: number): UseRay {
+  return isBucket(item) ? 'bucket' : item === I.GLUE ? 'glue' : 'plain';
+}
+
+/** The glue ray's cells: targetable and HARD (soft blocks carry no glue and are passed through). */
+const glueTargetable: CellPredicate = (cell) => targetable(cell) && SOLID[cell & ID_MASK] === 1;
+
+/** What a hit of the use ray `ray` must still be after the right-click (STALE HITS). */
+function usePredicate(ray: UseRay): CellPredicate {
+  return ray === 'bucket' ? targetableOrLiquidSource : ray === 'glue' ? glueTargetable : targetable;
 }
 
 function isAirOrLiquid(cell: number): boolean {
@@ -248,7 +269,7 @@ function gridVersionOf(grid: VoxelGrid): number {
 export class Interaction {
   /** What the use ray (outline, right-click, glue) hit during this tick's actions. */
   private hit: GridHit | null = null;
-  /** What the mining ray hit during this tick's actions (the same object unless a bucket is held). */
+  /** What the mining ray hit during this tick's actions (the same object while the use ray is the plain ray). */
   private mineHit: GridHit | null = null;
   private lastSlot = -1;
 
@@ -330,12 +351,12 @@ export class Interaction {
    */
   raycast(): GridHit | null {
     const p = this.sim.player;
-    return this.castRay(p, isBucket(this.heldItem(p)));
+    return this.castRay(p, useRayOf(this.heldItem(p)));
   }
 
   /** The cell a left-click would mine right now (never a liquid, whatever is held). */
   raycastMining(): GridHit | null {
-    return this.castRay(this.sim.player, false);
+    return this.castRay(this.sim.player, 'plain');
   }
 
   // ================================================================== pick block
@@ -360,7 +381,7 @@ export class Interaction {
   pickBlock(): boolean {
     const p = this.sim.entities.player;
     if (p === null || p.dead || p.removed) return false;
-    const h = this.castRay(p, isBucket(this.heldItem(p)));
+    const h = this.castRay(p, useRayOf(this.heldItem(p)));
     if (h === null) return false;
     const id = h.cell & ID_MASK;
     if (id === AIR || id === B.UNLOADED || LIQUID[id] !== 0 || !isBlockItem(id)) return false;
@@ -421,15 +442,15 @@ export class Interaction {
     if (held !== I.GLUE) this.glueOp = null;
     this.validate();
     this.steer(p);
-    const bucket = isBucket(held);
-    this.hit = this.castRay(p, bucket);
-    this.mineHit = bucket ? this.castRay(p, false) : this.hit;
+    const ray = useRayOf(held);
+    this.hit = this.castRay(p, ray);
+    this.mineHit = ray !== 'plain' ? this.castRay(p, 'plain') : this.hit;
     this.previewLifetime();
     if (usePressed) {
       this.onUse(p, held);
       // See STALE HITS in the header.
-      this.hit = this.recheck(this.hit, bucket ? targetableOrLiquidSource : targetable);
-      this.mineHit = bucket ? this.recheck(this.mineHit, targetable) : this.hit;
+      this.hit = this.recheck(this.hit, usePredicate(ray));
+      this.mineHit = ray !== 'plain' ? this.recheck(this.mineHit, targetable) : this.hit;
     }
     this.updateGlueOp(p);
     this.updateMining(p, attackPressed);
@@ -447,16 +468,17 @@ export class Interaction {
     const p = sim.entities.player;
     if (p === null || p.dead || p.removed) return v;
     const held = this.heldItem(p);
-    const bucket = isBucket(held);
+    const ray = useRayOf(held);
     // Cast again: structures and the player moved since the actions ran, and the outline and
     // hint must match what is on screen now.
-    const h = this.castRay(p, bucket);
+    const h = this.castRay(p, ray);
     this.validate();
     // The outline shows what a right-click would act on — except while the player digs with a
-    // bucket in hand, when it follows the block being dug (under the water) so the cracks show.
+    // bucket or glue in hand, when it follows the block being dug (under the water, the torch in
+    // front of a block) so the cracks show.
     let shown = h;
-    if (bucket && this.mineGrid !== null) {
-      const m = this.castRay(p, false);
+    if (ray !== 'plain' && this.mineGrid !== null) {
+      const m = this.castRay(p, 'plain');
       if (m !== null && this.isMineCell(m)) shown = m;
     }
     if (shown !== null) {
@@ -489,14 +511,15 @@ export class Interaction {
     return s !== null && s.count > 0 ? s.item : -1;
   }
 
-  private castRay(p: Player, bucket: boolean): GridHit | null {
+  private castRay(p: Player, ray: UseRay): GridHit | null {
     const eye = p.eyePos(this.eye);
     const cp = Math.cos(p.pitch);
     const d = this.dir;
     d.x = -Math.sin(p.yaw) * cp;
     d.y = Math.sin(p.pitch);
     d.z = -Math.cos(p.yaw) * cp;
-    return bucket ? this.bucketRay(eye, d) : raycastGrids(this.sim.grids(), eye, d, REACH, targetable);
+    if (ray === 'bucket') return this.bucketRay(eye, d);
+    return raycastGrids(this.sim.grids(), eye, d, REACH, ray === 'glue' ? glueTargetable : targetable);
   }
 
   /**
@@ -1218,12 +1241,14 @@ export class Interaction {
       return;
     }
     const total = Math.max(0, BLOCKS[hit.cell & ID_MASK]?.hardness ?? 0);
-    this.glueOp = { grid: hit.grid, x: hit.x, y: hit.y, z: hit.z, face: hit.face, total, progress: 0 };
+    this.glueOp = { grid: hit.grid, x: hit.x, y: hit.y, z: hit.z, face: hit.face, cell: hit.cell, total, progress: 0 };
   }
 
   /**
    * Survival glue operation: progresses while use stays held on the same face of the same cell;
-   * anything else (looking away, letting go, the block or the grid changing) cancels it.
+   * anything else (looking away, letting go, the block or the grid changing) cancels it. The
+   * block changing includes one glueable block turning straight into another: its time is the
+   * block's own, so the operation does not carry over.
    * Changing the slot and swapping hands cancel it in tick().
    */
   private updateGlueOp(p: Player): void {
@@ -1240,7 +1265,7 @@ export class Interaction {
       h.face !== op.face ||
       !this.isLive(op.grid) ||
       this.locked(op.grid) !== null ||
-      !canGlue(h.cell)
+      h.cell !== op.cell
     ) {
       this.glueOp = null;
       return;

@@ -6,10 +6,14 @@
  * client's overlay data. Scene: see g7-glue-offhand-helpers.ts.
  */
 import { describe, expect, it } from 'vitest';
-import { AIR } from '../../src/blocks/cell';
+import { AIR, axisState, cellState, stateFacing } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NX, PX, PY, PZ } from '../../src/core/dirs';
+import { qfromYaw, qmul, vec3 } from '../../src/core/math';
+import type { Simulation } from '../../src/sim/simulation';
+import type { Ship } from '../../src/structures/structure';
+import { SEA_TOP, label, makeSeaSim, raftShipByHand, structureLabels } from './g1-stick-glue-helpers';
 import {
   EAST,
   EDGE,
@@ -18,6 +22,7 @@ import {
   assembleRaft,
   buildRaft,
   drawnFace,
+  drawnGlue,
   glueClick,
   hardnessTicks,
   idAt,
@@ -45,7 +50,9 @@ describe('25. 手持强力胶右键方块露出的面，面上出现胶；贴着
     expect(sim.worldGlue.has(ex, ey, ez, PX)).toBe(true);
     expect(sim.worldGlue.size).toBe(1);
     // Shown as glue lying on the plank's open east face, whatever the player holds.
-    expect(drawnFace(sim, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: false });
+    // Lit like the face under it: by the light of the open cell east of the plank (open sky).
+    expect(drawnFace(sim, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: false, sky: sim.world.getSkyLight(ex + 1, ey, ez), block: 0 });
+    expect(sim.world.getSkyLight(ex + 1, ey, ez)).toBe(15);
     sim.hold(B.STONE);
     expect(drawnFace(sim, ex, ey, ez, PX)?.covered).toBe(false);
   });
@@ -59,7 +66,7 @@ describe('25. 手持强力胶右键方块露出的面，面上出现胶；贴着
     expect(idAt(sim.world, sx, sy, sz)).toBe(B.STONE);
     // Now covered: drawn only while glue is in a hand.
     sim.hold(I.GLUE);
-    expect(drawnFace(sim, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: true });
+    expect(drawnFace(sim, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: true, sky: 0, block: 0 });
     sim.hold(B.STONE);
     expect(drawnFace(sim, ex, ey, ez, PX)).toBeUndefined();
     const cells = assembleRaft(sim);
@@ -293,5 +300,186 @@ describe('29. 副手拿强力胶时，主手放出的方块自动粘到点击的
     expect(cells).toContain(stoneAt(sx, sy, sz - 1));
     expect(cells).toContain(stoneAt(sx, sy, sz));
     expect(cells).toContain(stoneAt(ex, ey + 1, ez - 1));
+  });
+
+  it('blocks that connect anyway are not glued and cost nothing: a log on the end of a log, a helm on a block, a bearing with its back to a block', () => {
+    const sim = makeSim('survival');
+    put(sim, 2, T, -3, B.LOG_OAK, axisState(1)); // an upright log
+    put(sim, 0, T, -3, B.STONE);
+    put(sim, -2, T, -3, B.STONE);
+    offhandGlue(sim, 10);
+    const offhand = (): number => sim.player.inventory.offhand?.count ?? 0;
+    // Logs stick along their axis: an upright log on top of an upright log.
+    placeAgainst(sim, B.LOG_OAK, 2, T, -3, PY);
+    expect(idAt(sim.world, 2, T + 1, -3)).toBe(B.LOG_OAK);
+    expect(sim.worldGlue.size).toBe(0);
+    expect(offhand()).toBe(10);
+    // A helm mounts on the block below it.
+    placeAgainst(sim, B.HELM, 0, T, -3, PY);
+    expect(idAt(sim.world, 0, T + 1, -3)).toBe(B.HELM);
+    expect(sim.worldGlue.size).toBe(0);
+    expect(offhand()).toBe(10);
+    // A bearing mounts with its back on the clicked face.
+    placeAgainst(sim, B.BEARING, -2, T, -3, PZ);
+    expect(idAt(sim.world, -2, T, -2)).toBe(B.BEARING);
+    expect(stateFacing(cellState(sim.world.getCell(-2, T, -2)))).toBe(PZ);
+    expect(sim.worldGlue.size).toBe(0);
+    expect(offhand()).toBe(10);
+  });
+
+  it('blocks that would not connect without glue are glued, one glue each: a log on the side of an upright log, a stone on the front of a bearing', () => {
+    const sim = makeSim('survival');
+    put(sim, 2, T, -3, B.LOG_OAK, axisState(1));
+    put(sim, -2, T, -3, B.STONE);
+    offhandGlue(sim, 10);
+    // A log put against the side of an upright log lies along that face's axis: logs beside each other do not stick.
+    placeAgainst(sim, B.LOG_OAK, 2, T, -3, PZ);
+    expect(idAt(sim.world, 2, T, -2)).toBe(B.LOG_OAK);
+    expect(sim.worldGlue.has(2, T, -3, PZ)).toBe(true);
+    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 9 });
+    // The front of a bearing does not stick: a stone put there (sneaking, so the bearing is not clicked) is glued.
+    placeAgainst(sim, B.BEARING, -2, T, -3, PZ);
+    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 9 });
+    sim.player.input.sneak = true;
+    placeAgainst(sim, B.STONE, -2, T, -2, PZ);
+    sim.player.input.sneak = false;
+    expect(idAt(sim.world, -2, T, -1)).toBe(B.STONE);
+    expect(sim.worldGlue.has(-2, T, -2, PZ)).toBe(true);
+    expect(sim.worldGlue.size).toBe(2);
+    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 8 });
+  });
+});
+
+// =====================================================================================
+describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手涂胶都落在船自己的面上，粘上的方块随船走。', () => {
+  /** The deck row of the sea raft (raftShipByHand: planks x 0..4, z 0..5, helm at (2, SEA_TOP, 4)). */
+  const D = SEA_TOP - 1;
+  /** Turn the floating ship by `yaw` and move it out to sea, away from the dock (the pose is set by hand). */
+  function turnAndSail(sim: Simulation, ship: Ship, yaw: number): void {
+    const p = ship.grid.position;
+    ship.grid.setPoseImmediate(vec3(p.x, p.y, p.z - 12), qmul(qfromYaw(yaw), ship.grid.rotation));
+    sim.dynamics.wake(ship);
+    sim.advance(40);
+  }
+  /** The (creative) player hovers at ship-local point (x, y, z). */
+  function hover(sim: Simulation, ship: Ship, x: number, y: number, z: number): void {
+    const q = ship.grid.toWorld(vec3(x, y, z));
+    sim.teleport(q.x, q.y, q.z);
+    sim.player.flying = true;
+    sim.tick();
+  }
+  /** The (survival) player stands on the deck at ship-local cell (3, D + 1, 3) and is carried. */
+  function standOnDeck(sim: Simulation, ship: Ship): void {
+    const q = ship.grid.toWorld(vec3(3.5, D + 1.05, 3.5));
+    sim.teleport(q.x, q.y, q.z);
+    sim.advance(10);
+  }
+  /** World cells (above the sea floor) holding block `id`. */
+  function findWorld(sim: Simulation, id: number): Array<[number, number, number]> {
+    const out: Array<[number, number, number]> = [];
+    for (let y = D - 2; y <= D + 3; y++) {
+      for (let z = -30; z <= 20; z++) for (let x = -20; x <= 25; x++) if (idAt(sim.world, x, y, z) === id) out.push([x, y, z]);
+    }
+    return out;
+  }
+
+  it('creative, the ship turned by 100°: the clicked local face is glued in the ship\'s store and drawn there; sneak removes it; glued stones ride along when the ship docks and is assembled again', () => {
+    const sim = makeSeaSim('creative');
+    const ship = raftShipByHand(sim);
+    turnAndSail(sim, ship, (100 * Math.PI) / 180);
+    hover(sim, ship, 6.5, D + 1.2, 2.5); // east of the raft's east edge (local +X)
+
+    // Main hand: the east face of plank (4, D, 2) in the ship's own frame.
+    glueClick(sim, 4, D, 2, PX, ship.id);
+    expect(ship.glue.has(4, D, 2, PX)).toBe(true);
+    expect(ship.glue.size).toBe(1);
+    expect(sim.worldGlue.size).toBe(0);
+    expect(drawnGlue(sim)).toContainEqual({ structureId: ship.id, x: 4, y: D, z: 2, face: PX, covered: false, sky: 15, block: 0 });
+    sim.player.input.sneak = true;
+    glueClick(sim, 4, D, 2, PX, ship.id);
+    sim.player.input.sneak = false;
+    expect(ship.glue.size).toBe(0);
+
+    // Glue it again and put a stone against it; a second stone against an unglued face.
+    glueClick(sim, 4, D, 2, PX, ship.id);
+    placeAgainst(sim, B.STONE, 4, D, 2, PX, ship.id);
+    placeAgainst(sim, B.STONE, 4, D, 0, PX, ship.id);
+    // Off-hand glue (swap key): a third stone put against plank (4, D, 4) is glued on its own.
+    sim.hold(I.GLUE);
+    sim.swapHands();
+    sim.tick();
+    placeAgainst(sim, B.STONE, 4, D, 4, PX, ship.id);
+    expect(idAt(ship.grid, 5, D, 2)).toBe(B.STONE);
+    expect(idAt(ship.grid, 5, D, 0)).toBe(B.STONE);
+    expect(idAt(ship.grid, 5, D, 4)).toBe(B.STONE);
+    expect(ship.glue.has(4, D, 2, PX)).toBe(true);
+    expect(ship.glue.has(4, D, 4, PX)).toBe(true);
+    expect(ship.glue.size).toBe(2);
+    expect(sim.worldGlue.size).toBe(0);
+
+    // Dock (sneak + right-click on the helm, empty hand), then assemble the raft again at its helm.
+    sim.emptyHand();
+    hover(sim, ship, 2.5, D + 2, 6.5);
+    sim.player.input.sneak = true;
+    expect(sim.useOn(2, SEA_TOP, 4, undefined, ship.id)).toBe(true);
+    sim.player.input.sneak = false;
+    expect(ship.removed).toBe(true);
+    expect(sim.worldGlue.size).toBe(2);
+    const helms = findWorld(sim, B.HELM);
+    expect(helms.length).toBe(1);
+    const [hx, hy, hz] = helms[0]!;
+    const stones = findWorld(sim, B.STONE);
+    expect(stones.length).toBe(3);
+    sim.teleport(hx + 0.5, hy + 1.5, hz + 0.5);
+    sim.player.flying = true;
+    sim.tick();
+    expect(sim.useOn(hx, hy, hz, PY)).toBe(true);
+    expect(sim.useOn(hx, hy, hz, PY)).toBe(true);
+    const again = sim.structures.ships();
+    expect(again.length).toBe(1);
+    const taken = structureLabels(again[0]!.grid).filter((l) => l.endsWith(':stone'));
+    expect(taken.length).toBe(2);
+    const left = findWorld(sim, B.STONE);
+    expect(left.length).toBe(1);
+    expect(taken).not.toContain(label(left[0]![0], left[0]![1], left[0]![2], B.STONE));
+  });
+
+  it('survival, on the deck of the turned ship: the timed glue and the off-hand glue land in the ship\'s store and use one glue each', () => {
+    const sim = makeSeaSim('survival');
+    const ship = raftShipByHand(sim);
+    turnAndSail(sim, ship, (-130 * Math.PI) / 180);
+    // A brick on the deck to glue; the player stands on the deck south-east of it.
+    sim.hold(B.BRICKS, 4);
+    standOnDeck(sim, ship);
+    expect(sim.useOn(2, D, 1, PY, ship.id)).toBe(true);
+    expect(idAt(ship.grid, 2, D + 1, 1)).toBe(B.BRICKS);
+
+    // Main hand, survival: hold the button on the brick's east face for the brick's mining time.
+    sim.hold(I.GLUE, 3);
+    const input = sim.player.input;
+    input.use = true;
+    expect(sim.useOn(2, D + 1, 1, PX, ship.id)).toBe(true);
+    const total = hardnessTicks(B.BRICKS);
+    let n = 1;
+    while (!ship.glue.has(2, D + 1, 1, PX) && n < total + 20) {
+      sim.lookAtCell(2, D + 1, 1, PX, ship.id); // the player keeps looking at it as the ship rocks
+      sim.tick();
+      n++;
+    }
+    input.use = false;
+    expect(n).toBe(total);
+    expect(ship.glue.size).toBe(1);
+    expect(sim.worldGlue.size).toBe(0);
+    expect(sim.player.inventory.count(I.GLUE)).toBe(2);
+
+    // Off-hand: the glue goes to the off-hand (swap key); a stone put against the brick's south face is glued to it.
+    sim.swapHands();
+    sim.tick();
+    placeAgainst(sim, B.STONE, 2, D + 1, 1, PZ, ship.id);
+    expect(idAt(ship.grid, 2, D + 1, 2)).toBe(B.STONE);
+    expect(ship.glue.has(2, D + 1, 1, PZ)).toBe(true);
+    expect(ship.glue.size).toBe(2);
+    expect(sim.worldGlue.size).toBe(0);
+    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 1 });
   });
 });
