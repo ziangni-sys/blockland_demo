@@ -3,7 +3,9 @@
  *
  * ENTRY POINTS. encodeClientMessage / decodeClientMessage, encodeServerMessage /
  * decodeServerMessage, packSamples (splits a tick's samples into messages that fit the unreliable
- * channel) and readHelloBuild (the part of Hello that never changes). The write* / read*
+ * channel), readHelloBuild (the part of Hello that never changes), and encodeTickBatch with
+ * encodeSnapshotPiece / encodeStructureRecordPiece (a server encodes a snapshot or a structure
+ * record once and writes the same bytes into several clients' batches). The write* / read*
  * functions are the building blocks (basic types, Cell, CellVolume, GlueList, records).
  *
  * ERRORS.
@@ -1836,14 +1838,58 @@ function readRest(r: ByteReader): StructureRest {
   return { id, pose: readPose(r) };
 }
 
-function writeTickBatch(w: ByteWriter, b: TickBatchMsg): void {
+/**
+ * A chunk snapshot or a structure record encoded on its own, to be written into the TickBatches
+ * of several clients without encoding it again (NETCODE section 15: a column's snapshot is
+ * encoded once per version). `cells` is what it charges to the batch's MAX_BATCH_CELLS.
+ */
+export interface EncodedPiece {
+  readonly bytes: Uint8Array;
+  readonly cells: number;
+}
+
+/** Pre-encoded entries of a TickBatch's snapshots and structureSpawns sections (encodeTickBatch). */
+export interface BatchPieces {
+  readonly snapshots: readonly EncodedPiece[];
+  readonly structureSpawns: readonly EncodedPiece[];
+}
+
+const NO_PIECES: BatchPieces = Object.freeze({ snapshots: Object.freeze([]), structureSpawns: Object.freeze([]) });
+
+/** One snapshot, encoded as it appears in the snapshots section. Throws RangeError on invalid data. */
+export function encodeSnapshotPiece(s: ChunkSnapshot): EncodedPiece {
   const budget: CellBudget = { cells: MAX_BATCH_CELLS };
+  const w = new ByteWriter(s.cells === 'pristine' ? 16 : 1024);
+  writeSnapshot(w, s, budget);
+  return { bytes: w.finish(), cells: MAX_BATCH_CELLS - budget.cells };
+}
+
+/** One structure record, encoded as it appears in the structureSpawns section. Throws RangeError on invalid data. */
+export function encodeStructureRecordPiece(s: StructureRecord): EncodedPiece {
+  const budget: CellBudget = { cells: MAX_BATCH_CELLS };
+  const w = new ByteWriter(256);
+  writeStructureRecord(w, s, budget);
+  return { bytes: w.finish(), cells: MAX_BATCH_CELLS - budget.cells };
+}
+
+function writePieces(w: ByteWriter, pieces: readonly EncodedPiece[], budget: CellBudget): void {
+  for (const p of pieces) {
+    if (p.cells > budget.cells) bad('cells in one TickBatch (MAX_BATCH_CELLS)', p.cells);
+    budget.cells -= p.cells;
+    w.raw(p.bytes);
+  }
+}
+
+function writeTickBatch(w: ByteWriter, b: TickBatchMsg, pieces: BatchPieces, sectionBytes: number[] | null): void {
+  const budget: CellBudget = { cells: MAX_BATCH_CELLS };
+  const nSnapshots = b.snapshots.length + pieces.snapshots.length;
+  const nSpawns = b.structureSpawns.length + pieces.structureSpawns.length;
   let sections = 0;
   if (b.unsubscribe.length > 0) sections |= 1 << SECTION.unsubscribe;
-  if (b.snapshots.length > 0) sections |= 1 << SECTION.snapshots;
+  if (nSnapshots > 0) sections |= 1 << SECTION.snapshots;
   if (b.chunkDeltas.length > 0) sections |= 1 << SECTION.chunkDeltas;
   if (b.structureRemoves.length > 0) sections |= 1 << SECTION.structureRemoves;
-  if (b.structureSpawns.length > 0) sections |= 1 << SECTION.structureSpawns;
+  if (nSpawns > 0) sections |= 1 << SECTION.structureSpawns;
   if (b.structureDeltas.length > 0) sections |= 1 << SECTION.structureDeltas;
   if (b.structureRests.length > 0) sections |= 1 << SECTION.structureRests;
   if (b.entityDespawns.length > 0) sections |= 1 << SECTION.entityDespawns;
@@ -1853,24 +1899,70 @@ function writeTickBatch(w: ByteWriter, b: TickBatchMsg): void {
   if (b.events.length > 0) sections |= 1 << SECTION.events;
   if (b.globals !== null) sections |= 1 << SECTION.globals;
   w.varuint(b.tick).u16(sections);
+  let mark = w.length;
+  const measured = (section: number): void => {
+    if (sectionBytes !== null) sectionBytes[section] = (sectionBytes[section] ?? 0) + w.length - mark;
+    mark = w.length;
+  };
   if (sections & (1 << SECTION.unsubscribe)) {
     writeList(w, b.unsubscribe, (w, c) => {
       writeCoord(w, c.cx);
       writeCoord(w, c.cz);
     });
+    measured(SECTION.unsubscribe);
   }
-  if (sections & (1 << SECTION.snapshots)) writeList(w, b.snapshots, (w, s) => writeSnapshot(w, s, budget));
-  if (sections & (1 << SECTION.chunkDeltas)) writeList(w, b.chunkDeltas, writeChunkDelta);
-  if (sections & (1 << SECTION.structureRemoves)) writeIdList(w, b.structureRemoves);
-  if (sections & (1 << SECTION.structureSpawns)) writeList(w, b.structureSpawns, (w, s) => writeStructureRecord(w, s, budget));
-  if (sections & (1 << SECTION.structureDeltas)) writeList(w, b.structureDeltas, writeStructureDelta);
-  if (sections & (1 << SECTION.structureRests)) writeList(w, b.structureRests, writeRest);
-  if (sections & (1 << SECTION.entityDespawns)) writeIdList(w, b.entityDespawns);
-  if (sections & (1 << SECTION.entitySpawns)) writeList(w, b.entitySpawns, writeEntityRecord);
-  if (sections & (1 << SECTION.entityUpdates)) writeList(w, b.entityUpdates, writeEntityUpdate);
-  if (b.private !== null) writePrivate(w, b.private);
-  if (sections & (1 << SECTION.events)) writeList(w, b.events, writeWorldEvent);
-  if (b.globals !== null) writeGlobals(w, b.globals);
+  if (sections & (1 << SECTION.snapshots)) {
+    w.varuint(nSnapshots);
+    for (const s of b.snapshots) writeSnapshot(w, s, budget);
+    writePieces(w, pieces.snapshots, budget);
+    measured(SECTION.snapshots);
+  }
+  if (sections & (1 << SECTION.chunkDeltas)) {
+    writeList(w, b.chunkDeltas, writeChunkDelta);
+    measured(SECTION.chunkDeltas);
+  }
+  if (sections & (1 << SECTION.structureRemoves)) {
+    writeIdList(w, b.structureRemoves);
+    measured(SECTION.structureRemoves);
+  }
+  if (sections & (1 << SECTION.structureSpawns)) {
+    w.varuint(nSpawns);
+    for (const s of b.structureSpawns) writeStructureRecord(w, s, budget);
+    writePieces(w, pieces.structureSpawns, budget);
+    measured(SECTION.structureSpawns);
+  }
+  if (sections & (1 << SECTION.structureDeltas)) {
+    writeList(w, b.structureDeltas, writeStructureDelta);
+    measured(SECTION.structureDeltas);
+  }
+  if (sections & (1 << SECTION.structureRests)) {
+    writeList(w, b.structureRests, writeRest);
+    measured(SECTION.structureRests);
+  }
+  if (sections & (1 << SECTION.entityDespawns)) {
+    writeIdList(w, b.entityDespawns);
+    measured(SECTION.entityDespawns);
+  }
+  if (sections & (1 << SECTION.entitySpawns)) {
+    writeList(w, b.entitySpawns, writeEntityRecord);
+    measured(SECTION.entitySpawns);
+  }
+  if (sections & (1 << SECTION.entityUpdates)) {
+    writeList(w, b.entityUpdates, writeEntityUpdate);
+    measured(SECTION.entityUpdates);
+  }
+  if (b.private !== null) {
+    writePrivate(w, b.private);
+    measured(SECTION.private);
+  }
+  if (sections & (1 << SECTION.events)) {
+    writeList(w, b.events, writeWorldEvent);
+    measured(SECTION.events);
+  }
+  if (b.globals !== null) {
+    writeGlobals(w, b.globals);
+    measured(SECTION.globals);
+  }
 }
 
 function readTickBatch(r: ByteReader): TickBatchMsg {
@@ -1941,7 +2033,7 @@ function writeServerPayload(w: ByteWriter, m: ServerMessage): void {
       w.u32(m.clientMs).varuint(m.tick);
       return;
     case 'tickBatch':
-      writeTickBatch(w, m);
+      writeTickBatch(w, m, NO_PIECES, null);
       return;
     case 'samples':
       writeSamplesBody(w, m.tick, m.seq, m.ships, m.entities);
@@ -2028,6 +2120,22 @@ export function encodeServerMessage(m: ServerMessage): Uint8Array {
   w.u8(MSG[m.type]);
   writeServerPayload(w, m);
   return finishMessage(w, m.type, Infinity);
+}
+
+/**
+ * Encode a TickBatch whose snapshots and structureSpawns sections are the batch's own entries
+ * followed by the pre-encoded `pieces` (encodeSnapshotPiece / encodeStructureRecordPiece). When
+ * `sectionBytes` is given, the encoded size of each present section is added to
+ * sectionBytes[bit] (statistics; the message id, tick and mask are not counted). Decodes like any
+ * TickBatch. Throws RangeError on invalid data, cells beyond MAX_BATCH_CELLS included. The length
+ * is not limited here: the caller compares it with MAX_RELIABLE_BYTES (the Replicator drops a
+ * client whose batch is longer, NETCODE section 13) before handing it to a Transport.
+ */
+export function encodeTickBatch(b: TickBatchMsg, pieces: BatchPieces, sectionBytes: number[] | null = null): Uint8Array {
+  const w = new ByteWriter(256);
+  w.u8(MSG.tickBatch);
+  writeTickBatch(w, b, pieces, sectionBytes);
+  return w.finish();
 }
 
 /** Message type by id (frozen lookup table). */

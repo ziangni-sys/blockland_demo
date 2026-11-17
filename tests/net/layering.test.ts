@@ -2,7 +2,7 @@
  * Import rules of src/net (docs/NETCODE.md section 15 "依赖方向"), checked by scanning the sources
  * (the same way tests/sim/single-player-guard.test.ts does):
  *  - each directory of src/net may import only what its entry in RULES allows (a later package
- *    adds the entry of its directory: server, host, client); a directory without an entry fails;
+ *    adds the entry of its directory: host); a directory without an entry fails;
  *  - the layers below net never import it, and only src/client may (package 9 narrows that);
  *  - no module of src/net has module-level mutable state (LESSONS "临时向量被改写");
  *  - the base modules touch no browser or timer globals.
@@ -25,14 +25,35 @@ interface Rule {
 /** The base modules: net/protocol, codec, transport, loopback (files directly in src/net). */
 const isNetBase = (t: string): boolean => /^net\/[^/]+$/.test(t);
 
+/** Browser, timer and clock globals: none of these modules may mention them (the host and the client's page own time and I/O). */
+const NO_DOM_OR_TIME =
+  /\b(window|document|navigator|self|globalThis|postMessage|performance|Date|Math\.random|setTimeout|setInterval|clearTimeout|clearInterval|requestAnimationFrame|MessagePort|MessageChannel|Worker|WebSocket|RTC\w+|localStorage|indexedDB|fetch)\b/;
+
 const RULES: Record<string, Rule> = {
   // net/{protocol, codec, transport, loopback}: core, blocks, save/bytes; types from sim/view.ts
   // and from package 2's movement report and correction (entities/drive.ts). No DOM.
   'net': {
     runtime: (t) => t.startsWith('core/') || t.startsWith('blocks/') || t === 'save/bytes' || isNetBase(t),
     types: (t) => t === 'sim/view' || t === 'entities/drive',
-    forbiddenGlobals:
-      /\b(window|document|navigator|self|globalThis|postMessage|performance|Date|Math\.random|setTimeout|setInterval|clearTimeout|clearInterval|requestAnimationFrame|MessagePort|MessageChannel|Worker|WebSocket|RTC\w+|localStorage|indexedDB|fetch)\b/,
+    forbiddenGlobals: NO_DOM_OR_TIME,
+  },
+  // net/server (package 4 on): sim, structures, entities, voxel and the base modules.
+  'net/server': {
+    runtime: (t) =>
+      ['core/', 'blocks/', 'voxel/', 'structures/', 'entities/', 'sim/', 'net/server/'].some((d) => t.startsWith(d)) || isNetBase(t),
+    types: () => false,
+    forbiddenGlobals: NO_DOM_OR_TIME,
+  },
+  // net/client: voxel, blocks, light, the structure data classes, entities, worldgen, sim/view,
+  // messages and rays, and the base modules; never the simulation, the server or the host. No DOM.
+  'net/client': {
+    runtime: (t) =>
+      ['core/', 'blocks/', 'voxel/', 'light/', 'entities/', 'worldgen/', 'net/client/'].some((d) => t.startsWith(d)) ||
+      ['structures/structure', 'structures/glue', 'structures/hull', 'structures/rotor'].includes(t) ||
+      ['sim/view', 'sim/messages', 'sim/rays'].includes(t) ||
+      isNetBase(t),
+    types: () => false,
+    forbiddenGlobals: NO_DOM_OR_TIME,
   },
 };
 
@@ -195,6 +216,16 @@ describe('src/net import rules (NETCODE section 15)', () => {
     expect(bad('const t = performance.now();')).toHaveLength(1);
     expect(bad("// performance.now() in a comment\nconst s = 'window';")).toHaveLength(0);
     expect(netViolations('net/elsewhere/x.ts', '')).toHaveLength(1);
+    // net/server may use the simulation; net/client may not, nor the server or the host.
+    expect(netViolations('net/server/x.ts', "import type { Simulation } from '../../sim/simulation';\nimport { World } from '../../voxel/world';")).toHaveLength(0);
+    expect(netViolations('net/server/x.ts', "import { encodeTickBatch } from '../codec';\nimport { ChangeCapture } from './capture';")).toHaveLength(0);
+    expect(netViolations('net/server/x.ts', "import { NetServer } from '../host/netserver';")).toHaveLength(1);
+    expect(netViolations('net/server/x.ts', "import { decodeChunk } from '../../save/codec';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', "import { GlueStore } from '../../structures/glue';\nimport { World } from '../../voxel/world';\nimport type { Message } from '../../sim/view';")).toHaveLength(0);
+    expect(netViolations('net/client/x.ts', "import type { Simulation } from '../../sim/simulation';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', "import { StructureManager } from '../../structures/manager';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', "import { Replicator } from '../server/replicator';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', 'const t = performance.now();')).toHaveLength(1);
     expect(mutableState(base, 'let scratch = 0;\nexport const cache = new Map();\nconst tmp = [];\nconst T = Object.freeze({ a: 1 });\nconst N = 4;')).toHaveLength(3);
     // Factories and static fields; frozen values, Math, arrow functions and static methods pass.
     const state = [

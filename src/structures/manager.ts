@@ -52,7 +52,7 @@ import {
 import { CellSet, collectRotor, collectShip, type CollectReason, type CollectResult } from './collect';
 import type { GlueStore } from './glue';
 import { analyzeHull, type HullInfo } from './hull';
-import { advanceRotor, applyRotorPose, holdRotor } from './rotor';
+import { advanceRotor, applyRotorPose, holdRotor, measureSweep, type RotorSweep } from './rotor';
 import { readStructures, writeStructures } from './serialize';
 import { cellFunc, isSailCell, pruneGlueAt, pruneGlueInBox } from './stick';
 import { Rotor, Ship, type ShipDynamics, type Structure, type StructureHost } from './structure';
@@ -111,15 +111,9 @@ interface Entry {
    * (wake / freeze tests). World rotors: the box of everything they sweep (freeze test).
    */
   readonly box: AABB;
-  /**
-   * Rotors only: the cylinder swept by the cells about the spin axis, in rotor-local terms —
-   * extent along the axis's positive direction relative to the pivot [sweepA0, sweepA1] and
-   * radius about the axis line. Valid while grid.version === sweepVersion.
-   */
+  /** Rotors only: the cylinder swept by the cells (rotor.ts measureSweep). Valid while grid.version === sweepVersion. */
   sweepVersion: number;
-  sweepA0: number;
-  sweepA1: number;
-  sweepRadius: number;
+  readonly sweep: RotorSweep;
 }
 type ShipEntry = Entry & { readonly s: Ship };
 
@@ -628,7 +622,7 @@ export class StructureManager {
 
   private register(s: Structure): void {
     const unsub = s instanceof Ship ? this.watchShip(s) : this.watchRotor(s as Rotor);
-    const e: Entry = { s, unsub, box: aabb(), sweepVersion: -1, sweepA0: 0, sweepA1: 0, sweepRadius: 0 };
+    const e: Entry = { s, unsub, box: aabb(), sweepVersion: -1, sweep: { a0: 0, a1: 0, radius: 0 } };
     this.entries.set(s.id, e);
     this.owners.set(s.grid, s);
     this.list = this.list.concat(s);
@@ -777,14 +771,17 @@ export class StructureManager {
    */
   private computeRotorBox(e: Entry, r: Rotor): AABB {
     const g = r.grid;
-    if (e.sweepVersion !== g.version) this.measureSweep(e, r);
+    if (e.sweepVersion !== g.version) {
+      measureSweep(r, e.sweep);
+      e.sweepVersion = g.version;
+    }
     // Spin axis (positive direction) in the parent (= world) frame. Taken from baseRotation,
     // not grid.rotation, so the box is bit-identical at every angle.
     const k = r.axis >> 1;
     const a = qrotate(r.baseRotation, vset(this.tmp, k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0), this.tmp);
-    const mid = (e.sweepA0 + e.sweepA1) * 0.5;
-    const half = (e.sweepA1 - e.sweepA0) * 0.5;
-    const rad = e.sweepRadius;
+    const mid = (e.sweep.a0 + e.sweep.a1) * 0.5;
+    const half = (e.sweep.a1 - e.sweep.a0) * 0.5;
+    const rad = e.sweep.radius;
     const p = g.position; // the pivot, in the parent frame
     // AABB of a cylinder: per axis i, half-height * |a_i| + radius * sqrt(1 - a_i^2).
     const ex = half * Math.abs(a.x) + rad * Math.sqrt(Math.max(0, 1 - a.x * a.x));
@@ -798,35 +795,5 @@ export class StructureManager {
     box.minZ = p.z + a.z * mid - ez;
     box.maxZ = p.z + a.z * mid + ez;
     return box;
-  }
-
-  /** Rotor-local swept cylinder of the cells (see Entry); recomputed when the cells change. */
-  private measureSweep(e: Entry, r: Rotor): void {
-    const g = r.grid;
-    const k = r.axis >> 1;
-    const px = g.pivot.x;
-    const py = g.pivot.y;
-    const pz = g.pivot.z;
-    let a0 = 0;
-    let a1 = 0;
-    let r2 = 0;
-    let first = true;
-    // Per cell, the corner farthest from the axis line; per axis, the farther of the two
-    // faces. Exact for the cells themselves, unlike the corner of their bounding box.
-    g.forEachCell((x, y, z) => {
-      const lo = k === 0 ? x - px : k === 1 ? y - py : z - pz;
-      if (first || lo < a0) a0 = lo;
-      if (first || lo + 1 > a1) a1 = lo + 1;
-      first = false;
-      const fx = k === 0 ? 0 : Math.max(Math.abs(x - px), Math.abs(x + 1 - px));
-      const fy = k === 1 ? 0 : Math.max(Math.abs(y - py), Math.abs(y + 1 - py));
-      const fz = k === 2 ? 0 : Math.max(Math.abs(z - pz), Math.abs(z + 1 - pz));
-      const d2 = fx * fx + fy * fy + fz * fz;
-      if (d2 > r2) r2 = d2;
-    });
-    e.sweepA0 = a0;
-    e.sweepA1 = a1;
-    e.sweepRadius = Math.sqrt(r2);
-    e.sweepVersion = g.version;
   }
 }

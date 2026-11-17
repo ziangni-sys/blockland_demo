@@ -214,6 +214,22 @@ export class ChunkManager {
     for (const [key, bytes] of entries) this.stash.set(key, bytes);
   }
 
+  /**
+   * The cells of a stashed (modified, unloaded) column, decoded without restoring it; null when
+   * the column is not stashed or its bytes cannot be decoded (it is then regenerated when it
+   * loads, so its cells are the generator's). The network replication answers a subscription to
+   * an unloaded column with this (NETCODE section 6).
+   */
+  stashedCells(cx: number, cz: number): Uint16Array | null {
+    const bytes = this.stash.get(chunkKey(cx, cz));
+    if (bytes === undefined) return null;
+    try {
+      return decodeChunk(bytes).cells;
+    } catch {
+      return null;
+    }
+  }
+
   /** Chunk coordinates of a stash key (for debugging). */
   static keyCoords(key: number): { cx: number; cz: number } {
     return { cx: chunkKeyX(key), cz: chunkKeyZ(key) };
