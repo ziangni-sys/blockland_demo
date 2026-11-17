@@ -75,6 +75,7 @@ import { Player } from '../entities/entity';
 import type { EntityEvent } from '../entities/host';
 import { maxStackOf } from '../entities/inventory';
 import { axisValue, finiteAngle } from '../entities/input';
+import { boxCellsWith } from '../structures/collect';
 import { analyzeHull, isDryCell, type HullInfo } from '../structures/hull';
 import { canGlue, canJoinStructure, sticksWithoutGlue } from '../structures/stick';
 import { Ship, type Structure } from '../structures/structure';
@@ -786,7 +787,7 @@ export class Hands {
       this.preview = null;
       const res = sim.structures.assembleShip(hit.x, hit.y, hit.z);
       if (!res.ok) {
-        this.toast(failMessage('ship', res.reason, { max: sim.shipMaxCells }), 'warn');
+        this.toast(failMessage('ship', res.reason, this.shipFailParams(res.reason)), 'warn');
         return;
       }
       const ship = res.structure;
@@ -798,7 +799,7 @@ export class Hands {
     const res = sim.structures.previewShip(hit.x, hit.y, hit.z);
     if (!res.ok) {
       this.preview = null;
-      this.toast(failMessage('ship', res.reason, { max: sim.shipMaxCells }), 'warn');
+      this.toast(failMessage('ship', res.reason, this.shipFailParams(res.reason)), 'warn');
       return;
     }
     this.setPreview('ship', hit.grid, hit.x, hit.y, hit.z, res.cells, res.count, res.sails, res.bounds, true);
@@ -862,7 +863,7 @@ export class Hands {
       this.preview = null;
       const res = sim.structures.startRotor(hit.grid, hit.x, hit.y, hit.z);
       if (!res.ok) {
-        this.toast(failMessage('rotor', res.reason, this.rotorFailParams(0)), 'warn');
+        this.toast(failMessage('rotor', res.reason, this.rotorFailParams(res.reason, 0)), 'warn');
         return;
       }
       this.toastKey('toast.rotor.started', 'info', { count: res.structure.grid.count, sails: res.structure.sails });
@@ -873,7 +874,7 @@ export class Hands {
       this.setPreview('rotor', hit.grid, hit.x, hit.y, hit.z, res.cells, res.count, res.sails, res.bounds, true);
       return;
     }
-    this.toast(failMessage('rotor', res.reason, this.rotorFailParams(res.sails)), 'warn');
+    this.toast(failMessage('rotor', res.reason, this.rotorFailParams(res.reason, res.sails)), 'warn');
     if (res.reason === 'not_enough_sails' && res.count > 0) {
       // Show what would turn, so the player sees where sails are missing; a second click re-checks.
       this.setPreview('rotor', hit.grid, hit.x, hit.y, hit.z, res.cells, res.count, res.sails, res.bounds, false);
@@ -882,8 +883,18 @@ export class Hands {
     }
   }
 
-  private rotorFailParams(sails: number): Record<string, number> {
-    return { max: this.sim.rotorMaxCells, min: this.sim.rotorMinSails, sails };
+  /** Parameters of a refused ship's message; the box limit only for 'too_spread'. */
+  private shipFailParams(reason: string): Record<string, number> {
+    const p: Record<string, number> = { max: this.sim.shipMaxCells };
+    if (reason === 'too_spread') p.box = this.sim.structureMaxBoxCells;
+    return p;
+  }
+
+  /** Parameters of a refused rotor's message; the box limit only for 'too_spread'. */
+  private rotorFailParams(reason: string, sails: number): Record<string, number> {
+    const p: Record<string, number> = { max: this.sim.rotorMaxCells, min: this.sim.rotorMinSails, sails };
+    if (reason === 'too_spread') p.box = this.sim.structureMaxBoxCells;
+    return p;
   }
 
   private setPreview(
@@ -986,7 +997,7 @@ export class Hands {
       if (!def.solid && LIQUID[curId] !== 0) return;
       cell = makeCell(item, this.placementState(def, hit, p));
     }
-    if (curId === AIR && !grid.isWorld && this.structureFull(grid)) return;
+    if (curId === AIR && !grid.isWorld && this.structureFull(grid, x, y, z)) return;
     // A block that can never be part of a structure (unbreakable ones such as deeprock —
     // DESIGN "挖不动的方块不能被连进结构体") cannot be put onto one either: it could not be
     // mined off again and would break the dock / re-assemble round trip.
@@ -1010,18 +1021,28 @@ export class Hands {
   }
 
   /**
-   * Is the structure owning `grid` at its assembly limit (DESIGN: ship 4000, rotor 400 cells)?
-   * Shows the limit and refuses: a ship built past it could never be assembled again after docking.
+   * Would a block put into the empty cell (x,y,z) of `grid` take the structure owning it past an
+   * assembly limit (DESIGN: ship 4000, rotor 400 cells; a tight box of at most
+   * STRUCTURE_MAX_BOX_CELLS cells)? Shows the limit and refuses: a ship built past it could never
+   * be assembled again after docking, and could not be saved or sent. The box test reads the
+   * grid's cached tight bounds (recomputed only when the grid changed) and a few comparisons.
    */
-  private structureFull(grid: VoxelGrid): boolean {
+  private structureFull(grid: VoxelGrid, x: number, y: number, z: number): boolean {
     const sim = this.sim;
     const s = sim.structures.structureOf(grid);
     if (s === null) return false;
     const ship = s instanceof Ship;
+    const kind = ship ? 'ship' : 'rotor';
     const max = ship ? sim.shipMaxCells : sim.rotorMaxCells;
-    if (s.grid.count < max) return false;
-    this.toast(failMessage(ship ? 'ship' : 'rotor', 'too_big', { max }), 'warn');
-    return true;
+    if (s.grid.count >= max) {
+      this.toast(failMessage(kind, 'too_big', { max }), 'warn');
+      return true;
+    }
+    if (boxCellsWith(s.grid.cellBounds(), x, y, z) > sim.structureMaxBoxCells) {
+      this.toast(failMessage(kind, 'too_spread', { box: sim.structureMaxBoxCells }), 'warn');
+      return true;
+    }
+    return false;
   }
 
   /** State bits of a newly placed block, in the target grid's local frame. */

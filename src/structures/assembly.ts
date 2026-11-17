@@ -27,13 +27,13 @@
 import { AIR, cellState, ID_MASK, isLiquidSource, liquidState, makeCell } from '../blocks/cell';
 import { B } from '../blocks/defs';
 import { BLOCKS, isLiquidCell, isSolidCell, type DropSpec } from '../blocks/registry';
-import { WORLD_HEIGHT } from '../core/constants';
+import { STRUCTURE_MAX_BOX_CELLS, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, NX, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
 import { qmul, vclone, vec3, vset, type Quat, type Vec3 } from '../core/math';
 import { SET_NO_NEIGHBOR_UPDATE, SET_STRUCTURE_MOVE, type CellBounds, type VoxelGrid } from '../voxel/grid';
 import type { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
-import { CellSet } from './collect';
+import { boxCellsWith, CellSet, inBounds } from './collect';
 import type { GlueStore } from './glue';
 import { HULL_BILGE, HULL_SEALED, isDryCell, type HullInfo } from './hull';
 import { nearestRot, rotCell, rotCellPos, rotToQuat, rotVec, type GridRot } from './orient';
@@ -384,7 +384,12 @@ function gridCells(grid: StructureGrid): { xyz: Int32Array; cells: Uint16Array; 
  *  - destination soft: overwritten; a replaced non-liquid, non-air block drops (if the world drops);
  *  - `inShip`: `dst` is a ship's grid, and a destination whose centre lies inside a HARD block
  *    of the WORLD is a hard conflict too (DESIGN "船上的转子"), so nothing ends up in rock and
- *    the ship is never pushed out of it.
+ *    the ship is never pushed out of it;
+ *  - `inShip`, box limit (DESIGN 组装与方块化: a structure's tight box holds at most
+ *    STRUCTURE_MAX_BOX_CELLS cells): when the cells that would be placed would spread the ship's
+ *    tight box past the limit, every one of them that lands outside the ship's current tight box
+ *    is a hard conflict too (it drops). The ship's box then stays as it is. Which cells drop does
+ *    not depend on their order, and nothing changes while the limit is not reached.
  * Every glued face with a placed end moves along (re-keyed by the rotation), then the glue rules
  * of settlePlacedGlue apply at the destination: no face joins a placed cell to a block that was
  * not placed with it, apart from `bearingFace` (the face between the rotor's bearing and the
@@ -409,12 +414,21 @@ export function blockifyGrid(
   const d = vec3();
   const tmp = vec3();
   const world = host.world;
+  // Destinations and hard conflicts first: the box limit below depends on all of them. The
+  // destinations are distinct, so a write never changes whether another destination is hard.
+  const dest = new Int32Array(n * 3);
+  const hardAt = new Uint8Array(n);
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
   for (let i = 0; i < n; i++) {
-    const x = xyz[i * 3]!;
-    const y = xyz[i * 3 + 1]!;
-    const z = xyz[i * 3 + 2]!;
-    const cell = cells[i]!;
-    snapCell(t, x, y, z, d);
+    snapCell(t, xyz[i * 3]!, xyz[i * 3 + 1]!, xyz[i * 3 + 2]!, d);
+    dest[i * 3] = d.x;
+    dest[i * 3 + 1] = d.y;
+    dest[i * 3 + 2] = d.z;
     let hard = isHardDestination(dst, d.x, d.y, d.z);
     if (!hard && inShip) {
       // The cell is written into the ship, so only a HARD world block at its centre matters
@@ -424,6 +438,31 @@ export function blockifyGrid(
       hard = isSolidCell(world.getCell(Math.floor(tmp.x), Math.floor(tmp.y), Math.floor(tmp.z)));
     }
     if (hard) {
+      hardAt[i] = 1;
+      continue;
+    }
+    minX = Math.min(minX, d.x);
+    minY = Math.min(minY, d.y);
+    minZ = Math.min(minZ, d.z);
+    maxX = Math.max(maxX, d.x);
+    maxY = Math.max(maxY, d.y);
+    maxZ = Math.max(maxZ, d.z);
+  }
+  if (inShip && minX <= maxX) {
+    const shipBox = dst.cellBounds();
+    if (boxCellsWith(grownBounds(shipBox, minX, minY, minZ), maxX, maxY, maxZ) > STRUCTURE_MAX_BOX_CELLS) {
+      for (let i = 0; i < n; i++) {
+        if (shipBox === null || !inBounds(shipBox, dest[i * 3]!, dest[i * 3 + 1]!, dest[i * 3 + 2]!)) hardAt[i] = 1;
+      }
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const x = xyz[i * 3]!;
+    const y = xyz[i * 3 + 1]!;
+    const z = xyz[i * 3 + 2]!;
+    const cell = cells[i]!;
+    vset(d, dest[i * 3]!, dest[i * 3 + 1]!, dest[i * 3 + 2]!);
+    if (hardAt[i] === 1) {
       report.dropped++;
       spawnCellDrop(host, dst, d.x, d.y, d.z, cell, tmp);
       continue;
@@ -447,6 +486,19 @@ export function blockifyGrid(
   srcGlue.moveTo(dstGlue, (x, y, z) => placedSrc.has(x, y, z), map, nothingStays);
   settlePlacedGlue(dst, dstGlue, placed, report.placed, CellSet.fromCells(placed, report.placed), keep);
   return { report, placed: report.placed * 3 === placed.length ? placed : placed.slice(0, report.placed * 3), placedSrc };
+}
+
+/** `b` (null = empty) grown to contain cell (x,y,z). */
+function grownBounds(b: CellBounds | null, x: number, y: number, z: number): CellBounds {
+  if (b === null) return { minX: x, minY: y, minZ: z, maxX: x + 1, maxY: y + 1, maxZ: z + 1 };
+  return {
+    minX: Math.min(b.minX, x),
+    minY: Math.min(b.minY, y),
+    minZ: Math.min(b.minZ, z),
+    maxX: Math.max(b.maxX, x + 1),
+    maxY: Math.max(b.maxY, y + 1),
+    maxZ: Math.max(b.maxZ, z + 1),
+  };
 }
 
 // ------------------------------------------------------------ docking

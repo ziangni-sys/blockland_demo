@@ -15,8 +15,9 @@
  *              then the box in index order (index = (x-minX) + (z-minZ)*sx + (y-minY)*sx*sz)
  *              as runs of non-air cells: varuint run count, per run varuint gap (air cells
  *              since the end of the previous run, or since index 0) + u16Array of the cells.
- *              Proportional to the cell count, so a sparse structure with a huge box (ships
- *              may be edited at will) stays small and always reads back.
+ *              Proportional to the cell count, so a sparse structure stays small. The box
+ *              holds at most STRUCTURE_MAX_BOX_CELLS cells (the game rule, DESIGN 组装与方块化),
+ *              on both ends: writing refuses a bigger one, reading rejects it.
  *     pose     f64 x 23: pivot, position, rotation, prevPosition, prevRotation,
  *              linearVelocity, angularVelocity
  *     glue     i32Array: GlueStore.toArray() (canonical x, y, z, axis quadruples)
@@ -36,6 +37,7 @@
  */
 import { AIR, ID_MASK } from '../blocks/cell';
 import { BLOCKS } from '../blocks/registry';
+import { STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import type { Dir } from '../core/dirs';
 import type { Quat, Vec3 } from '../core/math';
 import type { ByteReader, ByteWriter } from '../save/bytes';
@@ -49,12 +51,6 @@ export const STRUCTURES_FORMAT = 3;
 
 const KIND_SHIP = 0;
 const KIND_ROTOR = 1;
-/**
- * Largest cell box a structure can have: StructureGrid stores its box densely in one
- * Uint16Array, which cannot be longer than this, so no structure that existed in memory has a
- * bigger one. Also keeps every index computation exact.
- */
-const MAX_BOX_CELLS = 2 ** 32 - 1;
 /** Coordinates stay well inside int32 so every integer computation downstream is exact. */
 const MAX_COORD = 1 << 28;
 /**
@@ -121,6 +117,10 @@ function writeCells(w: ByteWriter, g: StructureGrid): void {
   const sx = b.maxX - b.minX;
   const sy = b.maxY - b.minY;
   const sz = b.maxZ - b.minZ;
+  // The game never lets a structure grow past the limit; a save no load could read is a bug.
+  if (sx * sy * sz > STRUCTURE_MAX_BOX_CELLS) {
+    throw new Error(`writeStructures: structure ${g.gridId} has a cell box of ${sx}x${sy}x${sz}, above STRUCTURE_MAX_BOX_CELLS`);
+  }
   const layer = sx * sz;
   // forEachCell walks the storage box y-major, then z, then x: the same order as the tight
   // box's index, so the indices arrive strictly increasing and runs are found in one pass.
@@ -281,18 +281,13 @@ function readBox(r: ByteReader): { minX: number; minY: number; minZ: number; sx:
   const sz = r.varuint();
   if (sx > MAX_COORD || sy > MAX_COORD || sz > MAX_COORD) r.fail('cell box too large');
   const volume = sx * sy * sz;
-  if (volume > MAX_BOX_CELLS) r.fail(`cell box of ${volume} cells is too large`);
+  if (volume > STRUCTURE_MAX_BOX_CELLS) r.fail(`cell box of ${volume} cells is above STRUCTURE_MAX_BOX_CELLS`);
   return { minX, minY, minZ, sx, sy, sz, volume };
 }
 
-function checkCell(r: ByteReader, cell: number): void {
-  if (cell === AIR) r.fail('air inside a run of structure cells');
-  if (BLOCKS[cell & ID_MASK] === undefined) r.fail(`unknown block id ${cell & ID_MASK} in structure`);
-}
-
 /**
- * Allocate the grid's storage for the box. A corrupted box far larger than any structure the
- * game could hold may fail to allocate: that is malformed data, not a crash.
+ * Allocate the grid's storage for the box (at most STRUCTURE_MAX_BOX_CELLS cells, 4 MiB). Should
+ * even that fail under memory pressure, it is reported as malformed data, not a crash.
  */
 function allocate(r: ByteReader, g: StructureGrid, minX: number, minY: number, minZ: number, sx: number, sy: number, sz: number): void {
   try {
@@ -301,6 +296,11 @@ function allocate(r: ByteReader, g: StructureGrid, minX: number, minY: number, m
     if (!(e instanceof RangeError)) throw e;
     r.fail(`cell box of ${sx}x${sy}x${sz} cells cannot be allocated`);
   }
+}
+
+function checkCell(r: ByteReader, cell: number): void {
+  if (cell === AIR) r.fail('air inside a run of structure cells');
+  if (BLOCKS[cell & ID_MASK] === undefined) r.fail(`unknown block id ${cell & ID_MASK} in structure`);
 }
 
 /** Format 2: tight box + runs of non-air cells (see the header). */

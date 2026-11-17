@@ -7,7 +7,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   root: fileURLToPath(new URL('../..', import.meta.url)),
   cacheDir: 'node_modules/.vite-ui',
-  define: { __ARTIFACT__: 'false' },
+  define: { __ARTIFACT__: 'false', __BUILD_ID__: JSON.stringify(`dev-${Date.now()}`) },
   server: { host: '127.0.0.1', port: 5182, strictPort: true },
   logLevel: 'warn',
 });

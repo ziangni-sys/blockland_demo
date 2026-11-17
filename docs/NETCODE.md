@@ -2,7 +2,7 @@
 
 本文件是 M2.1 工作包 3～9 和 M2.2 工作包 10～14 的实现规格。玩法规则见 [DESIGN.md](DESIGN.md) 的“M2 规则 → 联机”，工作包见 [ROADMAP.md](ROADMAP.md)，验收场景是 [ACCEPTANCE.md](ACCEPTANCE.md) 的 30～37，代码约定照 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-工作包 2（身体移动和服务器规则拆开；“由客户端驱动”的玩家；移动上报 `MoveReport` 和校正 `Correction`，见 `entities/drive.ts`）在本文里当作已有接口。本文规定它们在网络上怎么走，以及给上报加的两个字段和两处校验改动（第 9 节）。本文的常量都放在 `src/net/protocol.ts`，正文里写名字和取值。
+工作包 2（身体移动和服务器规则拆开；“由客户端驱动”的玩家；移动上报 `MoveReport` 和校正 `Correction`，见 `entities/drive.ts`）在本文里当作已有接口。本文规定它们在网络上怎么走，以及给上报加的两个字段和两处校验改动（第 9 节）。本文的常量都放在 `src/net/protocol.ts`，正文里写名字和取值。结构体包围盒的上限是游戏规则，定义在 `core/constants.ts`（`STRUCTURE_MAX_BOX_CELLS`），`protocol.ts` 引用它（第 7 节）。
 
 ## 1. 角色与拓扑
 
@@ -38,16 +38,18 @@ export interface Transport {
 }
 ```
 
+- 本端 `close()` 不触发本端的 `onClose`；对端在收到 close 之前已发出的可靠消息全部送达后触发 `onClose`。关闭之后的 `send()` 什么也不做。
 - **分帧**：一条传输消息就是一条协议消息，第一个字节是消息 id，后面是载荷，没有长度前缀，传输保证消息边界。不把几条协议消息拼进一条传输消息。
 - 可靠通道单条消息最长 `MAX_RELIABLE_BYTES = 4 MiB`，需要时由传输实现自己分片重组。不可靠通道单条最长 `MAX_UNRELIABLE_BYTES = 1150`（一个 UDP 包装得下）；不可靠消息从不分片（丢一片等于全丢），超长是调用方的 bug，`send` 抛错。
 - 允许“不可靠通道其实可靠”（Worker、WebSocket）：协议不依赖丢包。
 - **回环** `src/net/loopback.ts`：`createLoopbackPair(net: LoopbackNet, up: LinkConditions, down: LinkConditions): { client: Transport; server: Transport }`。
   - `LoopbackNet` 持有一个虚拟时钟和到期队列，测试用 `advanceTo(ms)` 推进；也可以挂到真的 `setTimeout` 上，给浏览器里手动调试延迟用。
   - 传的是字节：`send` 时 `slice()` 一份，绝不传对象。
-  - `LinkConditions { latencyMs, jitterMs, loss, bandwidthBytesPerSec?, rtoMs?, seed }`（`rtoMs` 默认 400），两个方向各一份。抖动和丢包用自己的 `Rng(seed)`，结果可复现。
+  - `LinkConditions { latencyMs, jitterMs, loss, bandwidthBytesPerSec?, rtoMs?, seed }`（`rtoMs` 默认 `DEFAULT_RTO_MS = 400`），两个方向各一份。抖动和丢包用自己的 `Rng(seed)`，结果可复现。
+  - 每条消息延迟 `latencyMs` + U(0, `jitterMs`)。
   - 不可靠通道：每条独立延迟（会乱序），按 `loss` 丢掉。
-  - 可靠通道：不丢、不乱序。按 `loss` 抽中的消息模拟一次 SCTP 重传：送达时间 = min(同一方向在它之后送达的第 3 条消息（两条通道都算）的送达时间 + 2 × `latencyMs`, 发出时间 + `rtoMs` + `latencyMs`)，前者是快速重传，后者是重传计时器。它挡住后面的可靠消息（队头阻塞）：送达时间 = max(上一条的送达时间, 本条的时间)。
-  - 设了 `bandwidthBytesPerSec` 时按字节排队，`bufferedBytes` 反映积压，用来测背压。
+  - 可靠通道：不丢、不乱序。按 `loss` 抽中的消息模拟一次 SCTP 重传：送达时间 = min(第 3 条消息的送达时间 + 2 × `latencyMs`, 发出时间 + `rtoMs` + `latencyMs`)，前者是快速重传，后者是重传计时器。“第 3 条消息”是同一方向上在它之后发出、本身没丢的第 3 条消息（两条通道都算），取它在网络上的到达时间（队头阻塞之前的）。重传没有抖动。它挡住后面的可靠消息（队头阻塞）：送达时间 = max(上一条的送达时间, 本条的时间)。
+  - 设了 `bandwidthBytesPerSec` 时按字节排队，两条通道共用一个字节队列；丢掉的消息占带宽，重传不占。`bufferedBytes` 反映积压，用来测背压。
 - **WebRTC（工作包 10）必须提供**：同一个 `RTCPeerConnection` 上两条数据通道，`'r'`（`ordered: true`）和 `'u'`（`ordered: false, maxRetransmits: 0`），`binaryType = 'arraybuffer'`；可靠通道按 16 KiB 分片，每片前加一个字节（0 整条、1 首片后跟 u32 总长、2 中间、3 末片），这个格式永远不改（第 3 节）；`bufferedBytes` 就是 `bufferedAmount`；ICE 失败、任一通道关闭都触发 `onClose`。信令放在单独的 `Signaller` 接口后面，不属于 `Transport`。
 - **房间里的积压**：数据通道在房主主线程，Worker 里的 `PortTransport` 看不到它的 `bufferedAmount`，postMessage 也没有背压。所以主线程为每个客人的每条通道，在 `bufferedamountlow` 时和至少每 100 ms 往这个端口回一条 `{channel, bufferedAmount, seen}`（`seen` = 它从这个端口累计收到的这条通道的字节数）。`PortTransport.bufferedBytes` = 最近一次报告的 `bufferedAmount` + （累计发出的 − `seen`）。本机客户端的端口没有报告，积压是 0。
 - **背压**（服务器每个 tick 给每个客户端打包前检查；阈值按“排多久”算，不按字节）：
@@ -60,7 +62,7 @@ export interface Transport {
 
 **握手**
 
-1. 传输打开后，客户端在可靠通道发 `Hello`：`build`、`playerKey`、`name`、`viewRadius`。`build` 是 `BUILD_ID`：部署的构建是提交号（Vite `define` 注入），开发服务器是 `'dev-'` 加服务器的启动时间，测试是 `'test'`。没有单独的协议版本号：消息的布局或含义一变，提交号就变了。永远不改的有三样：可靠通道的分片格式（第 2 节）、`Hello` 开头的消息 id + `str build`、`Refuse` 的布局和它的 reason 1。所以任何两个版本之间都能说清“版本不同”。
+1. 传输打开后，客户端在可靠通道发 `Hello`：`build`、`playerKey`、`name`、`viewRadius`。`build` 是 `BUILD_ID`：部署的构建是提交号（Vite `define` 注入），工作区和提交不同时加 `'-dirty-'` 和构建时间（两次这样的构建内容可能不同，不能互连），不在 git 里时是 `'nogit-'` 加构建时间；开发服务器是 `'dev-'` 加服务器的启动时间，测试是 `'test'`。没有单独的协议版本号：消息的布局或含义一变，提交号就变了。永远不改的有三样：可靠通道的分片格式（第 2 节）、`Hello` 开头的消息 id + `str build`、`Refuse` 的布局和它的 reason 1。所以任何两个版本之间都能说清“版本不同”。
 2. 服务器检查，不过就回 `Refuse{reason, detail}` 然后关闭：
    - `build` 不同（`build`）。客户端要自己生成原样的区块，方块表和地形生成必须逐位相同。部署后还开着旧页面的人会被拒绝，提示刷新。
    - 名字或身份格式不对、握手前先发了别的消息（`bad_hello`）。
@@ -68,7 +70,7 @@ export interface Transport {
 3. 同一个身份已经有连接（房主自己的除外，见上）：新连接顶替旧连接。旧连接收到 `Kick(replaced)`，从此和这个身份无关；服务器在下一个 tick 开头对这个身份做 `sim.leave` + `sim.join`，新连接像第一次加入一样从头同步（和下面的“重连”一样：舵松开、离开载体，位置和背包从记录恢复）。这是“断线了但服务器还没发现时重连”的路径。
 4. 不校验种子：客户端不带种子，地形规格由 `Welcome` 给出（`GeneratorSpec`）。
 
-**玩家身份** `PlayerKey`：每个浏览器一个随机 128 位值（32 个十六进制字符），存 localStorage，单机也用它（单机世界以后开放成房间，房主还是同一份记录）。地址参数 `?slot=<名字>` 换用另一份身份（存在 `playerKey:<名字>` 下），给同一个浏览器里的第二个页面和双页面测试（工作包 14）用。`game.ts` 的 `LOCAL_PLAYER_KEY = 'local'` 删掉。身份只发给服务器，服务器从不把任何人的身份发给别人，别人看到的是实体 id 和名字。名字 1～24 个字符，去掉控制字符。
+**玩家身份** `PlayerKey`：每个浏览器一个随机 128 位值（32 个十六进制字符），存 localStorage，单机也用它（单机世界以后开放成房间，房主还是同一份记录）。地址参数 `?slot=<名字>` 换用另一份身份（存在 `playerKey:<名字>` 下），给同一个浏览器里的第二个页面和双页面测试（工作包 14）用。`game.ts` 的 `LOCAL_PLAYER_KEY = 'local'` 删掉。身份只发给服务器，服务器从不把任何人的身份发给别人，别人看到的是实体 id 和名字。名字 1～`MAX_NAME_LENGTH = 24` 个字符，去掉控制字符。
 
 **加入顺序**（握手通过后，服务器在下一个 tick 开头处理；对模拟的所有写都在 tick 的流程里）：
 
@@ -121,7 +123,7 @@ export interface Transport {
 
 ## 5. 每个 tick 的包
 
-服务器每个 `sim.tick()` 之后调用 `replicator.endTick()`，给每个客户端在可靠通道上发**恰好一个** `TickBatch`。没有内容也发（6 字节）：它既是心跳，也是客户端时钟的样本来源。另外在不可靠通道上发零到几条 `Samples`（第 7、8 节）。
+服务器每个 `sim.tick()` 之后调用 `replicator.endTick()`，给每个客户端在可靠通道上发**恰好一个** `TickBatch`。没有内容也发（4～6 字节，tick < 2^21，约 29 小时）：它既是心跳，也是客户端时钟的样本来源。另外在不可靠通道上发零到几条 `Samples`（第 7、8 节）。
 
 `Replicator` 的变化收集是连续的：两个 tick 之间发生的变化（`ServerHost` 在 tick 之间生成区块时清掉的胶、加入时载入的区块）算进下一个包。
 
@@ -165,7 +167,7 @@ export interface Transport {
 - 标成原样的区块要客户端自己生成（异步）。生成完之前收到的这个区块的增量，按收到的顺序排队，生成完、插进副本之前全部应用，然后才画、才参与碰撞。这期间这一列不显示，所以看不到不一致。
 - 客户端每收到一列的快照就给这一列一个新的代号。退订丢掉这一列排队的增量，并作废在途的生成；生成结果带的代号不是当前的就扔掉；任何快照（包括重发）替换这一列所有等待中的状态。否则“原样快照 → 退订 → 改动 → 重新订阅（格子快照）→ 旧的生成才完成”会把生成的格子加上旧增量盖在新快照上，永远错下去。
 - 退订之后这个区块的增量不再发；以后重新订阅时发新的快照。
-- 一个 tick 里改了超过 `CHUNK_RESEND_CELLS = 1024` 格的已订阅区块，不发增量，在区段 1 里重发这一列。结构体超过 `STRUCTURE_RESEND_CELLS = 1024` 格时整体重发。阈值按“增量约 2 字节一格、一列的快照中位数约 1.8 KB”取。
+- 一个 tick 里改了超过 `CHUNK_RESEND_CELLS = 1024` 格的已订阅区块，不发增量，在区段 1 里重发这一列。结构体超过 `STRUCTURE_RESEND_CELLS = 1024` 格时整体重发。阈值按“增量约 2 字节一格、一列的快照中位数约 2.0 KB”取。
 
 ## 6. 区块
 
@@ -181,7 +183,7 @@ export interface Transport {
 
 **快照** `ChunkSnapshot { cx, cz, cells: 'pristine' | CellVolume, glue: number[] }`
 
-- `cells`：原样标记（客户端用 `Welcome` 里的 `GeneratorSpec` 自己生成），或者整列 16×128×16 的格子（第 14 节的 `CellVolume`，顺序 `lx | lz<<4 | y<<8`，和 `Chunk.cells` 一样）。改过的区块中位数约 1.8 KB。
+- `cells`：原样标记（客户端用 `Welcome` 里的 `GeneratorSpec` 自己生成），或者整列 16×128×16 的格子（第 14 节的 `CellVolume`，顺序 `lx | lz<<4 | y<<8`，和 `Chunk.cells` 一样）。改过的区块实测中位数约 2.0 KB，p90 约 2.85 KB；只被玩家改了几处的地形列中位数 2.6～2.7 KB。
 - `glue`：规范端（坐标较小的那一格，`GlueStore` 的规范键）在这一列里的所有世界胶面，每面一个数 `lx | lz<<4 | y<<8 | axis<<15`。原样的区块也可能有胶：在天然的石头上涂胶不改格子。
 - 不在快照里：光照（客户端自己算）、待处理的方块 tick（只在服务器）、实体和结构体（走各自的兴趣）。
 
@@ -214,7 +216,8 @@ export interface Transport {
 **生成记录** `StructureRecord`（全量，包的 tick 结束时的状态）
 
 - `kind`、`id`、`parentId`（0 = 世界）。
-- 格子：紧凑包围盒 + 盒内的 `CellVolume`（顺序 `(x−minX) + (z−minZ)·sx + (y−minY)·sx·sz`，和存档相同）。约 3700 格的船按存档的量法（每格 2 字节）是 8.8 KB，本文的估算都用这个数；木板船体的游程很长，调色板游程实际会小得多。
+- 格子：紧凑包围盒 + 盒内的 `CellVolume`（顺序 `(x−minX) + (z−minZ)·sx + (y−minY)·sx·sz`，和存档相同）。木板船体的游程很长：2934～3700 格的木板船实测整条记录约 1.2～1.35 KB（每格约 0.3～0.4 字节），本文的估算用这个数。按存档的量法（每格 2 字节，3700 格 8.8 KB）估算是上限，各处另列。
+- 盒子的上限：结构体的紧凑包围盒体积 ≤ `STRUCTURE_MAX_BOX_CELLS = 2^21`（比如 128 × 128 × 128），这是游戏规则（DESIGN“组装与方块化”）：组装（collect/assembly，预览同样）拒绝超出的结构体（toast），往结构体上放方块使盒子超出时同样拒绝，船上的转子停下时会让船的盒子超出的格子掉落；存档和网络用同一个上限（`protocol.ts` 的 `MAX_STRUCTURE_BOX_CELLS` 就是它）。所以服务器上的每个结构体都发得出去，客户端按它拒绝更大的盒子。
 - 位姿：`pivot`、`position`、`rotation`，f64（生成时要精确，携带从这里开始算）。
 - 胶：`GlueStore.toArray()` 的规范顺序，坐标差分编码。
 - 转子：`bearing xyz`、`axis`、`baseRotation`、`angle`、`angularSpeed`（f64）、`sails`、`frozen`。
@@ -368,7 +371,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | `SetViewRadius` | `r` 0～17 | 订阅半径；模拟半径 `min(r, SIM_RADIUS_CAP)` | — |
 | `HostCommand` | 见下 | 只接受房主的连接 | 否 |
 
-`HostCommand` 的种类：`SetRules { defaultMode, dropsEnabled }`；`SetPlayerMode { entityId（0 = 自己）, mode }`；`SetDayTime { t }`；`Teleport { x, y, z }`（自己，调试）；`Give { item, count }`（自己，调试）；`Kick { entityId }`（工作包 11）。客人发来的回一个 toast `toast.host.only`（新的消息键）。单机暂停菜单里切模式 = `SetPlayerMode(自己)` + `SetRules(worldRulesFor(mode))`，和现在一样连世界规则一起切。暂停、存档、关服不在这里，它们是宿主控制消息：只有房主页面需要，客人发不了，Node 服务器有自己的控制台。`window.__blocklands` 的 `setDayTime`、`teleport`、`give` 改发这些命令。
+`HostCommand` 的种类：`SetRules { rules: WorldRules }`（`defaultMode`、`dropsEnabled`）；`SetPlayerMode { entityId（0 = 自己）, mode }`；`SetDayTime { t }`；`Teleport { x, y, z }`（自己，调试）；`Give { item, count }`（自己，调试）；`Kick { entityId }`（工作包 11）。客人发来的回一个 toast `toast.host.only`（新的消息键）。单机暂停菜单里切模式 = `SetPlayerMode(自己)` + `SetRules(worldRulesFor(mode))`，和现在一样连世界规则一起切。暂停、存档、关服不在这里，它们是宿主控制消息：只有房主页面需要，客人发不了，Node 服务器有自己的控制台。`window.__blocklands` 的 `setDayTime`、`teleport`、`give` 改发这些命令。
 
 **应用顺序**：服务器把每个连接收到的意图按 `seq` 排队，在下一个 tick 开头、`sim.tick()` 之前按 `seq` 应用。一个玩家一个 tick 最多应用到第一个“按下”类意图（`Use`、`Attack`、`SwapHands`）为止，或者 `INTENTS_PER_TICK = 16` 条（`Aim` 不算），后面的留到下一个 tick。这样每次按下都作用在它自己带的目标和当时的手持物品上，不会被同一个 tick 里更晚的 `Aim` 或背包操作改掉；每秒 20 次按下足够（创造模式连点约 10 次/秒）。
 
@@ -419,20 +422,20 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 - 合计约 6 KB/s（50 kbit/s）。房主上行，3 个客人约 18 KB/s（150 kbit/s）。
 - 上行：移动上报 57 + 80 字节 × 20 ≈ 2.7 KB/s，加上 `Aim` 和点击不到 3.2 KB/s。房主下行约 10 KB/s。
 
-**加入**：数据量 = 订阅半径内改过的区块（中位 1.8 KB，p90 2.6 KB）+ 结构体（按存档量法，4000 格约 9.4 KB）+ 实体（约 25 B 一个）+ 原样区块的标记（约 6 B × 半径 9 时约 280 列 ≈ 1.7 KB）。
+**加入**：数据量 = 订阅半径内改过的区块（中位约 2.0 KB，p90 约 2.85 KB；玩家轻度改动的列 2.6～2.7 KB）+ 结构体（木板船实测每格约 0.3～0.4 字节，4000 格约 1.5 KB；按存档量法的上限约 9.4 KB）+ 实体（约 25 B 一个）+ 原样区块的标记（约 6 B × 半径 9 时约 280 列 ≈ 1.7 KB）。
 
-- 出生点附近 30 个改过的区块、3 条船：约 54 + 12 + 2 ≈ 70 KB。
-- 最坏：半径 9 内 280 列全改过，约 500～730 KB。
-- 快照预算 `SNAPSHOT_BUDGET = 16 KB/tick`（320 KB/s）是上限；推迟的新兴趣只在可靠积压不到 0.1 秒的送出量时发（第 2 节），所以实际速度就是房主上行送得出的速度，校正和方块变化前面不会排上几秒。就绪区最多 49 列，最坏约 130 KB：320 KB/s 下 0.4 秒，1 Mbit/s 上行约 1 秒。
+- 出生点附近 30 个轻度改动的区块、3 条船：约 80 + 2 + 2 ≈ 84 KB（船按存档量法的上限 12 KB 时约 94 KB）。
+- 最坏：半径 9 内 280 列全改过，约 560～800 KB。
+- 快照预算 `SNAPSHOT_BUDGET = 16 KB/tick`（320 KB/s）是上限；推迟的新兴趣只在可靠积压不到 0.1 秒的送出量时发（第 2 节），所以实际速度就是房主上行送得出的速度，校正和方块变化前面不会排上几秒。就绪区最多 49 列，最坏约 140 KB：320 KB/s 下约 0.45 秒，1 Mbit/s 上行约 1.1 秒。
 
 **3700 格的船在四个人旁边组装**（每个客人）：
 
 - 第一下右键：只有点击的人收到预览，包围盒位图约 1 KB。
-- 组装那个 tick：世界里清掉 3700 格，分布在 3～6 列，每列几百格，低于重发线，走增量：排好序的 index 差分 1 字节 + 格子值 1～2 字节 ≈ 2.5 B/格 → 约 9 KB；船的生成按 8.8 KB 算；补水改的就是这些格子的最终值，不另算。一个包约 18 KB。
-- 房主一次发 3 份约 54 KB，1 Mbit/s 上行约 0.45 秒送完（客人在收到这个包的那一帧同时看到格子消失和船出现）。
+- 组装那个 tick：世界里清掉 3700 格，分布在 3～6 列，每列几百格，低于重发线，走增量：排好序的 index 差分 1 字节 + 格子值 1～2 字节，最多约 2.5 B/格；船的生成实测约 1.2～1.35 KB（按存档量法的上限 8.8 KB）；补水改的就是这些格子的最终值，不另算。实测一个包 7～9 KB（全按上限估约 18 KB）。
+- 房主一次发 3 份约 21～27 KB，1 Mbit/s 上行约 0.2 秒送完（按上限 54 KB 约 0.45 秒；客人在收到这个包的那一帧同时看到格子消失和船出现）。
 - 之后每 tick 一条 22 B 的位姿采样。
 
-**全速飞过没去过的地方**（创造模式疾飞 18 格/秒 = 1.125 区块/秒）：圆形的兴趣每秒新进约 2 × 半径 × 速度列，半径 9 约 20 列/秒，半径 17 约 38 列/秒。没去过的区块是原样的，每列约 6 字节，不到 0.3 KB/s。代价在生成：客户端半径 9 约 20 × 2.3 ms ≈ 46 ms/s（地形 Worker 池）；服务器只到 `SIM_RADIUS_CAP = 10`，约 23 列/秒 ≈ 53 ms/s（`ServerHost` 在 tick 之间同步生成，每 tick 预算 6 ms ≈ 2.6 列 = 52 列/秒，刚好跟得上）。飞过改过的区块时半径 9 约 20 × 1.8 KB = 36 KB/s。
+**全速飞过没去过的地方**（创造模式疾飞 18 格/秒 = 1.125 区块/秒）：圆形的兴趣每秒新进约 2 × 半径 × 速度列，半径 9 约 20 列/秒，半径 17 约 38 列/秒。没去过的区块是原样的，每列约 6 字节，不到 0.3 KB/s。代价在生成：客户端半径 9 约 20 × 2.3 ms ≈ 46 ms/s（地形 Worker 池）；服务器只到 `SIM_RADIUS_CAP = 10`，约 23 列/秒 ≈ 53 ms/s（`ServerHost` 在 tick 之间同步生成，每 tick 预算 6 ms ≈ 2.6 列 = 52 列/秒，刚好跟得上）。飞过改过的区块时半径 9 约 20 × 2.0 KB = 40 KB/s（全是轻度改动的列时约 54 KB/s）。
 
 **大面积流水**（溃坝）：每 tick 几百格变化，约 2.5 B/格，10～20 KB/s，直到水停下。
 
@@ -444,18 +447,22 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 **服务器对每个客户端的限制**：
 
-- 上行单条消息 ≤ 2048 字节，`Hello` ≤ 512 字节。
+- 上行单条消息 ≤ `MAX_CLIENT_MESSAGE_BYTES = 2048` 字节，`Hello` ≤ `MAX_HELLO_BYTES = 512` 字节。
 - 意图：不丢，按第 10 节每 tick 应用；排队超过 `INTENT_QUEUE_LIMIT = 1024` 条断开。
 - 移动上报：队列上限 10（第 8 节）。
-- `viewRadius` ≤ 17；名字 ≤ 24 个字符；身份 ≤ `MAX_PLAYER_KEY_LENGTH = 128`。
+- `viewRadius` ≤ 17；名字 ≤ `MAX_NAME_LENGTH = 24` 个字符；身份 ≤ `MAX_PLAYER_KEY_LENGTH = 128`。
 - 可靠积压 > 8 MiB 持续 10 秒：`Kick(too_slow)`。
-- 握手之后解不开的消息、未知的消息 id、第二个 `Hello`：`Kick(protocol_error)`（握手之前的错误回 `Refuse(bad_hello)`）。客户端收到 M2.1 存不下的格子值（≥ 2¹⁶）同样按协议错误断开。
+- 握手之后解不开的消息、未知的消息 id、第二个 `Hello`、消息到达的通道和它规定的通道不同：`Kick(protocol_error)`（握手之前的错误回 `Refuse(bad_hello)`）。客户端收到 M2.1 存不下的格子值（≥ 2¹⁶）同样按协议错误断开。
 
 `Replicator` 从一开始就按客户端、按区段统计发出的字节数（调试面板显示），工作包 13 用它调预算。
 
 ## 14. 编码
 
-全部用 `src/save/bytes.ts` 的 `ByteWriter`、`ByteReader`。解码出错时 `ByteReader` 抛 `SaveFormatError`，解码函数包成 `ProtocolError`，连接按 `protocol_error` 断开。每个解码函数最后调 `expectEnd()`。编解码是纯函数，只看字节，不看副本；没有模块级的临时对象（LESSONS“临时向量被改写”）。
+全部用 `src/save/bytes.ts` 的 `ByteWriter`、`ByteReader`。解码出错时 `ByteReader` 抛 `SaveFormatError`，解码函数包成 `ProtocolError`，连接按 `protocol_error` 断开。每个完整消息的解码函数最后调 `expectEnd()`（只读 `Hello` 开头 `build` 的 `readHelloBuild` 除外）。编解码是纯函数，只看字节，不看副本；没有模块级的临时对象（LESSONS“临时向量被改写”）。
+
+- 所有格子坐标和区块坐标（包括差分累加后的，以及预览盒子的远角）|v| ≤ `MAX_COORD = 2^28`，超出按协议错误。
+- 范围超出布局规定的值域（枚举、标志位、视距 0～17、选中格 0～8、按键 0/2）按协议错误，不夹到范围内。
+- 解码时 RLE 是不按输入比例分配内存的地方之一：结构体的盒子 sx·sy·sz ≤ `MAX_STRUCTURE_BOX_CELLS`（= `STRUCTURE_MAX_BOX_CELLS` = 2^21，第 7 节）；一个 `TickBatch` 里所有 `CellVolume` 合计 ≤ `MAX_BATCH_CELLS = 2^25` 格（1024 列）。编码端同样拒绝，`Replicator` 打包时不得超过（超过的快照推到下一个包）。另一处是预览位图（见 `PrivateState` 位 3）。
 
 **基本类型**
 
@@ -465,15 +472,15 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | `u8` `u16` `u32` `i32` `f32` `f64` `bool` | bytes.ts 的同名方法 |
 | `i8` / `i16` | 用 `u8` / `u16` 写补码，读时做符号扩展（`net/codec.ts` 的小函数，bytes.ts 没有） |
 | `Cell` | `vu v`；`v & CELL_MULTI_BIT` 时再一个 `vu` 第二部件（第 6 节） |
-| `Pos32` | `i32 round(v × 512)`：1/512 格，范围 ±4 194 304，正好是世界的坐标范围 |
-| `Rot64` | 4 × `i16 round(q × 32767)`，读出后归一化 |
+| `Pos32` | `i32 round(v × 512)`：1/512 格，范围 [−4 194 304, +4 194 304)，正好是世界的坐标范围 |
+| `Rot64` | 4 × `i16 round_half_away_from_zero(q × 32767)`，读出后归一化 |
 | `Ang16` | `u16`：角度 /(2π) × 65536 取模 |
 | `Pose` | `Pos32 ×3` + `Rot64`（20 字节） |
 | `Target` | `vu gridId, vi x, vi y, vi z, u8 face, u8 sub, Cell cell` |
 | `OptTarget` | `u8 有无` + `Target` |
 | `Stack` | `vu (item + 1，0 = 空)`，非空时再 `vu count` |
-| `Message` | `str key, vu n`，每个参数 `str name, u8 tag`（0 数字后跟 `f64`，1 文字后跟 `str`） |
-| `CellVolume(n)` | `u8 enc`；0 = 调色板：`vu P`（1..n）、`P × Cell`、游程 `vu token` 直到覆盖 n 格，`token = (len − 1) × 2^B + idx`，`B` = `P − 1` 的位数（用乘除，不用位运算：结构体的盒子可以很大）；1 = 原样：`n × Cell`。调色板超过 4096 项时用 1 |
+| `Message` | `str key, vu n`，每个参数 `str name, u8 tag`（0 数字后跟 `f64`，1 文字后跟 `str`）。没有参数时解码出的 `Message` 不带 `params`；参数名重复按协议错误 |
+| `CellVolume(n)` | `u8 enc`；0 = 调色板：`vu P`（1..n）、`P × Cell`、游程 `vu token` 直到覆盖 n 格，`token = (len − 1) × 2^B + idx`，`B` = `P − 1` 的位数（用乘除，不用位运算：结构体的盒子可以很大）；1 = 原样：`n × Cell`。调色板超过 `PALETTE_LIMIT = 4096` 项时用 1 |
 | `GlueList` | `vu n`，每面 `vi dx, vi dy, vi dz, u8 axis`，和前一面的坐标差（从 0,0,0 起），规范顺序 |
 | `GeneratorSpec` | `u8 kind`：0 地形 `u32 seed`；1 平地 `u32 seed, vu n, n × (vu cell, vu thickness)`；2 虚空 `u32 seed`。生成器类加一个 `spec()` 方法给出它 |
 
@@ -485,7 +492,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | 0x02 | `Bye` | 可靠 | — | 1 B |
 | 0x03 | `Ping` | 不可靠 | `u32 clientMs` | 5 B |
 | 0x10 | `MoveReport` | 不可靠 | `vu seq, vu epoch, vu viewTick, vu carrierId, f64×3 pos, f32×3 vel, f32 yaw, f32 pitch, u8 flags`（0 着地 1 潜行 2 疾跑 3 飞行 4 输入 sneak）`, i8 forward, i8 strafe, u8 landings` | ~57 B |
-| 0x20 | `Aim` | 可靠 | `vu seq, vu moveSeq, OptTarget use, bool mineSame, [OptTarget mine]` | 6～40 B |
+| 0x20 | `Aim` | 可靠 | `vu seq, vu moveSeq, OptTarget use, bool mineSame, [OptTarget mine]`（两个目标相同时必须用 `mineSame`：标志为假又重复同一个目标按协议错误） | 6～40 B |
 | 0x21 | `Use` | 可靠 | `vu seq, vu moveSeq, u8 slot, u8 flags`（0 sneak）`, OptTarget` | 7～24 B |
 | 0x22 | `UseRelease` | 可靠 | `vu seq` | 2～4 B |
 | 0x23 | `Attack` | 可靠 | `vu seq, vu moveSeq, u8 slot, OptTarget` | 6～23 B |
@@ -512,8 +519,8 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | 0x82 | `Refuse` | 可靠 | `u8 reason, str detail`（布局和 reason 1 永不改）。reason：1 build、2 bad_hello、3 full、4 closed、5 shutting_down、6 same_key |
 | 0x83 | `Kick` | 可靠 | `u8 reason, str detail`。reason：1 replaced、2 too_slow、3 protocol_error、4 shutdown、5 kicked、6 timeout |
 | 0x84 | `Pong` | 不可靠 | `u32 clientMs, vu tick` |
-| 0x85 | `TickBatch` | 可靠 | `vu tick, u16 sections`，然后按位序排列的区段（下表） |
-| 0x86 | `Samples` | 不可靠 | `vu tick, vu seq`（每个客户端各自递增，用来算丢失率）`, vu nShips, nShips × (vu id, Pose), vu nEntities, nEntities × EntitySample`；超过 1150 字节就拆成几条，每条自成一体 |
+| 0x85 | `TickBatch` | 可靠 | `vu tick, u16 sections`，然后按位序排列的区段（下表）。解码后列表类的区段总是数组（不在包里的是空数组） |
+| 0x86 | `Samples` | 不可靠 | `vu tick, vu seq`（每个客户端各自递增，用来算丢失率）`, vu nShips, nShips × (vu id, Pose), vu nEntities, nEntities × EntitySample`；超过 1150 字节就拆成几条，每条自成一体、`seq` 连续（`packSamples`） |
 
 **`TickBatch` 的区段**
 
@@ -537,20 +544,21 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 - `StructureRecord`：`u8 kind`（0 ship 1 rotor）`, vu id, vu parentId, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, [CellVolume(sx·sy·sz)，盒子为空时没有], f64×3 pivot, f64×3 position, f64×4 rotation, GlueList`；转子再加 `vi bx, vi by, vi bz, u8 axis, f64×4 baseRotation, f64 angle, f64 angularSpeed, vu sails, bool frozen`；船再加 `vi hx, vi hy, vi hz, u8 forward, f32 throttle, f32 rudder, vu helmsmanId`。头约 130 字节 + 格子 + 胶。
 - `StructureDelta`：`vu id, u8 mask`；位 0 `vu n, n × (vi dx, vi dy, vi dz, Cell)`（与上一格的差，从 0,0,0 起）；位 1 `vu n, n × (vi dx, vi dy, vi dz, u8 axis + added × 4)`；位 2 `f64×3 pivot`；位 3 `vi hx, vi hy, vi hz, u8 forward, vu helmsmanId`；位 4 `f32 throttle, f32 rudder`；位 5 `f64 angle, f64 angularSpeed, vu sails, bool frozen`。
-- `EntityRecord`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`；player 再加 `i16 pitch`（pitch/(π/2)×32767）`, u8 flags`（0 潜行 1 疾跑 2 飞行 3 死亡 4 着地）`, vu steeringShipId, vu heldItem+1`；item `vu item, vu count`；falling `Cell`；tnt `vu fuse`；rabbit 无。
+- `EntityRecord`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`；player 再加 `i16 pitch`（round_half_away_from_zero(pitch/(π/2)×32767)）`, u8 flags`（0 潜行 1 疾跑 2 飞行 3 死亡 4 着地）`, vu steeringShipId, vu heldItem+1`；item `vu item, vu count`；falling `Cell`；tnt `vu fuse`；rabbit 无。
 - `EntitySample`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`，`kind` 是 player 时再加 `i16 pitch, u8 flags`。约 18～21 字节。
 - `EntityUpdate`：`vu id, u8 mask`；位 0 最终状态（同 `EntitySample` 去掉 id，含 `kind`）；位 1 `vu item, vu count`；位 2 `vu fuse`；位 3 `u8 flags, vu steeringShipId, vu heldItem+1`。
 - `PrivateState`：`u8 mask`，按位依次：
-  - 0 `Correction`：`vu epoch, str cause, vu carrierId, f64×3 pos, f32×3 vel, f32 yaw, f32 pitch, u8 flags`（0 飞行 1 着地）`, vu seatShipId, [f32×3 seat]`。约 75 字节。
-  - 1 背包：`u8 selected, 9 × Stack, 27 × Stack, Stack offhand, Stack cursor`。80～120 字节。
+  - 0 `Correction`：`vu epoch, str cause, vu carrierId, f64×3 pos, f32×3 vel, f32 yaw, f32 pitch, u8 flags`（0 飞行 1 着地）`, vu seatShipId, [f64×3 seat]`（只在 `seatShipId ≠ 0` 时有；f64 的理由同第 9 节的位置）。约 75 字节，坐着时约 100 字节。
+  - 1 背包：`u8 selected, HOTBAR_SLOTS × Stack, MAIN_SLOTS × Stack, Stack offhand, Stack cursor`（9 格和 27 格）。80～120 字节。
   - 2 `f32 health, f32 maxHealth, vu air, vu maxAir, bool dead, u8 mode`。约 14 字节。
   - 3 视图：`u8 mask`；0 `u8 有无, [vu gridId, vi x, vi y, vi z, u8 sub, u8 progress]`；1 `u8 有无, [vu gridId, vi x, vi y, vi z, u8 face, u8 sub, u8 progress]`；2 `u8 有无, [vu gridId, u8 kind, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, ceil(sx·sy·sz/8) 字节位图]`（位序同 `CellVolume` 的格子顺序，第 i 格是第 i>>3 字节的第 i&7 位）；3 `vu n, n × (vi dx, vi dy, vi dz)`；4 `u8 有无, [Message]`。
+    - 预览的格子数 ≤ `MAX_PREVIEW_CELLS`（= max(`SHIP_MAX_CELLS`, `ROTOR_MAX_CELLS`) = 4000），盒子体积 ≤ `MAX_STRUCTURE_BOX_CELLS`（位图最多 256 KiB，放得进一条消息），远角 ≤ `MAX_COORD`；超出时编码端抛错、解码端按协议错误，在分配之前检查。编码端总是发紧凑包围盒，盒子外的位必须为 0。服务器只为游戏会组装的结构体（或缺帆的转子）做预览，它们都在这两个上限之内（第 7 节）。
   - 4 事件：`vu n`，每个 `u8 type`：0 toast `Message, u8 kind`（0 info 1 warn 2 error）；1 受伤 `f32 amount, str cause`；2 死亡 `str cause`；3 拾取 `vu item, vu count`；4 松舵 `str cause`。
   - 5 `vu ack`。
   - 6 `vu moveAck`。
 - `WorldEvent`：`u8 type`；0 blockBroken、1 blockPlaced：`vu gridId, vi x, vi y, vi z, Cell`；2 explosion：`f32×3, f32 power`；3 sound：`str name, f32×3`。
 
-**大小估计**：空包 6 字节；平常的包 6～60 字节；原样快照 6 字节 + 每个胶面 3 字节；改过的快照中位 1.8 KB（p90 2.6 KB，最大 3.7 KB；调色板游程和存档相同，少 9 字节外壳）；区块增量每列约 6 字节 + 每格 2～4 字节；结构体生成约 130 字节 + 每格按 2.4 字节估（存档的量法，游程长时更少）+ 每个胶面 3～7 字节；结构体增量约 3 字节 + 每格约 5 字节；采样消息约 5 字节 + 每条船 22 字节 + 每个实体 18～21 字节；校正约 75 字节。
+**大小估计**（实测）：空包 4～6 字节（tick < 2^21，约 29 小时）；平常的包 6～60 字节；原样快照 6 字节 + 每个胶面 3 字节；改过的快照中位约 2.0 KB（p90 约 2.85 KB，最大可到 4.8 KB；玩家轻度改动的列中位 2.6～2.7 KB；调色板游程和存档相同，比存档编码小 17～29 字节）；区块增量每列约 6 字节 + 每格 2～4 字节；结构体生成约 130 字节 + 格子（木板船实测每格约 0.3～0.4 字节，3700 格整条约 1.2～1.35 KB；按存档的量法每格 2.4 字节是上限）+ 每个胶面 3～7 字节；结构体增量约 3 字节 + 每格约 5 字节；采样消息约 5 字节 + 每条船 22 字节 + 每个实体 18～21 字节；校正约 75 字节（坐着时约 100）；预览位图最多 256 KiB（盒子上限 2^21 格）。
 
 **版本**：没有单独的协议版本号，`BUILD_ID` 相同才能连（第 3 节）。不做兼容：版本不同就拒绝连接。
 
@@ -559,7 +567,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 ```
 src/net/
   protocol.ts     常量、消息 id、所有消息的 TS 类型（纯数据）、BUILD_ID          工作包 3
-  codec.ts        编解码：基本类型、Cell、CellVolume、GlueList、各消息、ProtocolError  工作包 3
+  codec.ts        编解码：基本类型、Cell、CellVolume、GlueList、各消息、ProtocolError、readHelloBuild、packSamples  工作包 3
   transport.ts    Transport 接口、通道常量                                      工作包 3
   loopback.ts     LoopbackNet、createLoopbackPair、LinkConditions               工作包 3
   server/
@@ -590,7 +598,7 @@ tests/net/harness.ts  NetHarness、HeadlessClient                               
 
 **各工作包还要改的现有文件**
 
-- 工作包 4：不改 `src/sim`。`structures/rotor.ts` 导出扫掠的量法，`StructureManager.measureSweep` 改用它（第 7 节）。
+- 工作包 4：不改 `src/sim`。`structures/rotor.ts` 导出扫掠的量法，`StructureManager.measureSweep` 改用它（第 7 节）。`Replicator` 每列每个版本只编码一次快照，字节在客户端之间共享（编码一列约 0.14 ms）。
 - 工作包 5：只在 `src/net/client` 里，不碰 `client/`。
 - 工作包 6：`entities/manager.ts`、`structures/manager.ts` 的“被放下的人跟着取整走”（第 9 节第 7 条）；工作包 2 的上报加 `viewTick`、`landings` 和对应的两处校验改动（第 9 节）。都在工作包 2 合并后做。
 - 工作包 7：`sim/interact.ts`（声称的瞄准、`mining`/`gluing`、射线抽走）、`sim/view.ts`（`InteractionView` 的两个字段）、`sim/players.ts`（`closeInventory`、声称的瞄准的入口、死亡和复活时清按键）、`sim/messages.ts`（`toast.host.only`）、`entities/inventory.ts`（`pickBlockInto`）。
@@ -635,7 +643,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 各工作包自己的单元测试：
 
-- 3：每种消息的往返（随机内容，编码再解码深度相等）；截断、乱改字节只抛 `ProtocolError`，不崩、不分配巨大内存；`Cell` 在 M2.1 拒绝 ≥ 2¹⁶；`CellVolume` 对真实地形区块的大小不超过存档编码 + 4 字节；回环的顺序、丢包率、SCTP 重传模型的队头阻塞和带宽限制。
+- 3：每种消息的往返（随机内容，编码再解码深度相等）；截断、乱改字节只抛 `ProtocolError`，不崩、不分配巨大内存；盒子正好 `STRUCTURE_MAX_BOX_CELLS` 的结构体记录和预览往返，多一格两端都拒绝；`Cell` 在 M2.1 拒绝 ≥ 2¹⁶；`CellVolume` 对真实地形区块的大小不超过存档编码 + 4 字节；回环的顺序、丢包率、SCTP 重传模型的队头阻塞和带宽限制。
 - 4：`Replicator` 挂在一个 `Simulation` 上，传输换成记录器，包解码后 `applyBatch` 到 `ReplicaState`，在组装、停靠（船上带风车）、转子启停、爆炸、溃坝、区块进出兴趣的脚本场景里逐 tick 比较摘要。
 - 5：录下的包序列回放到 `ClientReplica`；时钟在抖动、丢包、补跑突发下不倒退、D 收敛；可靠通道卡住时 `renderTick` 不越过已应用的包；原样区块生成期间的增量排队、退订再订阅时作废在途的生成；载体被删时别人的位置连续。
 - 6：校正之后队列里旧 epoch 的上报不被应用、乱序的上报不让位置倒退；两次落地之间的上报全丢不产生摔伤；从行驶的船跳进水里、从码头登上行驶的船，往返 150 ms 和 400 ms 都不被校正；`rotorLead` 收敛到服务器实际应用上报的 tick。
@@ -675,7 +683,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 | 光照引擎必须是第一个监听器 / 区块卸载后留下“鬼光” | 副本的光照在增量、退订再订阅之后和对同样格子的全量重算一致 |
 | 天空的昼夜和游戏时间不一致 | `SetDayTime` 之后客户端的昼夜和服务器的差不超过 D 个 tick |
 | 某个区块网格化失败，加载界面永远卡住 | 损坏的快照：客户端以协议错误断开并显示原因，不停在加载界面；原样区块生成失败沿用现在的退路 |
-| 存档写得出、读不回（两边大小限制不一致） | 4000 格的船、调色板 4096 项、4 MiB 消息在编码和解码两边的上限相同（往返测试） |
+| 存档写得出、读不回（两边大小限制不一致） | 4000 格的船、盒子正好 `STRUCTURE_MAX_BOX_CELLS` 的结构体、调色板 4096 项、一个包 `MAX_BATCH_CELLS` 格、4 MiB 消息在编码和解码两边的上限相同（往返测试）；游戏、存档、网络用同一个盒子上限 |
 | 界岩能直接放到船上 | `Use` 意图把界岩放到船上被拒绝（意图走同一个 `place`） |
 | 船被弹飞（未加载区块当成实心） | 预测：副本里还没插入的区块旁边，自己的角色冻结而不是被推开 |
 | 盒子坐标是无穷大时查询永不结束 | 带 NaN、Infinity 的移动上报和意图：服务器回校正或忽略，不卡住 |
