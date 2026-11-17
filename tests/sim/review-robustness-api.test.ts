@@ -18,15 +18,15 @@ describe('review: scripted control and interaction edge cases', () => {
     // a water source in a one-cell pit right in front of the player's feet
     sim.world.setCell(0, T - 1, -1, makeCell(B.WATER, liquidState(0, false)));
     sim.tick();
-    sim.lookAt(0.5, T - 1, -0.5); // down through the water, at the top of the dirt under it
+    sim.soloPlayer.lookAt(0.5, T - 1, -0.5); // down through the water, at the top of the dirt under it
     sim.tick();
-    expect(sim.targetCell()).toMatchObject({ x: 0, y: T - 2, z: -1 }); // empty hand: the dirt
-    sim.hold(I.BUCKET, 1);
-    sim.player.input.attack = true;
-    sim.attack();
+    expect(sim.soloPlayer.targetCell()).toMatchObject({ x: 0, y: T - 2, z: -1 }); // empty hand: the dirt
+    sim.soloPlayer.hold(I.BUCKET, 1);
+    sim.soloPlayer.player.input.attack = true;
+    sim.soloPlayer.attack();
     sim.tick();
-    sim.player.input.attack = false;
-    expect(sim.view.hint?.key).not.toBe('hint.unbreakable');
+    sim.soloPlayer.player.input.attack = false;
+    expect(sim.soloPlayer.view.hint?.key).not.toBe('hint.unbreakable');
     expect(idAt(sim.world, 0, T - 2, -1)).toBe(B.AIR);
   });
 });

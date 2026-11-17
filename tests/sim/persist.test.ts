@@ -7,7 +7,8 @@ import { exportSave, importSave, type SaveBundle } from '../../src/sim/persist';
 import { Simulation } from '../../src/sim/simulation';
 import { Rotor, Ship, type Structure } from '../../src/structures/structure';
 import { FlatGenerator } from '../../src/worldgen/generator';
-import { FLAT_TOP, SEA_TOP, click, countId, fill, flatSim, seaGenerator, seaSim } from './helpers';
+import { FLAT_TOP, SEA_TOP, click, countId, fill, flatOpts, flatSim, seaGenerator, seaSim } from './helpers';
+import { SOLO_KEY, loadSolo, soloSim } from '../solo';
 
 const T = FLAT_TOP;
 
@@ -28,7 +29,7 @@ function copyBundle(b: SaveBundle): SaveBundle {
 /** Sea scene: raft + helm + a plank mast carrying a stopped windmill glued to its bearing. */
 function shipWithWindmill(): Simulation {
   const sim = seaSim({ spawn: { x: 2.5, y: SEA_TOP + 12, z: 9.5 } });
-  sim.player.flying = true;
+  sim.soloPlayer.player.flying = true;
   const w = sim.world;
   fill(w, 0, SEA_TOP - 1, 0, 4, SEA_TOP - 1, 4, B.PLANKS_OAK);
   w.setCell(2, SEA_TOP, 4, makeCell(B.HELM, facingState(NZ)));
@@ -78,8 +79,7 @@ describe('save / load', () => {
     sim.setDayTime(0.3);
 
     const bundle = copyBundle(exportSave(sim));
-    const sim2 = new Simulation({ seed: 2, mode: 'creative', generator: seaGenerator(), syncChunks: true, loadRadius: 2, rabbits: false });
-    importSave(sim2, bundle);
+    const sim2 = loadSolo({ seed: 2, mode: 'creative', generator: seaGenerator(), syncChunks: true, loadRadius: 2, rabbits: false }, bundle);
 
     const a = sim.structures.all();
     const b = sim2.structures.all();
@@ -120,13 +120,12 @@ describe('save / load', () => {
 
   it('water saved mid-flow keeps flowing after loading and fills the 113-cell diamond (ACCEPTANCE 23)', () => {
     const gen = new FlatGenerator();
-    const make = (): Simulation =>
-      new Simulation({ seed: 4, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2, rabbits: false, spawn: { x: 0.5, y: T, z: 0.5 } });
-    const sim = make();
+    const opts = { seed: 4, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2, rabbits: false, spawn: { x: 0.5, y: T, z: 0.5 } } as const;
+    const sim = soloSim(opts);
     sim.advance(2);
-    sim.hold(I.BUCKET_WATER, 1);
-    sim.teleport(10.5, T, 14.5);
-    sim.lookAtCell(10, T - 1, 10, 2 /* PY */);
+    sim.soloPlayer.hold(I.BUCKET_WATER, 1);
+    sim.soloPlayer.teleport(10.5, T, 14.5);
+    sim.soloPlayer.lookAtCell(10, T - 1, 10, 2 /* PY */);
     click(sim);
     expect(sim.world.getCell(10, T, 10) & 1023).toBe(B.WATER);
     sim.advance(7); // 0.4 s after pouring (the pouring tick included)
@@ -135,8 +134,7 @@ describe('save / load', () => {
     expect(midway).toBeLessThan(113);
     const bundle = copyBundle(exportSave(sim));
 
-    const sim2 = make();
-    importSave(sim2, bundle);
+    const sim2 = loadSolo(opts, bundle);
     sim2.advance(300);
     expect(countId(sim2.world, B.WATER, 0, T, 0, 20, T, 20)).toBe(113);
     for (let x = 0; x <= 20; x++) {
@@ -152,33 +150,31 @@ describe('save / load', () => {
   it('what the hands were doing is not saved', () => {
     const sim = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
     sim.world.setCell(0, T + 1, -2, makeCell(B.STONE));
-    sim.hold(I.GLUE, 5);
-    sim.lookAtCell(0, T + 1, -2, PZ);
-    sim.player.input.use = true;
+    sim.soloPlayer.hold(I.GLUE, 5);
+    sim.soloPlayer.lookAtCell(0, T + 1, -2, PZ);
+    sim.soloPlayer.player.input.use = true;
     click(sim);
     sim.advance(5);
-    expect(sim.view.glueProgress).toBeGreaterThan(0); // a timed glue operation is running
-    const sim2 = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
-    importSave(sim2, exportSave(sim));
-    expect(sim2.view.glueProgress).toBe(0);
-    sim2.player.input.use = true; // still holding the button: nothing resumes
-    sim2.lookAtCell(0, T + 1, -2, PZ);
+    expect(sim.soloPlayer.view.glueProgress).toBeGreaterThan(0); // a timed glue operation is running
+    const sim2 = loadSolo(flatOpts({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } }), exportSave(sim));
+    expect(sim2.soloPlayer.view.glueProgress).toBe(0);
+    sim2.soloPlayer.player.input.use = true; // still holding the button: nothing resumes
+    sim2.soloPlayer.lookAtCell(0, T + 1, -2, PZ);
     sim2.advance(60);
-    expect(sim2.view.glueProgress).toBe(0);
+    expect(sim2.soloPlayer.view.glueProgress).toBe(0);
     expect(sim2.worldGlue.size).toBe(0);
-    expect(sim2.player.inventory.selectedStack()).toEqual({ item: I.GLUE, count: 5 });
+    expect(sim2.soloPlayer.player.inventory.selectedStack()).toEqual({ item: I.GLUE, count: 5 });
   });
 
   it('the off-hand stack is saved with the player', () => {
     const sim = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
-    sim.hold(I.GLUE, 7);
-    sim.swapHands();
+    sim.soloPlayer.hold(I.GLUE, 7);
+    sim.soloPlayer.swapHands();
     sim.tick();
-    expect(sim.player.inventory.offhand).toEqual({ item: I.GLUE, count: 7 });
-    const sim2 = flatSim({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } });
-    importSave(sim2, copyBundle(exportSave(sim)));
-    expect(sim2.player.inventory.offhand).toEqual({ item: I.GLUE, count: 7 });
-    expect(sim2.player.inventory.count(I.GLUE)).toBe(7);
+    expect(sim.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 7 });
+    const sim2 = loadSolo(flatOpts({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } }), copyBundle(exportSave(sim)));
+    expect(sim2.soloPlayer.player.inventory.offhand).toEqual({ item: I.GLUE, count: 7 });
+    expect(sim2.soloPlayer.player.inventory.count(I.GLUE)).toBe(7);
   });
 
   it('a new simulation with the same seed inherits nothing from the previous one (ACCEPTANCE 24)', () => {
@@ -201,28 +197,24 @@ describe('save / load', () => {
     expect(first.structures.all().some((s) => s instanceof Rotor)).toBe(true); // the old world is untouched
   });
 
-  it('a simulation built for loading (deferInitialLoad) generates nothing itself and ends up the same as the normal path', () => {
+  it('a simulation that loads a save generates nothing until the player joins, then continues exactly like the original', () => {
     const sim = shipWithWindmill();
     sim.advance(30);
     const bundle = copyBundle(exportSave(sim));
     const opts = { seed: 2, mode: 'creative', generator: seaGenerator(), syncChunks: true, loadRadius: 2, rabbits: false } as const;
-    const normal = new Simulation(opts);
-    const deferred = new Simulation({ ...opts, deferInitialLoad: true });
-    expect(normal.world.chunks.size).toBeGreaterThan(0);
-    expect(deferred.world.chunks.size).toBe(0);
-    importSave(normal, bundle);
-    importSave(deferred, copyBundle(bundle));
-    expect([...deferred.world.chunks.keys()].sort()).toEqual([...normal.world.chunks.keys()].sort());
-    expect(deferred.ticks).toBe(sim.ticks);
-    normal.advance(20);
-    deferred.advance(20);
+    const loaded = new Simulation(opts);
+    expect(loaded.world.chunks.size).toBe(0);
+    importSave(loaded, bundle);
+    expect(loaded.world.chunks.size).toBe(0); // the saved chunks wait in the stash
+    loaded.join(SOLO_KEY);
+    expect(loaded.world.chunks.size).toBe(9); // the ground under the restored player
+    expect(loaded.ticks).toBe(sim.ticks);
+    loaded.advance(20);
     sim.advance(20);
-    for (const other of [normal, deferred]) {
-      expect(other.ticks).toBe(sim.ticks);
-      expect(other.rng.state).toBe(sim.rng.state);
-      expect(other.structures.rotors()[0]!.angle).toBe(sim.structures.rotors()[0]!.angle);
-      expect(other.structures.ships()[0]!.grid.position).toEqual(sim.structures.ships()[0]!.grid.position);
-      expect(other.player.pos).toEqual(sim.player.pos);
-    }
+    expect(loaded.ticks).toBe(sim.ticks);
+    expect(loaded.rng.state).toBe(sim.rng.state);
+    expect(loaded.structures.rotors()[0]!.angle).toBe(sim.structures.rotors()[0]!.angle);
+    expect(loaded.structures.ships()[0]!.grid.position).toEqual(sim.structures.ships()[0]!.grid.position);
+    expect(loaded.soloPlayer.player.pos).toEqual(sim.soloPlayer.player.pos);
   });
 });

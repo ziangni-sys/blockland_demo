@@ -19,7 +19,7 @@ describe('step-up onto world ledges (pier fix): its limits', () => {
     const b = new Bench();
     fill(b.world, -20, 60, -20, 19, 60, 19, B.STONE);
     fill(b.world, -5, 61, -20, 5, 61, -3, B.STONE); // a 1-high step, face at z = -2
-    const p = b.entities.createPlayer('survival', 0.5, 61, 2.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 2.5);
     p.input.forward = 1; // north
     b.checks.push(() => expect(inWorld(b.world, p)).toBe(false));
     b.tick(60);
@@ -36,7 +36,7 @@ describe('step-up onto world ledges (pier fix): its limits', () => {
       fill(b.world, 6, 60, -2, 14, 60, 2, B.STONE); // pier, top at 61
       const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
       ship.grid.setPoseImmediate(vec3(0.5, 60.5 - dy, 0.5), qfromYaw(0));
-      const p = b.entities.createPlayer('survival', 3.5, 61 - dy + 0.01, 0.5);
+      const p = b.entities.spawnPlayer('survival', 3.5, 61 - dy + 0.01, 0.5);
       b.tick(5);
       expect(p.carrierId).toBe(ship.id);
       p.input.forward = 1;
@@ -63,7 +63,7 @@ describe('step-up onto world ledges (pier fix): its limits', () => {
       fill(b.world, 6, 60, -2, 14, 60, 2, B.STONE); // pier, top at 61, west face at x = 6
       const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
       ship.grid.setPoseImmediate(vec3(0.5, 60.5 + dy, 0.5), qfromYaw(0.2)); // deck top 61 + dy, slightly turned
-      const p = b.entities.createPlayer('survival', 9.5, 61, 0.5);
+      const p = b.entities.spawnPlayer('survival', 9.5, 61, 0.5);
       b.tick(3);
       p.input.forward = 1;
       p.input.yaw = Math.PI / 2; // west, toward the deck
@@ -89,7 +89,7 @@ describe('step-up onto world ledges (pier fix): its limits', () => {
     fill(b.world, -20, 40, -20, 19, 40, 19, B.STONE);
     fill(b.world, -20, 41, -20, 19, 47, 19, makeCell(B.WATER));
     const ship = b.ship(1, deck(-3, -3, 3, 3, 47), vec3(0.5, 47.5, 0.5)); // top at 48
-    const p = b.entities.createPlayer('survival', 0.5, 47.5, 6.5); // feet 0.5 below the deck top
+    const p = b.entities.spawnPlayer('survival', 0.5, 47.5, 6.5); // feet 0.5 below the deck top
     p.input.forward = 1;
     p.input.jump = true;
     for (let i = 0; i < 120; i++) {
@@ -122,7 +122,7 @@ describe('sneak edge guard: more shapes', () => {
       for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) cells.push([x, 61, z, B.PLANKS_OAK]);
       const tt = b.rotor(5, null, [0, 61, 0], 2, cells);
       b.spin(tt, 0.6, UP);
-      const p = b.entities.createPlayer('survival', 0.5, 62, 0.5);
+      const p = b.entities.spawnPlayer('survival', 0.5, 62, 0.5);
       b.tick(10);
       expect(p.carrierId).toBe(tt.id);
       p.input.sneak = true;
@@ -139,7 +139,7 @@ describe('sneak edge guard: more shapes', () => {
   it('a player standing in the band outside the guard disk can still sneak ALONG the edge, never outward', () => {
     const b = new Bench();
     fill(b.world, -2, 60, -5, 2, 60, 5, B.STONE); // east edge at x = 3
-    const p = b.entities.createPlayer('survival', 3.27, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 3.27, 61, 0.5);
     b.tick(3);
     expect(p.onGround).toBe(true);
     p.input.sneak = true;
@@ -163,7 +163,7 @@ describe('sneak edge guard: more shapes', () => {
   it('at the outer corner of a world platform, sneaking diagonally outward stops', () => {
     const b = new Bench();
     fill(b.world, -2, 60, -2, 2, 60, 2, B.STONE); // corner at (3, 3)
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     p.input.sneak = true;
     p.input.forward = 1;
     p.input.yaw = (-3 * Math.PI) / 4; // toward +x +z
@@ -181,7 +181,7 @@ describe('sneak edge guard: more shapes', () => {
     b.drive(ship, (t) => ({ p: vec3(-8 + 3 * t * DT, 60.5, 0.5), q: qfromYaw(shipYaw(t)) }));
     b.tick();
     const w = ship.grid.toWorld(vec3(0.5, 61.01, 0.5));
-    const p = b.entities.createPlayer('survival', w.x, w.y, w.z);
+    const p = b.entities.spawnPlayer('survival', w.x, w.y, w.z);
     p.carrierId = ship.id;
     b.tick(5);
     p.input.sneak = true;
@@ -216,7 +216,7 @@ describe('landing on a deck rim', () => {
     const ship = b.ship(1, deck(-3, -3, 3, 3, 60), vec3(0.5, 60.5, 0.5));
     ship.grid.setPoseImmediate(vec3(0.5, 60.5, 0.5), qfromYaw(0.25));
     const w = ship.grid.toWorld(vec3(0.5, 61 + h, 4.2)); // centre 0.2 beyond the local edge z = 4
-    const p = b.entities.createPlayer('survival', w.x, w.y, w.z);
+    const p = b.entities.spawnPlayer('survival', w.x, w.y, w.z);
     b.tick(60);
     expect(p.onGround).toBe(true);
     expect(p.carrierId).toBe(ship.id);
@@ -238,7 +238,7 @@ describe('free-spot search', () => {
   it('drops buried deep in rock rise to the surface (and stay out of the rock)', () => {
     const b = new Bench();
     fill(b.world, -12, 20, -12, 12, 50, 12, B.STONE); // solid hill, top at 51
-    b.entities.createPlayer('survival', 8.5, 51, 8.5);
+    b.entities.spawnPlayer('survival', 8.5, 51, 8.5);
     const drops: ItemEntity[] = [];
     for (let k = 0; k < 5; k++) drops.push(b.entities.spawnItem(-3.5 + k, 45.5, 0.5, B.CANVAS + 0 * k, 1, vec3()));
     b.tick(40);
@@ -252,7 +252,7 @@ describe('free-spot search', () => {
   it('a buried player is not risen through the rock: suffocation damage instead', () => {
     const b = new Bench();
     fill(b.world, -12, 20, -12, 12, 50, 12, B.STONE);
-    const p = b.entities.createPlayer('survival', 0.5, 45, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 45, 0.5);
     b.tick(60);
     expect(p.pos.y).toBe(45);
     expect(p.health).toBeLessThan(20);
@@ -307,7 +307,7 @@ describe('re-entrancy', () => {
     const b = new Bench();
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     ship.grid.setCell(0, 61, -2, makeCell(B.STONE)); // something to call a helm (any cell works for the seat logic)
-    const p = b.entities.createPlayer('survival', 0.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 1.5);
     const rabbit = b.entities.spawnRabbit(2.5, 61, 2.5);
     rabbit.aiTimer = 100000;
     b.tick(5);
@@ -346,7 +346,7 @@ describe('carrying is idempotent', () => {
     b.drive(ship, (t) => ({ p: vec3(-10 + 4 * t * DT, 60.5, 0.5), q: qfromYaw(0.5 * t * DT) }));
     b.tick();
     const w = ship.grid.toWorld(vec3(2.5, 61, 1.5));
-    const p = b.entities.createPlayer('survival', w.x, w.y, w.z);
+    const p = b.entities.spawnPlayer('survival', w.x, w.y, w.z);
     b.tick(20);
     expect(p.carrierId).toBe(ship.id);
     const l0 = ship.grid.toLocal(p.pos, vec3());
@@ -382,7 +382,7 @@ describe('structure pushes: the floor lift has limits', () => {
     for (let z = -1; z <= 1; z++) for (let y = 61; y <= 62; y++) pc.push([-4, y, z, B.CANVAS]);
     const paddle = b.rotor(20, null, [-4, 61, 0], 2, pc);
     b.drive(paddle, (t) => ({ p: vec3(-3.5 + 1.5 * t * DT, 61.6, 0.5), q: { x: 0, y: 0, z: 0, w: 1 } }));
-    const p = b.entities.createPlayer('survival', 0.5, 61.1, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61.1, 0.5);
     let maxLocalY = -Infinity;
     b.checks.push(() => {
       maxLocalY = Math.max(maxLocalY, ship.grid.toLocal(p.pos, vec3()).y);
@@ -408,7 +408,7 @@ describe('structure pushes on a rolling, pitching ship', () => {
     const tt = b.rotor(2, ship, [0, 61, 0], 2, plat);
     b.spin(tt, 1.1, UP);
     b.tick();
-    b.entities.createPlayer('survival', 30.5, 61, 30.5); // survival world, far away
+    b.entities.spawnPlayer('survival', 30.5, 61, 30.5); // survival world, far away
     const bodies = [];
     for (let k = 0; k < 8; k++) {
       const a = (k * Math.PI) / 4;
@@ -424,7 +424,7 @@ describe('structure pushes on a rolling, pitching ship', () => {
       }
     }
     const pw = ship.grid.toWorld(vec3(0.5, 61.02, -1.9));
-    const p = b.entities.createPlayer('survival', pw.x, pw.y, pw.z);
+    const p = b.entities.spawnPlayer('survival', pw.x, pw.y, pw.z);
     b.tick(400);
     expect(b.host.count('crush')).toBe(0);
     expect(p.health).toBe(20);
@@ -439,7 +439,7 @@ describe('frozen drops', () => {
   it('a drop in an unloaded chunk within reach is not picked up', () => {
     const b = new Bench(makeWorld(-16, -16, 15, 15));
     fill(b.world, -16, 40, -16, 15, 40, 15, B.STONE);
-    const p = b.entities.createPlayer('survival', 15.5, 41, 0.5);
+    const p = b.entities.spawnPlayer('survival', 15.5, 41, 0.5);
     const it = b.entities.spawnItem(16.3, 41.2, 0.5, B.COBBLE, 1, vec3());
     it.pickupDelay = 0;
     b.tick(20);
@@ -452,7 +452,7 @@ describe('look input', () => {
   it('a look poisoned with NaN everywhere (input and body) recovers a finite look', () => {
     const b = new Bench();
     fill(b.world, -10, 59, -10, 10, 59, 10, B.STONE);
-    const p = b.entities.createPlayer('survival', 0.5, 60, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 60, 0.5);
     b.tick(2);
     p.yaw = Number.NaN;
     p.pitch = Number.NaN;

@@ -76,7 +76,7 @@ export class FakeHost implements StructureHost {
   readonly world: World;
   readonly worldGlue = new GlueStore();
   readonly rng = new Rng(7);
-  creative = false;
+  dropsEnabled = true;
   readonly drops: Drop[] = [];
   constructor(world: World) {
     this.world = world;

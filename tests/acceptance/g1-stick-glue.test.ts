@@ -348,17 +348,17 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
     const sim = makeSim();
     put(sim, 0, T, -3, B.STONE);
     put(sim, -3, T, -3, B.STONE);
-    sim.hold(B.LOG_OAK);
+    sim.soloPlayer.hold(B.LOG_OAK);
 
-    expect(sim.useOn(0, T, -3, PZ)).toBe(true); // south side face
+    expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true); // south side face
     expect(idAt(sim.world, 0, T, -2)).toBe(B.LOG_OAK);
     expect(stateAxis(cellState(sim.world.getCell(0, T, -2)))).toBe(AXIS_Z);
 
-    expect(sim.useOn(-3, T, -3, PX)).toBe(true); // east side face
+    expect(sim.soloPlayer.useOn(-3, T, -3, PX)).toBe(true); // east side face
     expect(idAt(sim.world, -2, T, -3)).toBe(B.LOG_OAK);
     expect(stateAxis(cellState(sim.world.getCell(-2, T, -3)))).toBe(AXIS_X);
 
-    expect(sim.useOn(0, T, -3, PY)).toBe(true); // top face
+    expect(sim.soloPlayer.useOn(0, T, -3, PY)).toBe(true); // top face
     expect(idAt(sim.world, 0, T + 1, -3)).toBe(B.LOG_OAK);
     expect(stateAxis(cellState(sim.world.getCell(0, T + 1, -3)))).toBe(AXIS_Y);
   });
@@ -366,16 +366,16 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
   it('logs the player lays against side faces form a lying trunk that a helm on it assembles; an upright log in line stays', () => {
     const sim = makeSim('creative', { x: 4.5, y: T, z: -1.5 });
     put(sim, 0, T, -3, B.STONE);
-    sim.hold(B.LOG_OAK);
-    expect(sim.useOn(0, T, -3, PX)).toBe(true); // east face of the stone -> log at (1, T, -3)
-    expect(sim.useOn(1, T, -3, PX)).toBe(true); // east face of that log -> log at (2, T, -3)
+    sim.soloPlayer.hold(B.LOG_OAK);
+    expect(sim.soloPlayer.useOn(0, T, -3, PX)).toBe(true); // east face of the stone -> log at (1, T, -3)
+    expect(sim.soloPlayer.useOn(1, T, -3, PX)).toBe(true); // east face of that log -> log at (2, T, -3)
     expect(stateAxis(cellState(sim.world.getCell(1, T, -3)))).toBe(AXIS_X);
     expect(stateAxis(cellState(sim.world.getCell(2, T, -3)))).toBe(AXIS_X);
-    sim.hold(B.HELM);
-    expect(sim.useOn(1, T, -3, PY)).toBe(true); // the helm on top of the first log
+    sim.soloPlayer.hold(B.HELM);
+    expect(sim.soloPlayer.useOn(1, T, -3, PY)).toBe(true); // the helm on top of the first log
     expect(idAt(sim.world, 1, T + 1, -3)).toBe(B.HELM);
-    sim.hold(B.LOG_OAK);
-    expect(sim.useOn(3, T - 1, -3, PY)).toBe(true); // top face of the ground -> upright log at (3, T, -3)
+    sim.soloPlayer.hold(B.LOG_OAK);
+    expect(sim.soloPlayer.useOn(3, T - 1, -3, PY)).toBe(true); // top face of the ground -> upright log at (3, T, -3)
     expect(stateAxis(cellState(sim.world.getCell(3, T, -3)))).toBe(AXIS_Y);
 
     const a = assembleShipByHand(sim, 1, T + 1, -3, PX);
@@ -398,8 +398,8 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   it('a helm the player puts on a rubble block is assembled together with that rubble block', () => {
     const sim = makeSim();
     put(sim, 0, T, -3, B.COBBLE);
-    sim.hold(B.HELM);
-    expect(sim.useOn(0, T, -3, PY)).toBe(true);
+    sim.soloPlayer.hold(B.HELM);
+    expect(sim.soloPlayer.useOn(0, T, -3, PY)).toBe(true);
     expect(idAt(sim.world, 0, T + 1, -3)).toBe(B.HELM);
     const a = assembleShipByHand(sim, 0, T + 1, -3);
     const expected = labels([
@@ -444,8 +444,8 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   it('a bearing the player mounts on the side of the raft (its back on a plank) is part of the ship', () => {
     const sim = makeSim('creative', { x: 4.5, y: T, z: -0.5 });
     const planks = raft(sim);
-    sim.hold(B.BEARING);
-    expect(sim.useOn(2, T, -4, PX)).toBe(true); // east face of a raft plank
+    sim.soloPlayer.hold(B.BEARING);
+    expect(sim.soloPlayer.useOn(2, T, -4, PX)).toBe(true); // east face of a raft plank
     expect(idAt(sim.world, 3, T, -4)).toBe(B.BEARING);
     const a = assembleShipByHand(sim, 1, T + 1, -3);
     const expected = labels([[1, T + 1, -3, B.HELM], [3, T, -4, B.BEARING], ...planks]);
@@ -493,9 +493,9 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
     helmAt(sim, 1, T + 1, -3);
     put(sim, 3, T, -3, B.DEEPROCK);
     // The player tries to put glue on it.
-    sim.hold(I.GLUE);
-    expect(sim.useOn(3, T, -3, PZ)).toBe(true);
-    expect(sim.useOn(3, T, -3, PY)).toBe(true);
+    sim.soloPlayer.hold(I.GLUE);
+    expect(sim.soloPlayer.useOn(3, T, -3, PZ)).toBe(true);
+    expect(sim.soloPlayer.useOn(3, T, -3, PY)).toBe(true);
     expect(toasts.keys()).toEqual(['toast.glue.cannot', 'toast.glue.cannot']);
     expect(sim.worldGlue.size).toBe(0);
     // Glue written straight into the store (as a corrupt save might) changes nothing either.
@@ -511,12 +511,12 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
     const sim = makeSeaSim();
     const ship = raftShipByHand(sim);
     const n0 = ship.grid.count;
-    sim.hold(B.STONE);
-    expect(sim.useOn(3, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
+    sim.soloPlayer.hold(B.STONE);
+    expect(sim.soloPlayer.useOn(3, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
     expect(idAt(ship.grid, 3, SEA_TOP, 5)).toBe(B.STONE); // building on a deck works
     expect(ship.grid.count).toBe(n0 + 1);
-    sim.hold(B.DEEPROCK);
-    expect(sim.useOn(1, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
+    sim.soloPlayer.hold(B.DEEPROCK);
+    expect(sim.soloPlayer.useOn(1, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
     const inShip = structureLabels(ship.grid).filter((l) => l.endsWith(':deeprock'));
     expect(inShip).toEqual([]);
     expect(ship.grid.count).toBe(n0 + 1);
@@ -538,12 +538,12 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
       put(sim, x, y, z, B.CANVAS);
       sim.worldGlue.add(x, y, z, d); // forced: the player could not do this
     }
-    sim.emptyHand();
-    expect(sim.useOn(0, T + 4, -4, PZ)).toBe(true);
-    expect(sim.useOn(0, T + 4, -4, PZ)).toBe(true);
+    sim.soloPlayer.emptyHand();
+    expect(sim.soloPlayer.useOn(0, T + 4, -4, PZ)).toBe(true);
+    expect(sim.soloPlayer.useOn(0, T + 4, -4, PZ)).toBe(true);
     expect(toasts.keys()).toContain('fail.rotor.no_hub');
     expect(sim.structures.rotors().length).toBe(0);
-    expect(sim.view.preview).toBeNull();
+    expect(sim.soloPlayer.view.preview).toBeNull();
     expectWorld(sim, [
       [1, T + 4, -4, B.DEEPROCK],
       ...sails.map(([x, y, z]) => [x, y, z, B.CANVAS] as const),

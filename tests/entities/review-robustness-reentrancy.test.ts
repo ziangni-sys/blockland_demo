@@ -15,7 +15,7 @@ describe('review: re-entrancy of host.explode', () => {
   it('an explosion that damages every entity in range through all() reaches all of them', () => {
     const b = new Bench();
     fill(b.world, -10, 59, -10, 10, 59, 10, B.STONE);
-    b.entities.createPlayer('creative', 9.5, 60, 9.5); // far away, creative: unaffected
+    b.entities.spawnPlayer('creative', 9.5, 60, 9.5); // far away, creative: unaffected
     const drops: Entity[] = [];
     for (let k = 0; k < 8; k++) drops.push(b.entities.spawnItem(-2 + k * 0.6, 60.2, 0.5, k % 2 === 0 ? B.COBBLE : B.DIRT, 1, vec3()));
     drops.push(b.entities.spawnRabbit(0.5, 60, 2.5));

@@ -1,14 +1,16 @@
 /**
- * One running world: the Simulation plus everything that turns it into pictures — chunk
- * streaming, section meshing, structure meshes / poses, camera, environment, entities and
- * overlays. Created when a world is created or loaded, disposed on save & quit; the Game owns
- * screens, input, saving and the frame loop.
+ * One running world: the Simulation, the player this client plays (`me`, joined under the
+ * client's player key), plus everything that turns them into pictures — chunk streaming, section
+ * meshing, structure meshes / poses, camera, environment, entities and overlays. Created when a
+ * world is created or loaded, disposed on save & quit; the Game owns screens, input, saving and
+ * the frame loop. Only world events and the events addressed to `me` reach onEvent.
  */
 import { CHUNK_SHIFT, SECTIONS_PER_CHUNK } from '../core/constants';
 import type { MeshResponse } from '../mesh/types';
 import type { RenderBackend } from '../render/backend';
+import type { PlayerControl } from '../sim/players';
 import type { Simulation } from '../sim/simulation';
-import type { SimEvent } from '../sim/view';
+import { eventPlayer, type SimEvent } from '../sim/view';
 import type { WorldMeta } from '../save/codec';
 import { sectionKey } from '../voxel/chunk';
 import type { ChunkGenerator } from '../worldgen/generator';
@@ -60,6 +62,8 @@ export class WorldSession {
 
   constructor(
     readonly sim: Simulation,
+    /** The player this client plays. */
+    readonly me: PlayerControl,
     public meta: WorldMeta,
     readonly generator: ChunkGenerator,
     readonly isNew: boolean,
@@ -70,7 +74,9 @@ export class WorldSession {
     this.structures = new StructureRenderer(deps.backend, deps.meshPool, deps.onError);
     sim.chunks.onUnload = (cx, cz) => this.mesher.dropChunk(cx, cz);
     this.unsubscribe = sim.events.on((ev) => {
-      if (!this.disposed) deps.onEvent(ev);
+      if (this.disposed) return;
+      const to = eventPlayer(ev);
+      if (to === null || to === me.key) deps.onEvent(ev);
     });
   }
 
@@ -96,7 +102,7 @@ export class WorldSession {
 
   /** How far the area around the player is from being playable. */
   loadingProgress(): LoadingProgress {
-    const p = this.sim.player.pos;
+    const p = this.me.player.pos;
     const pcx = Math.floor(p.x) >> CHUNK_SHIFT;
     const pcz = Math.floor(p.z) >> CHUNK_SHIFT;
     const world = this.sim.world;
@@ -153,7 +159,7 @@ export class WorldSession {
       this.deps.onError('structures', e);
     }
     try {
-      b.setCamera(v.updateCamera(sim, alpha, yaw, pitch, fov, dt, viewMode));
+      b.setCamera(v.updateCamera(sim, this.me, alpha, yaw, pitch, fov, dt, viewMode));
     } catch (e) {
       this.deps.onError('camera', e);
     }
@@ -163,12 +169,12 @@ export class WorldSession {
       this.deps.onError('environment', e);
     }
     try {
-      b.setEntities(v.updateEntities(sim, alpha));
+      b.setEntities(v.updateEntities(sim, this.me, alpha));
     } catch (e) {
       this.deps.onError('entities', e);
     }
     try {
-      b.setOverlays(v.updateOverlays(sim, nowMs));
+      b.setOverlays(v.updateOverlays(sim, this.me, nowMs));
     } catch (e) {
       this.deps.onError('overlays', e);
     }

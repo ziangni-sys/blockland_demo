@@ -5,7 +5,7 @@
  * windmills, steering, pouring) goes through the simulation's input path (look + right-click
  * with an item in hand). Saves go through the storage path the browser uses: exportSave ->
  * SaveManager.save (SaveStorage.putAll with a WorldMeta) -> SaveManager.load
- * (listChunkKeys / getChunks / getBlob) -> new Simulation({ deferInitialLoad: true }) -> importSave.
+ * (listChunkKeys / getChunks / getBlob) -> new Simulation(...) -> importSave -> the player rejoins.
  */
 import { ID_MASK, facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
@@ -14,12 +14,13 @@ import type { Dir } from '../../src/core/dirs';
 import { SaveManager } from '../../src/client/saves';
 import { SAVE_VERSION, type WorldMeta } from '../../src/save/codec';
 import { MemoryStorage } from '../../src/save/storage';
-import { exportSave, importSave, type SaveBundle } from '../../src/sim/persist';
+import { exportSave, type SaveBundle } from '../../src/sim/persist';
 import { Simulation, type GameMode } from '../../src/sim/simulation';
 import type { Message, SimEvent } from '../../src/sim/view';
 import { Rotor, Ship, type Structure } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator, type ChunkGenerator } from '../../src/worldgen/generator';
+import { loadSolo, soloSim } from '../solo';
 
 // ------------------------------------------------------------------ worlds
 
@@ -44,7 +45,7 @@ export interface SimSpec {
 
 /** A new world as the client would open it (headless: synchronous chunks, no rabbits). */
 export function newWorld(spec: SimSpec): Simulation {
-  return new Simulation({
+  return soloSim({
     seed: spec.seed,
     mode: spec.mode,
     generator: spec.generator(),
@@ -55,19 +56,19 @@ export function newWorld(spec: SimSpec): Simulation {
   });
 }
 
-/** A Simulation built to receive a save (same seed and generator), then importSave(). */
+/** A Simulation built to receive a save (same seed and generator), then importSave(), then the player rejoins. */
 export function loadWorld(spec: SimSpec, bundle: SaveBundle): Simulation {
-  const sim = new Simulation({
-    seed: spec.seed,
-    mode: spec.mode,
-    generator: spec.generator(),
-    syncChunks: true,
-    rabbits: false,
-    loadRadius: spec.loadRadius,
-    deferInitialLoad: true,
-  });
-  importSave(sim, bundle);
-  return sim;
+  return loadSolo(
+    {
+      seed: spec.seed,
+      mode: spec.mode,
+      generator: spec.generator(),
+      syncChunks: true,
+      rabbits: false,
+      loadRadius: spec.loadRadius,
+    },
+    bundle,
+  );
 }
 
 
@@ -96,7 +97,7 @@ export async function saveThroughStorage(sim: Simulation, worldId: string, seedT
     name: worldId,
     seed: seedText,
     seedHash: seedHash >>> 0,
-    mode: sim.mode,
+    mode: sim.soloPlayer.player.mode,
     createdAt: 0,
     lastPlayed: 0,
     version: SAVE_VERSION,
@@ -129,18 +130,18 @@ export function blobOf(bundle: SaveBundle, name: string): Uint8Array {
 
 /** Aim at a cell of a grid and right-click once (one tick). Throws when the ray hits something else. */
 export function rightClick(sim: Simulation, x: number, y: number, z: number, face?: Dir, gridId = 0): void {
-  if (!sim.useOn(x, y, z, face, gridId)) {
-    const t = sim.targetCell();
+  if (!sim.soloPlayer.useOn(x, y, z, face, gridId)) {
+    const t = sim.soloPlayer.targetCell();
     throw new Error(`cannot aim at ${gridId}:${x},${y},${z} (ray hits ${t ? `${t.gridId}:${t.x},${t.y},${t.z} face ${t.face}` : 'nothing'})`);
   }
 }
 
 /** With glue in hand, right-click face `a[3]` of cell a of a grid: glue it (or with sneak: remove its glue). */
 export function glueFace(sim: Simulation, a: readonly [number, number, number, Dir], gridId = 0, sneak = false): void {
-  sim.hold(I.GLUE);
-  sim.player.input.sneak = sneak;
+  sim.soloPlayer.hold(I.GLUE);
+  sim.soloPlayer.player.input.sneak = sneak;
   rightClick(sim, a[0], a[1], a[2], a[3], gridId);
-  sim.player.input.sneak = false;
+  sim.soloPlayer.player.input.sneak = false;
 }
 
 // ------------------------------------------------------------------ observation
@@ -240,7 +241,7 @@ export function glueStores(sim: Simulation): Record<string, number[]> {
 
 /** The player's saved state that matters to the player: where, looking where, holding what. */
 export function playerState(sim: Simulation): Record<string, unknown> {
-  const p = sim.player;
+  const p = sim.soloPlayer.player;
   const inv = p.inventory;
   return {
     id: p.id,

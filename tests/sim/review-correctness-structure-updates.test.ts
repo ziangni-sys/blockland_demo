@@ -72,16 +72,16 @@ describe('review: snow layers stack on structures too', () => {
     expect(sres.ok).toBe(true);
     if (!sres.ok) return;
     const ship = sres.structure;
-    sim.player.flying = true;
-    sim.teleport(1.5, T + 3, -2.5);
-    sim.player.flying = true;
+    sim.soloPlayer.player.flying = true;
+    sim.soloPlayer.teleport(1.5, T + 3, -2.5);
+    sim.soloPlayer.player.flying = true;
     sim.tick();
     const log = new EventLog(sim);
-    sim.hold(B.SNOW_LAYER);
-    expect(sim.useOn(1, y0, 0, PY, ship.id)).toBe(true);
+    sim.soloPlayer.hold(B.SNOW_LAYER);
+    expect(sim.soloPlayer.useOn(1, y0, 0, PY, ship.id)).toBe(true);
     expect(idAt(ship.grid, 1, y0 + 1, 0)).toBe(B.SNOW_LAYER);
     // Same click on the snow layer itself (as in the world): it should stack, not refuse.
-    sim.lookAtCell(1, y0 + 1, 0, undefined, ship.id);
+    sim.soloPlayer.lookAtCell(1, y0 + 1, 0, undefined, ship.id);
     click(sim);
     expect(log.toastKeys()).not.toContain('toast.place.support');
     expect(stateLayers(cellState(ship.grid.getCell(1, y0 + 1, 0)))).toBe(2);

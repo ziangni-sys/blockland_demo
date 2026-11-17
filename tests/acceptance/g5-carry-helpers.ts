@@ -17,6 +17,7 @@ import type { SimEvent } from '../../src/sim/view';
 import { Rotor, Ship } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator } from '../../src/worldgen/generator';
+import { soloSim } from '../solo';
 
 /** Sea world: deeprock y=0, stone 1..19, water 20..29; the first air cell is y = SEA_TOP. */
 export const SEA_TOP = 30;
@@ -28,7 +29,7 @@ export const WATER_SURFACE = SEA_TOP - 1 + 8 / 9;
 export const FLAT_TOP = 35;
 
 export function seaSim(mode: GameMode, spawn: Vec3, seed = 1901): Simulation {
-  return new Simulation({
+  return soloSim({
     seed,
     mode,
     generator: new FlatGenerator([
@@ -44,7 +45,7 @@ export function seaSim(mode: GameMode, spawn: Vec3, seed = 1901): Simulation {
 }
 
 export function flatSim(mode: GameMode, spawn: Vec3, seed = 2001): Simulation {
-  return new Simulation({
+  return soloSim({
     seed,
     mode,
     generator: new FlatGenerator(),
@@ -100,7 +101,7 @@ export function buildHull(sim: Simulation, s: HullSpec): Vec3 {
 
 /** The face of a cell that looks toward the player's eyes (horizontal). */
 export function faceToward(sim: Simulation, x: number, z: number): Dir {
-  const e = sim.player.eyePos();
+  const e = sim.soloPlayer.player.eyePos();
   const dx = e.x - (x + 0.5);
   const dz = e.z - (z + 0.5);
   if (Math.abs(dx) > Math.abs(dz)) return dx > 0 ? PX : NX;
@@ -113,22 +114,22 @@ export function faceToward(sim: Simulation, x: number, z: number): Dir {
  */
 export function assembleAtHelm(sim: Simulation, helm: Vec3): Ship {
   const face = faceToward(sim, helm.x, helm.z);
-  expect(sim.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at').toBe(true);
-  expect(sim.view.preview?.kind).toBe('ship');
-  expect(sim.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at again').toBe(true);
+  expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at').toBe(true);
+  expect(sim.soloPlayer.view.preview?.kind).toBe('ship');
+  expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at again').toBe(true);
   const ships = sim.structures.ships();
   expect(ships.length).toBe(1);
   const ship = ships[0]!;
-  expect(sim.player.steeringShipId).toBe(ship.id);
+  expect(sim.soloPlayer.player.steeringShipId).toBe(ship.id);
   return ship;
 }
 
 /** A plain right-click while steering lets go of the wheel (the player stays aboard). */
 export function releaseWheelByClick(sim: Simulation): void {
-  expect(sim.player.steeringShipId).not.toBe(0);
-  sim.use();
+  expect(sim.soloPlayer.player.steeringShipId).not.toBe(0);
+  sim.soloPlayer.use();
   sim.tick();
-  expect(sim.player.steeringShipId).toBe(0);
+  expect(sim.soloPlayer.player.steeringShipId).toBe(0);
 }
 
 /** Heading of a structure (radians, CCW from above, 0 = bow toward -Z). */
@@ -150,7 +151,7 @@ export function wrap(a: number): number {
  * at rest; +1 = clockwise), so the stick is set proportionally to the remaining error.
  */
 export function steerToYaw(sim: Simulation, ship: Ship, target: number, maxTicks = 900): number {
-  const p = sim.player;
+  const p = sim.soloPlayer.player;
   expect(p.steeringShipId).toBe(ship.id);
   let calm = 0;
   for (let t = 0; t < maxTicks; t++) {
@@ -204,7 +205,7 @@ export function yawToward(a: Vec3, b: Vec3): number {
  * are within `tol` of the world point `target()` returns each tick. Returns the ticks used.
  */
 export function walkTo(sim: Simulation, target: () => Vec3, tol = 0.1, maxTicks = 200): number {
-  const p = sim.player;
+  const p = sim.soloPlayer.player;
   for (let t = 0; t < maxTicks; t++) {
     const g = target();
     const d = hdist(p.pos, g);
@@ -222,7 +223,7 @@ export function walkTo(sim: Simulation, target: () => Vec3, tol = 0.1, maxTicks 
 
 /** Idle the held input. */
 export function stopInput(sim: Simulation): void {
-  const i = sim.player.input;
+  const i = sim.soloPlayer.player.input;
   i.forward = 0;
   i.strafe = 0;
   i.jump = false;

@@ -51,7 +51,7 @@ const WATER_SOURCE = makeCell(B.WATER, liquidState(0, false));
 export interface BlockifyReport {
   /** Structure cells written into the destination grid. */
   placed: number;
-  /** Structure cells that hit a hard block and became drops (or vanished in creative). */
+  /** Structure cells that hit a hard block and became drops (or vanished when drops are off). */
   dropped: number;
   /** Soft destination blocks (plants, torches, snow cover, liquids) replaced. */
   overwritten: number;
@@ -68,9 +68,9 @@ export function dropOf(cell: number): DropSpec | null {
   return def.drop ?? { item: def.id, count: 1 };
 }
 
-/** Spawn the drop of `cell` centred on cell (x,y,z) of `grid`. Nothing in creative mode. */
+/** Spawn the drop of `cell` centred on cell (x,y,z) of `grid`. Nothing when the world's drops are off. */
 function spawnCellDrop(host: StructureHost, grid: VoxelGrid, x: number, y: number, z: number, cell: number, tmp: Vec3): void {
-  if (host.creative) return;
+  if (!host.dropsEnabled) return;
   const d = dropOf(cell);
   if (!d || d.count <= 0) return;
   grid.toWorld(vset(tmp, x + 0.5, y + 0.5, z + 0.5), tmp);
@@ -380,8 +380,8 @@ function gridCells(grid: StructureGrid): { xyz: Int32Array; cells: Uint16Array; 
 /**
  * Blockify `src` in place onto `dst` (DESIGN "方块化"): every cell goes to snapCell(t, ...)
  * with its block state rotated by t.r.
- *  - destination HARD: the cell is not placed; it becomes a drop there (nothing in creative);
- *  - destination soft: overwritten; a replaced non-liquid, non-air block drops (not in creative);
+ *  - destination HARD: the cell is not placed; it becomes a drop there (if the world drops);
+ *  - destination soft: overwritten; a replaced non-liquid, non-air block drops (if the world drops);
  *  - `inShip`: `dst` is a ship's grid, and a destination whose centre lies inside a HARD block
  *    of the WORLD is a hard conflict too (DESIGN "船上的转子"), so nothing ends up in rock and
  *    the ship is never pushed out of it.
@@ -492,7 +492,7 @@ export interface DockOutcome {
 /**
  * Write a ship's cells into the world with transform `t` (the caller has checked that no
  * destination is hard; should one have become hard since, that cell drops like a rotor cell
- * would). Overwritten soft non-liquid blocks drop (not in creative); liquids at the
+ * would). Overwritten soft non-liquid blocks drop (if the world drops); liquids at the
  * destinations of the hull's dry cells are removed (DESIGN: 方块化时，清掉密封舱位置里的液体);
  * the ship's glue moves to the world like a rotor's on blockify: every face with a placed end,
  * re-keyed by the rotation, then the glue rules of settlePlacedGlue where it landed (no face

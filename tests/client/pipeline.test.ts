@@ -29,6 +29,7 @@ import { ChunkStreamer } from '../../src/client/chunkstream';
 import { ViewBuilder, mediumAt, sampleLight } from '../../src/client/view';
 import { WorldSession } from '../../src/client/session';
 import { snapshotSection } from '../../src/mesh/snapshot';
+import { soloSim } from '../solo';
 
 class RecordingBackend implements RenderBackend {
   readonly sections = new Map<number, { ox: number; oy: number; oz: number }>();
@@ -85,7 +86,7 @@ const noErrors = (what: string, err: unknown): void => {
 };
 
 function flatSim(radius = 2): Simulation {
-  return new Simulation({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: radius });
+  return soloSim({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: radius });
 }
 
 function meshAll(m: SectionMesher, sim: Simulation): void {
@@ -93,7 +94,7 @@ function meshAll(m: SectionMesher, sim: Simulation): void {
   let stable = 0;
   for (let i = 0; i < 400 && stable < 3; i++) {
     const before = m.stats.installed;
-    m.update(0, 1e9, sim.player.pos.x, sim.player.pos.y, sim.player.pos.z, 0, -1);
+    m.update(0, 1e9, sim.soloPlayer.player.pos.x, sim.soloPlayer.player.pos.y, sim.soloPlayer.player.pos.z, 0, -1);
     stable = m.stats.installed === before && m.stats.waiting === 0 ? stable + 1 : 0;
   }
 }
@@ -153,7 +154,7 @@ describe('SectionMesher (main-thread fallback)', () => {
 describe('ChunkStreamer (main-thread fallback)', () => {
   it('feeds wanted columns into the world one or more per frame', () => {
     const gen = new FlatGenerator();
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: gen, loadRadius: 3 });
+    const sim = soloSim({ seed: 1, mode: 'creative', generator: gen, loadRadius: 3 });
     sim.tick(); // sets the load anchors
     const before = sim.world.chunks.size;
     const s = new ChunkStreamer(sim, null, gen, () => 0, noErrors);
@@ -201,17 +202,17 @@ describe('ViewBuilder', () => {
   it('puts the camera at the eyes and lists every entity but the player', () => {
     const sim = flatSim(1);
     for (let i = 0; i < 5; i++) sim.tick();
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     sim.entities.spawnItem(p.pos.x + 2, p.pos.y + 0.5, p.pos.z, B.STONE, 3);
     sim.tick();
     const v = new ViewBuilder();
-    const cam = v.updateCamera(sim, 1, 0.5, -0.2, 70, 1 / 60);
+    const cam = v.updateCamera(sim, sim.soloPlayer, 1, 0.5, -0.2, 70, 1 / 60);
     expect(cam.x).toBeCloseTo(p.pos.x);
     expect(cam.y).toBeCloseTo(p.pos.y + p.eyeHeight);
     expect(cam.yaw).toBe(0.5);
     expect(cam.pitch).toBe(-0.2);
     expect(cam.fov).toBeCloseTo(70);
-    const list = v.updateEntities(sim, 0.5);
+    const list = v.updateEntities(sim, sim.soloPlayer, 0.5);
     expect(list.length).toBe(1);
     expect(list[0]!.kind).toBe('item');
     expect(list[0]!.payload).toBe(B.STONE);
@@ -241,20 +242,20 @@ describe('ViewBuilder', () => {
     const sim = flatSim(1);
     sim.tick();
     const v = new ViewBuilder();
-    sim.view = {
-      ...sim.view,
+    sim.soloPlayer.hands.view = {
+      ...sim.soloPlayer.view,
       target: { gridId: 0, x: 1, y: 34, z: 1, face: 2 },
       breakProgress: 2,
       preview: { gridId: 0, kind: 'ship', cells: Int32Array.from([1, 34, 1, 2, 34, 1]) },
       conflicts: [{ x: 5, y: 6, z: 7 }],
     };
-    const o = v.updateOverlays(sim, 0);
+    const o = v.updateOverlays(sim, sim.soloPlayer, 0);
     expect(o.target).toEqual({ structureId: 0, x: 1, y: 34, z: 1 });
     expect(o.breakProgress).toBe(1);
     expect(o.preview.length).toBe(2);
     expect(o.conflicts).toEqual([{ structureId: 0, x: 5, y: 6, z: 7 }]);
     const previewList = o.preview;
-    v.updateOverlays(sim, 16);
+    v.updateOverlays(sim, sim.soloPlayer, 16);
     expect(o.preview).toBe(previewList);
   });
 });
@@ -262,10 +263,10 @@ describe('ViewBuilder', () => {
 describe('WorldSession', () => {
   it('reaches "loading done" once the area around the player is generated and meshed', () => {
     const gen = new FlatGenerator();
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: gen, loadRadius: 4 });
+    const sim = soloSim({ seed: 1, mode: 'creative', generator: gen, loadRadius: 4 });
     const backend = new RecordingBackend();
     const events: string[] = [];
-    const s = new WorldSession(sim, { id: 'x', name: 'x', seed: '', seedHash: 1, mode: 'creative', createdAt: 0, lastPlayed: 0, version: 1, time: 0 }, gen, true, {
+    const s = new WorldSession(sim, sim.soloPlayer, { id: 'x', name: 'x', seed: '', seedHash: 1, mode: 'creative', createdAt: 0, lastPlayed: 0, version: 1, time: 0 }, gen, true, {
       backend,
       genPool: null,
       meshPool: null,
@@ -277,7 +278,7 @@ describe('WorldSession', () => {
     expect(s.loadingProgress().done).toBe(false);
     let frames = 0;
     while (!s.loadingProgress().done && frames < 500) {
-      s.work(0, 1e9, sim.player.pos.x, sim.player.pos.y + 1.6, sim.player.pos.z, Number.NaN);
+      s.work(0, 1e9, sim.soloPlayer.player.pos.x, sim.soloPlayer.player.pos.y + 1.6, sim.soloPlayer.player.pos.z, Number.NaN);
       frames++;
     }
     const prog = s.loadingProgress();

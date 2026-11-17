@@ -17,7 +17,7 @@ describe('player movement on land', () => {
       ['sneak', SNEAK_SPEED],
     ] as const) {
       const b = flat();
-      const p = b.entities.createPlayer('survival', 0.5, 61, 20.5);
+      const p = b.entities.spawnPlayer('survival', 0.5, 61, 20.5);
       p.input.forward = 1;
       p.input.yaw = 0; // toward -Z
       p.input.sprint = mode === 'sprint';
@@ -36,7 +36,7 @@ describe('player movement on land', () => {
 
   it('strafes to the right with D (+strafe) when looking north', () => {
     const b = flat();
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     p.input.strafe = 1;
     b.tick(20);
     expect(p.pos.x).toBeGreaterThan(2);
@@ -45,7 +45,7 @@ describe('player movement on land', () => {
 
   it('jumps about 1.25 blocks high and lands again', () => {
     const b = flat();
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     b.tick(2);
     p.input.jump = true;
     b.tick();
@@ -68,7 +68,7 @@ describe('player movement on land', () => {
   it('can jump onto a 1-block step', () => {
     const b = flat();
     fill(b.world, -5, 61, -20, 5, 61, -3, B.STONE);
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     p.input.forward = 1;
     p.input.jump = true;
     b.tickUntil(() => p.pos.z < -3, 60);
@@ -81,7 +81,7 @@ describe('player movement on land', () => {
   it('slides along a wall and never enters it', () => {
     const b = flat();
     fill(b.world, -20, 61, -4, 20, 63, -4, B.STONE); // wall face at z = -3
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     p.input.forward = 1;
     p.input.yaw = Math.PI / 4; // north-west, into the wall
     b.checks.push(() => expect(inWorld(b.world, p)).toBe(false));
@@ -94,7 +94,7 @@ describe('player movement on land', () => {
     const b = flat();
     // Wall along x ending at x = 2 (cells x <= 2), face at z = -3.
     fill(b.world, -20, 61, -4, 2, 63, -4, B.STONE);
-    const p = b.entities.createPlayer('survival', -3.5, 61, -2.0);
+    const p = b.entities.spawnPlayer('survival', -3.5, 61, -2.0);
     p.input.forward = 1;
     p.input.yaw = -Math.PI / 4 - 0.2; // north-east, mostly east
     b.tick(60);
@@ -104,7 +104,7 @@ describe('player movement on land', () => {
     const c = flat();
     fill(c.world, -20, 61, -4, 3, 63, -4, B.STONE);
     fill(c.world, 3, 61, -4, 3, 63, 10, B.STONE);
-    const q = c.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const q = c.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     q.input.forward = 1;
     q.input.yaw = -Math.PI / 4;
     c.tick(60);
@@ -118,14 +118,14 @@ describe('player movement on land', () => {
   it('does not tunnel through a 1-block floor or a 1-cell deck when falling fast', () => {
     const b = new Bench();
     fill(b.world, -5, 40, -5, 5, 40, 5, B.STONE);
-    const p = b.entities.createPlayer('creative', 0.5, 120, 0.5);
+    const p = b.entities.spawnPlayer('creative', 0.5, 120, 0.5);
     p.vel.y = -60;
     b.tickUntil(() => p.onGround, 200);
     expect(p.pos.y).toBe(41);
     // a thin deck high up
     const c = new Bench();
     const ship = c.ship(1, deck(-3, -3, 3, 3, 60));
-    const q = c.entities.createPlayer('creative', 0.5, 120, 0.5);
+    const q = c.entities.spawnPlayer('creative', 0.5, 120, 0.5);
     q.vel.y = -60;
     c.tickUntil(() => q.onGround, 200);
     expect(q.pos.y).toBeCloseTo(61, 5);
@@ -143,7 +143,7 @@ describe('player in water', () => {
 
   it('sinks slowly, swims up with jump and treads water with the head out', () => {
     const b = pool();
-    const p = b.entities.createPlayer('survival', 0.5, 44, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 44, 0.5);
     b.tick(10);
     expect(p.pos.y).toBeLessThan(44);
     expect(p.vel.y).toBeGreaterThan(-1.2);
@@ -164,7 +164,7 @@ describe('player in water', () => {
 
   it('swims at about 2 blocks per second', () => {
     const b = pool();
-    const p = b.entities.createPlayer('survival', 0.5, 44, 8.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 44, 8.5);
     p.input.forward = 1;
     p.input.jump = true;
     b.tick(30);
@@ -178,7 +178,7 @@ describe('player in water', () => {
   it('climbs out onto a 1-high ledge holding jump and forward', () => {
     const b = pool();
     fill(b.world, -12, 41, -12, 12, 48, -6, B.STONE); // shore, top at 49
-    const p = b.entities.createPlayer('survival', 0.5, 45, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 45, 0.5);
     p.input.forward = 1;
     p.input.jump = true;
     const t = b.tickUntil(() => p.onGround && p.pos.y === 49, 200);
@@ -190,7 +190,7 @@ describe('player in water', () => {
 describe('creative flying', () => {
   it('double-tapping jump toggles flight; jump up, sneak down; landing keeps flying', () => {
     const b = flat();
-    const p = b.entities.createPlayer('creative', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('creative', 0.5, 61, 0.5);
     b.tick(2);
     p.input.jumpPresses = 1;
     b.tick(3);
@@ -232,7 +232,7 @@ describe('creative flying', () => {
 
   it('survival players cannot fly', () => {
     const b = flat();
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     p.input.jumpPresses = 2;
     b.tick();
     expect(p.flying).toBe(false);
@@ -246,7 +246,7 @@ describe('sneak edge guard', () => {
   it('stops at the edge of a world platform; without sneaking the player walks off', () => {
     const b = new Bench();
     fill(b.world, -2, 60, -2, 2, 60, 2, B.STONE); // 5x5 platform, edge at x = 3
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     p.input.sneak = true;
     p.input.forward = 1;
     p.input.yaw = -Math.PI / 2; // east (+X)
@@ -265,7 +265,7 @@ describe('sneak edge guard', () => {
     b.drive(ship, () => ({ p: vec3(0.5, 60.5, 0.5), q: qfromYaw(Math.PI / 6) }));
     b.tick();
     for (const yaw of [0, Math.PI / 2, -Math.PI / 2, Math.PI, Math.PI / 4, -0.3]) {
-      const p = b.entities.createPlayer('survival', 0.5, 61.01, 0.5);
+      const p = b.entities.spawnPlayer('survival', 0.5, 61.01, 0.5);
       b.tick(5);
       expect(p.onGround).toBe(true);
       expect(p.carrierId).toBe(ship.id);

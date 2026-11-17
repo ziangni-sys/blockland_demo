@@ -21,7 +21,7 @@ describe('performance', () => {
       const s = b.ship(i + 1, cells, vec3(cx + 0.5, 50.5, cz + 0.5));
       b.drive(s, (t) => ({ p: vec3(cx + 0.5 + 0.3 * Math.sin(t * 0.02 + i), 50.5 + 0.08 * Math.sin(t * 0.2 + i), cz + 0.5), q: qfromYaw(0.15 * Math.sin(t * DT * 0.5 + i)) }));
     });
-    b.entities.createPlayer('survival', 0.5, 51, 0.5);
+    b.entities.spawnPlayer('survival', 0.5, 51, 0.5);
     let n = 1;
     for (const [cx, cz] of centres) {
       for (let k = 0; k < 40 && n < 200; k++, n++) {

@@ -223,13 +223,13 @@ async function runMode(mode, pageUrl, hostRequests) {
   const aimAt = (c) =>
     G((c) => {
       const g = window.__blocklands.game;
-      const p = g.sim.player;
+      const p = g.me.player;
       const dx = c.x + 0.5 - p.pos.x;
       const dy = c.y + 0.5 - (p.pos.y + p.eyeHeight);
       const dz = c.z + 0.5 - p.pos.z;
       g.debug.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)));
     }, c);
-  /** Wait one simulation tick so sim.view reflects the current look direction. */
+  /** Wait one simulation tick so the player view reflects the current look direction. */
   const nextTick = async () => {
     const t = await G(() => window.__blocklands.game.sim.world.time);
     await waitFor('a simulation tick', (t) => window.__blocklands.game.sim.world.time > t + 1, t);

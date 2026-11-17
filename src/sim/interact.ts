@@ -1,10 +1,16 @@
 /**
- * Player interaction: turns the player's input (look direction, button presses, held item,
- * off-hand swaps) into world changes, and publishes the InteractionView (target, mining
+ * Player interaction: turns each player's input (look direction, button presses, held item,
+ * off-hand swaps) into world changes, and publishes that player's InteractionView (target, mining
  * progress, assembly preview, docking conflicts, glue progress, context hint).
  *
- * Runs in tick step 1 (docs/ARCHITECTURE.md), before block ticks, structures and entities
- * move, so a click acts on exactly what the player saw at the end of the previous tick.
+ * PER PLAYER. Everything the hands are doing (ray hits, mining progress and cooldowns, the
+ * assembly preview, docking conflicts, the timed glue operation, the last slot) lives in one
+ * Hands object per joined player. Interaction runs them in tick step 1 (docs/ARCHITECTURE.md),
+ * before block ticks, structures and entities move, so a click acts on exactly what the player
+ * saw at the end of the previous tick. Players act one after another in ascending entity id
+ * order: two players clicking in the same tick never act on the same snapshot — the second sees
+ * the world the first left behind (a block the first mined is gone, a helm the first assembled is
+ * a ship). Any world change marks EVERY player's preview stale.
  * The edge counters input.attackPresses / usePresses / swapPresses are consumed here; held
  * buttons are read from input.attack / input.use. A dead player does nothing.
  *
@@ -44,8 +50,8 @@
  * before the left-click and the glue operation use them: a hit on a structure that is gone, or
  * on a cell that is no longer targetable, is dropped for this tick.
  *
- * All state is on the instance; nothing here is saved (a timed glue operation, previews and
- * mining progress do not survive a reload by design).
+ * All state is on the instances; nothing here is saved (a timed glue operation, previews and
+ * mining progress do not survive a reload or a rejoin by design).
  */
 import {
   AIR,
@@ -87,7 +93,7 @@ import type { StructureGrid } from '../voxel/sgrid';
 import { spawnBlockDrop } from './drops';
 import { failMessage, msg, type MessageKey } from './messages';
 import type { Simulation } from './simulation';
-import { emptyView, type InteractionView, type Message } from './view';
+import { emptyView, type InteractionView, type Message, type PlayerKey } from './view';
 
 /** Reach of the player's hands, in blocks from the eye. */
 export const REACH = 5;
@@ -266,7 +272,10 @@ function gridVersionOf(grid: VoxelGrid): number {
   return grid.isWorld ? -1 : (grid as StructureGrid).version;
 }
 
-export class Interaction {
+/** One player's hands: what that player is doing with them, and what it looks like (the view). */
+export class Hands {
+  /** What the hands look like after the last tick (overlays, hint). Rebuilt every tick. */
+  view: InteractionView = emptyView();
   /** What the use ray (outline, right-click, glue) hit during this tick's actions. */
   private hit: GridHit | null = null;
   /** What the mining ray hit during this tick's actions (the same object while the use ray is the plain ray). */
@@ -304,25 +313,21 @@ export class Interaction {
   private readonly sampleLocal: Vec3 = vec3();
   private exitT = 0;
   private exitFace: Dir = PX;
-  /**
-   * Hull analyses of ships whose own ship.hull is missing or older than their cells (ships
-   * without dynamics, or edited this tick), keyed by object; recomputed when grid.version moves.
-   */
-  private readonly hulls = new WeakMap<Ship, HullInfo | null>();
 
-  constructor(private readonly sim: Simulation) {}
+  constructor(
+    private readonly sim: Simulation,
+    private readonly system: Interaction,
+    /** The player these hands belong to (the entity of one join). */
+    readonly player: Player,
+    readonly key: PlayerKey,
+  ) {}
 
   // ================================================================== hooks
 
-  onEntityEvent(ev: EntityEvent): void {
-    // Death drops everything the hands were doing (the wheel is released by the entities module).
-    if (ev.type === 'death' && ev.entity instanceof Player && ev.entity === this.sim.entities.player) this.reset();
-  }
-
   /**
-   * World change hook (the simulation's single world listener). Marks the preview stale when
-   * the change can matter: any block change, or liquid moving inside the preview's region.
-   * Liquid spreading elsewhere cannot change what a helm or a bearing takes along.
+   * World change hook (through Interaction). Marks the preview stale when the change can
+   * matter: any block change, or liquid moving inside the preview's region. Liquid spreading
+   * elsewhere cannot change what a helm or a bearing takes along.
    */
   onWorldChange(x: number, y: number, z: number, oldCell: number, newCell: number, _flags: number): void {
     const pv = this.preview;
@@ -350,13 +355,13 @@ export class Interaction {
    * item — what a right-click would act on and what the outline shows.
    */
   raycast(): GridHit | null {
-    const p = this.sim.player;
+    const p = this.player;
     return this.castRay(p, useRayOf(this.heldItem(p)));
   }
 
   /** The cell a left-click would mine right now (never a liquid, whatever is held). */
   raycastMining(): GridHit | null {
-    return this.castRay(this.sim.player, 'plain');
+    return this.castRay(this.player, 'plain');
   }
 
   // ================================================================== pick block
@@ -379,8 +384,8 @@ export class Interaction {
    * Returns true when the block is in hand afterwards.
    */
   pickBlock(): boolean {
-    const p = this.sim.entities.player;
-    if (p === null || p.dead || p.removed) return false;
+    const p = this.player;
+    if (p.dead || p.removed) return false;
     const h = this.castRay(p, useRayOf(this.heldItem(p)));
     if (h === null) return false;
     const id = h.cell & ID_MASK;
@@ -411,8 +416,7 @@ export class Interaction {
   // ================================================================== tick
 
   tick(): void {
-    const sim = this.sim;
-    const p = sim.player;
+    const p = this.player;
     const input = p.input;
     this.applyLook(p);
     const attackPressed = input.attackPresses > 0;
@@ -465,8 +469,8 @@ export class Interaction {
   buildView(): InteractionView {
     const sim = this.sim;
     const v = emptyView();
-    const p = sim.entities.player;
-    if (p === null || p.dead || p.removed) return v;
+    const p = this.player;
+    if (p.dead || p.removed) return v;
     const held = this.heldItem(p);
     const ray = useRayOf(held);
     // Cast again: structures and the player moved since the actions ran, and the outline and
@@ -646,21 +650,10 @@ export class Interaction {
       // Dry cells lie inside the hull's box, so nothing outside it is displaced.
       if (x < b.minX || y < b.minY || z < b.minZ || x >= b.maxX || y >= b.maxY || z >= b.maxZ) continue;
       if (SOLID[g.getCell(x, y, z) & ID_MASK] === 1) return true;
-      const hull = this.hullOf(ship);
+      const hull = this.system.hullOf(ship);
       if (hull !== null && isDryCell(hull, x, y, z)) return true;
     }
     return false;
-  }
-
-  /** The ship's hull analysis for its current cells. */
-  private hullOf(ship: Ship): HullInfo | null {
-    const own = ship.hull;
-    if (own !== null && own.version === ship.grid.version) return own;
-    const cached = this.hulls.get(ship);
-    if (cached !== undefined && (cached === null ? ship.grid.count === 0 : cached.version === ship.grid.version)) return cached;
-    const h = analyzeHull(ship.grid);
-    this.hulls.set(ship, h);
-    return h;
   }
 
   /** The world, or the grid of a structure that is still live. */
@@ -770,7 +763,7 @@ export class Interaction {
   }
 
   private toast(message: Message, kind: 'info' | 'warn' | 'error' = 'info'): void {
-    this.sim.events.emit({ type: 'toast', message, kind });
+    this.sim.events.emit({ type: 'toast', player: this.key, message, kind });
   }
 
   private toastKey(key: MessageKey, kind: 'info' | 'warn' | 'error' = 'info', params?: Record<string, number | string>): void {
@@ -1373,7 +1366,7 @@ export class Interaction {
     this.breakCooldown = BREAK_COOLDOWN;
   }
 
-  /** Remove the hit cell from its grid; drop its item in survival (world position of the cell). */
+  /** Remove the hit cell from its grid; drop its item for a survival player (world position of the cell). */
   private breakBlock(hit: GridHit): void {
     const sim = this.sim;
     const grid = hit.grid;
@@ -1391,7 +1384,8 @@ export class Interaction {
       }
     }
     if (!grid.setCell(x, y, z, AIR)) return;
-    spawnBlockDrop(sim, grid, x, y, z, cell, this.tmp);
+    // The mining player's mode decides (sim/rules.ts): a creative player's blocks never drop.
+    if (this.player.mode !== 'creative') spawnBlockDrop(sim, grid, x, y, z, cell, this.tmp);
     sim.events.emit({ type: 'blockBroken', gridId: grid.gridId, x, y, z, cell });
   }
 
@@ -1430,5 +1424,68 @@ export class Interaction {
     if (p.input.sneak) return msg(glued ? 'hint.glue.remove' : 'hint.glue.notGlued');
     if (!canGlue(h.cell)) return msg('hint.glue.cannot');
     return msg(glued ? 'hint.glue.already' : 'hint.glue.apply');
+  }
+}
+
+/**
+ * The interaction system: the Hands of every joined player (owned by their PlayerControl, see
+ * sim/players.ts), run in ascending entity id order, plus what they share.
+ */
+export class Interaction {
+  /**
+   * Hull analyses of ships whose own ship.hull is missing or older than their cells (ships
+   * without dynamics, or edited this tick), keyed by object; recomputed when grid.version moves.
+   * Shared by all hands: the hull is the same for everyone.
+   */
+  private readonly hulls = new WeakMap<Ship, HullInfo | null>();
+
+  constructor(private readonly sim: Simulation) {}
+
+  /** Tick step 1: every joined player acts, in ascending entity id order. */
+  tick(): void {
+    const online = this.sim.players.online();
+    for (let i = 0; i < online.length; i++) online[i]!.hands.tick();
+  }
+
+  /** Tick step 7: every joined player's view is rebuilt. */
+  buildViews(): void {
+    const online = this.sim.players.online();
+    for (let i = 0; i < online.length; i++) {
+      const h = online[i]!.hands;
+      h.view = h.buildView();
+    }
+  }
+
+  /** The simulation's world hook: a change can make any player's preview stale. */
+  onWorldChange(x: number, y: number, z: number, oldCell: number, newCell: number, flags: number): void {
+    const online = this.sim.players.online();
+    for (let i = 0; i < online.length; i++) online[i]!.hands.onWorldChange(x, y, z, oldCell, newCell, flags);
+  }
+
+  /** Death drops everything that player's hands were doing (the wheel is released by the entities module). */
+  onEntityEvent(ev: EntityEvent): void {
+    if (ev.type !== 'death' || !(ev.entity instanceof Player)) return;
+    this.sim.players.controlOf(ev.entity)?.hands.reset();
+  }
+
+  /** Forget every pending action of every player (loading a save). */
+  reset(): void {
+    const online = this.sim.players.online();
+    for (let i = 0; i < online.length; i++) {
+      const h = online[i]!.hands;
+      h.reset();
+      h.view = emptyView();
+    }
+  }
+
+  /** The ship's hull analysis for its current cells. */
+  hullOf(ship: Ship): HullInfo | null {
+    const own = ship.hull;
+    if (own !== null && own.version === ship.grid.version) return own;
+    const cached = this.hulls.get(ship);
+    if (cached !== undefined && (cached === null ? ship.grid.count === 0 : cached.version === ship.grid.version)) return cached;
+    const h = analyzeHull(ship.grid);
+    this.hulls.set(ship, h);
+    return h;
   }
 }

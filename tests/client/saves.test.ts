@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { MemoryStorage } from '../../src/save/storage';
 import { SAVE_VERSION, type WorldMeta } from '../../src/save/codec';
 import { makeWorldId, newWorldMeta, SaveManager, toSummary } from '../../src/client/saves';
-import { Simulation } from '../../src/sim/simulation';
-import { exportSave, importSave } from '../../src/sim/persist';
+import { exportSave } from '../../src/sim/persist';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { B } from '../../src/blocks/defs';
+import { loadSolo, soloSim } from '../solo';
 
 function meta(id: string, extra: Partial<WorldMeta> = {}): WorldMeta {
   return { ...newWorldMeta(id, 'W', 'seed', 7, 'creative', 1000), ...extra };
@@ -78,18 +78,17 @@ describe('SaveManager', () => {
     const storage = new MemoryStorage();
     const m = new SaveManager(storage);
     const gen = new FlatGenerator();
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2 });
+    const sim = soloSim({ seed: 1, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2 });
     sim.tick();
-    const p = sim.player.pos;
+    const p = sim.soloPlayer.player.pos;
     sim.world.setCell(Math.floor(p.x) + 2, Math.floor(p.y), Math.floor(p.z), B.BRICKS);
     await m.save(() => ({ meta: meta('c', { time: sim.world.time }), bundle: exportSave(sim) }));
     const res = await m.load('c');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.bundle.chunks.length).toBe(1);
-    expect(res.bundle.blobs.map(([n]) => n).sort()).toEqual(['entities', 'glue', 'sim', 'structures', 'ticks']);
-    const sim2 = new Simulation({ seed: 1, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2 });
-    importSave(sim2, res.bundle);
+    expect(res.bundle.blobs.map(([n]) => n).sort()).toEqual(['entities', 'glue', 'players', 'sim', 'structures', 'ticks']);
+    const sim2 = loadSolo({ seed: 1, mode: 'creative', generator: gen, syncChunks: true, loadRadius: 2 }, res.bundle);
     sim2.tick();
     expect(sim2.world.getId(Math.floor(p.x) + 2, Math.floor(p.y), Math.floor(p.z))).toBe(B.BRICKS);
 

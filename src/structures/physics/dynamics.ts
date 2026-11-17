@@ -825,7 +825,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
 
   /**
    * Destroy the deepest pinned hull cell of this tick: it becomes air and drops its item
-   * (BlockDef.drop: undefined = the block itself, null = nothing) unless in creative mode.
+   * (BlockDef.drop: undefined = the block itself, null = nothing) when the world's drops are on.
    */
   private destroyPinnedCell(b: Body): void {
     const ship = b.ship;
@@ -842,7 +842,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
     g.toWorld(c, c);
     if (!g.setCell(x, y, z, AIR)) return;
     b.stats.destroyed++;
-    if (this.host.creative) return;
+    if (!this.host.dropsEnabled) return;
     const id = cell & ID_MASK;
     const def = BLOCKS[id];
     const drop = def !== undefined ? def.drop : undefined;

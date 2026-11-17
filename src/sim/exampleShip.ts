@@ -20,7 +20,7 @@
  *    hub is glued to the bearing (DESIGN 轴心和轴承之间涂胶) so a stopped windmill comes along
  *    when the helm assembles the boat.
  *
- * The site is found by a deterministic search outward from the player's spawn: a rectangle of
+ * The site is found by a deterministic search outward from the world spawn: a rectangle of
  * open water (every column water at least two deep with air above) as big as the boat plus a
  * margin, with the whole boat between MIN_DISTANCE and MAX_DISTANCE blocks from the spawn. The
  * bow points along the longest run of open water from the boat's centre, and a site with a long
@@ -292,13 +292,13 @@ function build(sim: Simulation, site: Site): { x: number; y: number; z: number }
 }
 
 /**
- * Stamp the example windmill boat into a NEW world near the player's spawn. Returns the helm's
+ * Stamp the example windmill boat into a NEW world near the world spawn (sim.spawnPoint). Returns the helm's
  * world cell, or null when no suitable open water was found (then nothing is written). Never
  * throws: a failure must not stop the world from being created.
  */
 export function placeExampleShip(sim: Simulation): { x: number; y: number; z: number } | null {
   try {
-    const spawn = sim.player.spawn;
+    const spawn = sim.spawnPoint;
     const sx = spawn.x;
     const sz = spawn.z;
     if (!Number.isFinite(sx) || !Number.isFinite(sz)) return null;

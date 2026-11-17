@@ -21,11 +21,12 @@ import { Simulation } from '../../src/sim/simulation';
 import { Rotor, Ship } from '../../src/structures/structure';
 import { FlatGenerator, TerrainGenerator, VoidGenerator } from '../../src/worldgen/generator';
 import { flatSim } from './helpers';
+import { soloSim } from '../solo';
 
 const SEEDS = [1, 2, 3, 4, 5, 6];
 
 function terrainSim(seed: number): Simulation {
-  return new Simulation({ seed, mode: 'creative', generator: new TerrainGenerator(seed), syncChunks: true, loadRadius: 3, rabbits: false });
+  return soloSim({ seed, mode: 'creative', generator: new TerrainGenerator(seed), syncChunks: true, loadRadius: 3, rabbits: false });
 }
 
 interface Placed {
@@ -53,29 +54,29 @@ function tilt(ship: Ship): number {
 function startWindmill(p: Placed): void {
   const { sim, at } = p;
   const stand = at(1, BEARING_V, DECK_Y);
-  sim.teleport(stand.x + 0.5, DECK_Y, stand.z + 0.5);
-  sim.emptyHand();
+  sim.soloPlayer.teleport(stand.x + 0.5, DECK_Y, stand.z + 0.5);
+  sim.soloPlayer.emptyHand();
   sim.advance(2);
   const b = at(0, BEARING_V, MAST_TOP_Y);
-  expect(sim.useOn(b.x, b.y, b.z)).toBe(true); // preview
+  expect(sim.soloPlayer.useOn(b.x, b.y, b.z)).toBe(true); // preview
   expect(sim.structures.rotors().length).toBe(0);
-  expect(sim.view.preview?.kind).toBe('rotor');
-  expect(sim.useOn(b.x, b.y, b.z)).toBe(true); // start
+  expect(sim.soloPlayer.view.preview?.kind).toBe('rotor');
+  expect(sim.soloPlayer.useOn(b.x, b.y, b.z)).toBe(true); // start
 }
 
 /** Click the helm twice from the deck just in front of it: assemble and take the wheel. */
 function assembleAtHelm(p: Placed): Ship {
   const { sim, at, helm } = p;
   const stand = at(0, 2, DECK_Y);
-  sim.teleport(stand.x + 0.5, DECK_Y, stand.z + 0.5);
-  sim.emptyHand();
+  sim.soloPlayer.teleport(stand.x + 0.5, DECK_Y, stand.z + 0.5);
+  sim.soloPlayer.emptyHand();
   sim.advance(2);
-  expect(sim.useOn(helm.x, helm.y, helm.z)).toBe(true); // preview
+  expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z)).toBe(true); // preview
   expect(sim.structures.ships().length).toBe(0);
-  expect(sim.useOn(helm.x, helm.y, helm.z)).toBe(true); // assemble
+  expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z)).toBe(true); // assemble
   const ships = sim.structures.ships();
   expect(ships.length).toBe(1);
-  expect(sim.player.steeringShipId).toBe(ships[0]!.id);
+  expect(sim.soloPlayer.player.steeringShipId).toBe(ships[0]!.id);
   return ships[0]!;
 }
 
@@ -96,7 +97,7 @@ function sailsWell(p: Placed, ship: Ship): void {
   expect(minY).toBeGreaterThan(y0 - 0.5);
   expect(ship.grid.position.y).toBeGreaterThan(SEA_LEVEL - 1.5);
   const p0 = { x: ship.grid.position.x, z: ship.grid.position.z };
-  sim.player.input.forward = 1;
+  sim.soloPlayer.player.input.forward = 1;
   sim.advance(60);
   expect(ship.throttle).toBe(1);
   const dx = ship.grid.position.x - p0.x;
@@ -110,7 +111,7 @@ describe('example windmill boat (new worlds)', () => {
     for (const seed of SEEDS) {
       const { sim, at } = placed(seed);
       const w = sim.world;
-      const spawn = sim.player.spawn;
+      const spawn = sim.soloPlayer.player.spawn;
       for (const part of exampleShipParts()) {
         const c = at(part.u, part.v, part.y);
         const id = w.getCell(c.x, c.y, c.z) & ID_MASK;
@@ -210,11 +211,11 @@ describe('example windmill boat (new worlds)', () => {
     // The search stays bounded: at most 7 x 7 chunk columns around the spawn are generated.
     expect(flat.world.chunks.size).toBeLessThanOrEqual(49);
 
-    const empty = new Simulation({ seed: 9, mode: 'creative', generator: new VoidGenerator(), syncChunks: true, rabbits: false });
+    const empty = soloSim({ seed: 9, mode: 'creative', generator: new VoidGenerator(), syncChunks: true, rabbits: false });
     expect(placeExampleShip(empty)).toBeNull();
     expect(empty.worldGlue.size).toBe(0);
 
-    const flatAgain = new Simulation({ seed: 9, mode: 'survival', generator: new FlatGenerator(), syncChunks: true, rabbits: false });
+    const flatAgain = soloSim({ seed: 9, mode: 'survival', generator: new FlatGenerator(), syncChunks: true, rabbits: false });
     expect(() => placeExampleShip(flatAgain)).not.toThrow();
   });
 });

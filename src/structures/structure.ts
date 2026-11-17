@@ -166,8 +166,11 @@ export interface StructureHost {
   /** Glue between world cells. */
   readonly worldGlue: GlueStore;
   readonly rng: Rng;
-  /** True in creative mode: blocks displaced by a blockify do not drop items. */
-  readonly creative: boolean;
+  /**
+   * The world rule (sim/rules.ts): blocks displaced by a blockify or a dock, or destroyed by a
+   * pinned ship, drop their item. False in a creative world.
+   */
+  readonly dropsEnabled: boolean;
   /** Spawn an item drop with its centre at a world position. */
   spawnDrop(x: number, y: number, z: number, item: number, count: number): void;
   /**

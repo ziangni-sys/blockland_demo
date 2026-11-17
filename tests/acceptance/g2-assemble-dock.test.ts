@@ -74,7 +74,7 @@ function raftScene(o: RaftOpts = {}): Simulation {
     sim.worldGlue.add(0, SEA_TOP, 0, PX); // felt <-> glass
   }
   sim.advance(10); // chunks around the scene load
-  sim.emptyHand();
+  sim.soloPlayer.emptyHand();
   return sim;
 }
 
@@ -89,7 +89,7 @@ function raftCells(glued: boolean): string[] {
 
 /** Right-click the world helm of the raft scene from the pier (fails the test if it cannot be aimed at). */
 function clickHelm(sim: Simulation): void {
-  expect(sim.useOn(2, SEA_TOP, 4, PZ)).toBe(true);
+  expect(sim.soloPlayer.useOn(2, SEA_TOP, 4, PZ)).toBe(true);
 }
 
 /** Assemble the raft through the player: two right-clicks on the helm. */
@@ -101,25 +101,25 @@ function assembleRaft(sim: Simulation): Ship {
 
 /** Hold the wheel's keys for `ticks` ticks. */
 function steer(sim: Simulation, forward: number, strafe: number, ticks: number): void {
-  sim.player.input.forward = forward;
-  sim.player.input.strafe = strafe;
+  sim.soloPlayer.player.input.forward = forward;
+  sim.soloPlayer.player.input.strafe = strafe;
   sim.advance(ticks);
-  sim.player.input.forward = 0;
-  sim.player.input.strafe = 0;
+  sim.soloPlayer.player.input.forward = 0;
+  sim.soloPlayer.player.input.strafe = 0;
 }
 
 /** One right-click (whatever the player aims at) and one tick. */
 function click(sim: Simulation): void {
-  sim.use();
+  sim.soloPlayer.use();
   sim.tick();
 }
 
 /** Sneak + one right-click (whatever the player aims at), then stand up again. */
 function sneakClick(sim: Simulation): void {
-  sim.player.input.sneak = true;
-  sim.use();
+  sim.soloPlayer.player.input.sneak = true;
+  sim.soloPlayer.use();
   sim.tick();
-  sim.player.input.sneak = false;
+  sim.soloPlayer.player.input.sneak = false;
 }
 
 // ==================================================================== scenario 6
@@ -128,16 +128,16 @@ describe('6. 木筏加舵轮：第一次右键高亮；世界有变化后要重�
   it('第一次右键高亮: the first right-click only previews — the preview lists exactly the raft and the helm, nothing moves', () => {
     const sim = raftScene();
     const log = new EventLog(sim);
-    sim.lookAtCell(2, SEA_TOP, 4, PZ);
+    sim.soloPlayer.lookAtCell(2, SEA_TOP, 4, PZ);
     sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.helm.preview');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.helm.preview');
     clickHelm(sim);
     // highlighted: the preview is the set of cells the helm would take
-    expect(sim.view.preview).not.toBeNull();
-    expect(sim.view.preview!.kind).toBe('ship');
-    expect(sim.view.preview!.gridId).toBe(0);
-    expect(tripleKeys(sim.view.preview!.cells)).toEqual(raftCells(false));
-    expect(sim.view.hint).toEqual({ key: 'hint.helm.assemble', params: { count: 31 } });
+    expect(sim.soloPlayer.view.preview).not.toBeNull();
+    expect(sim.soloPlayer.view.preview!.kind).toBe('ship');
+    expect(sim.soloPlayer.view.preview!.gridId).toBe(0);
+    expect(tripleKeys(sim.soloPlayer.view.preview!.cells)).toEqual(raftCells(false));
+    expect(sim.soloPlayer.view.hint).toEqual({ key: 'hint.helm.assemble', params: { count: 31 } });
     // ...and nothing was assembled or moved
     expect(sim.structures.all().length).toBe(0);
     expect(log.of('structureAdded').length).toBe(0);
@@ -145,30 +145,30 @@ describe('6. 木筏加舵轮：第一次右键高亮；世界有变化后要重�
     expect(idAt(sim, 2, SEA_TOP, 4)).toBe(B.HELM);
     // the highlight stays while the player keeps looking at the helm
     sim.advance(20);
-    expect(tripleKeys(sim.view.preview!.cells)).toEqual(raftCells(false));
+    expect(tripleKeys(sim.soloPlayer.view.preview!.cells)).toEqual(raftCells(false));
     expect(sim.structures.all().length).toBe(0);
   });
 
   it('世界有变化后要重新预览: a block the player places between the clicks forces a fresh preview, the click after that assembles it too', () => {
     const sim = raftScene();
     // Planks in hand from the start: switching the slot would drop the preview by itself.
-    sim.hold(B.PLANKS_OAK);
+    sim.soloPlayer.hold(B.PLANKS_OAK);
     clickHelm(sim);
-    expect(sim.view.preview!.cells.length).toBe(31 * 3);
+    expect(sim.soloPlayer.view.preview!.cells.length).toBe(31 * 3);
     // The player puts a plank on the deck (right-click on the top face of a raft plank).
-    expect(sim.useOn(1, DECK, 3, PY)).toBe(true);
+    expect(sim.soloPlayer.useOn(1, DECK, 3, PY)).toBe(true);
     expect(idAt(sim, 1, SEA_TOP, 3)).toBe(B.PLANKS_OAK);
     // the old highlight no longer stands: looking at the helm asks for a new preview
-    expect(sim.view.preview).toBeNull();
-    sim.lookAtCell(2, SEA_TOP, 4, PZ);
+    expect(sim.soloPlayer.view.preview).toBeNull();
+    sim.soloPlayer.lookAtCell(2, SEA_TOP, 4, PZ);
     sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.helm.preview');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.helm.preview');
     // The next click on the helm previews again — with the new plank — instead of assembling.
     clickHelm(sim);
     expect(sim.structures.all().length).toBe(0);
-    expect(sim.view.preview).not.toBeNull();
-    expect(tripleKeys(sim.view.preview!.cells)).toEqual([...raftCells(false), key(1, SEA_TOP, 3)].sort());
-    expect(sim.view.hint).toEqual({ key: 'hint.helm.assemble', params: { count: 32 } });
+    expect(sim.soloPlayer.view.preview).not.toBeNull();
+    expect(tripleKeys(sim.soloPlayer.view.preview!.cells)).toEqual([...raftCells(false), key(1, SEA_TOP, 3)].sort());
+    expect(sim.soloPlayer.view.hint).toEqual({ key: 'hint.helm.assemble', params: { count: 32 } });
     // The click after that assembles, the new plank included.
     clickHelm(sim);
     const ship = onlyShip(sim);
@@ -179,13 +179,13 @@ describe('6. 木筏加舵轮：第一次右键高亮；世界有变化后要重�
   it('世界有变化后要重新预览: a raft block mined between the clicks forces a fresh preview without it', () => {
     const sim = raftScene();
     clickHelm(sim);
-    expect(sim.view.preview!.cells.length).toBe(31 * 3);
-    expect(sim.mine(4, DECK, 5, PY)).toBe(true); // creative: breaks at once
+    expect(sim.soloPlayer.view.preview!.cells.length).toBe(31 * 3);
+    expect(sim.soloPlayer.mine(4, DECK, 5, PY)).toBe(true); // creative: breaks at once
     expect(idAt(sim, 4, DECK, 5)).not.toBe(B.PLANKS_OAK);
-    expect(sim.view.preview).toBeNull();
+    expect(sim.soloPlayer.view.preview).toBeNull();
     clickHelm(sim);
     expect(sim.structures.all().length).toBe(0);
-    expect(tripleKeys(sim.view.preview!.cells)).toEqual(raftCells(false).filter((k) => k !== key(4, DECK, 5)));
+    expect(tripleKeys(sim.soloPlayer.view.preview!.cells)).toEqual(raftCells(false).filter((k) => k !== key(4, DECK, 5)));
     clickHelm(sim);
     expect(onlyShip(sim).grid.count).toBe(30);
   });
@@ -195,12 +195,12 @@ describe('6. 木筏加舵轮：第一次右键高亮；世界有变化后要重�
     sim.world.setCell(3, SEA_TOP, 1, makeCell(B.STONE)); // stone lying on the deck: not part of the raft
     sim.advance(2);
     clickHelm(sim);
-    expect(tripleKeys(sim.view.preview!.cells)).toEqual(raftCells(false));
+    expect(tripleKeys(sim.soloPlayer.view.preview!.cells)).toEqual(raftCells(false));
     sim.worldGlue.add(3, SEA_TOP, 1, NY); // glued onto the plank under it
     sim.tick();
     clickHelm(sim);
     expect(sim.structures.all().length).toBe(0);
-    expect(tripleKeys(sim.view.preview!.cells)).toEqual([...raftCells(false), key(3, SEA_TOP, 1)].sort());
+    expect(tripleKeys(sim.soloPlayer.view.preview!.cells)).toEqual([...raftCells(false), key(3, SEA_TOP, 1)].sort());
     clickHelm(sim);
     const ship = onlyShip(sim);
     expect(ship.grid.count).toBe(32);
@@ -212,7 +212,7 @@ describe('6. 木筏加舵轮：第一次右键高亮；世界有变化后要重�
     const sim = raftScene();
     const log = new EventLog(sim);
     clickHelm(sim);
-    const previewed = tripleKeys(sim.view.preview!.cells);
+    const previewed = tripleKeys(sim.soloPlayer.view.preview!.cells);
     clickHelm(sim);
     const ship = onlyShip(sim);
     expect(log.of('structureAdded').map((e) => e.id)).toEqual([ship.id]);
@@ -225,8 +225,8 @@ describe('6. 木筏加舵轮：第一次右键高亮；世界有变化后要重�
     expect(countWorld(sim, B.HELM, -3, SEA_FLOOR, -3, 8, SEA_TOP + 3, 9)).toBe(0);
     expect(idAt(sim, 2, DECK, 2)).toBe(B.WATER);
     // the player took the wheel
-    expect(sim.player.steeringShipId).toBe(ship.id);
-    expect(sim.view.preview).toBeNull();
+    expect(sim.soloPlayer.player.steeringShipId).toBe(ship.id);
+    expect(sim.soloPlayer.view.preview).toBeNull();
   });
 
   it('紧贴着的圆石码头不会被带走: the rubble pier touching the raft is not highlighted, not taken, and stays when the ship sails off', () => {
@@ -234,7 +234,7 @@ describe('6. 木筏加舵轮：第一次右键高亮；世界有变化后要重�
     const pierBefore = countWorld(sim, B.COBBLE, -1, SEA_FLOOR, -1, 5, SEA_TOP, 9);
     expect(pierBefore).toBe(5 * 10 * 3 + 9);
     clickHelm(sim);
-    const previewed = tripleKeys(sim.view.preview!.cells);
+    const previewed = tripleKeys(sim.soloPlayer.view.preview!.cells);
     for (const k of previewed) {
       const [x, y, z] = k.split(',').map(Number) as [number, number, number];
       expect(idAt(sim, x, y, z)).not.toBe(B.COBBLE);
@@ -295,15 +295,15 @@ describe('7. 船能漂浮、行驶、转向；撞墙会停住，不会穿墙。'
     // nothing pressed: it stays
     sim.advance(100);
     expect(Math.hypot(ship.grid.position.x - p0.x, ship.grid.position.z - p0.z)).toBeLessThan(0.1);
-    sim.player.input.forward = 1;
+    sim.soloPlayer.player.input.forward = 1;
     sim.advance(200);
     expect(ship.throttle).toBe(1);
     const p1 = ship.grid.position;
     expect(p0.z - p1.z).toBeGreaterThan(6); // ~2.5 blocks/s rowing speed after the spin-up
     expect(Math.abs(p1.x - p0.x)).toBeLessThan(0.3);
-    expect(sim.helmView()!.speed).toBeGreaterThan(1.5);
+    expect(sim.soloPlayer.helmView()!.speed).toBeGreaterThan(1.5);
     expect(Math.abs(headingDeg(ship))).toBeLessThan(3);
-    sim.player.input.forward = 0;
+    sim.soloPlayer.player.input.forward = 0;
   });
 
   it('行驶: S at the wheel drives it astern (south)', () => {
@@ -326,8 +326,8 @@ describe('7. 船能漂浮、行驶、转向；撞墙会停住，不会穿墙。'
       steer(sim, 1, 0, 60); // under way, heading north
       const h0 = headingDeg(ship);
       const x0 = ship.grid.position.x;
-      sim.player.input.forward = 1;
-      sim.player.input.strafe = strafe;
+      sim.soloPlayer.player.input.forward = 1;
+      sim.soloPlayer.player.input.strafe = strafe;
       sim.advance(60);
       expect(ship.rudder).toBe(strafe);
       const turned = headingDeg(ship) - h0;
@@ -352,15 +352,15 @@ describe('7. 船能漂浮、行驶、转向；撞墙会停住，不会穿墙。'
     let minZ = Infinity;
     let topSpeed = 0;
     const lastZ: number[] = [];
-    sim.player.input.forward = 1;
+    sim.soloPlayer.player.input.forward = 1;
     for (let t = 0; t < ticks; t++) {
       sim.tick();
       minZ = Math.min(minZ, minCentreZ(ship, cells));
-      topSpeed = Math.max(topSpeed, sim.helmView()?.speed ?? 0);
+      topSpeed = Math.max(topSpeed, sim.soloPlayer.helmView()?.speed ?? 0);
       if (t >= ticks - 100) lastZ.push(ship.grid.position.z);
     }
-    const speedAtEnd = sim.helmView()?.speed ?? NaN;
-    sim.player.input.forward = 0;
+    const speedAtEnd = sim.soloPlayer.helmView()?.speed ?? NaN;
+    sim.soloPlayer.player.input.forward = 0;
     return { minZ, topSpeed, speedAtEnd, drift: Math.max(...lastZ) - Math.min(...lastZ) };
   }
 
@@ -400,17 +400,17 @@ describe('7. 船能漂浮、行驶、转向；撞墙会停住，不会穿墙。'
     sim.world.setCell(2, SEA_TOP + 4, 4, makeCell(B.BEARING, facingState(NZ)));
     fill(sim, 0, SEA_TOP + 2, 3, 4, SEA_TOP + 6, 3, B.CANVAS);
     sim.worldGlue.add(2, SEA_TOP + 4, 3, PZ); // hub <-> bearing
-    sim.loadRadius = loadRadius; // the whole wall must be loaded when it is built
+    sim.soloPlayer.viewRadius = loadRadius; // the whole wall must be loaded when it is built
     sim.advance(30); // (4 chunk columns per tick)
     wall(sim);
-    sim.emptyHand();
-    expect(sim.useOn(2, SEA_TOP + 4, 4, PX)).toBe(true);
-    expect(sim.useOn(2, SEA_TOP + 4, 4, PX)).toBe(true);
+    sim.soloPlayer.emptyHand();
+    expect(sim.soloPlayer.useOn(2, SEA_TOP + 4, 4, PX)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, SEA_TOP + 4, 4, PX)).toBe(true);
     expect(sim.structures.rotors().length).toBe(1);
-    expect(sim.useOn(2, SEA_TOP, 7, PX)).toBe(true);
-    expect(sim.useOn(2, SEA_TOP, 7, PX)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 7, PX)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 7, PX)).toBe(true);
     const ship = onlyShip(sim);
-    expect(sim.player.steeringShipId).toBe(ship.id);
+    expect(sim.soloPlayer.player.steeringShipId).toBe(ship.id);
     sim.advance(20);
     expect(ship.sails).toBe(25);
     return { sim, ship };
@@ -439,15 +439,15 @@ describe('7. 船能漂浮、行驶、转向；撞墙会停住，不会穿墙。'
     });
     const cells = shipCells(ship);
     // a touch of port rudder while speeding up, then straight on
-    sim.player.input.forward = 1;
-    sim.player.input.strafe = -1;
+    sim.soloPlayer.player.input.forward = 1;
+    sim.soloPlayer.player.input.strafe = -1;
     for (let t = 0; t < 300 && headingDeg(ship) < 6; t++) sim.tick();
-    sim.player.input.strafe = 0;
+    sim.soloPlayer.player.input.strafe = 0;
     let minZ = Infinity;
     let headingAtImpact = NaN;
     let speedAtImpact = 0;
     for (let t = 0; t < 400; t++) {
-      const v = sim.helmView()!.speed;
+      const v = sim.soloPlayer.helmView()!.speed;
       const h = headingDeg(ship);
       sim.tick();
       const m = minCentreZ(ship, cells);
@@ -461,10 +461,10 @@ describe('7. 船能漂浮、行驶、转向；撞墙会停住，不会穿墙。'
     expect(headingAtImpact).toBeLessThan(35);
     expect(speedAtImpact).toBeGreaterThan(6);
     expect(minZ).toBeGreaterThan(WZ + 1);
-    expect(sim.helmView()!.speed).toBeLessThan(0.2);
+    expect(sim.soloPlayer.helmView()!.speed).toBeLessThan(0.2);
     expect(minCentreZ(ship, cells)).toBeLessThan(WZ + 1 + 0.75);
     expect(countWorld(sim, B.STONE, -40, SEA_FLOOR, WZ, 40, SEA_TOP + 3, WZ)).toBe(81 * 14);
-    sim.player.input.forward = 0;
+    sim.soloPlayer.player.input.forward = 0;
   });
 });
 
@@ -486,9 +486,9 @@ function destOf(exp: ReturnType<typeof expectedDock>, x: number, y: number, z: n
 function turnLeft(sim: Simulation, ship: Ship, minDeg: number): void {
   steer(sim, 1, 0, 60);
   sim.advance(40);
-  sim.player.input.strafe = -1;
+  sim.soloPlayer.player.input.strafe = -1;
   for (let t = 0; t < 600 && headingDeg(ship) < minDeg; t++) sim.tick();
-  sim.player.input.strafe = 0;
+  sim.soloPlayer.player.input.strafe = 0;
   sim.advance(100);
 }
 
@@ -541,12 +541,12 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
     expect(countWorld(sim, B.PLANKS_OAK, -12, SEA_FLOOR, -20, 12, SEA_TOP + 3, 6)).toBe(0);
     expect(countWorld(sim, B.HELM, -12, SEA_FLOOR, -20, 12, SEA_TOP + 3, 6)).toBe(0);
     // marked red: exactly the blocking world cells
-    expect(sim.view.conflicts.map((c) => key(c.x, c.y, c.z)).sort()).toEqual(blockers.map((b) => key(b.x, b.y, b.z)).sort());
+    expect(sim.soloPlayer.view.conflicts.map((c) => key(c.x, c.y, c.z)).sort()).toEqual(blockers.map((b) => key(b.x, b.y, b.z)).sort());
   }
 
   it('停靠位置被挡住时拒绝并标红: sneak + right-click from the wheel is refused and the blocking world cells are marked', () => {
     const { sim, log, ship, blockers } = yawedShipWithBlockers();
-    expect(sim.player.steeringShipId).toBe(ship.id);
+    expect(sim.soloPlayer.player.steeringShipId).toBe(ship.id);
     // (the stones lie where cells of the ship, as it floats now, would be put)
     const dests = [...expectedDock(ship).dest.values()].map((d) => key(d.x, d.y, d.z));
     for (const b of blockers) expect(dests).toContain(key(b.x, b.y, b.z));
@@ -559,10 +559,10 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
   it('停靠位置被挡住时拒绝并标红: sneak + right-click on the helm with an empty hand is refused the same way', () => {
     const { sim, log, ship, blockers } = yawedShipWithBlockers();
     click(sim); // a plain right-click at the wheel lets go of it
-    expect(sim.player.steeringShipId).toBe(0);
-    sim.player.input.sneak = true;
-    expect(sim.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true);
-    sim.player.input.sneak = false;
+    expect(sim.soloPlayer.player.steeringShipId).toBe(0);
+    sim.soloPlayer.player.input.sneak = true;
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true);
+    sim.soloPlayer.player.input.sneak = false;
     expectRefused(sim, log, ship, blockers);
   });
 
@@ -574,14 +574,14 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
     click(sim); // let go of the wheel; dock from the helm this time
     const exp = expectedDock(ship);
     expect(exp.k).toBe(0);
-    sim.player.input.sneak = true;
-    expect(sim.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true);
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = true;
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true);
+    sim.soloPlayer.player.input.sneak = false;
     expect(log.toasts()).toContainEqual({ key: 'toast.dock.done', params: { count: 36 } });
     expect(ship.removed).toBe(true);
     expect(sim.structures.all().length).toBe(0);
     expect(log.of('structureRemoved').map((e) => e.id)).toEqual([ship.id]);
-    expect(sim.view.conflicts).toEqual([]);
+    expect(sim.soloPlayer.view.conflicts).toEqual([]);
     // blocks: each one where the snapped pose puts it, nothing else
     expectDocked(sim, exp);
     for (const [c, d] of exp.dest) expect(sim.world.getCell(d.x, d.y, d.z)).toBe(c.cell); // unrotated: same state bits
@@ -609,9 +609,9 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
     const exp = expectedDock(ship);
     expect(exp.k).toBe(1);
     click(sim); // let go of the wheel
-    sim.player.input.sneak = true;
-    expect(sim.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true);
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = true;
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true);
+    sim.soloPlayer.player.input.sneak = false;
     expect(log.toastKeys()).toContain('toast.dock.done');
     expect(ship.removed).toBe(true);
     expectDocked(sim, exp);
@@ -639,9 +639,9 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
     // The player stands behind the helm (on the docked deck) and assembles it again.
     const helm = destOf(exp, 2, SEA_TOP, 4);
     const back = rotDirY(exp.k, PZ);
-    expect(sim.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
-    expect(sim.view.preview!.cells.length).toBe(n0 * 3);
-    expect(sim.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
+    expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
+    expect(sim.soloPlayer.view.preview!.cells.length).toBe(n0 * 3);
+    expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
     const again = onlyShip(sim);
     expect(again).not.toBe(ship);
     expect(again.grid.count).toBe(n0);
@@ -671,16 +671,16 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
     sim.worldGlue.add(4, SEA_TOP, 8, NY);
     sim.worldGlue.add(4, SEA_TOP, 8, NX);
     sim.advance(10);
-    sim.emptyHand();
-    expect(sim.useOn(2, by, 4, PX)).toBe(true);
-    expect(sim.useOn(2, by, 4, PX)).toBe(true);
+    sim.soloPlayer.emptyHand();
+    expect(sim.soloPlayer.useOn(2, by, 4, PX)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, by, 4, PX)).toBe(true);
     const rotor = sim.structures.rotors()[0]!;
     expect(rotor).toBeDefined();
-    expect(sim.useOn(2, SEA_TOP, 7, PX)).toBe(true);
-    expect(sim.useOn(2, SEA_TOP, 7, PX)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 7, PX)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 7, PX)).toBe(true);
     const ship = onlyShip(sim);
     expect(rotor.parent).toBe(ship);
-    expect(sim.player.steeringShipId).toBe(ship.id);
+    expect(sim.soloPlayer.player.steeringShipId).toBe(ship.id);
     return { sim, ship, rotor, by };
   }
 
@@ -776,8 +776,8 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
     expect(ship.removed).toBe(true);
     const helm = destOf(exp, 2, SEA_TOP, 7);
     const back = rotDirY(exp.k, PZ);
-    expect(sim.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
-    expect(sim.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
+    expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
+    expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, back)).toBe(true);
     const again = onlyShip(sim);
     expect(again.grid.count).toBe(n0);
     expect(again.glue.size).toBe(g0);
@@ -858,11 +858,11 @@ describe('9. 甲板上没粘的沙子在组装后会掉落；落到船上变成�
     sim.world.setCell(-2, SEA_TOP + 6, 4, makeCell(B.SAND)); // above open water, west of the raft
     const ship = assembleRaft(sim);
     sim.advance(60); // floats, settles
-    sim.teleport(1.5, SEA_TOP + 4, 7.5);
-    sim.emptyHand();
+    sim.soloPlayer.teleport(1.5, SEA_TOP + 4, 7.5);
+    sim.soloPlayer.emptyHand();
     sim.advance(2);
     // the player breaks the glass under the sand over the deck
-    expect(sim.mine(1, SEA_TOP + 5, 3, PZ)).toBe(true);
+    expect(sim.soloPlayer.mine(1, SEA_TOP + 5, 3, PZ)).toBe(true);
     for (let t = 0; t < 40; t++) sim.tick();
     expect(fallingBlocks(sim)).toBe(0);
     let drops = itemDrops(sim, B.SAND);
@@ -876,7 +876,7 @@ describe('9. 甲板上没粘的沙子在组装后会掉落；落到船上变成�
     });
     expect(shipSand).toBe(0);
     // ...while sand that misses the ship falls through the sea and lands as a block on the floor
-    expect(sim.mine(-2, SEA_TOP + 5, 4, PZ)).toBe(true);
+    expect(sim.soloPlayer.mine(-2, SEA_TOP + 5, 4, PZ)).toBe(true);
     sim.advance(200);
     expect(fallingBlocks(sim)).toBe(0);
     expect(worldSand(sim)).toEqual([key(-2, SEA_FLOOR, 4)]);
@@ -907,16 +907,16 @@ describe('6、8 与胶：停靠不会把船和码头粘在一起（结构体移�
     it(`a raft carrying an open glued face docks with it against a ${name} pier: assembled again it has the same blocks, and the pier stays whole`, () => {
       const sim = raftScene({ glued: true, pier: false });
       // The player glues the felt's open west face, and leaves it open.
-      sim.teleport(-2.5, SEA_TOP + 1, 0.5);
-      sim.player.flying = true;
+      sim.soloPlayer.teleport(-2.5, SEA_TOP + 1, 0.5);
+      sim.soloPlayer.player.flying = true;
       sim.tick();
-      sim.hold(I.GLUE);
-      expect(sim.useOn(0, SEA_TOP, 0, NX)).toBe(true);
+      sim.soloPlayer.hold(I.GLUE);
+      expect(sim.soloPlayer.useOn(0, SEA_TOP, 0, NX)).toBe(true);
       expect(sim.worldGlue.has(0, SEA_TOP, 0, NX)).toBe(true);
-      sim.teleport(2.5, SEA_TOP, 5.5);
-      sim.player.flying = false;
+      sim.soloPlayer.teleport(2.5, SEA_TOP, 5.5);
+      sim.soloPlayer.player.flying = false;
       sim.advance(2);
-      sim.emptyHand();
+      sim.soloPlayer.emptyHand();
       const ship = assembleRaft(sim);
       expect(ship.grid.count).toBe(33);
       expect(ship.glue.size).toBe(3);
@@ -950,33 +950,33 @@ describe('6、8 与胶：停靠不会把船和码头粘在一起（结构体移�
     const pierCells = buildPier(sim, B.COBBLE); // its east end is diagonal to the deck corner: not touching the raft
     sim.advance(2);
     // The player glues the pier's open east face, over the raft's north-west corner.
-    sim.teleport(1.5, SEA_TOP, 1.5);
+    sim.soloPlayer.teleport(1.5, SEA_TOP, 1.5);
     sim.advance(2);
-    sim.hold(I.GLUE);
-    expect(sim.useOn(-1, SEA_TOP, 0, PX)).toBe(true);
+    sim.soloPlayer.hold(I.GLUE);
+    expect(sim.soloPlayer.useOn(-1, SEA_TOP, 0, PX)).toBe(true);
     expect(sim.worldGlue.has(-1, SEA_TOP, 0, PX)).toBe(true);
-    sim.teleport(2.5, SEA_TOP, 5.5);
+    sim.soloPlayer.teleport(2.5, SEA_TOP, 5.5);
     sim.advance(2);
-    sim.emptyHand();
+    sim.soloPlayer.emptyHand();
     const ship = assembleRaft(sim);
     expect(ship.grid.count).toBe(31);
     expect(sim.worldGlue.has(-1, SEA_TOP, 0, PX)).toBe(true); // stays on the pier
     click(sim); // let go of the wheel
     // The player puts a plank on the ship's deck corner, right beside the glued pier face. It is a
     // ship block: the world's glue does not reach it.
-    sim.teleport(1.5, SEA_TOP, 1.5);
+    sim.soloPlayer.teleport(1.5, SEA_TOP, 1.5);
     sim.advance(2);
-    sim.hold(B.PLANKS_OAK);
-    expect(sim.useOn(0, DECK, 0, PY, ship.id)).toBe(true);
+    sim.soloPlayer.hold(B.PLANKS_OAK);
+    expect(sim.soloPlayer.useOn(0, DECK, 0, PY, ship.id)).toBe(true);
     expect(ship.grid.getCell(0, SEA_TOP, 0) & ID_MASK).toBe(B.PLANKS_OAK);
     expect(ship.grid.count).toBe(32);
-    sim.emptyHand();
-    sim.teleport(2.5, SEA_TOP, 5.5);
+    sim.soloPlayer.emptyHand();
+    sim.soloPlayer.teleport(2.5, SEA_TOP, 5.5);
     sim.advance(2);
     expectDocksInPlace(ship);
-    sim.player.input.sneak = true;
-    expect(sim.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true); // dock from the helm
-    sim.player.input.sneak = false;
+    sim.soloPlayer.player.input.sneak = true;
+    expect(sim.soloPlayer.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true); // dock from the helm
+    sim.soloPlayer.player.input.sneak = false;
     expect(ship.removed).toBe(true);
     expect(idAt(sim, 0, SEA_TOP, 0)).toBe(B.PLANKS_OAK);
     expect(sim.worldGlue.has(-1, SEA_TOP, 0, PX)).toBe(false); // the pier's face, now against the plank

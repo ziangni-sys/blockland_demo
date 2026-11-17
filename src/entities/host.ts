@@ -5,7 +5,7 @@
 import type { Rng } from '../core/rng';
 import type { Structure } from '../structures/structure';
 import type { World } from '../voxel/world';
-import type { Entity } from './entity';
+import type { Entity, Player } from './entity';
 
 export type EntityEventType = 'hurt' | 'death' | 'crush' | 'land' | 'splash' | 'pickup' | 'helmReleased' | 'despawn';
 
@@ -16,7 +16,7 @@ export type EntityEventType = 'hurt' | 'death' | 'crush' | 'land' | 'splash' | '
  *  - crush        squeezed by a structure (and moved to a free spot); cause = 'structure'
  *  - land         amount = height fallen
  *  - splash       amount = downward speed when hitting the water
- *  - pickup       the player picked up `amount` items of entity.stack (entity = the item drop)
+ *  - pickup       `player` picked up `amount` items of entity.stack (entity = the item drop)
  *  - helmReleased entity = the player who let go of the wheel; cause = why
  *  - despawn      an entity vanished without dying (item timeout, merged away, burnt ...); cause
  */
@@ -25,12 +25,19 @@ export type EntityEvent = {
   entity: Entity;
   amount?: number;
   cause?: string;
+  /** pickup: the player who took the items. */
+  player?: Player;
 };
 
 export interface EntityHost {
   readonly world: World;
   /** The only source of randomness (determinism). */
   readonly rng: Rng;
+  /**
+   * Creatures can be harmed (the world rules: a survival world). Decides the rabbit crush limit;
+   * players are always judged by their own mode.
+   */
+  readonly harmsCreatures: boolean;
   /** Every live structure, including nested ones. */
   structures(): readonly Structure[];
   structure(id: number): Structure | undefined;

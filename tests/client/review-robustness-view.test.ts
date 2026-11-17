@@ -21,6 +21,7 @@ import { FlatGenerator } from '../../src/worldgen/generator';
 import { ViewBuilder } from '../../src/client/view';
 import { SectionMesher } from '../../src/client/meshing';
 import type { WorkerPool } from '../../src/client/workers';
+import { soloSim } from '../solo';
 
 class NullBackend implements RenderBackend {
   async init(): Promise<BackendInfo> {
@@ -44,7 +45,7 @@ class NullBackend implements RenderBackend {
 }
 
 function flatSim(radius: number): Simulation {
-  return new Simulation({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: radius, rabbits: false });
+  return soloSim({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: radius, rabbits: false });
 }
 
 describe('review: environment time of day', () => {
@@ -56,7 +57,7 @@ describe('review: environment time of day', () => {
     sim.setDayTime(0.75); // midnight
     expect(sim.dayTime).toBeCloseTo(0.75, 2);
     const v = new ViewBuilder();
-    v.updateCamera(sim, 1, 0, 0, 75, 1 / 60);
+    v.updateCamera(sim, sim.soloPlayer, 1, 0, 0, 75, 1 / 60);
     const env = v.updateEnvironment(sim, 1, 0, 4);
     // Fails today: the client computes (world.time % DAY_TICKS) / DAY_TICKS ≈ 0.04 (morning
     // sky) while the simulation (rabbits, isDay) is at midnight.
@@ -86,7 +87,7 @@ describe('review: mesh worker utilisation', () => {
     const mesher = new SectionMesher(sim.world, new NullBackend(), pool as unknown as WorkerPool<MeshResponse>, () => 0, (w, e) => {
       throw new Error(`${w}: ${String(e)}`);
     });
-    const p = sim.player.pos;
+    const p = sim.soloPlayer.player.pos;
     // One frame with an unlimited time budget. Dozens of eligible non-trivial sections (the
     // turf layer of every inner chunk) are queued and the pool has room for size * 3 = 6 jobs.
     mesher.update(0, 1e9, p.x, p.y + 1.6, p.z, 0, -1);

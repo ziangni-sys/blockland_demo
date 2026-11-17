@@ -8,9 +8,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MeshData, MeshInput } from '../../src/mesh/types';
 import { Mesher } from '../../src/mesh/mesher';
 import type { RenderBackend } from '../../src/render/backend';
-import { Simulation } from '../../src/sim/simulation';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { WorldSession } from '../../src/client/session';
+import { soloSim } from '../solo';
 
 function nullBackend(): RenderBackend {
   const noop = (): void => undefined;
@@ -39,9 +39,9 @@ afterEach(() => {
 describe('review: loading with a section that cannot be meshed on the main thread', () => {
   it('still finishes loading (the failure is reported once, like the worker path does)', () => {
     const gen = new FlatGenerator();
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: gen, loadRadius: 4, rabbits: false });
+    const sim = soloSim({ seed: 1, mode: 'creative', generator: gen, loadRadius: 4, rabbits: false });
     const errors: string[] = [];
-    const s = new WorldSession(sim, { id: 'x', name: 'x', seed: '', seedHash: 1, mode: 'creative', createdAt: 0, lastPlayed: 0, version: 1, time: 0 }, gen, true, {
+    const s = new WorldSession(sim, sim.soloPlayer, { id: 'x', name: 'x', seed: '', seedHash: 1, mode: 'creative', createdAt: 0, lastPlayed: 0, version: 1, time: 0 }, gen, true, {
       backend: nullBackend(),
       genPool: null,
       meshPool: null,
@@ -64,7 +64,7 @@ describe('review: loading with a section that cannot be meshed on the main threa
     });
     let frames = 0;
     while (!s.loadingProgress().done && frames < 600) {
-      s.work(0, 1e9, sim.player.pos.x, sim.player.pos.y + 1.6, sim.player.pos.z, Number.NaN);
+      s.work(0, 1e9, sim.soloPlayer.player.pos.x, sim.soloPlayer.player.pos.y + 1.6, sim.soloPlayer.player.pos.z, Number.NaN);
       frames++;
     }
     const prog = s.loadingProgress();

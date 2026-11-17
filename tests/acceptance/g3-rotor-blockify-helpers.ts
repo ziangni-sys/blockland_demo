@@ -14,6 +14,7 @@ import type { SimEvent } from '../../src/sim/view';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator } from '../../src/worldgen/generator';
+import { soloSim } from '../solo';
 
 /** Default flat world: deeprock y=0, stone 1..30, dirt 31..33, turf 34; first air at y = 35. */
 export const T = 35;
@@ -21,7 +22,7 @@ export const T = 35;
 export const SEA = 30;
 
 export function flatWorld(mode: GameMode, spawn: { x: number; y: number; z: number }, seed = 1): Simulation {
-  return new Simulation({ seed, mode, generator: new FlatGenerator(), syncChunks: true, rabbits: false, loadRadius: 2, spawn });
+  return soloSim({ seed, mode, generator: new FlatGenerator(), syncChunks: true, rabbits: false, loadRadius: 2, spawn });
 }
 
 export function seaWorld(mode: GameMode, spawn: { x: number; y: number; z: number }, seed = 2): Simulation {
@@ -30,7 +31,7 @@ export function seaWorld(mode: GameMode, spawn: { x: number; y: number; z: numbe
     { id: B.STONE, thickness: 19 },
     { id: B.WATER, thickness: 10 },
   ]);
-  return new Simulation({ seed, mode, generator, syncChunks: true, rabbits: false, loadRadius: 3, spawn });
+  return soloSim({ seed, mode, generator, syncChunks: true, rabbits: false, loadRadius: 3, spawn });
 }
 
 export function set(grid: VoxelGrid, x: number, y: number, z: number, id: number, state = 0): void {
@@ -152,9 +153,9 @@ export function turnedAboutY(k: number, hx: number, _hy: number, hz: number, x: 
 /** Right-click the bearing twice like a player (preview, then start). Returns the new rotor. */
 export function startByPlayer(sim: Simulation, x: number, y: number, z: number, face: Dir | undefined, gridId = 0): Rotor {
   const before = new Set(sim.structures.rotors());
-  if (!sim.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (first click)');
-  if (sim.view.preview?.kind !== 'rotor') throw new Error('no rotor preview after the first click');
-  if (!sim.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (second click)');
+  if (!sim.soloPlayer.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (first click)');
+  if (sim.soloPlayer.view.preview?.kind !== 'rotor') throw new Error('no rotor preview after the first click');
+  if (!sim.soloPlayer.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (second click)');
   const fresh = sim.structures.rotors().filter((r) => !before.has(r));
   if (fresh.length !== 1) throw new Error(`expected one new rotor, got ${fresh.length}`);
   return fresh[0]!;

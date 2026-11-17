@@ -312,9 +312,9 @@ describe('stopRotor (blockify in place, ACCEPTANCE 10)', () => {
     expect(drops).toEqual([`${B.FLOWER_RED}@0.5,67.5,1.5`, `${B.WOOL_RED}@0.5,66.5,1.5`].sort());
   });
 
-  it('creative mode: nothing drops', () => {
+  it('drops off (a creative world): nothing drops', () => {
     const s = millScene();
-    s.host.creative = true;
+    s.host.dropsEnabled = false;
     const r = started(s);
     s.world.setCell(BX, BY + 2, BZ + 1, c(B.STONE));
     s.world.setCell(BX, BY + 3, BZ + 1, c(B.TORCH));

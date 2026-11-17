@@ -19,7 +19,7 @@ describe('block updates', () => {
     w.setCell(3, SEA_TOP, 1, makeCell(B.SAND));
     sim.worldGlue.add(3, SEA_TOP, 1, 3 /* NY: glued to the deck */);
     sim.advance(3);
-    sim.lookAtCell(2, SEA_TOP, 4, 4 /* PZ */);
+    sim.soloPlayer.lookAtCell(2, SEA_TOP, 4, 4 /* PZ */);
     click(sim);
     click(sim);
     const ship = sim.structures.ships()[0]!;

@@ -30,7 +30,7 @@ describe('review: swimming (W + space) at the corner of a ship turned 45 degrees
     ship.grid.setPoseImmediate(vec3(0.5, 47, 0.5), qfromYaw(Math.PI / 4));
     b.drive(ship, (t) => ({ p: vec3(0.5, 47 + 0.05 * Math.sin(t * 0.25), 0.5), q: qfromYaw(Math.PI / 4 + 0.02 * Math.sin(t * TICK_DT)) }));
     const corner = ship.grid.toWorld(vec3(4, 47, 4)); // the tip of the local (+x, +z) corner
-    const p = b.entities.createPlayer('survival', corner.x + 3.5, 46.6, corner.z);
+    const p = b.entities.spawnPlayer('survival', corner.x + 3.5, 46.6, corner.z);
     const dx = corner.x - p.pos.x;
     const dz = corner.z - p.pos.z;
     p.input.yaw = Math.atan2(-dx, -dz) + offset;

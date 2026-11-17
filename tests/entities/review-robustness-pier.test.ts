@@ -17,7 +17,7 @@ describe('review: walking from a bobbing ship onto a pier', () => {
     fill(b.world, 6, 60, -2, 14, 60, 2, B.STONE); // pier, top at 61, next to the deck edge (x = 6)
     const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
     ship.grid.setPoseImmediate(vec3(0.5, 60.5 - dy, 0.5), qfromYaw(0));
-    const p = b.entities.createPlayer('survival', 3.5, 61 - dy + 0.01, 0.5);
+    const p = b.entities.spawnPlayer('survival', 3.5, 61 - dy + 0.01, 0.5);
     b.tick(5);
     expect(p.carrierId).toBe(ship.id);
     p.input.forward = 1;

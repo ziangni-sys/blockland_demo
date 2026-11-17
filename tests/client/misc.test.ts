@@ -6,6 +6,7 @@ import { UiStateBuilder, type UiInputs } from '../../src/client/uistate';
 import { Inventory } from '../../src/entities/inventory';
 import { DEFAULT_SETTINGS } from '../../src/ui/model';
 import { B } from '../../src/blocks/defs';
+import { soloSim } from '../solo';
 
 describe('ToastList', () => {
   it('adds, expires and keeps the list identity until something changes', () => {
@@ -199,11 +200,10 @@ describe('debug overlay text', () => {
 
   it('lists the player, the world and recent faults', async () => {
     const { debugLines } = await import('../../src/client/debug');
-    const { Simulation } = await import('../../src/sim/simulation');
     const { FlatGenerator } = await import('../../src/worldgen/generator');
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: 1 });
+    const sim = soloSim({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: 1 });
     sim.tick();
-    const lines = debugLines(sim, {
+    const lines = debugLines(sim, sim.soloPlayer, {
       version: '9.9.9',
       rendererDetail: 'WebGL2 test',
       fps: 60,

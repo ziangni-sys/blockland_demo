@@ -35,7 +35,7 @@ function windmill(sim: Simulation, sails = true): void {
 }
 
 function aimBearing(sim: Simulation): void {
-  sim.lookAtCell(0, T + 4, -4, PZ);
+  sim.soloPlayer.lookAtCell(0, T + 4, -4, PZ);
 }
 
 describe('bearing: preview, start, stop', () => {
@@ -45,11 +45,11 @@ describe('bearing: preview, start, stop', () => {
     const log = new EventLog(sim);
     aimBearing(sim);
     sim.tick();
-    expect(sim.view.hint?.key).toBe('hint.bearing.preview');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.bearing.preview');
     click(sim);
-    expect(sim.view.preview?.kind).toBe('rotor');
-    expect(sim.view.preview?.cells.length).toBe(9 * 3);
-    expect(sim.view.hint).toEqual({ key: 'hint.bearing.start', params: { count: 9, sails: 9 } });
+    expect(sim.soloPlayer.view.preview?.kind).toBe('rotor');
+    expect(sim.soloPlayer.view.preview?.cells.length).toBe(9 * 3);
+    expect(sim.soloPlayer.view.hint).toEqual({ key: 'hint.bearing.start', params: { count: 9, sails: 9 } });
     click(sim);
     const rotors = sim.structures.rotors();
     expect(rotors.length).toBe(1);
@@ -60,32 +60,32 @@ describe('bearing: preview, start, stop', () => {
     sim.advance(10);
     expect(rotor.angularSpeed).toBeGreaterThan(0);
     expect(rotor.editable).toBe(false);
-    expect(sim.view.hint?.key).toBe('hint.bearing.stop');
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.bearing.stop');
 
     // Spinning: no mining, placing or gluing on it.
-    sim.lookAt(1.5, T + 4.5, -4.5); // the hub (it turns about its own centre)
+    sim.soloPlayer.lookAt(1.5, T + 4.5, -4.5); // the hub (it turns about its own centre)
     sim.tick();
-    expect(sim.view.target?.gridId).toBe(rotor.id);
-    expect(sim.view.hint?.key).toBe('hint.rotor.spinning');
+    expect(sim.soloPlayer.view.target?.gridId).toBe(rotor.id);
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.rotor.spinning');
     const before = rotor.grid.count;
-    sim.attack();
-    sim.player.input.attack = true;
+    sim.soloPlayer.attack();
+    sim.soloPlayer.player.input.attack = true;
     sim.advance(20);
-    sim.player.input.attack = false;
+    sim.soloPlayer.player.input.attack = false;
     expect(rotor.grid.count).toBe(before);
-    sim.hold(B.PLANKS_OAK);
+    sim.soloPlayer.hold(B.PLANKS_OAK);
     click(sim);
     expect(rotor.grid.count).toBe(before);
     expect(log.toastKeys()).toContain('toast.place.spinning');
     const glueBefore = rotor.glue.size;
-    sim.hold(I.GLUE);
+    sim.soloPlayer.hold(I.GLUE);
     click(sim);
     expect(log.toastKeys()).toContain('toast.glue.spinning');
     expect(rotor.glue.size).toBe(glueBefore);
-    expect(sim.view.glueProgress).toBe(0);
+    expect(sim.soloPlayer.view.glueProgress).toBe(0);
 
     // Right-click the bearing again: stop, the windmill turns back into blocks.
-    sim.hold(B.STONE);
+    sim.soloPlayer.hold(B.STONE);
     aimBearing(sim);
     click(sim);
     expect(sim.structures.all().length).toBe(0);
@@ -104,11 +104,11 @@ describe('bearing: preview, start, stop', () => {
     sim.advance(30);
     expect(rotor.angle).not.toBe(0);
     const log = new EventLog(sim);
-    sim.hold(B.DIRT);
+    sim.soloPlayer.hold(B.DIRT);
     aimBearing(sim);
-    sim.player.input.attack = true;
+    sim.soloPlayer.player.input.attack = true;
     sim.advance(40); // bearing: 2 s
-    sim.player.input.attack = false;
+    sim.soloPlayer.player.input.attack = false;
     expect(idAt(sim.world, 0, T + 4, -4)).toBe(B.AIR);
     expect(rotor.removed).toBe(true);
     expect(sim.structures.all().length).toBe(0);
@@ -125,8 +125,8 @@ describe('bearing: preview, start, stop', () => {
     aimBearing(sim);
     click(sim);
     expect(log.toasts()).toContainEqual({ key: 'fail.rotor.not_enough_sails', params: { max: 400, min: 4, sails: 2 } });
-    expect(sim.view.preview?.cells.length).toBe(2 * 3);
-    expect(sim.view.hint?.key).toBe('hint.bearing.preview');
+    expect(sim.soloPlayer.view.preview?.cells.length).toBe(2 * 3);
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.bearing.preview');
     click(sim);
     expect(sim.structures.all().length).toBe(0);
     expect(log.toastKeys().filter((k) => k === 'fail.rotor.not_enough_sails').length).toBe(2);
@@ -140,7 +140,7 @@ describe('bearing: preview, start, stop', () => {
     aimBearing(sim);
     click(sim);
     expect(log.toastKeys()).toEqual(['fail.rotor.no_hub']);
-    expect(sim.view.preview).toBeNull();
+    expect(sim.soloPlayer.view.preview).toBeNull();
   });
 
   it('a change between the clicks re-previews instead of starting', () => {
@@ -148,11 +148,11 @@ describe('bearing: preview, start, stop', () => {
     windmill(sim);
     aimBearing(sim);
     click(sim);
-    expect(sim.view.preview?.cells.length).toBe(27);
+    expect(sim.soloPlayer.view.preview?.cells.length).toBe(27);
     sim.world.setCell(1, T + 7, -4, makeCell(B.CANVAS)); // one more sail on top
     click(sim);
     expect(sim.structures.all().length).toBe(0);
-    expect(sim.view.preview?.cells.length).toBe(30);
+    expect(sim.soloPlayer.view.preview?.cells.length).toBe(30);
     click(sim);
     expect(sim.structures.rotors().length).toBe(1);
     expect(sim.structures.rotors()[0]!.grid.count).toBe(10);
@@ -163,23 +163,23 @@ describe('bearing: preview, start, stop', () => {
     windmill(sim);
     aimBearing(sim);
     click(sim);
-    expect(sim.view.preview).not.toBeNull();
-    sim.player.input.pitch = -1.2; // look at the ground
+    expect(sim.soloPlayer.view.preview).not.toBeNull();
+    sim.soloPlayer.player.input.pitch = -1.2; // look at the ground
     sim.advance(20);
-    expect(sim.view.preview).not.toBeNull();
+    expect(sim.soloPlayer.view.preview).not.toBeNull();
     sim.advance(15);
-    expect(sim.view.preview).toBeNull();
+    expect(sim.soloPlayer.view.preview).toBeNull();
     aimBearing(sim);
     click(sim);
-    expect(sim.view.preview).not.toBeNull();
-    sim.player.input.slot = 4;
+    expect(sim.soloPlayer.view.preview).not.toBeNull();
+    sim.soloPlayer.player.input.slot = 4;
     sim.tick();
-    expect(sim.view.preview).toBeNull();
+    expect(sim.soloPlayer.view.preview).toBeNull();
   });
 
   it('works the same on a ship: the rotor mounts on the ship and stops back into it', () => {
     const sim = seaSim({ spawn: { x: 5.5, y: SEA_TOP + 1, z: 1.5 } });
-    sim.player.flying = true;
+    sim.soloPlayer.player.flying = true;
     const w = sim.world;
     fill(w, 0, SEA_TOP - 1, 0, 4, SEA_TOP - 1, 4, B.PLANKS_OAK);
     w.setCell(2, SEA_TOP, 4, makeCell(B.HELM, facingState(NZ)));
@@ -196,14 +196,14 @@ describe('bearing: preview, start, stop', () => {
     const ship = sres.structure;
     expect(ship.grid.count).toBe(25 + 1 + 4 + 1 + 9);
     sim.advance(5);
-    sim.teleport(5.5, SEA_TOP + 1, 1.5);
-    sim.player.flying = true;
+    sim.soloPlayer.teleport(5.5, SEA_TOP + 1, 1.5);
+    sim.soloPlayer.player.flying = true;
     sim.advance(2);
 
-    expect(sim.useOn(2, by, 1, PX, ship.id)).toBe(true);
-    expect(sim.view.preview).toMatchObject({ gridId: ship.id, kind: 'rotor' });
-    expect(sim.view.preview!.cells.length).toBe(27);
-    expect(sim.useOn(2, by, 1, PX, ship.id)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, by, 1, PX, ship.id)).toBe(true);
+    expect(sim.soloPlayer.view.preview).toMatchObject({ gridId: ship.id, kind: 'rotor' });
+    expect(sim.soloPlayer.view.preview!.cells.length).toBe(27);
+    expect(sim.soloPlayer.useOn(2, by, 1, PX, ship.id)).toBe(true);
     const rotor = sim.structures.rotors()[0]!;
     expect(rotor).toBeDefined();
     expect(rotor.parent).toBe(ship);
@@ -211,7 +211,7 @@ describe('bearing: preview, start, stop', () => {
     sim.advance(20);
     expect(rotor.angularSpeed).toBeGreaterThan(0);
     expect(ship.sails).toBe(9);
-    expect(sim.useOn(2, by, 1, PX, ship.id)).toBe(true);
+    expect(sim.soloPlayer.useOn(2, by, 1, PX, ship.id)).toBe(true);
     expect(rotor.removed).toBe(true);
     let canvas = 0;
     ship.grid.forEachCell((_x, _y, _z, c) => {
