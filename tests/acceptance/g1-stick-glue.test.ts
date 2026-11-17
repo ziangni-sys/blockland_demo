@@ -1,9 +1,9 @@
 /**
- * Acceptance scenarios 1–5 (docs/ACCEPTANCE.md "连接与胶水"), headless, at the level of the
+ * Acceptance scenarios 1–3 (docs/ACCEPTANCE.md "连接与胶水"), headless, at the level of the
  * whole simulation. Which blocks belong together is proven through what the PLAYER gets when
  * assembling: right-click a helm (or a bearing) twice and compare both the highlighted preview
- * and the resulting structure's cells with the expected set. Glue is applied, removed and
- * timed through the player's clicks, looks and held buttons.
+ * and the resulting structure's cells with the expected set. (Scenarios 4 and 5 were replaced
+ * by 25–29, tests/acceptance/g7-glue-offhand.test.ts.)
  *
  * Scene convention: flat world (turf top at y = T - 1), the player stands at (0.5, T, 0.5)
  * looking north unless a test says otherwise; scenes are built a few cells north of it.
@@ -12,19 +12,17 @@ import { describe, expect, it } from 'vitest';
 import { AIR, cellState, facingState, stateAxis } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
-import { NX, NZ, PX, PY, PZ, type Dir } from '../../src/core/dirs';
+import { NZ, PX, PY, PZ, type Dir } from '../../src/core/dirs';
 import type { Simulation } from '../../src/sim/simulation';
 import {
   SEA_TOP,
   T,
   Toasts,
   assembleShipByHand,
-  hardnessTicks,
   idAt,
   labels,
   makeSeaSim,
   makeSim,
-  measureMiningTicks,
   put,
   raftShipByHand,
   startRotorByHand,
@@ -494,11 +492,11 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
     for (const [x, y, z, id] of planks) put(sim, x, y, z, id);
     helmAt(sim, 1, T + 1, -3);
     put(sim, 3, T, -3, B.DEEPROCK);
-    // The player tries to glue it on.
+    // The player tries to put glue on it.
     sim.hold(I.GLUE);
-    expect(sim.useOn(2, T, -3, PZ)).toBe(true);
     expect(sim.useOn(3, T, -3, PZ)).toBe(true);
-    expect(toasts.keys()).toContain('toast.glue.cannot');
+    expect(sim.useOn(3, T, -3, PY)).toBe(true);
+    expect(toasts.keys()).toEqual(['toast.glue.cannot', 'toast.glue.cannot']);
     expect(sim.worldGlue.size).toBe(0);
     // Glue written straight into the store (as a corrupt save might) changes nothing either.
     sim.worldGlue.add(2, T, -3, PX);
@@ -550,325 +548,5 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
       [1, T + 4, -4, B.DEEPROCK],
       ...sails.map(([x, y, z]) => [x, y, z, B.CANVAS] as const),
     ]);
-  });
-});
-
-// =====================================================================================
-describe('4. 两次右键涂胶、潜行两次右键拆胶；挖掉任一侧方块，胶消失。', () => {
-  const Y = T + 1;
-  /** Two stone blocks side by side at eye level, A west of B (stone never sticks by itself). */
-  function pair(sim: Simulation): void {
-    put(sim, 0, Y, -2, B.STONE); // A
-    put(sim, 1, Y, -2, B.STONE); // B
-  }
-  function glueAB(sim: Simulation): void {
-    expect(sim.useOn(0, Y, -2, PZ)).toBe(true);
-    expect(sim.useOn(1, Y, -2, PZ)).toBe(true);
-  }
-
-  it('with glue in hand, a right-click on block A and one on the adjacent block B glue the face between them', () => {
-    const sim = makeSim();
-    const toasts = new Toasts(sim);
-    pair(sim);
-    sim.hold(I.GLUE);
-    expect(sim.useOn(0, Y, -2, PZ)).toBe(true);
-    expect(sim.worldGlue.size).toBe(0); // one click is not enough
-    expect(sim.view.glueAnchor).toEqual({ gridId: 0, x: 0, y: Y, z: -2 });
-    expect(sim.useOn(1, Y, -2, PZ)).toBe(true);
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(true);
-    expect(sim.worldGlue.has(1, Y, -2, NX)).toBe(true); // the same face seen from B
-    expect(sim.worldGlue.size).toBe(1);
-    expect(toasts.keys()).toContain('toast.glue.added');
-    expect(sim.view.glueAnchor).toBeNull();
-  });
-
-  it('glue made with two right-clicks holds: a stone glued to the raft goes with the ship', () => {
-    const sim = makeSim();
-    for (let z = -4; z <= -3; z++) for (let x = 0; x <= 2; x++) put(sim, x, T, z, B.PLANKS_OAK);
-    helmAt(sim, 1, T + 1, -3);
-    put(sim, 3, T, -3, B.STONE);
-    sim.hold(I.GLUE);
-    expect(sim.useOn(2, T, -3, PZ)).toBe(true);
-    expect(sim.useOn(3, T, -3, PZ)).toBe(true);
-    expect(sim.worldGlue.has(2, T, -3, PX)).toBe(true);
-    const a = assembleShipByHand(sim, 1, T + 1, -3);
-    expect(a.cells).toContain(`3,${T},-3:stone`);
-    expect(a.structure.glue.has(2, T, -3, PX)).toBe(true);
-    expect(idAt(sim.world, 3, T, -3)).toBe(AIR);
-  });
-
-  it('sneak + right-click A, sneak + right-click B removes that glue', () => {
-    const sim = makeSim();
-    const toasts = new Toasts(sim);
-    pair(sim);
-    sim.hold(I.GLUE);
-    glueAB(sim);
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(true);
-    expect(sim.view.glueAnchor).toBeNull();
-    sim.player.input.sneak = true;
-    expect(sim.useOn(0, Y, -2, PZ)).toBe(true);
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(true); // the first sneak click only picks A
-    expect(sim.useOn(1, Y, -2, PZ)).toBe(true);
-    sim.player.input.sneak = false;
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(false);
-    expect(sim.worldGlue.size).toBe(0);
-    expect(toasts.keys()).toContain('toast.glue.removed');
-  });
-
-  it('the same two right-clicks without sneaking do not remove the glue', () => {
-    const sim = makeSim();
-    const toasts = new Toasts(sim);
-    pair(sim);
-    sim.hold(I.GLUE);
-    glueAB(sim);
-    glueAB(sim);
-    expect(toasts.keys()).toContain('toast.glue.already');
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(true);
-    expect(sim.worldGlue.size).toBe(1);
-  });
-
-  it('a stone unglued again with sneak + two right-clicks no longer goes with the ship', () => {
-    const sim = makeSim();
-    for (let z = -4; z <= -3; z++) for (let x = 0; x <= 2; x++) put(sim, x, T, z, B.PLANKS_OAK);
-    helmAt(sim, 1, T + 1, -3);
-    put(sim, 3, T, -3, B.STONE);
-    sim.hold(I.GLUE);
-    expect(sim.useOn(2, T, -3, PZ)).toBe(true);
-    expect(sim.useOn(3, T, -3, PZ)).toBe(true);
-    sim.player.input.sneak = true;
-    expect(sim.useOn(2, T, -3, PZ)).toBe(true);
-    expect(sim.useOn(3, T, -3, PZ)).toBe(true);
-    sim.player.input.sneak = false;
-    expect(sim.worldGlue.size).toBe(0);
-    const a = assembleShipByHand(sim, 1, T + 1, -3);
-    expect(a.cells).not.toContain(`3,${T},-3:stone`);
-    expect(idAt(sim.world, 3, T, -3)).toBe(B.STONE);
-  });
-
-  /** A-B glued, plus an unrelated glued pair C-D (C on the ground west of A, D behind C). */
-  function twoGluedPairs(sim: Simulation): void {
-    pair(sim);
-    put(sim, -1, T, -2, B.STONE); // C
-    put(sim, -1, T, -3, B.STONE); // D
-    sim.hold(I.GLUE);
-    glueAB(sim);
-    expect(sim.useOn(-1, T, -2, PZ)).toBe(true);
-    expect(sim.useOn(-1, T, -3, PY)).toBe(true);
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(true);
-    expect(sim.worldGlue.has(-1, T, -2, NZ)).toBe(true);
-    expect(sim.worldGlue.size).toBe(2);
-  }
-
-  it('mining block A (one side of the face) makes that glue disappear; other glue stays', () => {
-    const sim = makeSim();
-    twoGluedPairs(sim);
-    expect(sim.mine(0, Y, -2, PZ)).toBe(true);
-    expect(idAt(sim.world, 0, Y, -2)).toBe(AIR);
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(false);
-    expect(sim.worldGlue.has(-1, T, -2, NZ)).toBe(true);
-    expect(sim.worldGlue.size).toBe(1);
-  });
-
-  it('mining block B (the other side) makes that glue disappear too; other glue stays', () => {
-    const sim = makeSim();
-    twoGluedPairs(sim);
-    expect(sim.mine(1, Y, -2, PZ)).toBe(true);
-    expect(idAt(sim.world, 1, Y, -2)).toBe(AIR);
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(false);
-    expect(sim.worldGlue.has(-1, T, -2, NZ)).toBe(true);
-    expect(sim.worldGlue.size).toBe(1);
-  });
-
-  it('on a ship as well: two right-clicks glue deck blocks, sneak + two right-clicks unglue, mining one side removes the glue', () => {
-    const sim = makeSeaSim();
-    const ship = raftShipByHand(sim);
-    const D = SEA_TOP - 1; // deck row
-    sim.hold(I.GLUE);
-    expect(sim.useOn(0, D, 4, PY, ship.id)).toBe(true);
-    expect(sim.useOn(0, D, 5, PY, ship.id)).toBe(true);
-    expect(ship.glue.has(0, D, 4, PZ)).toBe(true);
-    expect(sim.useOn(1, D, 4, PY, ship.id)).toBe(true);
-    expect(sim.useOn(1, D, 5, PY, ship.id)).toBe(true);
-    expect(ship.glue.has(1, D, 4, PZ)).toBe(true);
-    expect(ship.glue.size).toBe(2);
-    expect(sim.worldGlue.size).toBe(0);
-    sim.player.input.sneak = true;
-    expect(sim.useOn(1, D, 4, PY, ship.id)).toBe(true);
-    expect(sim.useOn(1, D, 5, PY, ship.id)).toBe(true);
-    sim.player.input.sneak = false;
-    expect(ship.glue.has(1, D, 4, PZ)).toBe(false);
-    expect(ship.glue.size).toBe(1);
-    expect(sim.mine(0, D, 5, PY, ship.id)).toBe(true);
-    expect(idAt(ship.grid, 0, D, 5)).toBe(AIR);
-    expect(ship.glue.has(0, D, 4, PZ)).toBe(false);
-    expect(ship.glue.size).toBe(0);
-  });
-
-  it('a block put back where the mined one was is not glued (the glue went with the block)', () => {
-    const sim = makeSim();
-    twoGluedPairs(sim);
-    put(sim, 1, Y, -3, B.STONE); // behind B, to build against
-    expect(sim.mine(1, Y, -2, PZ)).toBe(true);
-    sim.hold(B.STONE);
-    expect(sim.useOn(1, Y, -3, PZ)).toBe(true); // a new stone at (1, Y, -2)
-    expect(idAt(sim.world, 1, Y, -2)).toBe(B.STONE);
-    expect(sim.worldGlue.has(0, Y, -2, PX)).toBe(false);
-  });
-});
-
-// =====================================================================================
-describe('5. 生存模式：涂胶耗时等于两块中较慢的挖掘时间；中途移开视线会取消；完成后消耗 1 个胶。创造模式瞬间完成。', () => {
-  const Y = T + 1;
-  const A: readonly [number, number, number] = [0, Y, -2];
-  const Bc: readonly [number, number, number] = [1, Y, -2];
-
-  /**
-   * The player picks A (one right-click), then right-clicks B and keeps the button held while
-   * looking at it. Returns the number of ticks — the click's tick counted as the first — after
-   * which the A-B face is glued, or -1 if it is not glued within maxTicks.
-   */
-  function holdGlueOnB(sim: Simulation, maxTicks: number): number {
-    expect(sim.useOn(A[0], A[1], A[2], PZ)).toBe(true);
-    expect(sim.view.glueAnchor).toEqual({ gridId: 0, x: A[0], y: A[1], z: A[2] });
-    const input = sim.player.input;
-    input.use = true;
-    try {
-      expect(sim.useOn(Bc[0], Bc[1], Bc[2], PZ)).toBe(true);
-      for (let n = 1; n <= maxTicks; n++) {
-        if (sim.worldGlue.has(A[0], A[1], A[2], PX)) return n;
-        sim.tick();
-      }
-      return -1;
-    } finally {
-      input.use = false;
-    }
-  }
-
-  /** Mining time (ticks) of each block, measured by the player on copies of them. */
-  function miningTicksOf(sim: Simulation, a: number, b: number): [number, number] {
-    put(sim, -2, Y, -2, a);
-    put(sim, -3, Y, -2, b);
-    const ta = measureMiningTicks(sim, -2, Y, -2, PZ);
-    const tb = measureMiningTicks(sim, -3, Y, -2, PZ);
-    sim.advance(10); // let the break cooldown pass and the drops settle
-    return [ta, tb];
-  }
-
-  for (const [a, b, slower] of [
-    [B.PLANKS_OAK, B.GLASS, 'A'], // planks 1.5 s, glass 0.3 s
-    [B.WOOL_WHITE, B.BRICKS, 'B'], // felt 0.8 s, red bricks 2 s
-  ] as const) {
-    it(`gluing ${slower === 'A' ? 'slow A to fast B' : 'fast A to slow B'} takes exactly the slower block's mining time`, () => {
-      const sim = makeSim('survival');
-      const [ta, tb] = miningTicksOf(sim, a, b);
-      expect(ta).toBe(hardnessTicks(a));
-      expect(tb).toBe(hardnessTicks(b));
-      const expected = Math.max(hardnessTicks(a), hardnessTicks(b));
-      expect(expected).toBe(slower === 'A' ? ta : tb);
-      put(sim, A[0], A[1], A[2], a);
-      put(sim, Bc[0], Bc[1], Bc[2], b);
-      sim.hold(I.GLUE, 5);
-      const n = holdGlueOnB(sim, expected + 40);
-      expect(n).toBe(Math.max(ta, tb));
-      expect(n).toBe(expected);
-    });
-  }
-
-  it('while the button is held the face is not glued yet and no glue is used; the hint says it is working', () => {
-    const sim = makeSim('survival');
-    put(sim, A[0], A[1], A[2], B.IRON_BLOCK); // 5 s
-    put(sim, Bc[0], Bc[1], Bc[2], B.STONE);
-    sim.hold(I.GLUE, 3);
-    expect(sim.useOn(A[0], A[1], A[2], PZ)).toBe(true);
-    sim.player.input.use = true;
-    expect(sim.useOn(Bc[0], Bc[1], Bc[2], PZ)).toBe(true);
-    sim.advance(hardnessTicks(B.IRON_BLOCK) - 2);
-    expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(3);
-    expect(sim.view.hint?.key).toBe('hint.glue.working');
-    expect(sim.view.glueProgress).toBeCloseTo((hardnessTicks(B.IRON_BLOCK) - 1) / hardnessTicks(B.IRON_BLOCK), 5);
-    sim.player.input.use = false;
-  });
-
-  it('looking away from B part-way (at the sky) cancels: no glue, no glue used, and holding on afterwards does not finish it', () => {
-    const sim = makeSim('survival');
-    put(sim, A[0], A[1], A[2], B.STONE); // 1.5 s
-    put(sim, Bc[0], Bc[1], Bc[2], B.STONE);
-    sim.hold(I.GLUE, 3);
-    const total = hardnessTicks(B.STONE);
-    expect(sim.useOn(A[0], A[1], A[2], PZ)).toBe(true);
-    const input = sim.player.input;
-    input.use = true;
-    expect(sim.useOn(Bc[0], Bc[1], Bc[2], PZ)).toBe(true);
-    sim.advance(total - 5); // most of the way
-    expect(sim.view.glueProgress).toBeGreaterThan(0.5);
-    sim.lookAt(1.5, Y + 30, -2.5); // up at the sky, button still held
-    sim.tick();
-    expect(sim.view.glueProgress).toBe(0);
-    sim.lookAtCell(Bc[0], Bc[1], Bc[2], PZ); // back on B, still holding
-    sim.advance(3 * total);
-    input.use = false;
-    expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(3);
-  });
-
-  it('looking away from B at another block part-way also cancels', () => {
-    const sim = makeSim('survival');
-    put(sim, A[0], A[1], A[2], B.STONE);
-    put(sim, Bc[0], Bc[1], Bc[2], B.STONE);
-    sim.hold(I.GLUE, 3);
-    const total = hardnessTicks(B.STONE);
-    expect(sim.useOn(A[0], A[1], A[2], PZ)).toBe(true);
-    const input = sim.player.input;
-    input.use = true;
-    expect(sim.useOn(Bc[0], Bc[1], Bc[2], PZ)).toBe(true);
-    sim.advance(total - 5);
-    sim.lookAtCell(A[0], A[1], A[2], PZ); // the view slides over to A
-    sim.advance(2);
-    sim.lookAtCell(Bc[0], Bc[1], Bc[2], PZ);
-    sim.advance(3 * total);
-    input.use = false;
-    expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(3);
-  });
-
-  it('completing the step uses up exactly one glue, at the moment the face is glued', () => {
-    const sim = makeSim('survival');
-    put(sim, A[0], A[1], A[2], B.PLANKS_OAK);
-    put(sim, Bc[0], Bc[1], Bc[2], B.PLANKS_PINE);
-    sim.hold(I.GLUE, 3);
-    const total = hardnessTicks(B.PLANKS_OAK);
-    expect(sim.useOn(A[0], A[1], A[2], PZ)).toBe(true);
-    const input = sim.player.input;
-    input.use = true;
-    expect(sim.useOn(Bc[0], Bc[1], Bc[2], PZ)).toBe(true);
-    sim.advance(total - 2);
-    expect(sim.worldGlue.size).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(3);
-    sim.tick();
-    expect(sim.worldGlue.has(A[0], A[1], A[2], PX)).toBe(true);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(2);
-    sim.advance(20); // still holding: nothing more happens
-    input.use = false;
-    expect(sim.player.inventory.count(I.GLUE)).toBe(2);
-    expect(sim.worldGlue.size).toBe(1);
-  });
-
-  it('creative: the second right-click glues at once, even between the hardest blocks, and uses no glue', () => {
-    const sim = makeSim('creative');
-    put(sim, A[0], A[1], A[2], B.IRON_BLOCK); // 5 s each in survival
-    put(sim, Bc[0], Bc[1], Bc[2], B.IRON_BLOCK);
-    put(sim, A[0], A[1] + 1, A[2], B.IRON_BLOCK); // C, on top of A
-    sim.hold(I.GLUE, 1);
-    expect(sim.useOn(A[0], A[1], A[2], PZ)).toBe(true);
-    expect(sim.useOn(Bc[0], Bc[1], Bc[2], PZ)).toBe(true); // one tick, button not held
-    expect(sim.worldGlue.has(A[0], A[1], A[2], PX)).toBe(true);
-    expect(sim.view.glueProgress).toBe(0);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(1);
-    expect(sim.useOn(A[0], A[1], A[2], PZ)).toBe(true);
-    expect(sim.useOn(A[0], A[1] + 1, A[2], PZ)).toBe(true);
-    expect(sim.worldGlue.has(A[0], A[1], A[2], PY)).toBe(true);
-    expect(sim.worldGlue.size).toBe(2);
-    expect(sim.player.inventory.count(I.GLUE)).toBe(1);
   });
 });

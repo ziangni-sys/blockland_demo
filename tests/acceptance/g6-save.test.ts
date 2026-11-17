@@ -9,7 +9,7 @@
  * test also loads the way src/client/game.ts does (a normally constructed Simulation).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { liquidState, makeCell } from '../../src/blocks/cell';
+import { cellState, liquidState, makeCell, stateFacing } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NX, NY, NZ, PX, PY, PZ } from '../../src/core/dirs';
@@ -84,7 +84,7 @@ const FULL_CROSS = [
   [0, -1],
   [0, -2],
 ] as const;
-/** No lower arm: the hub's and the bearing's bottom faces stay open for the glue clicks. */
+/** The raft windmill's arms (no lower arm). */
 const T_CROSS = [
   [1, 0],
   [2, 0],
@@ -110,10 +110,8 @@ function buildHarbour(sim: Simulation): void {
   setBlock(w, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], B.HELM, NZ);
   fill(w, 2, T, 2, 2, T + 3, 2, B.PLANKS_OAK);
   setBlock(w, RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], B.BEARING, NZ);
-  setBlock(w, RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], B.CANVAS);
-  for (const [x, y, z] of cross(RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], T_CROSS)) setBlock(w, x, y, z, B.CANVAS);
-  // A stone next to the mast: stone never sticks by itself, only glue takes it aboard.
-  setBlock(w, RAFT.stone[0], RAFT.stone[1], RAFT.stone[2], B.STONE);
+  // The player puts the hub (glued to the bearing) and the stone (glued to the mast) in place
+  // himself: blocks that already touch cannot be glued (DESIGN 强力胶).
 }
 
 interface Harbour {
@@ -122,8 +120,9 @@ interface Harbour {
 }
 
 /**
- * The player plays: glues two sails of the world windmill and starts it, glues two stones on the
- * pier, glues a stone to the raft's mast and the raft's windmill hub to its bearing, assembles
+ * The player plays: glues a sail face of the world windmill and starts it, glues a face of a
+ * stone on the pier, glues the raft's mast and puts a stone against it, glues the raft's bearing
+ * and puts the windmill hub against it (the arms are scene blocks), glues a sail face, assembles
  * the raft at its helm, starts the windmill on the ship, takes the wheel and sails a curve.
  */
 function playHarbour(): Harbour {
@@ -135,22 +134,37 @@ function playHarbour(): Harbour {
   sim.giveItem(B.CANVAS, 7);
   sim.advance(2);
 
-  // World windmill: glue two sails together, then preview + start at the bearing.
-  glueFace(sim, [-8, WM.hy, 0, PZ], [-9, WM.hy, 0, PZ]);
+  // World windmill: glue the south face of a sail, then preview + start at the bearing.
+  glueFace(sim, [-9, WM.hy, 0, PZ]);
   sim.hold(B.PLANKS_OAK);
   rightClick(sim, WM.bx, WM.by, WM.bz, PX);
   rightClick(sim, WM.bx, WM.by, WM.bz, PX);
-  // World glue between the two pier stones.
-  glueFace(sim, [-6, T, 5, NZ], [-6, T + 1, 5, NZ]);
+  // World glue on the north face of a pier stone.
+  glueFace(sim, [-6, T, 5, NZ]);
 
-  // On the raft.
+  // On the raft: glue the mast's west face and put the stone against it.
+  sim.teleport(0.5, T, 1.5);
+  sim.advance(2);
+  glueFace(sim, [RAFT.mast[0], RAFT.mast[1], RAFT.mast[2], NX]);
+  sim.hold(B.STONE, 1);
+  rightClick(sim, RAFT.mast[0], RAFT.mast[1], RAFT.mast[2], NX);
+  // Hovering north of the bearing: glue its front face and put the hub against it (sneak: with
+  // a block in hand that places instead of previewing the rotor).
+  sim.teleport(2.5, T + 2, -1.5);
+  sim.player.flying = true;
+  sim.advance(2);
+  glueFace(sim, [RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NZ]);
+  sim.hold(B.CANVAS);
+  sim.player.input.sneak = true;
+  rightClick(sim, RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NZ);
+  sim.player.input.sneak = false;
+  for (const [x, y, z] of cross(RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], T_CROSS)) setBlock(sim.world, x, y, z, B.CANVAS);
+  // Glue on a sail of the raft's windmill: it rides into the ship, then into the nested
+  // windmill, so the nested structure has a glue store of its own to save.
+  glueFace(sim, [RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], NZ]);
+  sim.player.flying = false;
   sim.teleport(3.5, T, 1.5);
   sim.advance(2);
-  glueFace(sim, [RAFT.stone[0], RAFT.stone[1], RAFT.stone[2], NZ], [RAFT.mast[0], RAFT.mast[1], RAFT.mast[2], NZ]);
-  glueFace(sim, [RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NY], [RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], NY]);
-  // Glue between two sails of the raft's windmill: it rides into the ship, then into the nested
-  // windmill, so the nested structure has a glue store of its own to save.
-  glueFace(sim, [RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], PZ], [RAFT.sailB[0], RAFT.sailB[1], RAFT.sailB[2], PZ]);
   sim.emptyHand();
   rightClick(sim, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], PX); // preview
   rightClick(sim, RAFT.helm[0], RAFT.helm[1], RAFT.helm[2], PX); // assemble (takes the wheel)
@@ -315,18 +329,19 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
       [2, 'ship', 0, 0, [3]],
       [3, 'rotor', 2, 2, []],
     ]);
-    const [worldMill, , shipMill] = before.states as Array<{ angle: number; angularSpeed: number; hubGlue: boolean }>;
+    const [worldMill, , shipMill] = before.states as Array<{ angle: number; angularSpeed: number }>;
     expect(worldMill!.angle).not.toBe(0);
     expect(worldMill!.angularSpeed).not.toBe(0);
     expect(shipMill!.angle).not.toBe(0);
     expect(shipMill!.angularSpeed).not.toBe(0);
-    expect(shipMill!.hubGlue).toBe(true);
     const ship = before.poses[1]!;
     expect(ship.rotation![3]).toBeLessThan(0.9999); // the ship has turned
     expect(Math.hypot(ship.linearVelocity![0]!, ship.linearVelocity![2]!)).toBeGreaterThan(0.05);
     expect(Math.abs(ship.angularVelocity![1]!)).toBeGreaterThan(1e-3);
-    expect(Object.values(before.glue).map((g) => g.length / 4)).toEqual([1, 1, 1, 1]); // world, mill 1, ship 2, mill 3 (nested)
-    expect(before.glue['structure 3']).toEqual([RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], 0]); // the sail face (x axis)
+    // world, mill 1, ship 2 (stone-mast + the hub glue staying on the spinning windmill's bearing), mill 3 (nested)
+    expect(Object.values(before.glue).map((g) => g.length / 4)).toEqual([1, 1, 2, 1]);
+    expect(before.glue['structure 2']).toEqual([RAFT.stone[0], RAFT.stone[1], RAFT.stone[2], 0, RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], 2]);
+    expect(before.glue['structure 3']).toEqual([RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2] - 1, 2]); // the sail's north face (z axis)
     expect(before.player.steeringShipId).toBe(2);
   });
 
@@ -355,15 +370,16 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
 
   it('胶水一致: every glue store is identical — the world, the ship, both windmills', () => {
     expect(glueStores(loaded)).toEqual(before.glue);
-    expect(loaded.worldGlue.has(-6, T, 5, PY)).toBe(true);
+    expect(loaded.worldGlue.has(-6, T, 5, NZ)).toBe(true);
     expect(loaded.structures.get(2)!.glue.has(RAFT.stone[0], RAFT.stone[1], RAFT.stone[2], PX)).toBe(true);
-    expect(loaded.structures.get(1)!.glue.has(-9, WM.hy, 0, PX)).toBe(true);
+    expect(loaded.structures.get(2)!.glue.has(RAFT.bearing[0], RAFT.bearing[1], RAFT.bearing[2], NZ)).toBe(true);
+    expect(loaded.structures.get(1)!.glue.has(-9, WM.hy, 0, PZ)).toBe(true);
     // the nested windmill's own store (glue that rode world -> ship -> windmill on the ship)
-    expect(loaded.structures.get(3)!.glue.has(RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], PX)).toBe(true);
+    expect(loaded.structures.get(3)!.glue.has(RAFT.sailA[0], RAFT.sailA[1], RAFT.sailA[2], NZ)).toBe(true);
     expect(loaded.structures.get(3)!.glue.size).toBe(1);
   });
 
-  it('风车角度一致: both windmills have exactly the saved angle, speed and hub glue', () => {
+  it('风车角度一致: both windmills have exactly the saved angle and speed', () => {
     expect(loaded.structures.all().map(stateOf)).toEqual(before.states);
     const angles = loaded.structures.rotors().map((r) => [r.angle, r.angularSpeed]);
     expect(angles).toEqual(
@@ -431,13 +447,16 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     expect(b.structures.ships().length).toBe(0);
     expect(a.structures.ships().length).toBe(0);
     expect(Array.from(b.worldGlue.toArray())).toEqual(Array.from(a.worldGlue.toArray()));
-    // pier stones + the stone glued to the mast (the ship's windmill keeps running on the world,
-    // holding its hub glue until it stops)
-    expect(b.worldGlue.size).toBe(2);
-    expect(b.structures.rotors().map((r) => [r.id, r.parent, r.hubGlue])).toEqual([
-      [1, null, false],
-      [3, null, true],
+    // the pier stone, the stone glued to the mast and the hub glue: it travelled with the bearing
+    // (the ship's windmill keeps running on the world)
+    expect(b.worldGlue.size).toBe(3);
+    expect(b.structures.rotors().map((r) => [r.id, r.parent])).toEqual([
+      [1, null],
+      [3, null],
     ]);
+    const mill = b.structures.get(3) as Rotor;
+    const front = stateFacing(cellState(b.world.getCell(mill.bearingX, mill.bearingY, mill.bearingZ)));
+    expect(b.worldGlue.has(mill.bearingX, mill.bearingY, mill.bearingZ, front)).toBe(true);
   });
 
   it('结构体（含嵌套）、胶水、风车角度一致（读档后能用）: after loading, the player stops both windmills at their bearings — the same blocks and glue come back as in the game never saved, hub glue included', async () => {
@@ -469,13 +488,13 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     // the ship took its windmill back: the same cells, the same glue
     expect(cellsOf(shipB)).toEqual(cellsOf(shipA));
     expect(Array.from(shipB.glue.toArray())).toEqual(Array.from(shipA.glue.toArray()));
-    // stone-mast + the hub glue restored on stop + the sail glue (wherever the snapped angle put it)
+    // stone-mast + the hub glue (it stayed on the bearing) + the sail glue (wherever the snapped angle put it)
     expect(shipB.glue.size).toBe(3);
     expect(shipB.glue.has(RAFT.hub[0], RAFT.hub[1], RAFT.hub[2], PZ)).toBe(true); // hub <-> bearing
     expect(countId(shipB.grid, B.CANVAS, -8, T - 4, -8, 12, T + 10, 12)).toBe(7); // hub + 6 sails, none lost
     // the world windmill is blocks again, with its sail glue, exactly as in the game never saved
     expect(Array.from(b.worldGlue.toArray())).toEqual(Array.from(a.worldGlue.toArray()));
-    expect(b.worldGlue.size).toBe(2); // pier stones + the sail glue
+    expect(b.worldGlue.size).toBe(2); // the pier stone + the sail glue
     const region = (s: Simulation): number[] => {
       const out: number[] = [];
       for (let y = WM.hy - 3; y <= WM.hy + 3; y++) for (let x = WM.hx - 3; x <= WM.hx + 3; x++) out.push(s.world.getCell(x, y, WM.hz));
@@ -556,7 +575,6 @@ const SHALLOW: SimSpec = {
 /** Two cells of the generated sea floor: identical in every world made from this seed. */
 const FLOOR_A = [0, FLOOR, 2] as const;
 const FLOOR_B = [0, FLOOR, 3] as const;
-const FLOOR_C = [0, FLOOR, 4] as const;
 const BAY = { helm: [2, T, 2] as const, stone: [1, T, 4] as const, plank: [1, T - 1, 4] as const, bearing: [-3, T + 3, -1] as const };
 
 /** A cobble pier (x -4..-2, z 0..5) for the player to stand on (spawn is on its east edge). */
@@ -564,12 +582,12 @@ function buildPier(sim: Simulation): void {
   fill(sim.world, -4, FLOOR + 1, 0, -2, T - 1, 5, B.COBBLE);
 }
 
-/** A raft (x 1..5, z 0..5) with a helm facing north and a loose stone on its deck. */
-function buildRaft(sim: Simulation): void {
+/** A raft (x 1..5, z 0..5) with a helm facing north (and, unless `stone` is false, a loose stone on its deck). */
+function buildRaft(sim: Simulation, stone = true): void {
   const w = sim.world;
   fill(w, 1, T - 1, 0, 5, T - 1, 5, B.PLANKS_OAK);
   setBlock(w, BAY.helm[0], BAY.helm[1], BAY.helm[2], B.HELM, NZ);
-  setBlock(w, BAY.stone[0], BAY.stone[1], BAY.stone[2], B.STONE);
+  if (stone) setBlock(w, BAY.stone[0], BAY.stone[1], BAY.stone[2], B.STONE);
 }
 
 /** A windmill on a brick tower on the pier: bearing facing north, 9 canvas sails in the plane z = -2. */
@@ -586,12 +604,15 @@ function buildWindmill(sim: Simulation): void {
 function playPreviousGame(): Simulation {
   const sim = newWorld(SHALLOW);
   buildPier(sim);
-  buildRaft(sim);
+  buildRaft(sim, false);
   buildWindmill(sim);
   sim.advance(2);
-  // Glue two cells of the generated sea floor (through the water), and the stone to the deck.
-  glueFace(sim, [FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY], [FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY]);
-  glueFace(sim, [BAY.stone[0], BAY.stone[1], BAY.stone[2], NX], [BAY.plank[0], BAY.plank[1], BAY.plank[2], NX]);
+  // Glue the top of a cell of the generated sea floor (through the water), and the deck plank
+  // the player then puts the stone on.
+  glueFace(sim, [FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY]);
+  glueFace(sim, [BAY.plank[0], BAY.plank[1], BAY.plank[2], PY]);
+  sim.hold(B.STONE, 1);
+  rightClick(sim, BAY.plank[0], BAY.plank[1], BAY.plank[2], PY);
   // Start the windmill.
   sim.hold(B.PLANKS_OAK);
   rightClick(sim, BAY.bearing[0], BAY.bearing[1], BAY.bearing[2], PX);
@@ -628,7 +649,7 @@ describe('24. 用同一个种子开新世界时，没有上一局的胶水。', 
   });
 
   it('(premise) the previous game had glue on the generated sea floor and on its ship, a ship, a windmill and a thrown item', () => {
-    expect(oldGlue).toEqual([FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], 2]); // the face between FLOOR_A and FLOOR_B (z axis)
+    expect(oldGlue).toEqual([FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], 1]); // FLOOR_A's top face (y axis)
     expect(structureTree(old)).toEqual([
       [1, 'rotor', 0, 0, []],
       [2, 'ship', 0, 0, []],
@@ -645,21 +666,19 @@ describe('24. 用同一个种子开新世界时，没有上一局的胶水。', 
   it('没有上一局的胶水（世界）: the sea-floor face glued in the previous game is not glued — the player is offered to apply it', () => {
     const fresh = openNewWorld();
     expect(fresh.worldGlue.size).toBe(0);
-    expect(fresh.worldGlue.has(FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PZ)).toBe(false);
+    expect(fresh.worldGlue.has(FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY)).toBe(false);
     const log = new EventLog(fresh);
     buildPier(fresh); // somewhere to stand (does not touch the sea floor)
     fresh.advance(2);
     fresh.hold(I.GLUE);
-    rightClick(fresh, FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY);
-    expect(fresh.view.glueAnchor).toEqual({ gridId: 0, x: FLOOR_A[0], y: FLOOR_A[1], z: FLOOR_A[2] });
-    fresh.lookAtCell(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY);
+    fresh.lookAtCell(FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY);
     fresh.tick();
     expect(fresh.view.hint?.key).toBe('hint.glue.apply'); // 'hint.glue.already' if the old glue were there
     fresh.player.input.sneak = true;
     fresh.tick();
     expect(fresh.view.hint?.key).toBe('hint.glue.notGlued'); // nothing to remove either
     fresh.player.input.sneak = false;
-    rightClick(fresh, FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY);
+    rightClick(fresh, FLOOR_A[0], FLOOR_A[1], FLOOR_A[2], PY);
     expect(log.toastKeys()).toContain('toast.glue.added');
     expect(log.toastKeys()).not.toContain('toast.glue.already');
     expect(fresh.worldGlue.size).toBe(1);
@@ -708,9 +727,9 @@ describe('24. 用同一个种子开新世界时，没有上一局的胶水。', 
     buildPier(fresh);
     fresh.advance(2);
     // glue a face in the new world that the previous game never glued
-    glueFace(fresh, [FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY], [FLOOR_C[0], FLOOR_C[1], FLOOR_C[2], PY]);
-    expect(fresh.worldGlue.has(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PZ)).toBe(true);
-    expect(old.worldGlue.has(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PZ)).toBe(false);
+    glueFace(fresh, [FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY]);
+    expect(fresh.worldGlue.has(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY)).toBe(true);
+    expect(old.worldGlue.has(FLOOR_B[0], FLOOR_B[1], FLOOR_B[2], PY)).toBe(false);
     expect(Array.from(old.worldGlue.toArray())).toEqual(oldGlue);
     expect(structureTree(old)).toEqual([
       [1, 'rotor', 0, 0, []],

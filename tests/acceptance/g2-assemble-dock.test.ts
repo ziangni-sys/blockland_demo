@@ -766,7 +766,10 @@ describe('8. 停靠位置被挡住时拒绝并标红。停靠成功后，方块�
     const n0 = ship.grid.count;
     const g0 = ship.glue.size;
     expect(n0).toBe(45 + 1 + 4 + 1 + 2); // deck, helm, mast, bearing, felt + glass (the canvas spins in the rotor)
-    expect(g0).toBe(2);
+    // felt-deck, felt-glass, and the hub-bearing face: it stays on the bearing (a glueable block
+    // left behind) while the hub spins in the rotor.
+    expect(g0).toBe(3);
+    expect(ship.glue.has(2, SEA_TOP + 3, 4, NZ)).toBe(true);
     const exp = expectedDock(ship);
     sneakClick(sim);
     expect(ship.removed).toBe(true);

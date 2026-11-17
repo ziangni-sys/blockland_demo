@@ -12,7 +12,7 @@
  * every quarter turn gives a different, exactly predictable set of cells.
  */
 import { describe, expect, it } from 'vitest';
-import { cellState, facingState, stateFacing } from '../../src/blocks/cell';
+import { cellState, facingState, ID_MASK, stateFacing } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { isSolidCell } from '../../src/blocks/registry';
@@ -634,8 +634,9 @@ describe('13. 船上的轴承被炸：轴心和爆炸半径内的帆布被炸掉
  * At sea, creative: a 5x5 raft with a helm (2, SEA, 4) facing north, a plank post (2, SEA..by, 2)
  * and on its north face a bearing (2, by, 1) facing north; a canvas windmill in the plane z = 0
  * (hub (2, by, 0), up 2, down 1, west 2 — no east arm, so the player hovering north-east sees the
- * hub's and the bearing's east faces). The player glues the hub to the bearing with the glue item,
- * and (when `start`) starts the windmill on the world.
+ * hub's and the bearing's east faces). The player glues the bearing's front face with the glue
+ * item and puts the hub canvas against it (DESIGN 强力胶: glue belongs to a face; blocks that
+ * already touch cannot be glued), and (when `start`) starts the windmill on the world.
  */
 function gluedRaftWindmill(start = true) {
   const sim = seaWorld('creative', { x: 4.5, y: SEA + 2, z: -0.5 }, 15);
@@ -646,13 +647,19 @@ function gluedRaftWindmill(start = true) {
   set(w, 2, SEA, 4, B.HELM, facingState(NZ));
   fill(w, 2, SEA, 2, 2, by, 2, B.PLANKS_OAK); // post
   set(w, 2, by, 1, B.BEARING, facingState(NZ)); // mounted on the post's north face
+  sim.advance(2);
+  sim.hold(I.GLUE);
+  if (!sim.useOn(2, by, 1, NZ)) throw new Error('cannot glue'); // the bearing's front face
+  sim.hold(B.CANVAS);
+  sim.player.input.sneak = true; // with a block in hand, sneak + right-click on a bearing places
+  if (!sim.useOn(2, by, 1, NZ)) throw new Error('cannot place the hub'); // the hub, against it
+  sim.player.input.sneak = false;
+  if ((w.getCell(2, by, 0) & ID_MASK) !== B.CANVAS) throw new Error('no hub');
+  if (!sim.worldGlue.has(2, by, 0, PZ)) throw new Error('no glue');
   const windmill: Cell[] = [[2, by, 0, B.CANVAS]];
   for (const [dx, dy] of [[0, 1], [0, 2], [0, -1], [-1, 0], [-2, 0]] as const) windmill.push([2 + dx, by + dy, 0, B.CANVAS]);
   for (const [x, y, z, id] of windmill) set(w, x, y, z, id);
   sim.advance(2);
-  sim.hold(I.GLUE);
-  if (!sim.useOn(2, by, 0, PX) || !sim.useOn(2, by, 1, PX)) throw new Error('cannot glue'); // hub, then bearing
-  if (!sim.worldGlue.has(2, by, 0, PZ)) throw new Error('no glue');
   sim.emptyHand();
   const rotor = start ? startByPlayer(sim, 2, by, 1, PX) : (null as unknown as Rotor);
   return { sim, w, by, windmill, rotor };
@@ -660,21 +667,25 @@ function gluedRaftWindmill(start = true) {
 
 describe('14. 轴心和轴承之间的胶，在风车启动再停下之后仍然在。', () => {
   it('glue the hub to the bearing, start the windmill, let it turn half a turn, stop it: the glue is there again', () => {
-    const sim = flatWorld('creative', { x: 0.5, y: T, z: -1.5 }, 14);
+    const sim = flatWorld('creative', { x: 2.5, y: T, z: -1.5 }, 14);
     const w = sim.world;
     const Y = T + 4;
     fill(w, -1, T, -4, -1, Y, -4, B.STONE_BRICKS);
     set(w, 0, Y, -4, B.BEARING, facingState(PX));
-    set(w, 1, Y, -4, B.CANVAS); // hub
-    for (const [dy, dz] of [[1, 0], [2, 0], [-1, 0], [0, -1], [0, -2]] as const) set(w, 1, Y + dy, -4 + dz, B.CANVAS);
     sim.advance(2);
     const log = new Events(sim);
-    // Glue: right-click the hub, then the bearing, with the glue in hand.
+    // Glue: right-click the bearing's front face with the glue in hand, then put the hub on it.
     sim.hold(I.GLUE);
-    expect(sim.useOn(1, Y, -4, PZ)).toBe(true);
-    expect(sim.useOn(0, Y, -4, PZ)).toBe(true);
+    expect(sim.useOn(0, Y, -4, PX)).toBe(true);
     expect(log.toastKeys()).toContain('toast.glue.added');
+    sim.hold(B.CANVAS);
+    sim.player.input.sneak = true; // with a block in hand, sneak + right-click on a bearing places
+    expect(sim.useOn(0, Y, -4, PX)).toBe(true);
+    sim.player.input.sneak = false;
+    expect(idAt(w, 1, Y, -4)).toBe(B.CANVAS); // hub
     expect(sim.worldGlue.has(1, Y, -4, NX)).toBe(true);
+    for (const [dy, dz] of [[1, 0], [2, 0], [-1, 0], [0, -1], [0, -2]] as const) set(w, 1, Y + dy, -4 + dz, B.CANVAS);
+    sim.advance(2);
 
     sim.emptyHand();
     const rotor = startByPlayer(sim, 0, Y, -4, PZ);

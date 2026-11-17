@@ -81,6 +81,7 @@ function initialState(): UiState {
     hotbar,
     selected: 2,
     inventory,
+    offhand: params.has('offhand') ? stack(Number(params.get('offhand')), 24) : null,
     cursor: cursorItem >= 0 ? stack(cursorItem, 24) : null,
     health: num('health', 14),
     maxHealth: 20,
@@ -225,7 +226,8 @@ const actions: UiActions = {
     record('slotClick', [area, index, button, shift]);
     const hotbar = state.hotbar.slice();
     const inventory = state.inventory.slice();
-    const arr = area === 'hotbar' ? hotbar : inventory;
+    const offhand = [state.offhand];
+    const arr = area === 'hotbar' ? hotbar : area === 'offhand' ? offhand : inventory;
     const slot = arr[index] ?? null;
     let cursor = state.cursor;
     if (shift && slot && !cursor) {
@@ -261,7 +263,7 @@ const actions: UiActions = {
         cursor = cursor.count > 1 ? stack(cursor.item, cursor.count - 1) : null;
       }
     }
-    set({ hotbar, inventory, cursor });
+    set({ hotbar, inventory, offhand: offhand[0] ?? null, cursor });
   },
   creativePick(item, shift) {
     record('creativePick', [item, shift]);

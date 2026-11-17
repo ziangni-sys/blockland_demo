@@ -77,10 +77,12 @@ describe('bearing: preview, start, stop', () => {
     click(sim);
     expect(rotor.grid.count).toBe(before);
     expect(log.toastKeys()).toContain('toast.place.spinning');
+    const glueBefore = rotor.glue.size;
     sim.hold(I.GLUE);
     click(sim);
     expect(log.toastKeys()).toContain('toast.glue.spinning');
-    expect(sim.view.glueAnchor).toBeNull();
+    expect(rotor.glue.size).toBe(glueBefore);
+    expect(sim.view.glueProgress).toBe(0);
 
     // Right-click the bearing again: stop, the windmill turns back into blocks.
     sim.hold(B.STONE);
@@ -205,7 +207,7 @@ describe('bearing: preview, start, stop', () => {
     const rotor = sim.structures.rotors()[0]!;
     expect(rotor).toBeDefined();
     expect(rotor.parent).toBe(ship);
-    expect(ship.glue.has(2, by, 0, PZ)).toBe(false); // removed while it spins
+    expect(ship.glue.has(2, by, 0, PZ)).toBe(true); // stays on the bearing while the hub spins
     sim.advance(20);
     expect(rotor.angularSpeed).toBeGreaterThan(0);
     expect(ship.sails).toBe(9);
@@ -216,6 +218,6 @@ describe('bearing: preview, start, stop', () => {
       if ((c & 1023) === B.CANVAS) canvas++;
     });
     expect(canvas).toBe(9);
-    expect(ship.glue.has(2, by, 0, PZ)).toBe(true); // ACCEPTANCE 14: back when it stops
+    expect(ship.glue.has(2, by, 0, PZ)).toBe(true); // ACCEPTANCE 14: it holds the hub again when it stops
   });
 });

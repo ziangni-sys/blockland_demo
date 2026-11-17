@@ -29,16 +29,14 @@ export interface InteractionView {
   preview: { gridId: number; kind: 'ship' | 'rotor'; cells: Int32Array /* x,y,z triples */ } | null;
   /** World cells that blocked the last docking attempt (shown in red for a moment). */
   conflicts: Array<{ x: number; y: number; z: number }>;
-  /** First block picked for a glue operation, or null. */
-  glueAnchor: GridCell | null;
-  /** Progress of a glue operation in survival, 0..1. */
+  /** Progress of the timed survival glue operation on the target face, 0..1 (0 = none). */
   glueProgress: number;
   /** Hint shown under the crosshair, or null. */
   hint: Message | null;
 }
 
 export function emptyView(): InteractionView {
-  return { target: null, breakProgress: 0, preview: null, conflicts: [], glueAnchor: null, glueProgress: 0, hint: null };
+  return { target: null, breakProgress: 0, preview: null, conflicts: [], glueProgress: 0, hint: null };
 }
 
 /** Things that happened during a tick, for the client (sounds, particles, toasts). */

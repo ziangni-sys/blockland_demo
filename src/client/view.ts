@@ -23,16 +23,23 @@ import type { Simulation } from '../sim/simulation';
 import type { InteractionView } from '../sim/view';
 import { FallingBlockEntity, ItemEntity, Player, TntEntity, type Entity } from '../entities/entity';
 import { isDryCell } from '../structures/hull';
+import type { GlueStore } from '../structures/glue';
 import type { VoxelGrid } from '../voxel/grid';
 import { raycastGrids, type CellPredicate } from '../voxel/raycast';
 import type { World } from '../voxel/world';
 import { cameraPose, placeCamera, SELF_HIDE_DISTANCE, type CameraRay, type ViewMode } from './camera';
 import { approach, interpolateCarried, lerpAngle, lerpVec, type FramePose } from './interp';
 
-/** Radius (blocks) around the player in which glued faces are drawn while holding glue. */
+/** Radius (blocks) around the player in which COVERED glued faces are drawn while glue is in a hand. */
 export const GLUE_VIEW_RADIUS = 8;
-/** Glue faces are re-collected at most this often unless a glue store changed. */
-const GLUE_REFRESH_MS = 250;
+/** Radius (blocks) around the player in which EXPOSED glued faces are always drawn. */
+export const GLUE_EXPOSED_RADIUS = 24;
+/**
+ * Glue faces are re-collected at most this often unless a glue store changed or a hand started
+ * or stopped holding glue. Also the longest a face that became covered / exposed (a block put
+ * on it or taken off) waits before it is drawn the other way.
+ */
+export const GLUE_REFRESH_MS = 250;
 /** Sprinting widens the view a little (smoothed). */
 const SPRINT_FOV_SCALE = 1.1;
 
@@ -83,7 +90,7 @@ function newEntityState(): EntityRenderState {
 export class ViewBuilder {
   readonly camera: CameraState = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, fov: 75 };
   readonly env: EnvironmentState = { dayTime: 0, submerged: 'none', viewDistance: 128, time: 0 };
-  readonly overlay: OverlayState = { target: null, breakProgress: 0, preview: [], conflicts: [], glue: [], glueAnchor: null };
+  readonly overlay: OverlayState = { target: null, breakProgress: 0, preview: [], conflicts: [], glue: [] };
 
   private readonly entityPool: EntityRenderState[] = [];
   private readonly entityList: EntityRenderState[] = [];
@@ -104,7 +111,6 @@ export class ViewBuilder {
 
   // overlay caches (rebuilt only when the simulation publishes a new object)
   private readonly targetCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0 };
-  private readonly anchorCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0 };
   /**
    * What the cached preview list was built from. Keyed on the parts, not the wrapper: the
    * simulation publishes a fresh `preview` object every tick around the same `cells` array.
@@ -115,7 +121,6 @@ export class ViewBuilder {
   private lastConflicts: InteractionView['conflicts'] | undefined = undefined;
   private glueAt = -Infinity;
   private glueKey = '';
-  private glueShown = false;
 
   // scratch
   private readonly framePrev: FramePose = { position: vec3(), rotation: quat() };
@@ -240,7 +245,7 @@ export class ViewBuilder {
     return list;
   }
 
-  /** Overlays from the interaction view plus nearby glue while holding glue. */
+  /** Overlays from the interaction view plus the glued faces around the player. */
   updateOverlays(sim: Simulation, nowMs: number): OverlayState {
     const o = this.overlay;
     const v = sim.view;
@@ -274,61 +279,84 @@ export class ViewBuilder {
       this.lastConflicts = v.conflicts;
       o.conflicts = v.conflicts.map((c) => ({ structureId: 0, x: c.x, y: c.y, z: c.z }));
     }
-    if (v.glueAnchor) {
-      const a = this.anchorCell;
-      a.structureId = v.glueAnchor.gridId;
-      a.x = v.glueAnchor.x;
-      a.y = v.glueAnchor.y;
-      a.z = v.glueAnchor.z;
-      o.glueAnchor = a;
-    } else {
-      o.glueAnchor = null;
-    }
     this.updateGlue(sim, nowMs);
     return o;
   }
 
+  /**
+   * Glued faces near the player (DESIGN 强力胶: glue on a face is visible): every EXPOSED face
+   * (a side that is not a hard block) within GLUE_EXPOSED_RADIUS, whatever the player holds;
+   * COVERED faces (hard blocks on both sides) within GLUE_VIEW_RADIUS while glue is in the main
+   * hand or the off-hand. Re-collected when a glue store changes or a hand starts / stops
+   * holding glue, and at least every GLUE_REFRESH_MS (blocks placed on or taken off a glued face
+   * switch it between covered and exposed). An unchanged result keeps the previous array.
+   */
   private updateGlue(sim: Simulation, nowMs: number): void {
     const o = this.overlay;
     const p = sim.player;
-    const held = p.inventory.selectedStack();
-    if (!held || held.item !== I.GLUE || p.dead) {
-      if (this.glueShown) {
-        o.glue = [];
-        this.glueShown = false;
-        this.glueKey = '';
-      }
+    if (p.dead) {
+      if (o.glue.length > 0) o.glue = [];
+      this.glueKey = '';
       return;
     }
-    // Re-collect when a store changed or the player moved, at most every GLUE_REFRESH_MS.
-    let key = `${sim.worldGlue.version}`;
+    const inv = p.inventory;
+    const main = inv.selectedStack();
+    const off = inv.offhand;
+    const inHand = (main !== null && main.item === I.GLUE) || (off !== null && off.item === I.GLUE);
+    let key = `${inHand ? 1 : 0}|${sim.worldGlue.version}`;
     const structures = sim.structures.all();
     for (let i = 0; i < structures.length; i++) key += `,${structures[i]!.id}:${structures[i]!.glue.version}`;
-    const changed = key !== this.glueKey;
-    if (!changed && nowMs - this.glueAt < GLUE_REFRESH_MS) return;
+    if (key === this.glueKey && nowMs - this.glueAt < GLUE_REFRESH_MS) return;
     this.glueKey = key;
     this.glueAt = nowMs;
-    this.glueShown = true;
-    const r = GLUE_VIEW_RADIUS;
     const faces: OverlayFace[] = [];
-    const px = Math.floor(p.pos.x);
-    const py = Math.floor(p.pos.y + 1);
-    const pz = Math.floor(p.pos.z);
-    for (const f of sim.worldGlue.facesInBox(px - r, py - r, pz - r, px + r, py + r, pz + r)) {
-      faces.push({ structureId: 0, x: f.x, y: f.y, z: f.z, face: f.axis * 2 });
-    }
     const eye = p.eyePos(this.scratch2);
+    collectGlueFaces(sim.world, sim.worldGlue, 0, eye, inHand, faces);
     for (let i = 0; i < structures.length; i++) {
       const s = structures[i]!;
       if (s.removed || s.glue.size === 0) continue;
-      const l = s.grid.toLocal(eye, this.scratch);
-      const lx = Math.floor(l.x);
-      const ly = Math.floor(l.y);
-      const lz = Math.floor(l.z);
-      for (const f of s.glue.facesInBox(lx - r, ly - r, lz - r, lx + r, ly + r, lz + r)) {
-        faces.push({ structureId: s.id, x: f.x, y: f.y, z: f.z, face: f.axis * 2 });
-      }
+      collectGlueFaces(s.grid, s.glue, s.id, s.grid.toLocal(eye, this.scratch), inHand, faces);
     }
-    o.glue = faces;
+    if (!sameFaces(o.glue, faces)) o.glue = faces;
   }
+}
+
+/**
+ * Append the glued faces of one grid around `at` (a point in that grid's local space) to `out`:
+ * exposed ones within GLUE_EXPOSED_RADIUS, covered ones within GLUE_VIEW_RADIUS when `covered`
+ * glue is to be shown. An exposed face is given as its hard cell plus the direction of the open
+ * side (the decal lies on that side); a covered one as its canonical cell plus the positive face.
+ */
+export function collectGlueFaces(grid: VoxelGrid, glue: GlueStore, structureId: number, at: Vec3, showCovered: boolean, out: OverlayFace[]): void {
+  if (glue.size === 0) return;
+  const R = GLUE_EXPOSED_RADIUS;
+  const r = GLUE_VIEW_RADIUS;
+  const cx = Math.floor(at.x);
+  const cy = Math.floor(at.y);
+  const cz = Math.floor(at.z);
+  glue.forEachInBox(cx - R, cy - R, cz - R, cx + R, cy + R, cz + R, (x, y, z, axis) => {
+    const bx = axis === 0 ? x + 1 : x;
+    const by = axis === 1 ? y + 1 : y;
+    const bz = axis === 2 ? z + 1 : z;
+    const hardA = SOLID[grid.getCell(x, y, z) & ID_MASK] === 1;
+    const hardB = SOLID[grid.getCell(bx, by, bz) & ID_MASK] === 1;
+    if (hardA && hardB) {
+      if (!showCovered || Math.max(Math.abs(x - cx), Math.abs(y - cy), Math.abs(z - cz)) > r) return;
+      out.push({ structureId, x, y, z, face: axis * 2, covered: true });
+    } else if (hardB) {
+      out.push({ structureId, x: bx, y: by, z: bz, face: axis * 2 + 1, covered: false });
+    } else {
+      out.push({ structureId, x, y, z, face: axis * 2, covered: false });
+    }
+  });
+}
+
+function sameFaces(a: readonly OverlayFace[], b: readonly OverlayFace[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const p = a[i]!;
+    const q = b[i]!;
+    if (p.structureId !== q.structureId || p.x !== q.x || p.y !== q.y || p.z !== q.z || p.face !== q.face || p.covered !== q.covered) return false;
+  }
+  return true;
 }

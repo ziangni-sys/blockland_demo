@@ -163,7 +163,7 @@ export const UI_CSS = String.raw`
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Zen Hei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
   --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif SC", "Songti SC", "STSong", serif;
-  --slot: clamp(30px, min(calc((100vw - 56px) / 9), calc(4.4vh + 22px)), calc(92px * var(--ui-zoom)));
+  --slot: clamp(30px, min(calc((100vw - 56px) / 13.4), calc(4.4vh + 22px)), calc(92px * var(--ui-zoom)));
   --gap: clamp(3px, calc(var(--slot) * 0.09), 8px);
   --islot: clamp(31px, min(calc((100vw - 84px) / 9), calc(4.2vh + 18px)), 54px);
   --igap: clamp(3px, calc(var(--islot) * 0.1), 6px);
@@ -309,6 +309,26 @@ ${twin('bl-hit', HIT)}
   -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
 }
 .bl-hud[data-drag="1"] .bl-hotbar .bl-slot { pointer-events: auto; }
+
+/* The off-hand socket: hangs left of the hotbar (the hotbar stays centred), a round well in a
+   darker steel collar, the swap key engraved on a tab above it. */
+.bl-hands { position: relative; }
+.bl-offhand {
+  position: absolute; right: calc(100% + var(--gap) * 2.5); bottom: 0;
+  padding: calc(var(--gap) * 1.4); border-radius: 50%;
+  background: radial-gradient(120% 120% at 30% 20%, var(--hotbar-hi), var(--hotbar-lo));
+  border: 1px dashed var(--brass-400); box-shadow: var(--shadow-md), inset 0 1px 0 var(--glint-08);
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+}
+.bl-offhand .bl-slot { --s: calc(var(--slot) * 0.9); border-radius: 50%; cursor: default; }
+.bl-offhand .bl-slot-well { border-radius: 50%; }
+.bl-offhand-key {
+  position: absolute; left: 50%; top: 0; transform: translate(-50%, -55%);
+  min-width: 1.6em; padding: 2px 5px; border-radius: 4px; text-align: center;
+  font: 700 clamp(9px, calc(var(--slot) * 0.2), calc(14px * var(--ui-zoom)))/1 var(--font-mono);
+  color: var(--brass-100); background: var(--panel-bg-soft); border: 1px solid var(--brass-400);
+  box-shadow: 0 1px 2px var(--shade-55);
+}
 
 /* ------------------------------------------------------------------ slots (stamped brass plates) */
 .bl-slot {
@@ -825,6 +845,10 @@ ${twin('bl-hit', HIT)}
 .bl-slotgrid--hot { padding-top: 10px; margin-top: 4px; border-top: 1px dashed var(--line); }
 .bl-inv-slots .bl-subtitle { margin-top: 2px; }
 .bl-inv-slots .bl-subtitle + .bl-slotgrid { margin-bottom: 12px; }
+.bl-inv-offhand { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.bl-inv-offhand .bl-slot, .bl-inv-offhand .bl-slot-well { border-radius: 50%; }
+.bl-inv-offhand .bl-slot { box-shadow: 0 0 0 1px var(--brass-400), 0 2px 5px var(--shade-30); }
+.bl-inv-offhand-label { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--canvas-300); }
 .bl-inv-hint { margin-top: auto; padding-top: 10px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--canvas-500); }
 .bl-inv-close { min-height: 34px; min-width: 34px; padding: 6px; border-radius: 8px; }
 

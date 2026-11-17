@@ -11,6 +11,7 @@ import {
   PITCH_LIMIT,
   slotForKey,
   SPRINT_DOUBLE_TAP_MS,
+  SWAP_KEY,
   WHEEL_STEP_PIXELS,
   wrapYaw,
 } from '../../src/client/input';
@@ -116,8 +117,26 @@ describe('InputState keyboard', () => {
     expect(slotForKey('KeyQ')).toBe(-1);
   });
 
+  it('F counts one off-hand swap per non-repeated press, handed to the simulation as a command (not while a screen is open)', () => {
+    const s = new InputState();
+    expect(SWAP_KEY).toBe('KeyF');
+    expect(s.keyDown('KeyF', false, 0)).toBe('none');
+    s.keyDown('KeyF', true, 10); // auto-repeat
+    s.keyUp('KeyF');
+    s.keyDown('KeyF', false, 20);
+    const i = written(s);
+    expect(i.swapPresses).toBe(2);
+    expect(written(s).swapPresses).toBe(0); // moved into the input once
+    s.keyDown('KeyF', false, 30);
+    expect(written(s, false).swapPresses).toBe(0); // a screen is open: dropped
+    expect(written(s).swapPresses).toBe(0);
+    s.keyDown('KeyF', false, 40);
+    s.releaseAll();
+    expect(written(s).swapPresses).toBe(0);
+  });
+
   it('knows which keys are game keys', () => {
-    for (const k of ['KeyW', 'Space', 'ShiftLeft', 'F3', 'F5', 'Digit1', 'Escape', 'KeyE']) expect(isGameKey(k)).toBe(true);
+    for (const k of ['KeyW', 'Space', 'ShiftLeft', 'F3', 'F5', 'Digit1', 'Escape', 'KeyE', 'KeyF']) expect(isGameKey(k)).toBe(true);
     for (const k of ['KeyQ', 'Tab', 'F6', 'KeyR']) expect(isGameKey(k)).toBe(false);
   });
 

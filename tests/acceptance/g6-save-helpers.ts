@@ -135,19 +135,11 @@ export function rightClick(sim: Simulation, x: number, y: number, z: number, fac
   }
 }
 
-/** Glue (or with sneak: unglue) the face between cells a and b of a grid, with glue in hand. */
-export function glueFace(
-  sim: Simulation,
-  a: readonly [number, number, number, Dir?],
-  b: readonly [number, number, number, Dir?],
-  gridId = 0,
-  sneak = false,
-): void {
+/** With glue in hand, right-click face `a[3]` of cell a of a grid: glue it (or with sneak: remove its glue). */
+export function glueFace(sim: Simulation, a: readonly [number, number, number, Dir], gridId = 0, sneak = false): void {
   sim.hold(I.GLUE);
-  sim.player.input.sneak = false;
-  rightClick(sim, a[0], a[1], a[2], a[3], gridId);
   sim.player.input.sneak = sneak;
-  rightClick(sim, b[0], b[1], b[2], b[3], gridId);
+  rightClick(sim, a[0], a[1], a[2], a[3], gridId);
   sim.player.input.sneak = false;
 }
 
@@ -231,7 +223,6 @@ export function stateOf(s: Structure): Record<string, unknown> {
       angle: s.angle,
       angularSpeed: s.angularSpeed,
       sails: s.sails,
-      hubGlue: s.hubGlue,
     };
   }
   if (s instanceof Ship) {

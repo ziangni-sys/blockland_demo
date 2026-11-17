@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
-import { GLUE_BEAD_LIFT, GLUE_BEAD_WIDTH, glueBeadGeometry, OverlayLayer } from '../../src/render/three/overlays';
+import { GLUE_BEAD_LIFT, GLUE_BEAD_WIDTH, GLUE_DECAL_LIFT, glueBeadGeometry, OverlayLayer } from '../../src/render/three/overlays';
 import { SharedUniforms } from '../../src/render/three/shading';
 import type { OverlayFace, OverlayState } from '../../src/render/backend';
 
@@ -17,7 +17,7 @@ const DIRS: readonly [number, number, number][] = [
 ];
 
 function state(partial: Partial<OverlayState>): OverlayState {
-  return { target: null, breakProgress: 0, preview: [], conflicts: [], glue: [], glueAnchor: null, ...partial };
+  return { target: null, breakProgress: 0, preview: [], conflicts: [], glue: [], ...partial };
 }
 
 function layer(): { layer: OverlayLayer; tex: THREE.DataArrayTexture } {
@@ -43,12 +43,71 @@ function instancesOf(root: THREE.Object3D, name: string): { box: THREE.Box3; mat
 }
 
 describe('glued faces (review: glue between two blocks was invisible)', () => {
-  it('the bead straddles the shared face and reaches the outer surfaces along all four edges', () => {
+  it('an exposed glued face is a depth-tested decal on the face, on its open side; no bead or ghost', () => {
     const { layer: l, tex } = layer();
     const root = new THREE.Group();
     const cell = { structureId: 0, x: 4, y: 2, z: -3 };
     for (let face = 0; face < 6; face++) {
-      l.update(state({ glue: [{ ...cell, face }] }), () => root, face);
+      l.update(state({ glue: [{ ...cell, face, covered: false }] }), () => root, face);
+      expect(instancesOf(root, 'overlay-glue')).toEqual([]);
+      expect(instancesOf(root, 'overlay-glue-xray')).toEqual([]);
+      const decals = instancesOf(root, 'overlay-glue-decal');
+      expect(decals.length).toBe(1);
+      const mat = decals[0]!.mat;
+      expect(mat.depthTest).toBe(true);
+      expect(mat.depthFunc).toBe(THREE.LessEqualDepth); // hidden behind other blocks
+      const [dx, dy, dz] = DIRS[face]!;
+      const axis = dx !== 0 ? 'x' : dy !== 0 ? 'y' : 'z';
+      const sign = dx + dy + dz;
+      const plane = cell[axis] + 0.5 + 0.5 * sign;
+      const box = decals[0]!.box;
+      // A flat 1 x 1 quad lying just off the face, on the open side (outside the block's cell).
+      expect(box.min[axis]).toBeCloseTo(plane + sign * GLUE_DECAL_LIFT, 6);
+      expect(box.max[axis]).toBeCloseTo(plane + sign * GLUE_DECAL_LIFT, 6);
+      for (const a of ['x', 'y', 'z'] as const) {
+        if (a === axis) continue;
+        expect(box.max[a] - box.min[a]).toBeCloseTo(1, 6);
+        expect(box.min[a]).toBeCloseTo(cell[a], 6);
+      }
+      // The quad faces the open side (its +Z normal is rotated onto the face direction).
+      const n = new THREE.Vector3(0, 0, 1).transformDirection(decals[0]!.matrix);
+      expect([n.x, n.y, n.z].map((v) => Math.round(v))).toEqual([dx, dy, dz]);
+    }
+    l.dispose();
+    tex.dispose();
+  });
+
+  it('a list mixing both kinds draws each the right way', () => {
+    const { layer: l, tex } = layer();
+    const root = new THREE.Group();
+    l.update(
+      state({
+        glue: [
+          { structureId: 0, x: 0, y: 0, z: 0, face: 0, covered: true },
+          { structureId: 0, x: 5, y: 0, z: 0, face: 2, covered: false },
+          { structureId: 0, x: 9, y: 0, z: 0, face: 4, covered: false },
+        ],
+      }),
+      () => root,
+      1,
+    );
+    expect(instancesOf(root, 'overlay-glue').length).toBe(1);
+    expect(instancesOf(root, 'overlay-glue-xray').length).toBe(1);
+    expect(instancesOf(root, 'overlay-glue-decal').length).toBe(2);
+    l.update(state({ glue: [] }), () => root, 1);
+    expect(instancesOf(root, 'overlay-glue-decal').length).toBe(0);
+    expect(instancesOf(root, 'overlay-glue').length).toBe(0);
+    l.dispose();
+    tex.dispose();
+  });
+
+  it('a covered face: the bead straddles the shared face and reaches the outer surfaces along all four edges', () => {
+    const { layer: l, tex } = layer();
+    const root = new THREE.Group();
+    const cell = { structureId: 0, x: 4, y: 2, z: -3 };
+    for (let face = 0; face < 6; face++) {
+      l.update(state({ glue: [{ ...cell, face, covered: true }] }), () => root, face);
+      expect(instancesOf(root, 'overlay-glue-decal')).toEqual([]);
       const beads = instancesOf(root, 'overlay-glue');
       expect(beads.length).toBe(1);
       const box = beads[0]!.box;
@@ -120,7 +179,7 @@ describe('overlay parenting', () => {
     group.matrix.makeRotationY(0.6).setPosition(100, 47.5, -20);
     scene.add(group);
     scene.updateMatrixWorld(); // the structure's pose is settled before the overlay appears
-    const face: OverlayFace = { structureId: 5, x: 2, y: 1, z: 2, face: 2 };
+    const face: OverlayFace = { structureId: 5, x: 2, y: 1, z: 2, face: 2, covered: true };
     l.update(state({ glue: [face], preview: [{ structureId: 5, x: 1, y: 1, z: 1 }] }), (id) => (id === 5 ? group : id === 0 ? scene : null), 1);
     scene.updateMatrixWorld();
     let meshes = 0;

@@ -13,8 +13,8 @@
  * registers blocks and it is imported first, so the tables cover the whole block table.
  * The tables are never written after that (immutable lookup data, not module state).
  */
-import '../blocks/defs';
 import { cellState, ID_MASK, MAX_BLOCK_ID, stateAxis, stateFacing } from '../blocks/cell';
+import { B } from '../blocks/defs';
 import { BLOCKS, type FuncKind } from '../blocks/registry';
 import { DIR_X, DIR_Y, DIR_Z, NY, type Dir } from '../core/dirs';
 import type { VoxelGrid } from '../voxel/grid';
@@ -45,6 +45,7 @@ const F_SAIL = 8;
 /** Functional block (helm, bearing, propeller): never part of a rotor. */
 const F_FUNC = 16;
 
+const UNLOADED_ID = B.UNLOADED;
 const TABLE_SIZE = MAX_BLOCK_ID + 1;
 const STICK = new Uint8Array(TABLE_SIZE);
 const MOUNT = new Uint8Array(TABLE_SIZE);
@@ -89,6 +90,35 @@ export function canJoinStructure(cell: number): boolean {
  */
 export function canGlue(cell: number): boolean {
   return (FLAGS[cell & ID_MASK]! & F_GLUE) !== 0;
+}
+
+/**
+ * Does this cell keep the glue on its faces alive (DESIGN 强力胶: a glued face stays while at
+ * least one side is a glueable block)? A glueable block, or the world's 'unloaded' sentinel:
+ * terrain that is not loaded is unknown, and glue must not be lost at the edge of the loaded area.
+ */
+export function holdsGlue(cell: number): boolean {
+  return (FLAGS[cell & ID_MASK]! & F_GLUE) !== 0 || (cell & ID_MASK) === UNLOADED_ID;
+}
+
+/**
+ * The glue lifetime rule at one cell of `grid`, whose value is now `cell`: every glued face of
+ * the cell stays when the cell or the neighbour across that face holdsGlue(), and is removed
+ * otherwise. Returns the number of faces removed. The grids' change hooks call it on every
+ * write (bulk structure moves included), the movers on their destination cells after moveTo.
+ * Costs one size check when the store is empty and six lookups when the cell carries no glue.
+ */
+export function pruneGlueAt(grid: VoxelGrid, glue: GlueStore, x: number, y: number, z: number, cell: number): number {
+  if (glue.size === 0) return 0;
+  const mask = glue.dirMaskAt(x, y, z);
+  if (mask === 0 || holdsGlue(cell)) return 0;
+  let n = 0;
+  for (let d = 0; d < 6; d++) {
+    if ((mask & (1 << d)) === 0) continue;
+    if (holdsGlue(grid.getCell(x + DIR_X[d]!, y + DIR_Y[d]!, z + DIR_Z[d]!))) continue;
+    if (glue.remove(x, y, z, d as Dir)) n++;
+  }
+  return n;
 }
 
 /** Functional block (helm, bearing, propeller). These never become part of a rotor. */
@@ -148,13 +178,22 @@ export function mountSticks(a: number, b: number, dirAtoB: Dir): boolean {
 }
 
 /**
+ * Do two adjacent cells (`b` is a's neighbour in `dirAtoB`) connect WITHOUT glue: both may join
+ * a structure and they auto-stick, or one is mounted on the other? Symmetric.
+ */
+export function sticksWithoutGlue(a: number, b: number, dirAtoB: Dir): boolean {
+  if ((FLAGS[a & ID_MASK]! & FLAGS[b & ID_MASK]! & F_JOIN) === 0) return false;
+  return autoSticks(a, b, dirAtoB) || mountSticks(a, b, dirAtoB) || mountSticks(b, a, (dirAtoB ^ 1) as Dir);
+}
+
+/**
  * Connection test for two adjacent cells whose values the caller already holds: `a` at
  * (x,y,z) and `b` at its neighbour in `dirAtoB`. Same result as connected(); the flood fills
  * use this form to avoid reading each cell twice.
  *
- * Glue only counts when both cells may carry glue. The store is kept consistent by
- * removeAllAt() on every cell change, so this matters only if a caller forgot to clear a
- * face; it guarantees that e.g. a torch that replaced a glued block is never glued in.
+ * Glue only counts when both cells may carry glue. A glued face outlives the block on one side
+ * (DESIGN 强力胶), so this matters: a torch next to a glued stone face is not glued in, while a
+ * block placed against that face is.
  */
 export function connectedCells(
   a: number,

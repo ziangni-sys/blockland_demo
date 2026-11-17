@@ -10,8 +10,9 @@
  *   persist    serialize / deserialize
  *
  * HOOKS. Every cell change of every grid goes through one listener per grid:
- *  - glue: a cell removed or replaced by another block id loses its glue (任一侧方块被移除或替换，
- *    胶就消失) — except bulk moves flagged SET_STRUCTURE_MOVE, which transfer glue themselves;
+ *  - glue: when a cell changes block id, by whatever path (bulk structure moves included), the
+ *    glue lifetime rule runs on its faces (pruneGlueAt: a glued face stays while one side is a
+ *    glueable block);
  *  - bearings: when the bearing of a running rotor is removed or replaced, by whatever path
  *    (mining, explosion, physics damage ...), the rotor blockifies in place — immediately, or at
  *    endBatch() inside a batch (LESSONS: 先等冲击波处理完所有结构体，再把转子方块化，最后统一重算);
@@ -30,18 +31,16 @@ import { TICK_DT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
 import { aabb, qidentity, qrotate, qtoMat3, vec3, vset, type AABB } from '../core/math';
 import type { ByteReader, ByteWriter } from '../save/bytes';
-import { SET_STRUCTURE_MOVE, type VoxelGrid } from '../voxel/grid';
+import type { VoxelGrid } from '../voxel/grid';
 import type { World } from '../voxel/world';
 import {
   blockifyGrid,
   commitDock,
   emptyReport,
   hullCavityCells,
-  identityMap,
   planDock,
   refillWater,
   remountRotor,
-  restoreHubGlue,
   rotorSnap,
   transferCells,
   type BlockifyReport,
@@ -52,7 +51,7 @@ import type { GlueStore } from './glue';
 import { analyzeHull, type HullInfo } from './hull';
 import { advanceRotor, applyRotorPose, holdRotor } from './rotor';
 import { readStructures, writeStructures } from './serialize';
-import { cellFunc, isSailCell } from './stick';
+import { cellFunc, isSailCell, pruneGlueAt } from './stick';
 import { Rotor, Ship, type ShipDynamics, type Structure, type StructureHost } from './structure';
 
 export type { BlockifyReport } from './assembly';
@@ -264,8 +263,7 @@ export class StructureManager {
       const r = rotors[i]!;
       if (r.parent === null && inSet.has(r.bearingX, r.bearingY, r.bearingZ)) this.reparentToShip(r, ship);
     }
-    transferCells(world, ship.grid, res.cells, res.count, res.bounds);
-    host.worldGlue.moveTo(ship.glue, (gx, gy, gz) => inSet.has(gx, gy, gz), identityMap());
+    transferCells(world, host.worldGlue, ship.grid, ship.glue, res.cells, res.count, res.bounds);
     this.register(ship);
 
     const dyn = this.dynamics;
@@ -314,15 +312,13 @@ export class StructureManager {
     rotor.bearingZ = z;
     rotor.axis = facing;
     rotor.sails = res.sails;
-    // LESSONS 风车停下后轴心和轴承之间的胶没了: remember it, it comes back on stop.
-    rotor.hubGlue = glue.remove(x, y, z, facing);
     const g = rotor.grid;
     vset(g.pivot, x + DIR_X[facing]! + 0.5, y + DIR_Y[facing]! + 0.5, z + DIR_Z[facing]! + 0.5);
     g.setPoseImmediate(g.pivot, qidentity());
 
-    const inSet = CellSet.fromCells(res.cells, res.count);
-    transferCells(grid, g, res.cells, res.count, res.bounds);
-    glue.moveTo(rotor.glue, (gx, gy, gz) => inSet.has(gx, gy, gz), identityMap());
+    // The glue between the hub and the bearing stays on the bearing (DESIGN 强力胶: the bearing is
+    // a glueable block that stays behind), so it is there again when the rotor stops.
+    transferCells(grid, glue, g, rotor.glue, res.cells, res.count, res.bounds);
     if (ship !== null) ship.children.push(rotor);
     else this.worldRotors.push(rotor);
     applyRotorPose(rotor);
@@ -356,7 +352,6 @@ export class StructureManager {
     this.detachRotor(rotor);
     this.unregister(rotor);
     const out = blockifyGrid(this.host, rotor.grid, rotor.glue, dst, dstGlue, t, ship !== null);
-    if (rotor.hubGlue) restoreHubGlue(dst, dstGlue, rotor, t, out.placedSrc);
     if (ship !== null) {
       if (this.isLive(ship)) this.dynamics?.wake(ship);
     } else {
@@ -529,12 +524,9 @@ export class StructureManager {
 
   // ------------------------------------------------------------ hooks
 
-  private readonly onWorldCell = (x: number, y: number, z: number, oldCell: number, newCell: number, flags: number): void => {
+  private readonly onWorldCell = (x: number, y: number, z: number, oldCell: number, newCell: number): void => {
     const oldId = oldCell & ID_MASK;
-    if ((flags & SET_STRUCTURE_MOVE) === 0 && oldId !== (newCell & ID_MASK)) {
-      const glue = this.host.worldGlue;
-      if (glue.size > 0) glue.removeAllAt(x, y, z);
-    }
+    if (oldId !== (newCell & ID_MASK)) pruneGlueAt(this.world, this.host.worldGlue, x, y, z, newCell);
     if (oldId === BEARING_ID && this.worldRotors.length > 0) this.bearingChanged(this.worldRotors, x, y, z, oldCell, newCell);
     const dyn = this.dynamics;
     if (dyn !== null) {
@@ -556,20 +548,16 @@ export class StructureManager {
   };
 
   private watchShip(ship: Ship): () => void {
-    return ship.grid.onCellChange((x, y, z, oldCell, newCell, flags) => {
+    return ship.grid.onCellChange((x, y, z, oldCell, newCell) => {
       const oldId = oldCell & ID_MASK;
-      if ((flags & SET_STRUCTURE_MOVE) === 0 && oldId !== (newCell & ID_MASK) && ship.glue.size > 0) {
-        ship.glue.removeAllAt(x, y, z);
-      }
+      if (oldId !== (newCell & ID_MASK)) pruneGlueAt(ship.grid, ship.glue, x, y, z, newCell);
       if (oldId === BEARING_ID && ship.children.length > 0) this.bearingChanged(ship.children, x, y, z, oldCell, newCell);
     });
   }
 
   private watchRotor(rotor: Rotor): () => void {
-    return rotor.grid.onCellChange((x, y, z, oldCell, newCell, flags) => {
-      if ((flags & SET_STRUCTURE_MOVE) === 0 && (oldCell & ID_MASK) !== (newCell & ID_MASK) && rotor.glue.size > 0) {
-        rotor.glue.removeAllAt(x, y, z);
-      }
+    return rotor.grid.onCellChange((x, y, z, oldCell, newCell) => {
+      if ((oldCell & ID_MASK) !== (newCell & ID_MASK)) pruneGlueAt(rotor.grid, rotor.glue, x, y, z, newCell);
       const was = isSailCell(oldCell);
       if (was !== isSailCell(newCell)) rotor.sails += was ? -1 : 1;
     });

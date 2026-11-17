@@ -1,7 +1,7 @@
 /**
- * Overlays: target outline, mining cracks, assembly preview / conflict cells, glued faces and
- * the glue anchor. Cells with structureId != 0 are in that structure's local cell space; their
- * objects are parented to the structure's group so they follow its pose exactly.
+ * Overlays: target outline, mining cracks, assembly preview / conflict cells and glued faces.
+ * Cells with structureId != 0 are in that structure's local cell space; their objects are
+ * parented to the structure's group so they follow its pose exactly.
  *
  * World-space overlays (structureId 0) live under `overlayRoot`, which the backend places at
  * an integer ANCHOR near the camera (OverlayLayer.update's anchor argument): positions are
@@ -12,19 +12,21 @@
  * (cheap order-sensitive hash), so a client that re-sends the same lists every frame costs one
  * pass over them and nothing else.
  *
- * Glue. A glued face always lies BETWEEN two blocks (docs/DESIGN.md 强力胶: the glue vanishes
- * when either block goes), so a decal on that face would sit inside solid blocks where it can
- * never be seen. It is drawn twice instead:
- *   - a glue BEAD: a thin band straddling the seam on every surface of the pair that touches
- *     the glued face's edges (a box w thick across the face plane, just over 1 x 1 along it;
- *     its side faces lie on the outer surfaces of the two blocks). Depth tested: it shows
- *     exactly where the joint meets open air, like glue squeezed out of the joint;
- *   - an X-RAY ghost of the glued face itself (glue_face tile, faint), drawn only where it is
- *     hidden (depth test GREATER), so glue between blocks buried in a wall is still visible
- *     to a player holding glue.
+ * Glue (docs/DESIGN.md 强力胶: glue belongs to a face and outlives the block on one side).
+ *   - An EXPOSED glued face (one side open) is a DECAL of the glue_face tile lying on the face,
+ *     on the open side, depth tested: it shows like paint on the block and hides behind others.
+ *   - A COVERED glued face lies between two blocks, where a decal could never be seen. It is
+ *     drawn twice instead:
+ *       - a glue BEAD: a thin band straddling the seam on every surface of the pair that
+ *         touches the glued face's edges (a box w thick across the face plane, just over 1 x 1
+ *         along it; its side faces lie on the outer surfaces of the two blocks). Depth tested:
+ *         it shows exactly where the joint meets open air, like glue squeezed out of the joint;
+ *       - an X-RAY ghost of the glued face itself (glue_face tile, faint), drawn only where it
+ *         is hidden (depth test GREATER), so glue between blocks buried in a wall is still
+ *         visible to a player holding glue.
  */
 import * as THREE from 'three/webgpu';
-import { abs, Discard, float, Fn, max, mix, sin, smoothstep, texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
+import { abs, Discard, float, Fn, max, min, mix, sin, smoothstep, texture, uniform, uv, vec2, vec3, vec4 } from 'three/tsl';
 import type { OverlayCell, OverlayFace, OverlayState } from '../backend';
 import { boxEdges } from './boxgeom';
 import { crackLayer, crackStage, tileLayer } from './blocktiles';
@@ -52,6 +54,8 @@ const ORDER_LINES = 63;
 export const GLUE_BEAD_WIDTH = 0.26;
 /** How far the bead stands proud of the block surfaces (avoids z-fighting with them). */
 export const GLUE_BEAD_LIFT = 0.006;
+/** How far an exposed face's decal floats off the block surface, towards the open side. */
+export const GLUE_DECAL_LIFT = 0.004;
 
 // Face rotations mapping the local +Z axis onto each Dir, column-major 3x3.
 const FACE_ROT: readonly (readonly number[])[] = [
@@ -259,36 +263,6 @@ class InstancedCellLayer {
   }
 }
 
-/** 12 square bars of thickness `t` along the edges of the box [lo, hi]^3, merged into one geometry. */
-function frameGeometry(lo: number, hi: number, t: number): THREE.BufferGeometry {
-  const len = hi - lo + t;
-  const mid = (lo + hi) / 2;
-  const pos: number[] = [];
-  const nrm: number[] = [];
-  const idx: number[] = [];
-  for (let axis = 0; axis < 3; axis++) {
-    for (let k = 0; k < 4; k++) {
-      const b = k & 1 ? hi : lo;
-      const c = k & 2 ? hi : lo;
-      const size = [t, t, t];
-      size[axis] = len;
-      const center = axis === 0 ? [mid, b, c] : axis === 1 ? [b, mid, c] : [b, c, mid];
-      const g = new THREE.BoxGeometry(size[0], size[1], size[2]);
-      g.translate(center[0]!, center[1]!, center[2]!);
-      const base = pos.length / 3;
-      pos.push(...(g.getAttribute('position').array as Float32Array));
-      nrm.push(...(g.getAttribute('normal').array as Float32Array));
-      for (const i of g.getIndex()!.array as ArrayLike<number> as number[]) idx.push(base + i);
-      g.dispose();
-    }
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
-  geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nrm), 3));
-  geo.setIndex(new THREE.BufferAttribute(new Uint16Array(idx), 1));
-  return geo;
-}
-
 /**
  * The glue bead in the glued face's own frame: the face lies in the z = 0 plane spanning
  * x, y in [-0.5, 0.5], z = +-0.5 are the two glued block centres' sides. Only the four side
@@ -372,14 +346,17 @@ export class OverlayLayer {
   private readonly beadGeo: THREE.BufferGeometry;
   private readonly crackBox: THREE.BoxGeometry;
   private readonly outlineGeo: THREE.BufferGeometry;
-  private readonly anchorGeo: THREE.BufferGeometry;
   private readonly outline: THREE.LineSegments;
-  private readonly anchor: THREE.Mesh;
   private readonly crack: THREE.Mesh;
   private readonly preview: InstancedCellLayer;
   private readonly conflicts: InstancedCellLayer;
   private readonly glueBead: InstancedCellLayer;
   private readonly glueGhost: InstancedCellLayer;
+  private readonly glueDecal: InstancedCellLayer;
+  /** OverlayState.glue split by OverlayFace.covered (redone when the client sends a new list). */
+  private glueList: readonly OverlayFace[] | null = null;
+  private coveredGlue: OverlayFace[] = [];
+  private exposedGlue: OverlayFace[] = [];
   private readonly crackLayerU = uniform(0, 'int');
   private readonly glueLayerU = uniform(0, 'int');
   readonly materials: THREE.Material[] = [];
@@ -476,10 +453,30 @@ export class OverlayLayer {
     })();
     this.materials.push(ghostMat);
 
+    // Decal of an exposed glued face: the glue_face tile on the block surface, depth tested.
+    const decalTex = texture(placeholder, uv()).depth(this.glueLayerU);
+    tileNodes.push(decalTex);
+    const decalMat = new THREE.NodeMaterial();
+    decalMat.name = 'overlay-glue-decal';
+    decalMat.lights = false;
+    decalMat.fog = false;
+    decalMat.transparent = true;
+    decalMat.depthWrite = false;
+    decalMat.polygonOffset = true;
+    decalMat.polygonOffsetFactor = -1;
+    decalMat.polygonOffsetUnits = -2;
+    decalMat.colorNode = Fn(() => {
+      Discard(decalTex.a.lessThan(0.04));
+      const a = min(decalTex.a.mul(1.6), float(0.95));
+      return vec4(encodeOutput(applyFogNode(u, decalTex.rgb.mul(1.1), cameraRelativePosition())), a);
+    })();
+    this.materials.push(decalMat);
+
     this.preview = new InstancedCellLayer(this.cellBox, cellMat(0x52e0ff, 0.16, 0.5), ORDER_CELLS, { kind: 'cell', inflate: 0.03 });
     this.conflicts = new InstancedCellLayer(this.cellBox, cellMat(0xff3b30, 0.3, 0.55), ORDER_CELLS, { kind: 'cell', inflate: 0.04 });
     this.glueGhost = new InstancedCellLayer(this.decalQuad, ghostMat, ORDER_DECALS, { kind: 'face', offset: 0.5 });
     this.glueBead = new InstancedCellLayer(this.beadGeo, beadMat, ORDER_GLUE, { kind: 'face', offset: 0.5 });
+    this.glueDecal = new InstancedCellLayer(this.decalQuad, decalMat, ORDER_DECALS, { kind: 'face', offset: 0.5 + GLUE_DECAL_LIFT });
 
     this.crack = new THREE.Mesh(this.crackBox, crackMat);
     this.crack.renderOrder = ORDER_DECALS;
@@ -502,24 +499,6 @@ export class OverlayLayer {
     this.outline.matrixAutoUpdate = false;
     this.outline.visible = false;
 
-    // The anchor is a solid frame of 12 thin bars (1 px lines vanish against the block faces),
-    // bright and gently pulsing so the first pick of a glue operation is easy to find again.
-    this.anchorGeo = frameGeometry(-0.02, 1.02, 0.045);
-    const anchorMat = new THREE.NodeMaterial();
-    anchorMat.name = 'overlay-anchor';
-    anchorMat.lights = false;
-    anchorMat.fog = false;
-    const gold = new THREE.Color(0xffc93a);
-    anchorMat.colorNode = Fn(() => {
-      const pulse = sin(u.time.mul(5)).mul(0.15).add(0.95);
-      return vec4(encodeOutput(applyFogNode(u, vec3(gold.r, gold.g, gold.b).mul(pulse), cameraRelativePosition())), 1);
-    })();
-    this.materials.push(anchorMat);
-    this.anchor = new THREE.Mesh(this.anchorGeo, anchorMat);
-    this.anchor.renderOrder = ORDER_LINES;
-    this.anchor.matrixAutoUpdate = false;
-    this.anchor.visible = false;
-
     this.glueLayerU.value = Math.max(0, tileLayer('glue_face'));
   }
 
@@ -536,19 +515,31 @@ export class OverlayLayer {
     } else {
       this.crack.visible = false;
     }
-    placeOnCell(this.anchor, o.glueAnchor, resolve, anchor);
     this.preview.update(o.preview, resolve, topology, anchor);
     this.conflicts.update(o.conflicts, resolve, topology, anchor);
-    this.glueGhost.update(o.glue, resolve, topology, anchor);
-    this.glueBead.update(o.glue, resolve, topology, anchor);
+    if (o.glue !== this.glueList) {
+      this.glueList = o.glue;
+      this.coveredGlue = o.glue.filter((f) => f.covered);
+      this.exposedGlue = o.glue.filter((f) => !f.covered);
+    }
+    this.glueGhost.update(this.coveredGlue, resolve, topology, anchor);
+    this.glueBead.update(this.coveredGlue, resolve, topology, anchor);
+    this.glueDecal.update(this.exposedGlue, resolve, topology, anchor);
   }
 
   /** Objects covering every overlay pipeline, for warm-up compilation. */
   warmupObjects(): THREE.Object3D[] {
     const crack = new THREE.Mesh(this.crackBox, this.crack.material);
     const outline = new THREE.LineSegments(this.outlineGeo, this.outline.material);
-    const anchor = new THREE.Mesh(this.anchorGeo, this.anchor.material);
-    return [crack, outline, anchor, this.preview.warmupMesh(), this.conflicts.warmupMesh(), this.glueGhost.warmupMesh(), this.glueBead.warmupMesh()];
+    return [
+      crack,
+      outline,
+      this.preview.warmupMesh(),
+      this.conflicts.warmupMesh(),
+      this.glueGhost.warmupMesh(),
+      this.glueBead.warmupMesh(),
+      this.glueDecal.warmupMesh(),
+    ];
   }
 
   /** Called when the tile texture changes (glue tile layer may move). */
@@ -557,7 +548,7 @@ export class OverlayLayer {
   }
 
   get instances(): number {
-    return this.preview.drawn + this.conflicts.drawn + this.glueBead.drawn;
+    return this.preview.drawn + this.conflicts.drawn + this.glueBead.drawn + this.glueDecal.drawn;
   }
 
   dispose(): void {
@@ -565,15 +556,14 @@ export class OverlayLayer {
     this.conflicts.dispose();
     this.glueGhost.dispose();
     this.glueBead.dispose();
+    this.glueDecal.dispose();
     this.outline.removeFromParent();
-    this.anchor.removeFromParent();
     this.crack.removeFromParent();
     this.cellBox.dispose();
     this.decalQuad.dispose();
     this.beadGeo.dispose();
     this.crackBox.dispose();
     this.outlineGeo.dispose();
-    this.anchorGeo.dispose();
     for (const m of this.materials) m.dispose();
   }
 }

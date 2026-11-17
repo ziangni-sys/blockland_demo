@@ -3,7 +3,7 @@
  * writing one. Saves are serialized: a save requested while another runs is coalesced into
  * one follow-up save with the newest state, so two writes never race.
  */
-import { SAVE_VERSION, isNewerSave, type WorldMeta } from '../save/codec';
+import { SAVE_VERSION, isNewerSave, isOlderSave, type WorldMeta } from '../save/codec';
 import { SaveStorageError, type SaveStorage } from '../save/storage';
 import type { SaveBundle } from '../sim/persist';
 import type { GameMode, WorldSummary } from '../ui/model';
@@ -29,7 +29,7 @@ export function newWorldMeta(id: string, name: string, seedText: string, seedHas
 
 export type LoadResult =
   | { ok: true; meta: WorldMeta; bundle: SaveBundle }
-  | { ok: false; reason: 'missing' | 'newer' | 'error'; error?: unknown };
+  | { ok: false; reason: 'missing' | 'newer' | 'older' | 'error'; error?: unknown };
 
 type Snapshot = () => { meta: WorldMeta; bundle: SaveBundle } | null;
 
@@ -63,6 +63,8 @@ export class SaveManager {
       const meta = await this.storage.getMeta(id);
       if (!meta) return { ok: false, reason: 'missing' };
       if (isNewerSave(meta)) return { ok: false, reason: 'newer' };
+      // No backward compatibility: an older world is refused before any of its data is read.
+      if (isOlderSave(meta)) return { ok: false, reason: 'older' };
       const keys = await this.storage.listChunkKeys(id);
       const data = keys.length > 0 ? await this.storage.getChunks(id, keys) : [];
       const chunks: Array<[number, Uint8Array]> = [];

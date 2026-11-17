@@ -21,12 +21,11 @@
  *              linearVelocity, angularVelocity
  *     glue     i32Array: GlueStore.toArray() (canonical x, y, z, axis quadruples)
  *     rotor:   varint bearing x y z, u8 axis, f64 x 4 baseRotation, f64 angle,
- *              f64 angularSpeed, varuint sails, bool hubGlue
+ *              f64 angularSpeed, varuint sails
  *     ship:    varint helm x y z, u8 forward, f64 throttle, f64 rudder, bool asleep,
  *              varuint restTicks
  *
- * Format 1 (still read) differed only in the cells: the box followed by a u16Array of the
- * whole dense box.
+ * Only the current format is read: older saves are rejected as a whole (save/codec.ts).
  *
  * Not stored: the helmsman (entities re-take the wheel), frozen flags and ship.sails
  * (recomputed every step), hull / mass / inertia (rebuilt by the dynamics' refresh).
@@ -46,9 +45,7 @@ import type { World } from '../voxel/world';
 import type { GlueStore } from './glue';
 import { Rotor, Ship, type Structure } from './structure';
 
-export const STRUCTURES_FORMAT = 2;
-/** The previous format (dense cell boxes); read, never written. */
-const FORMAT_DENSE = 1;
+export const STRUCTURES_FORMAT = 3;
 
 const KIND_SHIP = 0;
 const KIND_ROTOR = 1;
@@ -104,7 +101,6 @@ export function writeStructures(w: ByteWriter, nextId: number, structures: reado
       writeQuat(w, s.baseRotation);
       w.f64(s.angle).f64(s.angularSpeed);
       w.varuint(s.sails);
-      w.bool(s.hubGlue);
     } else if (s instanceof Ship) {
       w.varint(s.helmX).varint(s.helmY).varint(s.helmZ);
       w.u8(s.forward);
@@ -179,7 +175,7 @@ function writePose(w: ByteWriter, g: StructureGrid): void {
  */
 export function readStructures(r: ByteReader, world: World): DecodedStructures {
   const format = r.u8();
-  if (format !== STRUCTURES_FORMAT && format !== FORMAT_DENSE) r.fail(`unsupported structures format ${format}`);
+  if (format !== STRUCTURES_FORMAT) r.fail(`unsupported structures format ${format}`);
   const nextId = r.varuint();
   if (nextId < 1) r.fail('structure id counter must be at least 1');
   const n = r.count(MIN_RECORD_BYTES);
@@ -194,8 +190,7 @@ export function readStructures(r: ByteReader, world: World): DecodedStructures {
     const parentId = r.varuint();
     if (kind === KIND_SHIP && parentId !== 0) r.fail(`ship ${id} has a parent (${parentId})`);
     const s: Structure = kind === KIND_SHIP ? new Ship(id, world) : new Rotor(id, world);
-    if (format === FORMAT_DENSE) readDenseCells(r, s.grid);
-    else readCells(r, s.grid);
+    readCells(r, s.grid);
     readPose(r, s.grid);
     readGlue(r, s.glue);
     if (s instanceof Rotor) {
@@ -207,7 +202,6 @@ export function readStructures(r: ByteReader, world: World): DecodedStructures {
       s.angle = readFinite(r);
       s.angularSpeed = readFinite(r);
       s.sails = r.varuint();
-      s.hubGlue = r.bool();
     } else if (s instanceof Ship) {
       s.helmX = readCoord(r);
       s.helmY = readCoord(r);
@@ -277,7 +271,7 @@ function readPose(r: ByteReader, g: StructureGrid): void {
   readVec(r, g.angularVelocity);
 }
 
-/** The cell box header shared by both formats; returns its volume. */
+/** The cell box header; returns its volume. */
 function readBox(r: ByteReader): { minX: number; minY: number; minZ: number; sx: number; sy: number; sz: number; volume: number } {
   const minX = readCoord(r);
   const minY = readCoord(r);
@@ -370,25 +364,6 @@ function readCells(r: ByteReader, g: StructureGrid): void {
       const z = Math.floor(rem / sx);
       g.setCell(minX + rem - z * sx, minY + y, minZ + z, run[k]!, SET_STRUCTURE_MOVE);
     }
-  }
-}
-
-/** Format 1: the whole dense box (its length is bounded by the input, so no box limit). */
-function readDenseCells(r: ByteReader, g: StructureGrid): void {
-  const { minX, minY, minZ, sx, sy, sz, volume } = readBox(r);
-  const dense = r.u16Array();
-  if (dense.length !== volume) r.fail(`cell box holds ${dense.length} cells, expected ${volume}`);
-  if (volume === 0) return;
-  allocate(r, g, minX, minY, minZ, sx, sy, sz);
-  const layer = sx * sz;
-  for (let i = 0; i < volume; i++) {
-    const cell = dense[i]!;
-    if (cell === AIR) continue;
-    checkCell(r, cell);
-    const y = Math.floor(i / layer);
-    const rem = i - y * layer;
-    const z = Math.floor(rem / sx);
-    g.setCell(minX + rem - z * sx, minY + y, minZ + z, cell, SET_STRUCTURE_MOVE);
   }
 }
 

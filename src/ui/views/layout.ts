@@ -42,6 +42,17 @@ function rectOf(el: Element): Rect | null {
   return r.width > 0 && r.height > 0 ? { x: r.left, y: r.top, w: r.width, h: r.height } : null;
 }
 
+/** The bottom cluster's box, grown to include the off-hand socket hanging outside its flow. */
+function clusterRect(cluster: HTMLElement): Rect | null {
+  const r = rectOf(cluster);
+  const off = cluster.querySelector('.bl-offhand');
+  const o = off ? rectOf(off) : null;
+  if (r === null || o === null) return r ?? o;
+  const x = Math.min(r.x, o.x);
+  const y = Math.min(r.y, o.y);
+  return { x, y, w: Math.max(r.x + r.w, o.x + o.w) - x, h: Math.max(r.y + r.h, o.y + o.h) - y };
+}
+
 function px(v: number): string {
   return `${Math.round(v * 10) / 10}px`;
 }
@@ -115,7 +126,7 @@ export class HudLayoutController {
     const tb = t.toasts.getBoundingClientRect();
     const toasts: Rect | null = tb.width > 0 ? { x: tb.left, y: tb.top - this.toastsDy, w: tb.width, h: tb.height } : null;
 
-    const out = layoutHud({ vw, vh, gap, cluster: rectOf(t.cluster), center, debug: rectOf(t.debug), helm, banner, toasts });
+    const out = layoutHud({ vw, vh, gap, cluster: clusterRect(t.cluster), center, debug: rectOf(t.debug), helm, banner, toasts });
 
     if (out.helm) {
       const h = out.helm;

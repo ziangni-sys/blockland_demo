@@ -627,7 +627,9 @@ export class Game implements InputHost {
             ? clientText(lang, 'load.missing')
             : res.reason === 'newer'
               ? clientText(lang, 'load.newer')
-              : clientText(lang, 'load.failed', { msg: describeError(res.error) });
+              : res.reason === 'older'
+                ? clientText(lang, 'load.older')
+                : clientText(lang, 'load.failed', { msg: describeError(res.error) });
         if (res.reason === 'error') console.error('[blocklands] load failed', res.error);
         this.toast(msg, 'error');
         return this.backToMenu();

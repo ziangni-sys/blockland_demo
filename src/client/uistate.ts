@@ -98,6 +98,7 @@ export class UiStateBuilder {
   private hotbar: Array<SlotView | null> = emptySlots(HOTBAR_SIZE);
   private backpack: Array<SlotView | null> = emptySlots(INVENTORY_SIZE);
   private cursor: SlotView | null = null;
+  private offhand: SlotView | null = null;
 
   build(x: UiInputs): UiState {
     const inv = x.inventory;
@@ -105,6 +106,9 @@ export class UiStateBuilder {
     const backpack = syncSlots(this.backpack, inv ? inv.main : null, INVENTORY_SIZE);
     const curStack = inv ? inv.cursor : null;
     const cursor = sameSlot(this.cursor, curStack) ? this.cursor : toView(curStack);
+    const offStack = inv ? inv.offhand : null;
+    const offhand = sameSlot(this.offhand, offStack) ? this.offhand : toView(offStack);
+    this.offhand = offhand;
     this.hotbar = hotbar;
     this.backpack = backpack;
     this.cursor = cursor;
@@ -122,6 +126,7 @@ export class UiStateBuilder {
       prev.hotbar === hotbar &&
       prev.inventory === backpack &&
       prev.cursor === cursor &&
+      prev.offhand === offhand &&
       prev.selected === x.selected &&
       prev.health === x.health &&
       prev.maxHealth === x.maxHealth &&
@@ -149,6 +154,7 @@ export class UiStateBuilder {
       hotbar,
       selected: x.selected,
       inventory: backpack,
+      offhand,
       cursor,
       health: x.health,
       maxHealth: x.maxHealth,

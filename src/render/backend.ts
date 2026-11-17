@@ -80,6 +80,12 @@ export interface OverlayCell {
 export interface OverlayFace extends OverlayCell {
   /** Face direction (Dir 0..5) on the cell. */
   face: number;
+  /**
+   * Hard blocks on both sides of the face. A covered glued face is drawn as a bead along the
+   * joint plus an x-ray ghost. An EXPOSED one (covered false) is drawn as a depth-tested decal
+   * lying on the face: then the cell is the hard side and `face` points to the open side.
+   */
+  covered: boolean;
 }
 
 export interface OverlayState {
@@ -92,12 +98,10 @@ export interface OverlayState {
   /** Cells blocking a docking / blockify attempt, tinted red. */
   conflicts: OverlayCell[];
   /**
-   * Glued faces to draw (only near the player, only while holding glue). Each entry is the
-   * face BETWEEN two blocks: the cell plus the direction of its glued neighbour.
+   * Glued faces to draw near the player: exposed ones always, covered ones while glue is in
+   * one of the player's hands (see OverlayFace.covered).
    */
   glue: OverlayFace[];
-  /** First cell picked for a glue operation, or null. */
-  glueAnchor: OverlayCell | null;
 }
 
 /**

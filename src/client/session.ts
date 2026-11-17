@@ -184,7 +184,7 @@ export class WorldSession {
     this.structures.dispose();
     try {
       this.deps.backend.setEntities([]);
-      this.deps.backend.setOverlays({ target: null, breakProgress: 0, preview: [], conflicts: [], glue: [], glueAnchor: null });
+      this.deps.backend.setOverlays({ target: null, breakProgress: 0, preview: [], conflicts: [], glue: [] });
     } catch {
       // the backend may already be gone
     }

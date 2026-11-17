@@ -108,7 +108,7 @@ describe('lifecycle', () => {
     be.setStructurePose(9, pose(0, 0, 0));
     be.setStructureDryVolume(9, { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, mask: new Uint8Array([1]) });
     be.setEntities([{ id: 1, kind: 'rabbit', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 }]);
-    be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0 }, breakProgress: 0.5, preview: [], conflicts: [], glue: [], glueAnchor: null });
+    be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0 }, breakProgress: 0.5, preview: [], conflicts: [], glue: [] });
     be.render();
     be.dispose(); // twice is fine
     expect(be.stats()).toEqual({ drawCalls: 0, triangles: 0, sections: 0, structures: 0 });
@@ -197,7 +197,7 @@ describe('floating render origin (review: float32 precision far from the world o
     expect(g.matrix.elements[12]).toBeCloseTo(10.25 - 768, 9);
     expect(i.entities.group.matrix.elements[12]).toBe(-(far + 768));
     // World overlays: root at (anchor - origin), anchor near the camera.
-    be.setOverlays({ target: { structureId: 0, x: far + 1001, y: 59, z: far + 1 }, breakProgress: 0, preview: [], conflicts: [], glue: [], glueAnchor: null });
+    be.setOverlays({ target: { structureId: 0, x: far + 1001, y: 59, z: far + 1 }, breakProgress: 0, preview: [], conflicts: [], glue: [] });
     const outline = i.overlayRoot.children.find((c) => c instanceof THREE.LineSegments)!;
     i.overlayRoot.updateMatrixWorld(true);
     const p = new THREE.Vector3().setFromMatrixPosition(outline.matrixWorld);

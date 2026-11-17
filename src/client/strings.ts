@@ -40,6 +40,10 @@ const STRINGS = {
     zh: '这个世界由更新版本的游戏保存，请刷新页面更新后再载入',
     en: 'This world was saved by a newer version — reload the page to update first',
   },
+  'load.older': {
+    zh: '这个世界由旧版本的游戏保存，当前版本已无法读取。可以在列表里删除它',
+    en: 'This world was saved by an older version of the game and can no longer be opened. You can delete it from the list',
+  },
   'delete.failed': { zh: '删除失败：{msg}', en: 'Could not delete the world: {msg}' },
   'graphics.failed': { zh: '无法启动图形：{msg}', en: 'Could not start graphics: {msg}' },
   'graphics.notReady': { zh: '图形尚未就绪，请稍候', en: 'Graphics are not ready yet' },

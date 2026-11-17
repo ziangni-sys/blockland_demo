@@ -1,16 +1,24 @@
 /**
- * Player interaction: turns the player's input (look direction, button presses, held item)
- * into world changes, and publishes the InteractionView (target, mining progress, assembly
- * preview, docking conflicts, glue state, context hint).
+ * Player interaction: turns the player's input (look direction, button presses, held item,
+ * off-hand swaps) into world changes, and publishes the InteractionView (target, mining
+ * progress, assembly preview, docking conflicts, glue progress, context hint).
  *
  * Runs in tick step 1 (docs/ARCHITECTURE.md), before block ticks, structures and entities
  * move, so a click acts on exactly what the player saw at the end of the previous tick.
- * The edge counters input.attackPresses / usePresses are consumed here; held buttons are
- * read from input.attack / input.use. A dead player does nothing.
+ * The edge counters input.attackPresses / usePresses / swapPresses are consumed here; held
+ * buttons are read from input.attack / input.use. A dead player does nothing.
+ *
+ * GLUE (DESIGN 强力胶). Glue belongs to a face. With glue in the main hand, a right-click on a
+ * glueable block glues the face the use ray hit (between the block and its neighbour along the
+ * hit normal): at once in creative, in survival after holding the button on that same face for
+ * the block's mining time (looking away, letting go, changing the slot or swapping hands
+ * cancels; 1 glue is used on completion). Sneak + right-click removes the glue of the hit face
+ * at once. With glue in the OFF-HAND, a block the main hand places against a face gets that
+ * face glued (offhandGlue).
  *
  * RIGHT-CLICK PRIORITY
  *   steering        sneak = dock the steered ship, otherwise let go of the wheel
- *   glue in hand    glue steps (DESIGN 强力胶)
+ *   glue in hand    apply / remove the glue of the hit face (DESIGN 强力胶)
  *   bucket in hand  scoop / pour (world only)
  *   helm            world: preview -> assemble; ship: steer, sneak = dock
  *   bearing         running rotor: stop; else preview -> start
@@ -29,11 +37,11 @@
  *
  * STALE HITS. Both rays are cast before the right-click runs. The right-click may remove what
  * they hit (docking turns the ship into world blocks, a crate is lit), so they are checked again
- * before the left-click and the glue step use them: a hit on a structure that is gone, or on a
- * cell that is no longer targetable, is dropped for this tick.
+ * before the left-click and the glue operation use them: a hit on a structure that is gone, or
+ * on a cell that is no longer targetable, is dropped for this tick.
  *
- * All state is on the instance; nothing here is saved (pending glue, previews and mining
- * progress do not survive a reload by design).
+ * All state is on the instance; nothing here is saved (a timed glue operation, previews and
+ * mining progress do not survive a reload by design).
  */
 import {
   AIR,
@@ -58,7 +66,7 @@ import type { EntityEvent } from '../entities/host';
 import { maxStackOf } from '../entities/inventory';
 import { axisValue, finiteAngle } from '../entities/input';
 import { analyzeHull, isDryCell, type HullInfo } from '../structures/hull';
-import { canGlue, canJoinStructure } from '../structures/stick';
+import { canGlue, canJoinStructure, sticksWithoutGlue } from '../structures/stick';
 import { Ship, type Structure } from '../structures/structure';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
 import {
@@ -196,28 +204,17 @@ interface Preview {
   awayTicks: number;
 }
 
-/** A timed survival glue step in progress (second click held on block B). */
+/** A timed survival glue operation in progress (use held on one face of one block). */
 interface GlueOp {
-  readonly grid: VoxelGrid;
-  readonly ax: number;
-  readonly ay: number;
-  readonly az: number;
-  readonly bx: number;
-  readonly by: number;
-  readonly bz: number;
-  /** Direction from A to B. */
-  readonly dir: Dir;
-  readonly remove: boolean;
-  /** Seconds needed: the slower of the two blocks' mining times. */
-  readonly total: number;
-  progress: number;
-}
-
-interface CellRef {
   readonly grid: VoxelGrid;
   readonly x: number;
   readonly y: number;
   readonly z: number;
+  /** The glued face: towards the neighbour the ray came from. */
+  readonly face: Dir;
+  /** Seconds needed: the block's survival mining time. */
+  readonly total: number;
+  progress: number;
 }
 
 function isBucket(item: number): boolean {
@@ -271,7 +268,6 @@ export class Interaction {
   private conflictsUntil = -1;
 
   // ---- glue
-  private glueAnchor: CellRef | null = null;
   private glueOp: GlueOp | null = null;
 
   // ---- scratch (instance-owned)
@@ -323,7 +319,6 @@ export class Interaction {
     this.preview = null;
     this.conflicts = [];
     this.conflictsUntil = -1;
-    this.glueAnchor = null;
     this.glueOp = null;
   }
 
@@ -401,8 +396,10 @@ export class Interaction {
     this.applyLook(p);
     const attackPressed = input.attackPresses > 0;
     const usePressed = input.usePresses > 0;
+    const swaps = input.swapPresses;
     input.attackPresses = 0;
     input.usePresses = 0;
+    input.swapPresses = 0;
     if (p.dead || p.removed) {
       this.reset();
       return;
@@ -411,17 +408,17 @@ export class Interaction {
     const selected = p.inventory.selected;
     if (selected !== this.lastSlot) {
       // Switching the held slot drops what the hands were preparing.
-      if (this.lastSlot !== -1) {
-        this.preview = null;
-        this.glueOp = null;
-      }
+      if (this.lastSlot !== -1) this.dropPrepared();
       this.lastSlot = selected;
     }
-    const held = this.heldItem(p);
-    if (held !== I.GLUE) {
-      this.glueAnchor = null;
-      this.glueOp = null;
+    if (swaps > 0) {
+      // DESIGN 副手: swap the selected hotbar stack with the off-hand stack (two presses in one
+      // tick swap back). Like changing the slot, it drops what the hands were preparing.
+      if ((swaps & 1) === 1) p.inventory.swapOffhand();
+      this.dropPrepared();
     }
+    const held = this.heldItem(p);
+    if (held !== I.GLUE) this.glueOp = null;
     this.validate();
     this.steer(p);
     const bucket = isBucket(held);
@@ -436,6 +433,12 @@ export class Interaction {
     }
     this.updateGlueOp(p);
     this.updateMining(p, attackPressed);
+  }
+
+  /** What the hands were preparing (an assembly preview, a timed glue operation) is dropped. */
+  private dropPrepared(): void {
+    this.preview = null;
+    this.glueOp = null;
   }
 
   buildView(): InteractionView {
@@ -463,10 +466,7 @@ export class Interaction {
     const pv = this.preview;
     if (pv !== null) v.preview = { gridId: pv.grid.gridId, kind: pv.kind, cells: pv.cells };
     if (sim.world.time < this.conflictsUntil) v.conflicts = this.conflicts;
-    const a = this.glueAnchor;
-    if (a !== null) v.glueAnchor = { gridId: a.grid.gridId, x: a.x, y: a.y, z: a.z };
-    const op = this.glueOp;
-    if (op !== null) v.glueProgress = op.total > 0 ? clamp(op.progress / op.total, 0, 1) : 1;
+    v.glueProgress = this.glueProgress();
     v.hint = this.hintFor(p, h, held);
     return v;
   }
@@ -668,14 +668,6 @@ export class Interaction {
       const gone = !pv.grid.isWorld && sim.structures.structureOf(pv.grid) === null;
       if (gone || pv.dirty || glueVersionOf(sim, pv.grid) !== pv.glueVersion || gridVersionOf(pv.grid) !== pv.gridVersion) {
         this.preview = null;
-      }
-    }
-    const a = this.glueAnchor;
-    if (a !== null) {
-      const gone = !a.grid.isWorld && sim.structures.structureOf(a.grid) === null;
-      if (gone || !canGlue(a.grid.getCell(a.x, a.y, a.z))) {
-        this.glueAnchor = null;
-        this.glueOp = null;
       }
     }
     if (this.conflictsUntil >= 0 && sim.world.time >= this.conflictsUntil) {
@@ -950,7 +942,8 @@ export class Interaction {
     let x: number;
     let y: number;
     let z: number;
-    if (REPLACEABLE[hitId] === 1 && LIQUID[hitId] === 0) {
+    const replacesClicked = REPLACEABLE[hitId] === 1 && LIQUID[hitId] === 0;
+    if (replacesClicked) {
       // Clicking soft cover (a grass tuft, snow) puts the block in its place — in the world and
       // on structures alike (snow cover stacks on a deck too).
       x = hit.x;
@@ -995,6 +988,8 @@ export class Interaction {
     }
     if (!grid.setCell(x, y, z, cell)) return;
     if (p.mode !== 'creative') p.inventory.consumeSelected(1);
+    // A block that replaced the clicked one (snow, a grass tuft) was not put against a face.
+    if (!replacesClicked) this.offhandGlue(p, grid, hit, grid.getCell(x, y, z));
     sim.events.emit({ type: 'blockPlaced', gridId: grid.gridId, x, y, z, cell });
   }
 
@@ -1173,80 +1168,64 @@ export class Interaction {
 
   // ------------------------------------------------------------------ glue
 
+  /** Glue progress of the running survival operation, 0..1 (0 = none). */
+  private glueProgress(): number {
+    const op = this.glueOp;
+    if (op === null) return 0;
+    return op.total > 0 ? clamp(op.progress / op.total, 0, 1) : 1;
+  }
+
+  /**
+   * Right-click with glue in the main hand on the face the use ray hit. Sneak removes that
+   * face's glue at once (both modes, nothing refunded). Otherwise, on a glueable block whose hit
+   * face is not glued yet: creative glues at once for free; survival starts the timed operation
+   * (updateGlueOp), which needs at least one glue.
+   */
   private glueClick(p: Player, hit: GridHit | null): void {
-    const sim = this.sim;
-    if (hit === null) {
-      this.glueAnchor = null;
-      this.glueOp = null;
-      return;
-    }
+    this.glueOp = null;
+    if (hit === null) return;
     if (this.locked(hit.grid) !== null) {
       this.toastKey('toast.glue.spinning', 'warn');
       return;
     }
+    const glue = this.sim.structures.glueFor(hit.grid);
+    const glued = glue.has(hit.x, hit.y, hit.z, hit.face);
+    if (p.input.sneak) {
+      if (!glued) {
+        this.toastKey('toast.glue.notGlued', 'warn');
+        return;
+      }
+      glue.remove(hit.x, hit.y, hit.z, hit.face);
+      this.toastKey('toast.glue.removed');
+      this.glueSound(hit.grid, hit.x, hit.y, hit.z, hit.face, 'unglue');
+      return;
+    }
     if (!canGlue(hit.cell)) {
-      // Liquids, soft blocks, unbreakable blocks: anything else clears the selection.
-      this.glueAnchor = null;
-      this.glueOp = null;
+      // Soft blocks, liquids, unbreakable blocks.
       this.toastKey('toast.glue.cannot', 'warn');
       return;
     }
-    const a = this.glueAnchor;
-    if (a !== null && a.grid === hit.grid) {
-      const dx = hit.x - a.x;
-      const dy = hit.y - a.y;
-      const dz = hit.z - a.z;
-      if (dx === 0 && dy === 0 && dz === 0) {
-        // The anchor again: deselect.
-        this.glueAnchor = null;
-        this.glueOp = null;
-        return;
-      }
-      if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) === 1) {
-        const dir = nearestDir(dx, dy, dz);
-        const remove = p.input.sneak;
-        const glue = sim.structures.glueFor(hit.grid);
-        const glued = glue.has(a.x, a.y, a.z, dir);
-        if (remove && !glued) {
-          this.toastKey('toast.glue.notGlued', 'warn');
-          return;
-        }
-        if (!remove && glued) {
-          this.toastKey('toast.glue.already', 'warn');
-          return;
-        }
-        if (p.mode === 'creative') {
-          this.applyGlue(p, hit.grid, a.x, a.y, a.z, dir, remove);
-          return;
-        }
-        if (!remove && p.inventory.count(I.GLUE) < 1) {
-          this.toastKey('toast.glue.none', 'warn');
-          return;
-        }
-        const ha = BLOCKS[a.grid.getCell(a.x, a.y, a.z) & ID_MASK]?.hardness ?? 0;
-        const hb = BLOCKS[hit.cell & ID_MASK]?.hardness ?? 0;
-        this.glueOp = {
-          grid: hit.grid,
-          ax: a.x,
-          ay: a.y,
-          az: a.z,
-          bx: hit.x,
-          by: hit.y,
-          bz: hit.z,
-          dir,
-          remove,
-          total: Math.max(ha, hb, 0),
-          progress: 0,
-        };
-        return;
-      }
+    if (glued) {
+      this.toastKey('toast.glue.already', 'warn');
+      return;
     }
-    // First click, or a block that is not next to the anchor: (re)pick the anchor.
-    this.glueAnchor = { grid: hit.grid, x: hit.x, y: hit.y, z: hit.z };
-    this.glueOp = null;
+    if (p.mode === 'creative') {
+      this.applyGlue(p, hit.grid, hit.x, hit.y, hit.z, hit.face);
+      return;
+    }
+    if (p.inventory.count(I.GLUE) < 1) {
+      this.toastKey('toast.glue.none', 'warn');
+      return;
+    }
+    const total = Math.max(0, BLOCKS[hit.cell & ID_MASK]?.hardness ?? 0);
+    this.glueOp = { grid: hit.grid, x: hit.x, y: hit.y, z: hit.z, face: hit.face, total, progress: 0 };
   }
 
-  /** Survival glue step: progresses while use stays held on block B; looking away or letting go cancels. */
+  /**
+   * Survival glue operation: progresses while use stays held on the same face of the same cell;
+   * anything else (looking away, letting go, the block or the grid changing) cancels it.
+   * Changing the slot and swapping hands cancel it in tick().
+   */
   private updateGlueOp(p: Player): void {
     const op = this.glueOp;
     if (op === null) return;
@@ -1255,42 +1234,65 @@ export class Interaction {
       !p.input.use ||
       h === null ||
       h.grid !== op.grid ||
-      h.x !== op.bx ||
-      h.y !== op.by ||
-      h.z !== op.bz ||
+      h.x !== op.x ||
+      h.y !== op.y ||
+      h.z !== op.z ||
+      h.face !== op.face ||
       !this.isLive(op.grid) ||
       this.locked(op.grid) !== null ||
       !canGlue(h.cell)
     ) {
-      this.glueOp = null; // cancelled; the anchor stays picked
+      this.glueOp = null;
       return;
     }
     op.progress += TICK_DT;
     if (op.progress < op.total - 1e-9) return;
     this.glueOp = null;
-    this.applyGlue(p, op.grid, op.ax, op.ay, op.az, op.dir, op.remove);
+    this.applyGlue(p, op.grid, op.x, op.y, op.z, op.face);
   }
 
-  private applyGlue(p: Player, grid: VoxelGrid, x: number, y: number, z: number, dir: Dir, remove: boolean): void {
-    const sim = this.sim;
-    if (!this.isLive(grid)) return; // the structure was docked or destroyed meanwhile
-    const glue = sim.structures.glueFor(grid);
-    if (remove) {
-      if (glue.remove(x, y, z, dir)) this.toastKey('toast.glue.removed');
-    } else {
-      if (p.mode !== 'creative' && !p.inventory.consume(I.GLUE, 1)) {
-        this.toastKey('toast.glue.none', 'warn');
-        return;
-      }
-      if (glue.add(x, y, z, dir)) this.toastKey('toast.glue.added');
+  /** Glue one face (main hand): survival uses 1 glue. */
+  private applyGlue(p: Player, grid: VoxelGrid, x: number, y: number, z: number, face: Dir): void {
+    const glue = this.sim.structures.glueFor(grid);
+    if (glue.has(x, y, z, face)) return; // glued meanwhile by some other way: nothing to pay for
+    if (p.mode !== 'creative' && !p.inventory.consume(I.GLUE, 1)) {
+      this.toastKey('toast.glue.none', 'warn');
+      return;
     }
-    this.glueAnchor = null;
+    glue.add(x, y, z, face);
+    this.toastKey('toast.glue.added');
+    this.glueSound(grid, x, y, z, face, 'glue');
+  }
+
+  /**
+   * DESIGN 副手: the main hand just placed `placed` at (x,y,z) of `grid` against face `face` of
+   * the clicked block (hit.x, hit.y, hit.z), whose neighbour it is. With glue in the off-hand
+   * that face gets glued, when both blocks are glueable, the face is not glued yet and the two
+   * do not already stick together without glue. Survival uses 1 glue from the off-hand; with
+   * none left nothing happens.
+   */
+  private offhandGlue(p: Player, grid: VoxelGrid, hit: GridHit, placed: number): void {
+    const off = p.inventory.offhand;
+    if (off === null || off.item !== I.GLUE) return;
+    const clicked = grid.getCell(hit.x, hit.y, hit.z);
+    if (!canGlue(clicked) || !canGlue(placed)) return;
+    // Spares survival glue: blocks that connect anyway (auto-stick, mounting) are not glued.
+    const alreadySticks = sticksWithoutGlue(clicked, placed, hit.face);
+    if (alreadySticks) return;
+    const glue = this.sim.structures.glueFor(grid);
+    if (glue.has(hit.x, hit.y, hit.z, hit.face)) return;
+    if (p.mode !== 'creative' && !p.inventory.consumeOffhand(1)) return;
+    glue.add(hit.x, hit.y, hit.z, hit.face);
+    this.glueSound(grid, hit.x, hit.y, hit.z, hit.face, 'glue');
+  }
+
+  private glueSound(grid: VoxelGrid, x: number, y: number, z: number, face: Dir, name: 'glue' | 'unglue'): void {
     const c = this.tmp;
-    c.x = x + 0.5 + DIR_X[dir]! * 0.5;
-    c.y = y + 0.5 + DIR_Y[dir]! * 0.5;
-    c.z = z + 0.5 + DIR_Z[dir]! * 0.5;
+    c.x = x + 0.5 + DIR_X[face]! * 0.5;
+    c.y = y + 0.5 + DIR_Y[face]! * 0.5;
+    c.z = z + 0.5 + DIR_Z[face]! * 0.5;
     grid.toWorld(c, c);
-    sim.events.emit({ type: 'sound', name: remove ? 'unglue' : 'glue', x: c.x, y: c.y, z: c.z });
+    this.sim.events.emit({ type: 'sound', name, x: c.x, y: c.y, z: c.z });
   }
 
   // ================================================================== left click
@@ -1373,8 +1375,7 @@ export class Interaction {
   private hintFor(p: Player, h: GridHit | null, held: number): Message | null {
     const sim = this.sim;
     if (p.steeringShipId !== 0) return msg('hint.steering');
-    const op = this.glueOp;
-    if (op !== null) return msg(op.remove ? 'hint.glue.unglueWorking' : 'hint.glue.working');
+    if (this.glueOp !== null) return msg('hint.glue.working', { pct: Math.floor(this.glueProgress() * 100) });
     if (h === null) return null;
     if (this.locked(h.grid) !== null) return msg('hint.rotor.spinning');
     if (held === I.GLUE) return this.glueHint(p, h);
@@ -1398,21 +1399,11 @@ export class Interaction {
     return null;
   }
 
+  /** What a right-click with glue in the main hand would do on the hit face. */
   private glueHint(p: Player, h: GridHit): Message {
+    const glued = this.sim.structures.glueFor(h.grid).has(h.x, h.y, h.z, h.face);
+    if (p.input.sneak) return msg(glued ? 'hint.glue.remove' : 'hint.glue.notGlued');
     if (!canGlue(h.cell)) return msg('hint.glue.cannot');
-    const a = this.glueAnchor;
-    if (a === null) return msg('hint.glue.first');
-    if (a.grid === h.grid) {
-      const dx = h.x - a.x;
-      const dy = h.y - a.y;
-      const dz = h.z - a.z;
-      if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) === 1) {
-        const glued = this.sim.structures.glueFor(h.grid).has(a.x, a.y, a.z, nearestDir(dx, dy, dz));
-        if (p.input.sneak) return msg(glued ? 'hint.glue.remove' : 'hint.glue.notGlued');
-        return msg(glued ? 'hint.glue.already' : 'hint.glue.apply');
-      }
-      if (dx === 0 && dy === 0 && dz === 0) return msg('hint.glue.first');
-    }
-    return msg('hint.glue.move');
+    return msg(glued ? 'hint.glue.already' : 'hint.glue.apply');
   }
 }

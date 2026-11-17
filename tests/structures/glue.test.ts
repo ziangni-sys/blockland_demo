@@ -136,7 +136,7 @@ describe('GlueStore: single faces', () => {
     expect(s.has(1.5, 0, 0, PX)).toBe(false);
     expect(s.has(GLUE_MAX_XZ + 17, 0, 0, PX)).toBe(false);
     expect(s.remove(Number.NaN, 0, 0, PX)).toBe(false);
-    expect(s.removeAllAt(1e12, 0, 0)).toBe(0);
+    expect(s.dirMaskAt(1e12, 0, 0)).toBe(0);
     expect(s.size).toBe(1);
   });
 
@@ -168,8 +168,8 @@ describe('GlueStore: single faces', () => {
   });
 });
 
-describe('GlueStore: removeAllAt and dirMaskAt', () => {
-  it('drops exactly the six faces touching a cell', () => {
+describe('GlueStore: dirMaskAt', () => {
+  it('reports exactly the six faces touching a cell', () => {
     const s = new GlueStore();
     for (const d of ALL_DIRS) s.add(-3, 7, -1, d);
     // Unrelated faces: neighbours' other faces and a face two cells away.
@@ -179,15 +179,10 @@ describe('GlueStore: removeAllAt and dirMaskAt', () => {
     s.add(-3, 8, -1, PZ);
     expect(s.size).toBe(10);
     expect(s.dirMaskAt(-3, 7, -1)).toBe(0b111111);
-    expect(s.removeAllAt(-3, 7, -1)).toBe(6);
-    expect(s.size).toBe(4);
-    expect(s.dirMaskAt(-3, 7, -1)).toBe(0);
-    for (const d of ALL_DIRS) expect(s.has(-3, 7, -1, d)).toBe(false);
-    expect(s.has(-2, 7, -1, PX)).toBe(true);
-    expect(s.has(-4, 7, -1, PY)).toBe(true);
-    expect(s.has(-3, 9, -1, NY)).toBe(true);
-    expect(s.has(-3, 8, -1, PZ)).toBe(true);
-    expect(s.removeAllAt(-3, 7, -1)).toBe(0);
+    s.remove(-3, 7, -1, NX);
+    s.remove(-3, 7, -1, PY);
+    expect(s.dirMaskAt(-3, 7, -1)).toBe(0b111111 & ~(1 << NX) & ~(1 << PY));
+    expect(s.dirMaskAt(-3, 9, -1)).toBe(1 << NY);
   });
   it('dirMaskAt reports each direction bit', () => {
     const s = new GlueStore();
@@ -368,27 +363,32 @@ function transform(r: (p: P) => P, tx: number, ty: number, tz: number): Map3 {
 interface Cluster {
   s: GlueStore;
   inSet: (x: number, y: number, z: number) => boolean;
+  /** moveTo's `stays`: true for the outside end of `oneEndStays` only. */
+  stays: (x: number, y: number, z: number) => boolean;
   /** Faces with both ends in the set (they move). */
   inner: Array<[P, P]>;
-  /** Faces with exactly one end in the set (they are deleted): [in-set end, outside end]. */
-  oneEnd: Array<[P, P]>;
+  /** A face with one end in the set whose outside end stays behind: kept in the source. [in, out] */
+  oneEndStays: [P, P];
+  /** A face with one end in the set whose outside end does not stay: it moves. [in, out] */
+  oneEndMoves: [P, P];
   /** A face with no end in the set (it stays in the source store, untouched). */
   outside: [P, P];
-  /** toArray() of a store holding only the inner faces, at their original positions. */
-  innerArray: Int32Array;
+  /** toArray() of a store holding only the faces that move, at their original positions. */
+  movedArray: Int32Array;
 }
 
 /**
  * A 4x2x2 cell set with glued faces on all three axes (inner), two faces leaving the set —
- * one whose canonical (smaller) end is inside, one whose far end is inside — and one face
- * entirely outside it.
+ * one whose canonical (smaller) end is inside and whose outer end stays behind, one whose far
+ * end is inside and whose outer end does not stay — and one face entirely outside it.
  */
 function cluster(): Cluster {
   const cells = new Set<string>();
   for (let x = -2; x <= 1; x++) for (let y = 3; y <= 4; y++) for (let z = -1; z <= 0; z++) cells.add(`${x},${y},${z}`);
   const inSet = (x: number, y: number, z: number): boolean => cells.has(`${x},${y},${z}`);
+  const stays = (x: number, y: number, z: number): boolean => x === 2 && y === 3 && z === 0;
   const s = new GlueStore();
-  const innerOnly = new GlueStore();
+  const movedOnly = new GlueStore();
   const glue = (a: P, d: Dir): [P, P] => {
     s.add(a.x, a.y, a.z, d);
     return [a, { x: a.x + DIR_X[d]!, y: a.y + DIR_Y[d]!, z: a.z + DIR_Z[d]! }];
@@ -400,67 +400,93 @@ function cluster(): Cluster {
     glue({ x: -1, y: 4, z: 0 }, NZ),
     glue({ x: 1, y: 3, z: -1 }, PZ),
   ];
-  for (const [a, b] of inner) innerOnly.add(a.x, a.y, a.z, dirBetween(a, b));
-  const oneEnd: Array<[P, P]> = [
-    glue({ x: 1, y: 3, z: 0 }, PX), // (2,3,0) outside; the canonical end (1,3,0) is inside
-    glue({ x: -2, y: 3, z: -1 }, NY), // (-2,2,-1) outside and canonical; (-2,3,-1) inside
-  ];
+  const oneEndStays = glue({ x: 1, y: 3, z: 0 }, PX); // (2,3,0) outside and staying; canonical end inside
+  const oneEndMoves = glue({ x: -2, y: 3, z: -1 }, NY); // (-2,2,-1) outside and canonical, not staying
+  for (const [a, b] of [...inner, oneEndMoves]) movedOnly.add(a.x, a.y, a.z, dirBetween(a, b));
   const outside = glue({ x: 10, y: 10, z: 10 }, PY);
-  for (const [a, b] of [...oneEnd, outside]) {
+  for (const [a, b] of [oneEndStays, oneEndMoves, outside]) {
     expect(inSet(a.x, a.y, a.z) && inSet(b.x, b.y, b.z)).toBe(false); // the helper's own sanity
   }
-  return { s, inSet, inner, oneEnd, outside, innerArray: innerOnly.toArray() };
+  return { s, inSet, stays, inner, oneEndStays, oneEndMoves, outside, movedArray: movedOnly.toArray() };
 }
 
-/** Did `s` keep exactly the untouched face and none of the one-end faces? */
+function hasFace(s: GlueStore, [a, b]: [P, P]): boolean {
+  return s.has(a.x, a.y, a.z, dirBetween(a, b));
+}
+
+/** Does `s` hold exactly the untouched face and the staying one-end face (nothing that moved)? */
 function expectSourceAfterMove(s: GlueStore, c: Cluster): void {
-  const [oa, ob] = c.outside;
-  expect(s.has(oa.x, oa.y, oa.z, dirBetween(oa, ob))).toBe(true);
-  for (const [a, b] of c.oneEnd) expect(s.has(a.x, a.y, a.z, dirBetween(a, b))).toBe(false);
+  expect(hasFace(s, c.outside)).toBe(true);
+  expect(hasFace(s, c.oneEndStays)).toBe(true);
+  expect(hasFace(s, c.oneEndMoves)).toBe(false);
+  for (const f of c.inner) expect(hasFace(s, f)).toBe(false);
+  expect(s.size).toBe(2);
+}
+
+function mapped(map: Map3, [a, b]: [P, P]): [P, P] {
+  const ma = map(a.x, a.y, a.z);
+  const mb = map(b.x, b.y, b.z);
+  return [{ ...ma }, { ...mb }];
 }
 
 describe('GlueStore: moveTo', () => {
-  it('translation: both-end faces move, one-end faces are deleted, others stay', () => {
+  it('translation: both-end faces move; a one-end face stays when its outside end stays, else moves; others stay', () => {
     const cl = cluster();
-    const { s, inSet, inner } = cl;
+    const { s, inSet, stays, inner } = cl;
     const t = new GlueStore();
     t.add(50, 50, 50, PZ); // pre-existing target glue is kept
-    const n = s.moveTo(t, inSet, transform((p) => p, 100, -200, 300));
-    expect(n).toBe(inner.length);
-    expect(s.size).toBe(1);
+    const map = transform((p) => p, 100, -200, 300);
+    const n = s.moveTo(t, inSet, map, stays);
+    expect(n).toBe(inner.length + 1);
     expectSourceAfterMove(s, cl);
-    expect(t.size).toBe(inner.length + 1);
+    expect(t.size).toBe(inner.length + 2);
     expect(t.has(50, 50, 50, PZ)).toBe(true);
-    for (const [a, b] of inner) expect(t.has(a.x + 100, a.y - 200, a.z + 300, dirBetween(a, b))).toBe(true);
-    // The one-end faces were deleted, not carried along.
-    for (const [a, b] of cl.oneEnd) expect(t.has(a.x + 100, a.y - 200, a.z + 300, dirBetween(a, b))).toBe(false);
+    for (const f of [...inner, cl.oneEndMoves]) expect(hasFace(t, mapped(map, f))).toBe(true);
+    // The staying face is not duplicated into the target.
+    expect(hasFace(t, mapped(map, cl.oneEndStays))).toBe(false);
+  });
+
+  it('with nothing staying every face touching the set moves; with everything staying only both-end faces do', () => {
+    const a = cluster();
+    expect(a.s.moveTo(new GlueStore(), a.inSet, (x, y, z) => ({ x, y, z }), () => false)).toBe(a.inner.length + 2);
+    expect(a.s.size).toBe(1);
+    const b = cluster();
+    expect(b.s.moveTo(new GlueStore(), b.inSet, (x, y, z) => ({ x, y, z }), () => true)).toBe(b.inner.length);
+    expect(b.s.size).toBe(3);
+  });
+
+  it('a moved face landing on a face the target already holds merges with it', () => {
+    const s = new GlueStore();
+    s.add(0, 0, 0, PX);
+    s.add(0, 0, 0, PY);
+    const t = new GlueStore();
+    t.add(5, 0, 0, PX);
+    expect(s.moveTo(t, () => true, (x, y, z) => ({ x: x + 5, y, z }), () => false)).toBe(2);
+    expect(t.size).toBe(2);
+    expect(t.has(5, 0, 0, PX)).toBe(true);
+    expect(t.has(5, 0, 0, PY)).toBe(true);
+    expect(s.size).toBe(0);
   });
 
   for (const [name, rot] of [['X', rotX], ['Y', rotY], ['Z', rotZ]] as const) {
     for (const k of [1, 2, 3]) {
-      it(`rotation by ${k * 90} degrees about ${name} re-keys from the mapped ends; one-end faces deleted, others untouched`, () => {
+      it(`rotation by ${k * 90} degrees about ${name} re-keys from the mapped ends`, () => {
         const cl = cluster();
-        const { s, inSet, inner } = cl;
+        const { s, inSet, stays, inner } = cl;
         const r = times(rot, k);
         const t = new GlueStore();
         const map = transform(r, -7, 5, -3);
-        expect(s.moveTo(t, inSet, map)).toBe(inner.length);
-        expect(s.size).toBe(1);
+        expect(s.moveTo(t, inSet, map, stays)).toBe(inner.length + 1);
         expectSourceAfterMove(s, cl);
-        expect(t.size).toBe(inner.length);
-        for (const [a, b] of inner) {
-          const ma = map(a.x, a.y, a.z);
-          const mb = map(b.x, b.y, b.z);
+        expect(t.size).toBe(inner.length + 1);
+        for (const f of [...inner, cl.oneEndMoves]) {
+          const [ma, mb] = mapped(map, f);
           expect(t.has(ma.x, ma.y, ma.z, dirBetween(ma, mb))).toBe(true);
           expect(t.has(mb.x, mb.y, mb.z, dirBetween(mb, ma))).toBe(true);
         }
-        // Neither the mapped nor the unmapped position of a one-end face appears in the target.
-        for (const [a, b] of cl.oneEnd) {
-          const ma = map(a.x, a.y, a.z);
-          const mb = map(b.x, b.y, b.z);
-          expect(t.has(ma.x, ma.y, ma.z, dirBetween(ma, mb))).toBe(false);
-          expect(t.has(a.x, a.y, a.z, dirBetween(a, b))).toBe(false);
-        }
+        // Neither the mapped nor the unmapped position of the staying face appears in the target.
+        expect(hasFace(t, mapped(map, cl.oneEndStays))).toBe(false);
+        expect(hasFace(t, cl.oneEndStays)).toBe(false);
       });
     }
   }
@@ -469,22 +495,23 @@ describe('GlueStore: moveTo', () => {
     const s = new GlueStore();
     s.add(0, 0, 0, PX); // (0,0,0)-(1,0,0)
     const all = (): boolean => true;
+    const none = (): boolean => false;
     const t = new GlueStore();
-    s.moveTo(t, all, transform(rotY, 0, 0, 0)); // (1,0,0) -> (0,0,-1)
+    s.moveTo(t, all, transform(rotY, 0, 0, 0), none); // (1,0,0) -> (0,0,-1)
     const got: string[] = [];
     t.forEach((x, y, z, axis: Axis) => got.push(`${x},${y},${z},${axis}`));
     expect(got).toEqual(['0,0,-1,2']);
     const u = new GlueStore();
-    t.moveTo(u, all, transform(rotZ, 0, 0, 0)); // z axis stays z
+    t.moveTo(u, all, transform(rotZ, 0, 0, 0), none); // z axis stays z
     expect(facesOf(u)).toEqual(['0,0,-1,2']);
     const v = new GlueStore();
-    u.moveTo(v, all, transform(rotX, 0, 0, 0)); // (0,0,-1)-(0,0,0) -> (0,1,0)-(0,0,0)
+    u.moveTo(v, all, transform(rotX, 0, 0, 0), none); // (0,0,-1)-(0,0,0) -> (0,1,0)-(0,0,0)
     expect(facesOf(v)).toEqual(['0,0,0,1']);
   });
 
   it('in place (target === this) and with a map that reuses its result object', () => {
     const cl = cluster();
-    const { s, inSet, inner } = cl;
+    const { s, inSet, stays, inner } = cl;
     const out: P = { x: 0, y: 0, z: 0 };
     const reuse: Map3 = (x, y, z) => {
       const q = rotY({ x, y, z });
@@ -494,42 +521,41 @@ describe('GlueStore: moveTo', () => {
       return out;
     };
     const fresh = transform(rotY, 1, 0, 0);
-    expect(s.moveTo(s, inSet, reuse)).toBe(inner.length);
-    expect(s.size).toBe(inner.length + 1); // + the untouched outside face
-    expectSourceAfterMove(s, cl);
-    for (const [a, b] of inner) {
-      const ma = fresh(a.x, a.y, a.z);
-      const mb = fresh(b.x, b.y, b.z);
-      expect(s.has(ma.x, ma.y, ma.z, dirBetween(ma, mb))).toBe(true);
-    }
+    expect(s.moveTo(s, inSet, reuse, stays)).toBe(inner.length + 1);
+    expect(s.size).toBe(inner.length + 1 + 2); // + the untouched outside face and the staying face
+    expect(hasFace(s, cl.outside)).toBe(true);
+    expect(hasFace(s, cl.oneEndStays)).toBe(true);
+    for (const f of [...inner, cl.oneEndMoves]) expect(hasFace(s, mapped(fresh, f))).toBe(true);
   });
 
   it('round trip through four quarter turns restores the moved faces', () => {
-    const { s, inSet, innerArray } = cluster();
+    const { s, inSet, stays, movedArray } = cluster();
     let cur = s;
     let set = inSet;
+    let st = stays;
     for (let i = 0; i < 4; i++) {
       const next = new GlueStore();
-      cur.moveTo(next, set, transform(rotY, 0, 0, 0));
+      cur.moveTo(next, set, transform(rotY, 0, 0, 0), st);
       const prevSet = set;
       set = (x, y, z) => {
         const p = times(rotY, 3)({ x, y, z }); // inverse of rotY
         return prevSet(p.x, p.y, p.z);
       };
+      st = () => false;
       cur = next;
     }
-    // The first move dropped the one-end faces and left the outside face behind.
-    expect(cur.toArray()).toEqual(innerArray);
+    // The first move left the staying face and the outside face behind.
+    expect(cur.toArray()).toEqual(movedArray);
   });
 
   it('is atomic when the map breaks adjacency or leaves the range', () => {
-    const { s, inSet } = cluster();
+    const { s, inSet, stays } = cluster();
     const before = s.toArray();
     const t = new GlueStore();
-    expect(() => s.moveTo(t, inSet, (x, y, z) => ({ x: x * 2, y, z }))).toThrow();
+    expect(() => s.moveTo(t, inSet, (x, y, z) => ({ x: x * 2, y, z }), stays)).toThrow();
     expect(s.toArray()).toEqual(before);
     expect(t.size).toBe(0);
-    expect(() => s.moveTo(t, inSet, (x, y, z) => ({ x: x + GLUE_MAX_XZ, y, z }))).toThrow(RangeError);
+    expect(() => s.moveTo(t, inSet, (x, y, z) => ({ x: x + GLUE_MAX_XZ, y, z }), stays)).toThrow(RangeError);
     expect(s.toArray()).toEqual(before);
     expect(t.size).toBe(0);
   });
@@ -537,7 +563,7 @@ describe('GlueStore: moveTo', () => {
   it('an empty set moves nothing and deletes nothing', () => {
     const { s } = cluster();
     const n0 = s.size;
-    expect(s.moveTo(new GlueStore(), () => false, (x, y, z) => ({ x, y, z }))).toBe(0);
+    expect(s.moveTo(new GlueStore(), () => false, (x, y, z) => ({ x, y, z }), () => false)).toBe(0);
     expect(s.size).toBe(n0);
   });
 });
@@ -548,7 +574,6 @@ describe('GlueStore: version', () => {
     const v0 = s.version;
     s.has(0, 0, 0, PX);
     s.remove(0, 0, 0, PX);
-    s.removeAllAt(0, 0, 0);
     s.clear();
     expect(s.version).toBe(v0);
     s.add(0, 0, 0, PX);
@@ -561,12 +586,96 @@ describe('GlueStore: version', () => {
     const v2 = s.version;
     const t = new GlueStore();
     const tv = t.version;
-    s.moveTo(t, () => true, (x, y, z) => ({ x: x + 1, y, z }));
+    s.moveTo(t, () => true, (x, y, z) => ({ x: x + 1, y, z }), () => false);
     expect(s.version).toBeGreaterThan(v2);
     expect(t.version).toBeGreaterThan(tv);
     const v3 = t.version;
-    t.removeAllAt(1, 0, 0);
+    t.clear();
     expect(t.version).toBeGreaterThan(v3);
     expect(t.size).toBe(0);
+  });
+});
+
+describe('GlueStore: change events', () => {
+  /** A store kept ONLY from `src`'s events. */
+  function mirrorOf(src: GlueStore): { mirror: GlueStore; off: () => void } {
+    const mirror = new GlueStore();
+    const off = src.onChange((added, x, y, z, axis) => {
+      const d = (axis * 2) as Dir;
+      if (added) expect(mirror.add(x, y, z, d)).toBe(true);
+      else expect(mirror.remove(x, y, z, d)).toBe(true);
+    });
+    return { mirror, off };
+  }
+
+  it('a mirror fed only by the events stays identical through a long random sequence (bulk operations included)', () => {
+    const rng = new Rng(77);
+    const s = new GlueStore();
+    const other = new GlueStore();
+    const { mirror } = mirrorOf(s);
+    const c = (): number => rng.int(-12, 12);
+    for (let i = 0; i < 6000; i++) {
+      const op = rng.int(0, 9);
+      if (op <= 3) {
+        s.add(c(), c(), c(), rng.int(0, 5) as Dir);
+      } else if (op <= 5) {
+        s.remove(c(), c(), c(), rng.int(0, 5) as Dir);
+      } else if (op === 6) {
+        // In-place move of a random box, with a random rotation and offset (faces may merge).
+        const x0 = c();
+        const inSet = (x: number, y: number, z: number): boolean => x >= x0 && x < x0 + 6 && Math.abs(y) < 8 && Math.abs(z) < 8;
+        const map = transform(times(rotY, rng.int(0, 3)), rng.int(-3, 3), rng.int(-3, 3), rng.int(-3, 3));
+        const stayBit = rng.int(0, 1);
+        s.moveTo(s, inSet, map, (x) => (x & 1) === stayBit);
+      } else if (op === 7) {
+        // Out to another store and (part of it) back in.
+        const y0 = c();
+        s.moveTo(other, (_x, y) => y >= y0, (x, y, z) => ({ x, y, z }), () => rng.chance(0.5));
+        const x1 = c();
+        other.moveTo(s, (x) => x < x1, (x, y, z) => ({ x: z, y, z: -x }), () => false);
+      } else if (op === 8) {
+        if (rng.chance(0.05)) s.clear();
+      } else {
+        for (let k = 0; k < 4; k++) other.add(c(), c(), c(), rng.int(0, 5) as Dir);
+      }
+      if (i % 500 === 0) expect(mirror.toArray()).toEqual(s.toArray());
+    }
+    expect(s.size).toBeGreaterThan(0);
+    expect(mirror.toArray()).toEqual(s.toArray());
+    expect(mirror.size).toBe(s.size);
+  });
+
+  it('reports each face once per change, with the canonical cell and axis; no-ops report nothing', () => {
+    const s = new GlueStore();
+    const log: string[] = [];
+    s.onChange((added, x, y, z, axis) => log.push(`${added ? '+' : '-'}${x},${y},${z},${axis}`));
+    s.add(1, 0, 0, NX); // canonical (0,0,0) axis 0
+    s.add(0, 0, 0, PX); // duplicate
+    s.remove(5, 5, 5, PY); // absent
+    s.add(0, 0, 0, PY);
+    s.remove(0, 1, 0, NY);
+    s.add(3, 3, 3, PZ);
+    s.clear();
+    s.clear(); // empty
+    expect(log).toEqual(['+0,0,0,0', '+0,0,0,1', '-0,0,0,1', '+3,3,3,2', '-0,0,0,0', '-3,3,3,2']);
+  });
+
+  it('unsubscribing during dispatch does not skip the next listener (copy-on-write); unsubscribe is idempotent', () => {
+    const s = new GlueStore();
+    const calls: string[] = [];
+    let offA: () => void = () => undefined;
+    offA = s.onChange(() => {
+      calls.push('a');
+      offA();
+    });
+    const offB = s.onChange(() => calls.push('b'));
+    s.add(0, 0, 0, PX);
+    s.add(0, 0, 0, PY);
+    expect(calls).toEqual(['a', 'b', 'b']);
+    offA();
+    offB();
+    offB();
+    s.add(0, 0, 0, PZ);
+    expect(calls).toEqual(['a', 'b', 'b']);
   });
 });

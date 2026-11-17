@@ -12,7 +12,7 @@
  * their glue and rotor angles), 'entities' (incl. the player and inventory).
  * A loader finds the saved chunks with SaveStorage.listChunkKeys().
  *
- * Deliberately NOT saved: what the player's hands were doing (a pending glue step, an
+ * Deliberately NOT saved: what the player's hands were doing (a timed glue operation, an
  * assembly preview, mining progress, highlighted docking conflicts) — a reload starts with
  * empty hands.
  */
@@ -30,7 +30,7 @@ export interface SaveBundle {
   blobs: Array<[string, Uint8Array]>;
 }
 
-/** 1: time + rng. 2: + time-of-day offset. */
+/** Layout of the 'sim' blob: time, rng, time-of-day offset. Only this version is read. */
 const SIM_BLOB_VERSION = 2;
 
 export function exportSave(sim: Simulation): SaveBundle {
@@ -76,10 +76,10 @@ export function importSave(sim: Simulation, bundle: SaveBundle): void {
   if (simBlob) {
     const r = new ByteReader(simBlob, 'sim');
     const version = r.varuint();
-    if (version < 1 || version > SIM_BLOB_VERSION) r.fail(`unsupported sim blob version ${version}`);
+    if (version !== SIM_BLOB_VERSION) r.fail(`unsupported sim blob version ${version}`);
     sim.world.time = r.varuint();
     sim.rng.state = r.u32();
-    sim.dayOffset = version >= 2 ? mod(r.varuint(), DAY_TICKS) : 0;
+    sim.dayOffset = mod(r.varuint(), DAY_TICKS);
   }
 
   sim.world.ticks.clear();
