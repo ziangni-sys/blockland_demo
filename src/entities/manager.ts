@@ -985,31 +985,42 @@ export class EntityManager {
    * Steps b–e for a displacement already chosen by the controller (in this.rel / this.disp).
    * Returns the structure that crushed the body this tick, or null.
    */
-  private moveBody(e: Entity, sneakGuard: boolean): StructRec | null {
+  private moveBody(e: Entity, sneakGuard: boolean, walker = false): StructRec | null {
     const d = this.disp;
     const rel = this.rel;
     this.relocatedDy = 0;
-    if (Math.abs(d.x) + Math.abs(d.y) + Math.abs(d.z) > NEAR_MARGIN * 0.5) this.gatherNear(e, d.x, d.y, d.z);
+    // A walker may step up STEP_HEIGHT: structures that high above must be seen too.
+    if (walker) this.gatherNear(e, d.x, d.y, d.z, STEP_HEIGHT);
+    else if (Math.abs(d.x) + Math.abs(d.y) + Math.abs(d.z) > NEAR_MARGIN * 0.5) this.gatherNear(e, d.x, d.y, d.z);
     const mover = this.mover;
-    mover.move(e, rel, d.x, d.y, d.z, sneakGuard);
+    mover.move(e, rel, d.x, d.y, d.z, sneakGuard, walker);
     e.onWorldGround = mover.onWorldGround;
     e.onGround = mover.onWorldGround || mover.groundRec !== null;
     e.contactNx = mover.contactNx;
     e.contactNz = mover.contactNz;
     // d. crush: whatever overlap remains was made by a structure (own motion was taken back).
     let crushed: StructRec | null = null;
+    let relocated = false;
     if (mover.near.length > 0) {
       crushed = mover.findOverlap(e);
       if (crushed !== null) {
-        this.relocate(e, CRUSH_SEARCH_RADIUS);
+        relocated = this.unstick(e, CRUSH_SEARCH_RADIUS);
         this.crushed(e);
         if (e.removed) return crushed;
       }
     }
-    if (crushed === null && mover.inWorldBlock(e)) {
-      // Something put a world block into the body (placed, landed, blockified): step aside.
-      if (!this.relocate(e, UNSTUCK_SEARCH_RADIUS) && e instanceof Player) this.damage(e, 1, 'suffocate');
+    if (crushed === null) {
+      if (mover.inWorldBlock(e)) {
+        // Something put a world block into the body (placed, landed, blockified): step aside.
+        relocated = this.unstick(e, UNSTUCK_SEARCH_RADIUS);
+        if (!relocated && e instanceof Player) this.damage(e, 1, 'suffocate');
+      } else {
+        e.unstuckFails = 0;
+        e.unstuckWait = 0;
+      }
     }
+    // The attach step looks at the structures around the body where it is NOW.
+    if (relocated) this.gatherNear(e, 0, 0, 0);
     // e. attach / detach
     this.updateCarrier(e);
     e.vel.x = rel.x + e.carrierVel.x;
@@ -1018,24 +1029,86 @@ export class EntityManager {
     return crushed;
   }
 
-  /** Move the body to the nearest spot free of the world and every near structure (same overlap test as pushing). */
+  /**
+   * Free a body that overlaps the world or a structure: nearest free spot within `radius`; a
+   * buried passive body (no free spot nearby) rises to the first free spot above it. A failed
+   * attempt backs off (2^failures ticks, at most UNSTUCK_MAX_BACKOFF_TICKS): a body deep in rock
+   * must not run a full lattice search every tick (review finding: ~0.26 ms per buried drop).
+   */
+  private unstick(e: Entity, radius: number): boolean {
+    if (e.unstuckWait > 0) {
+      e.unstuckWait--;
+      return false;
+    }
+    if (this.relocate(e, radius) || (!(e instanceof Player) && this.riseOut(e))) {
+      e.unstuckFails = 0;
+      return true;
+    }
+    const f = e.unstuckFails < 16 ? e.unstuckFails : 16;
+    e.unstuckFails = f + 1;
+    const wait = 1 << f;
+    e.unstuckWait = wait < UNSTUCK_MAX_BACKOFF_TICKS ? wait : UNSTUCK_MAX_BACKOFF_TICKS;
+    return false;
+  }
+
+  /**
+   * Move the body to the nearest spot free of the world and of EVERY structure the search can
+   * reach — the same overlap test as pushing (LESSONS 挪到空位后立刻又被挤). The structures are
+   * gathered over the whole search radius: mover.near only covers NEAR_MARGIN, and a spot inside
+   * a structure 1–3 blocks away would be crushed again at once (review finding).
+   */
   private relocate(e: Entity, radius: number): boolean {
+    const b = e.box(this.box1);
+    const reach = this.cache.near(b, radius, this.relocNear);
     const grids = this.grids;
     grids.length = 0;
     grids.push(this.host.world);
-    const near = this.mover.near;
-    for (let k = 0; k < near.length; k++) grids.push(near[k]!.grid);
-    const off = nearestFreeOffset(grids, e.box(this.box1), radius);
+    for (let k = 0; k < reach.length; k++) grids.push(reach[k]!.grid);
+    const off = nearestFreeOffset(grids, b, radius);
     if (off === null) return false;
-    e.pos.x += off.x;
-    e.pos.y += off.y;
-    e.pos.z += off.z;
-    this.relocatedDy += off.y;
-    // Stand still relative to the carrier: no velocity survives being squeezed out.
+    this.teleportBy(e, off.x, off.y, off.z);
+    return true;
+  }
+
+  /**
+   * A buried passive body rises straight up to the first cell-aligned spot free of the world and
+   * of every structure, at most BURIED_RISE_LIMIT blocks (drops of a windmill blockified inside a
+   * hill pop out on top of it, ACCEPTANCE 12). Cheap: one world range test per layer.
+   */
+  private riseOut(e: Entity): boolean {
+    const col = e.box(this.box1);
+    col.maxY += BURIED_RISE_LIMIT;
+    const reach = this.cache.near(col, 0, this.relocNear);
+    const world = this.host.world;
+    const y0 = e.pos.y;
+    const base = Math.floor(y0);
+    const b = this.box3;
+    for (let k = 1; k <= BURIED_RISE_LIMIT; k++) {
+      const fy = base + k;
+      boxAt(e, e.pos.x, fy, e.pos.z, b);
+      if (boxOverlapsSolid(world, b)) continue;
+      let free = true;
+      for (let j = 0; j < reach.length && free; j++) {
+        const r = reach[j]!;
+        if (boxNearRec(b, r, 0) && boxOverlapsSolid(r.grid, b)) free = false;
+      }
+      if (!free) continue;
+      this.teleportBy(e, 0, fy - y0, 0);
+      return true;
+    }
+    return false;
+  }
+
+  /** Displace a body that was squeezed / dug out: a teleport, not a fall, and no velocity survives. */
+  private teleportBy(e: Entity, dx: number, dy: number, dz: number): void {
+    e.pos.x += dx;
+    e.pos.y += dy;
+    e.pos.z += dz;
+    this.relocatedDy += dy;
+    // Stand still relative to the carrier.
     this.rel.x = 0;
     this.rel.y = 0;
     this.rel.z = 0;
-    return true;
   }
 
   /**
@@ -1170,7 +1243,7 @@ export class EntityManager {
     }
     this.splashCheck(p, wasWet);
     const y0 = p.pos.y;
-    this.moveBody(p, guard && !p.flying);
+    this.moveBody(p, guard && !p.flying, !seated && !p.flying);
     if (p.removed || p.dead) return;
     if (seated && p.steeringShipId !== 0) {
       p.onGround = true;
@@ -1405,7 +1478,7 @@ export class EntityManager {
     let dy = e.wanderYaw - e.yaw;
     dy = Math.atan2(Math.sin(dy), Math.cos(dy));
     e.yaw += dy * 0.35;
-    this.moveBody(e, false);
+    this.moveBody(e, false, true);
   }
 
   /** Is the spot one hop ahead safe: supported within RABBIT_MAX_DROP and not water / lava? */

@@ -18,12 +18,13 @@ import * as THREE from 'three/webgpu';
 import {
   abs,
   attribute,
-  cameraPosition,
+  cameraWorldMatrix,
   clamp,
   dFdx,
   dFdy,
   Discard,
   dot,
+  exp,
   float,
   floor,
   Fn,
@@ -36,7 +37,7 @@ import {
   modelWorldMatrix,
   normalize,
   positionLocal,
-  positionWorld,
+  positionView,
   pow,
   reflect,
   renderGroup,
@@ -56,10 +57,17 @@ import {
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import { AMBIENT_FLOOR, FACE_BOTTOM, FACE_TOP, FACE_X, FACE_Z, LIGHT_CURVE_K, type FogParams, type SkyState } from './lighting';
+import { animOrigin, BOB_OFFSET, BOB_WAVES, RIPPLE_WAVES, SWAY_PHASE } from './waves';
 
 /** Number of structures whose dry volumes cut world water at the same time. */
 export const DRY_SLOTS = 4;
-/** Linearly filtered mask value above which world water is cut (see makeMaskTexture). */
+/**
+ * Mask value above which world water is cut. The mask is sampled bilinearly in the
+ * horizontal plane only (exact layer in y, see dryVolumeFactor): inside a dry cell the value
+ * never drops below 0.25 (an inner corner of the hold, one dry cell out of four around the
+ * vertex), so 0.2 cuts every dry fragment while the cut reaches at most ~0.3 cells into the
+ * neighbouring hull walls (which hide it) and never into open cells.
+ */
 const DRY_THRESHOLD = 0.2;
 
 type N<T> = Node<T>;
@@ -87,10 +95,24 @@ export class SharedUniforms {
   readonly fogEnd = uniform(128).setGroup(renderGroup);
   readonly fogColor = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
   readonly fogFixed = uniform(0).setGroup(renderGroup);
+  /** Submerged exponential fog coefficient per block (lighting.ts FogParams.density). */
+  readonly fogDensity = uniform(0).setGroup(renderGroup);
+  /** Multiplicative surface tint of the medium the camera is in ((1,1,1) in air). */
+  readonly mediumTint = uniform(new THREE.Vector3(1, 1, 1)).setGroup(renderGroup);
+  /**
+   * Origin of the animation fields (waves.ts): the camera snapped to WAVE_PERIOD, an integer
+   * vector, so section translations minus it stay exact in float32.
+   */
+  readonly animOrigin = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
+  /** Camera position minus animOrigin, computed in float64 on the CPU (small, precise). */
+  readonly cameraAnim = uniform(new THREE.Vector3(0, 0, 0)).setGroup(renderGroup);
   /** Tile layers of world water (still, flow): only those fragments are cut by dry volumes. */
   readonly waterLayers = uniform(new THREE.Vector2(-1, -1)).setGroup(renderGroup);
   readonly dryCount = uniform(0).setGroup(renderGroup);
+  /** Camera-relative position -> mask uvw, one per slot (pose.ts dryVolumeMatrix with the camera as origin). */
   readonly dryMatrices: THREE.UniformNode<"mat4", THREE.Matrix4>[] = [];
+  /** Layer count (DryVolume.sy) of each slot's mask, slot i in component i. */
+  readonly dryLayers = uniform(new THREE.Vector4(1, 1, 1, 1)).setGroup(renderGroup);
 
   constructor() {
     for (let i = 0; i < DRY_SLOTS; i++) this.dryMatrices.push(uniform(new THREE.Matrix4()).setGroup(renderGroup));
@@ -137,6 +159,17 @@ export class SharedUniforms {
     this.fogEnd.value = Math.max(f.end, f.start + 0.01);
     this.fogColor.value.set(f.color.r, f.color.g, f.color.b);
     this.fogFixed.value = f.fixedColor;
+    this.fogDensity.value = f.density;
+    this.mediumTint.value.set(f.tint.r, f.tint.g, f.tint.b);
+  }
+
+  /** Rebases the animation fields near the camera (call whenever the camera moves). */
+  applyCamera(x: number, y: number, z: number): void {
+    const ax = animOrigin(x);
+    const ay = animOrigin(y);
+    const az = animOrigin(z);
+    this.animOrigin.value.set(ax, ay, az);
+    this.cameraAnim.value.set(x - ax, y - ay, z - az);
   }
 }
 
@@ -186,14 +219,30 @@ export function skyGradientNode(u: SharedUniforms, dir: N<'vec3'>): N<'vec3'> {
   return mix(base, u.sunGlow, clamp(lobe.mul(u.glowStrength), 0, 1));
 }
 
-/** Fog blend factor 0..1 and colour for a world position. */
-export function applyFogNode(u: SharedUniforms, color: N<'vec3'>, worldPos: N<'vec3'>): N<'vec3'> {
-  const toFrag = worldPos.sub(cameraPosition);
-  const dist = length(toFrag);
-  const f = smoothstep(u.fogStart, u.fogEnd, dist);
-  const dir = toFrag.div(max(dist, 1e-4));
+/**
+ * Fragment position relative to the camera (world - camera). Built from the view-space
+ * position, which the renderer computes with a CPU float64 model-view matrix (highPrecision),
+ * so it stays exact far from the world origin where `positionWorld` (float32 world matrix
+ * times vertex) loses whole fractions of a block. Fragment stage.
+ */
+export function cameraRelativePosition(): N<'vec3'> {
+  return cameraWorldMatrix.mul(vec4(positionView, 0)).xyz;
+}
+
+/**
+ * Medium tint + fog for a fragment at camera-relative position `rel` (mirrors
+ * lighting.fogFactor). In air: smoothstep fog to the sky gradient seen in the same direction,
+ * so far terrain melts exactly into the sky behind it. Submerged: every surface tinted by
+ * the medium and exponential fog to its colour, rising from the first block.
+ */
+export function applyFogNode(u: SharedUniforms, color: N<'vec3'>, rel: N<'vec3'>): N<'vec3'> {
+  const dist = length(rel);
+  const air = smoothstep(u.fogStart, u.fogEnd, dist);
+  const medium = float(1).sub(exp(dist.mul(u.fogDensity).negate()));
+  const f = mix(air, medium, u.fogFixed);
+  const dir = rel.div(max(dist, 1e-4));
   const fogCol = mix(skyGradientNode(u, dir), u.fogColor, u.fogFixed);
-  return mix(color, fogCol, f);
+  return mix(color.mul(u.mediumTint), fogCol, f);
 }
 
 /** Decoded per-vertex light inputs (vertex stage values; they become varyings when read in the fragment). */
@@ -222,13 +271,23 @@ function decodeVertexLight(obj: N<'vec4'>): VertexLight {
   };
 }
 
-/** Wave height used for liquid-surface bobbing; depends only on WORLD xz so sections never crack. */
-function waveHeight(u: SharedUniforms, xz: N<'vec2'>): N<'float'> {
-  const t = u.time;
-  const a = sin(xz.x.mul(0.61).add(xz.y.mul(0.27)).add(t.mul(1.3)));
-  const b = sin(xz.y.mul(0.83).sub(xz.x.mul(0.19)).add(t.mul(1.7)));
-  const c = sin(xz.x.add(xz.y).mul(1.37).add(t.mul(2.3)));
-  return a.mul(0.022).add(b.mul(0.018)).add(c.mul(0.009)).sub(0.035);
+/** Sum of travelling waves (waves.ts) at anim-space xz, time t. */
+function waveSum(waves: readonly { kx: number; kz: number; w: number; a: number }[], xz: N<'vec2'>, t: N<'float'>): N<'float'> {
+  let h: N<'float'> = float(0);
+  for (const wv of waves) h = h.add(sin(xz.x.mul(wv.kx).add(xz.y.mul(wv.kz)).add(t.mul(wv.w))).mul(wv.a));
+  return h;
+}
+
+/**
+ * Vertex position in ANIMATION space (world - animOrigin), before any displacement. The
+ * object's translation minus the integer animOrigin is computed first: for world sections both
+ * are integers, so the result and the sum with the (exact) local position are exact in
+ * float32 at any distance from the world origin. Coincident vertices of neighbouring sections
+ * therefore get bit-identical wave heights and the liquid surface stays watertight.
+ */
+function animSpacePosition(u: SharedUniforms): N<'vec3'> {
+  const t = modelWorldMatrix.element(3).xyz;
+  return t.sub(u.animOrigin).add(modelWorldMatrix.mul(vec4(positionLocal, 0)).xyz);
 }
 
 /**
@@ -238,10 +297,10 @@ function waveHeight(u: SharedUniforms, xz: N<'vec2'>): N<'float'> {
  */
 function animatedPosition(u: SharedUniforms, vl: VertexLight): N<'vec3'> {
   const p = positionLocal;
-  const w = modelWorldMatrix.mul(vec4(p, 1)).xyz;
-  const bob = waveHeight(u, w.xz).mul(vl.liquid);
+  const a = animSpacePosition(u);
   const t = u.time;
-  const phase = w.x.mul(0.7).add(w.z.mul(0.43));
+  const bob = waveSum(BOB_WAVES, a.xz, t).add(BOB_OFFSET).mul(vl.liquid);
+  const phase = a.x.mul(SWAY_PHASE.kx).add(a.z.mul(SWAY_PHASE.kz));
   const swayW = uv().y.mul(vl.plant).mul(0.055);
   const sx = sin(t.mul(1.9).add(phase)).add(sin(t.mul(3.1).add(phase.mul(1.7))).mul(0.35));
   const sz = cos(t.mul(1.6).add(phase.mul(1.3)));
