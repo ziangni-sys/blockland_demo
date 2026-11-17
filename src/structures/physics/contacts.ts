@@ -26,9 +26,12 @@
  * flung along. So for rotor contacts, faces along the relative sweep pay a depth penalty of up
  * to GRAZE_PENALTY: a perpendicular exit shallower than that wins. Points on a face of the hull
  * (one normal) are unaffected — the alignment rule leaves them only the face toward the blade,
- * so a blade that meets a hull squarely pushes it at full strength. Rotor contacts never use
- * the deep "walk back" fallback either: a point the blade has passed more than a cell into is
- * left alone instead of being pushed out through the blade's far side.
+ * so a blade that meets a hull squarely pushes it at full strength. A blade sample point inside
+ * the hull that lies within one face of the blade stands for that flat face, and its contact
+ * takes the BLADE face's normal; only blade edges and corners take the hull face's normal
+ * (vertex-against-face). Rotor contacts never use the deep "walk back" fallback, and contacts
+ * deeper than ROTOR_STALE_DEPTH are kept inert: a point the blade has passed into is left alone
+ * instead of being pushed out through the blade's far side.
  */
 import { DIR_X, DIR_Y, DIR_Z } from '../../core/dirs';
 import type { Body } from './body';
@@ -94,11 +97,25 @@ export const FIX_B = 2;
 /** Both sides asked to be fixed: the contact stays two-sided. */
 export const FIX_CONFLICT = 3;
 
-/** F_PIN values. */
-export const PIN_PINNED = 1; // its (ship, rotor) pair is pinned this sub-step
-export const PIN_STALE = 2; // rotor contact deeper than ROTOR_STALE_DEPTH (see below)
-export const PIN_BLOCKED = 3; // rotor contact driving the ship straight into its supports (dynamics.ts)
-export const PIN_REDIRECTED = 4; // active, normal replaced by the blade's motion along the supports, no positional bias
+/**
+ * F_PIN: the state of a rotor contact in the current sub-step (0 for terrain and ship contacts).
+ * Every state but 0 and PIN_REDIRECTED transfers nothing (zero effective mass in the solver).
+ *  - PIN_STALE      deeper than ROTOR_STALE_DEPTH (set here, at generation).
+ *  - PIN_CUTTING    its (ship, rotor) pair has a stale contact: the blade is cutting through the
+ *                   hull (dynamics.ts prepareDriven, before the solve).
+ *  - PIN_BLOCKED    drives the ship straight into its own supports and cannot be redirected
+ *                   (prepareDriven), or jammed: still violated after the solve (pinning.ts jam).
+ *  - PIN_REDIRECTED drives the ship into its supports; its normal became the blade's motion along
+ *                   them; acts on the linear velocity only, no positional correction (prepareDriven).
+ *  - PIN_PINNED     its (ship, rotor) pair is pinned (pinning.ts detect).
+ * BLOCKED, REDIRECTED and CUTTING contacts still take part in the pin test; STALE ones only in
+ * choosing the cell to destroy.
+ */
+export const PIN_PINNED = 1;
+export const PIN_STALE = 2;
+export const PIN_BLOCKED = 3;
+export const PIN_REDIRECTED = 4;
+export const PIN_CUTTING = 5;
 
 export class ContactSet {
   count = 0;

@@ -61,6 +61,8 @@ const F_PIN = CR.F_PIN;
 const PIN_PINNED = CR.PIN_PINNED;
 const PIN_BLOCKED = CR.PIN_BLOCKED;
 const PIN_REDIRECTED = CR.PIN_REDIRECTED;
+const PIN_STALE = CR.PIN_STALE;
+const PIN_CUTTING = CR.PIN_CUTTING;
 const F_SRC = CR.F_SRC;
 const F_VO = CR.F_VO;
 const STRIDE = CR.STRIDE;
@@ -78,12 +80,21 @@ const ROTOR_WAKE_MARGIN = 0.25;
  * jam a ship pushed up to 31 degrees off the wall's normal, up to 48 together with the blade's own
  * friction, so the ship could neither slide away (as LESSONS 能动的船被误判压坏 demands for
  * anything outside the 25-degree pin cone) nor be pinned, and the blade would cut into its hull.
- * Without that friction the pin cone alone decides: inside it the ship is held and pinned,
- * outside it the blade slides the ship along the terrain. Ground under a ship pushed sideways
- * (normal across the push) keeps its friction. The same goes for the pushed ship's contacts
- * with other ships.
+ * Without that friction — the supports' and, on that ship, the blade's own — the pin cone alone
+ * decides: inside it the ship is held and pinned, outside it the blade slides the ship along the
+ * terrain. Ground under a ship pushed sideways (normal across the push) keeps its friction. The
+ * same goes for the pushed ship's contacts with other ships.
  */
 const FRICTION_RELEASE = 0.2;
+/**
+ * A rotor contact counts as driving the ship straight into its supports (blocked / redirected,
+ * see prepareDriven) only within this cone (cosine, ~11.5 degrees) of exactly opposing them.
+ * Anything wider can still be met — the ship slides along the support, fast near the pin cone —
+ * and is left to the pin test. A cone as wide as the pin cone would block the face contacts of
+ * a blade whose own motion lies just outside it (face normal and point velocity differ by a few
+ * degrees), so the blade would dig in without pinning or pushing.
+ */
+const BLOCK_COS = 0.98;
 
 export class ShipDynamicsImpl implements ShipDynamics {
   readonly options: ResolvedOptions;
@@ -109,6 +120,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
   private readonly gen = new ContactGenerator();
   private readonly pins = new PinDetector();
   private readonly supports = new SupportQuery();
+  private readonly blockQuery = new SupportQuery();
   private readonly mR = new Float64Array(9);
   private readonly mI = new Float64Array(9);
   private readonly mT = new Float64Array(9);
@@ -583,8 +595,14 @@ export class ShipDynamicsImpl implements ShipDynamics {
 
   /**
    * Before a solve, for every ship with rotor contacts:
+   *  - a (ship, rotor) pair with a stale contact is CUTTING: the blade is more than half a cell
+   *    inside the hull (it cut in while the ship was pinned), so it is passing through, not
+   *    pushing — none of the pair's contacts transfers anything. The few that are still shallow
+   *    sit on trailing faces or deep inside a half-destroyed hull, and alone they only fling it
+   *    about. The pin test still sees them: while the ship stays held, cells keep breaking.
    *  - a rotor contact whose blade drives into it (vo . n > 0) along a normal that the ship's own
-   *    supports oppose (the pin test's support rule) cannot be met: typically a blade edge or
+   *    supports oppose almost exactly (the pin test's support rule, BLOCK_COS) cannot be met:
+   *    typically a blade edge or
    *    corner pressing a hull face whose other side lies against a wall, while the blade itself
    *    moves obliquely. Handed to the solver as is, it only jams the ship and spins it about the
    *    contact. It is REDIRECTED instead: its normal becomes the blade's velocity without the
@@ -594,10 +612,11 @@ export class ShipDynamicsImpl implements ShipDynamics {
    *    without spinning it about a point on its far side. When nothing usable is left (the blade moves straight into the support, or the
    *    remaining direction is blocked too, as in a corner) it is BLOCKED: it transfers nothing,
    *    and the pin test, in which it still takes part, pins the pair.
-   * Then, for every ship that an active blade contact presses (pinning condition 1a), with d the
-   * blades' direction of motion,
+   * Then, for every ship that a driving blade contact (active or redirected) presses (pinning
+   * condition 1a), with d the blades' direction of motion,
    *  - its contacts that oppose d, with terrain and with other ships, become frictionless (see
-   *    FRICTION_RELEASE): outside the pin cone the blade slides the ship along them;
+   *    FRICTION_RELEASE): outside the pin cone the blade slides the ship along them; so do its
+   *    driving rotor contacts then (the ship slides along the blade face as well);
    *  - its contacts with another ship it presses that way are one-sided (F_FIX, see solver.ts):
    *    if that ship cannot give way along the contact's normal (held by terrain, a frozen ship
    *    ... — the pin test's support rule) it is the immovable side and the driven hull slides
@@ -617,10 +636,25 @@ export class ShipDynamicsImpl implements ShipDynamics {
     const ratio = this.options.pinPressRatio;
     const sup = this.supports;
     sup.configure(this.options.pinOpposeCos);
+    const blk = this.blockQuery;
+    blk.configure(Math.max(BLOCK_COS, this.options.pinOpposeCos));
     const ter = this.ter;
     for (let i = 0; i < active.length; i++) {
       const b = active[i]!;
       if (b.kinEnd <= b.kinStart) continue;
+      // cutting pairs: contacts of one (ship, rotor) pair are contiguous
+      let k0 = b.kinStart;
+      while (k0 < b.kinEnd) {
+        const src = kf[k0 * STRIDE + F_SRC];
+        let k1 = k0;
+        let stale = false;
+        while (k1 < b.kinEnd && kf[k1 * STRIDE + F_SRC] === src) {
+          if (kf[k1 * STRIDE + F_PIN] === PIN_STALE) stale = true;
+          k1++;
+        }
+        if (stale) for (let k = k0; k < k1; k++) if (kf[k * STRIDE + F_PIN] === 0) kf[k * STRIDE + F_PIN] = PIN_CUTTING;
+        k0 = k1;
+      }
       for (let k = b.kinStart; k < b.kinEnd; k++) {
         const c = k * STRIDE;
         if (kf[c + F_PIN] !== 0) continue;
@@ -633,13 +667,13 @@ export class ShipDynamicsImpl implements ShipDynamics {
         const von = vox * nx + voy * ny + voz * nz;
         if (von <= 0) continue;
         const src = kf[c + F_SRC]!;
-        if (!sup.blocked(b, kin, ter, shipStart, bodies, nx, ny, nz, src, 0)) continue;
+        if (!blk.blocked(b, kin, ter, shipStart, bodies, nx, ny, nz, src, 0)) continue;
         const tx = vox - von * nx;
         const ty = voy - von * ny;
         const tz = voz - von * nz;
         const tl = Math.sqrt(tx * tx + ty * ty + tz * tz);
         const vb = Math.sqrt(vox * vox + voy * voy + voz * voz);
-        if (tl > ratio * vb && !sup.blocked(b, kin, ter, shipStart, bodies, tx / tl, ty / tl, tz / tl, src, 0)) {
+        if (tl > ratio * vb && !blk.blocked(b, kin, ter, shipStart, bodies, tx / tl, ty / tl, tz / tl, src, 0)) {
           kf[c + F_NX] = tx / tl;
           kf[c + F_NX + 1] = ty / tl;
           kf[c + F_NX + 2] = tz / tl;
@@ -660,8 +694,9 @@ export class ShipDynamicsImpl implements ShipDynamics {
       let dz = 0;
       for (let k = b.kinStart; k < b.kinEnd; k++) {
         const c = k * STRIDE;
+        // only contacts that actually drive the ship define its push direction
         const pinState = kf[c + F_PIN];
-        if ((pinState !== 0 && pinState !== PIN_BLOCKED && pinState !== PIN_REDIRECTED) || !bladePresses(kf, c, ratio)) continue;
+        if ((pinState !== 0 && pinState !== PIN_REDIRECTED) || !bladePresses(kf, c, ratio)) continue;
         const vx = kf[c + F_VO]!;
         const vy = kf[c + F_VO + 1]!;
         const vz = kf[c + F_VO + 2]!;
@@ -675,9 +710,13 @@ export class ShipDynamicsImpl implements ShipDynamics {
       dx /= dl;
       dy /= dl;
       dz /= dl;
+      let released = false;
       for (let k = b.terStart; k < b.terEnd; k++) {
         const c = k * STRIDE;
-        if (tf[c + F_NX]! * dx + tf[c + F_NX + 1]! * dy + tf[c + F_NX + 2]! * dz < -FRICTION_RELEASE) tf[c + F_MU] = 0;
+        if (tf[c + F_NX]! * dx + tf[c + F_NX + 1]! * dy + tf[c + F_NX + 2]! * dz < -FRICTION_RELEASE) {
+          tf[c + F_MU] = 0;
+          released = true;
+        }
       }
       for (let k = shipStart; k < kin.count; k++) {
         const c = k * STRIDE;
@@ -690,7 +729,11 @@ export class ShipDynamicsImpl implements ShipDynamics {
         const nz = kf[c + F_NX + 2]! * sgn;
         if (nx * dx + ny * dy + nz * dz >= -FRICTION_RELEASE) continue;
         kf[c + F_MU] = 0;
+        released = true;
         const other = bodies[(isA ? kf[c + F_B] : kf[c + F_A])!]!;
+        // a frozen ship or a sleeper taking part as an obstacle is immovable in the solver anyway
+        // (fixing b as well would leave the contact with no side that moves)
+        if (other.mode !== MODE_ACTIVE) continue;
         // The other ship is pushed along -n_b. Held that way: it is the immovable side, b slides
         // along it. Free: b is, since an infinitely strong blade drives it — the other ship
         // must give way entirely instead of shoving b back into the blade.
@@ -698,6 +741,11 @@ export class ShipDynamicsImpl implements ShipDynamics {
         const want = held === isA ? FIX_B : FIX_A;
         const cur = kf[c + F_FIX]!;
         kf[c + F_FIX] = cur === FIX_NONE || cur === want ? want : FIX_CONFLICT;
+      }
+      // Pressed into its supports, the ship escapes by sliding along them, and so slides along
+      // the blade's face too: the blade's own friction would jam it just like the supports'.
+      if (released) {
+        for (let k = b.kinStart; k < b.kinEnd; k++) if (kf[k * STRIDE + F_PIN] === 0) kf[k * STRIDE + F_MU] = 0;
       }
     }
   }

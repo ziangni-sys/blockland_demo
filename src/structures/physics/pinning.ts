@@ -18,11 +18,12 @@
  *  (2) the blade's direction of motion d = vo / |vo| is almost exactly opposed by what holds the
  *      ship: some support normal m has m . d <= -pinOpposeCos (one wall), or — voxel normals are
  *      axis-aligned, so corners need this — every axis on which d has a significant component
- *      (|d_i| > sin) is covered by a support normal opposing d on that axis. d is the blade's own motion, not the relative velocity: once a ship slides
- *      along a wall at the blade's tangential speed the relative velocity points straight into
- *      the wall, which would make every oblique blade "opposed" (the bug the reviewers found).
- *      The normal is not used either: a blade corner inside a hull takes the HULL's face normal,
- *      which can point into the wall while the blade itself moves at 60 degrees to it.
+ *      (|d_i| > sin) is covered by a support normal opposing d on that axis.
+ *      d is the blade's own motion, not the relative velocity: once a ship slides along a wall at
+ *      the blade's tangential speed the relative velocity points straight into the wall, which
+ *      would make every oblique blade "opposed" (the bug the reviewers found). The normal is not
+ *      used either: a blade corner inside a hull takes the HULL's face normal, which can point
+ *      into the wall while the blade itself moves at 60 degrees to it.
  *
  * Supports are the ship's contacts of this sub-step: terrain; OTHER rotors (a ship crushed
  * between two blades); other ships that cannot give way along d — a frozen ship, or a simulated
@@ -65,10 +66,18 @@ const KIND_ROTOR = CR.KIND_ROTOR;
 const PIN_PINNED = CR.PIN_PINNED;
 const PIN_BLOCKED = CR.PIN_BLOCKED;
 const PIN_REDIRECTED = CR.PIN_REDIRECTED;
+const PIN_CUTTING = CR.PIN_CUTTING;
 const STRIDE = CR.STRIDE;
 
 /** Blade speeds below this (blocks/s) never pin: a stopped rotor is just a wall. */
 const MIN_BLADE_SPEED = 1e-4;
+/**
+ * A contact is jammed when the solve left more than this fraction of the blade's speed pressing
+ * into it (relative, like the pin thresholds). A solve that can meet its contacts converges to a
+ * small remainder even for a steep wedge (frictionless, the Gauss-Seidel remainder shrinks by
+ * sin^2 of the wedge angle per pass); contacts that cannot all be met keep nearly all of it.
+ */
+const JAM_RATIO = 0.5;
 /** How many ships deep a chain of ship/ship supports is followed. */
 const MAX_SUPPORT_CHAIN = 4;
 
@@ -225,7 +234,7 @@ export class PinDetector {
   /**
    * After the first velocity solve of a sub-step: mark the rotor contacts of pinned (ship, rotor)
    * pairs (F_PIN = PIN_PINNED; stale contacts keep PIN_STALE and never decide the test; blocked
-   * ones, which took no part in the solve, still do).
+   * and cutting ones, which took no part in the solve, still do).
    * `kin` holds rotor contacts in [0, shipStart), grouped by (ship, rotor), then ship/ship
    * contacts. Returns the number of pinned pairs and records the hull cell to destroy on each
    * pinned ship.
@@ -247,15 +256,17 @@ export class PinDetector {
       for (let k = i; k < j && !pin; k++) {
         const c = k * STRIDE;
         const pinState = f[c + F_PIN];
-        if (f[c + F_KIND] !== KIND_ROTOR || (pinState !== 0 && pinState !== PIN_BLOCKED && pinState !== PIN_REDIRECTED)) continue;
+        if (f[c + F_KIND] !== KIND_ROTOR || !(pinState === 0 || pinState === PIN_BLOCKED || pinState === PIN_REDIRECTED || pinState === PIN_CUTTING)) continue;
         if (!bladePresses(f, c, ratio)) continue; // (1a)
         const vox = f[c + F_VO]!;
         const voy = f[c + F_VO + 1]!;
         const voz = f[c + F_VO + 2]!;
         const vb = Math.sqrt(vox * vox + voy * voy + voz * voz);
-        const rx = f[c + F_PX]! - A.px;
-        const ry = f[c + F_PX + 1]! - A.py;
-        const rz = f[c + F_PX + 2]! - A.pz;
+        // a redirected contact acts through the centre of mass (solver.ts)
+        const lin = pinState === PIN_REDIRECTED;
+        const rx = lin ? 0 : f[c + F_PX]! - A.px;
+        const ry = lin ? 0 : f[c + F_PX + 1]! - A.py;
+        const rz = lin ? 0 : f[c + F_PX + 2]! - A.pz;
         const relx = vox - (A.vx + A.wy * rz - A.wz * ry);
         const rely = voy - (A.vy + A.wz * rx - A.wx * rz);
         const relz = voz - (A.vz + A.wx * ry - A.wy * rx);
@@ -270,7 +281,7 @@ export class PinDetector {
         for (let k = i; k < j; k++) {
           const c = k * STRIDE;
           const ps = f[c + F_PIN];
-          if (ps === 0 || ps === PIN_BLOCKED || ps === PIN_REDIRECTED) f[c + F_PIN] = PIN_PINNED;
+          if (ps === 0 || ps === PIN_BLOCKED || ps === PIN_REDIRECTED || ps === PIN_CUTTING) f[c + F_PIN] = PIN_PINNED;
           // destroy where the blade is driving in deepest, stale contacts included (first found
           // on ties: deterministic)
           if (bladePresses(f, c, ratio) && f[c + F_DEPTH]! > bestDepth) {
@@ -287,8 +298,9 @@ export class PinDetector {
 
   /**
    * After the first solve, in pairs that are not pinned: rotor contacts that the blade presses
-   * (1a) and that the solve still left pressing (1b), on a ship touching any support, are jammed
-   * (F_PIN = PIN_BLOCKED): they transfer nothing in the re-solve and destroy nothing. With the
+   * (1a) and that the solve left pressing by more than JAM_RATIO of the blade's speed, on a ship
+   * touching any support, are jammed (F_PIN = PIN_BLOCKED): they transfer nothing in the
+   * re-solve and destroy nothing. With the
    * terrain the blade drives into made frictionless, a solve leaves a pressing contact behind
    * only when the contacts cannot all be met together — a blade's tip corner wedged into a hull
    * at a wall: its end face and its leading face each look escapable, together they push the
@@ -320,7 +332,7 @@ export class PinDetector {
       const rely = voy - (A.vy + A.wz * rx - A.wx * rz);
       const relz = voz - (A.vz + A.wx * ry - A.wy * rx);
       const press = relx * f[c + F_NX]! + rely * f[c + F_NX + 1]! + relz * f[c + F_NX + 2]!;
-      if (press <= ratio * vb) continue;
+      if (press <= JAM_RATIO * vb) continue;
       f[c + F_PIN] = PIN_BLOCKED;
       jammed++;
     }

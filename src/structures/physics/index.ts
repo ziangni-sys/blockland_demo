@@ -8,10 +8,11 @@
  *   hydro.ts      drag, keel, thrust, rudder, rotational damping
  *   patch.ts      per-tick copy of the world's collision / water flags around a ship
  *   shape.ts      per-version collision shape: occupancy, surface sample points, displacing cells
- *   contacts.ts   contact generation (terrain, rotors, ships) and manifold reduction
- *   rotorview.ts  rotors as kinematic obstacles, interpolated per sub-step
- *   solver.ts     sequential impulses + split-impulse penetration recovery
- *   pinning.ts    rotor pinning test and the hull cell to destroy
+ *   contacts.ts   contact generation (terrain, rotors, ships), manifold reduction, rotor
+ *                 contact states (F_PIN)
+ *   rotorview.ts  rotors as kinematic obstacles, interpolated per sub-step, swept boxes
+ *   solver.ts     sequential impulses + split-impulse penetration recovery, one-sided contacts
+ *   pinning.ts    rotor pinning test, jams, the shared support rule, the hull cell to destroy
  *   sleep.ts      sleep / wake
  */
 import type { StructureHost } from '../structure';
@@ -26,7 +27,8 @@ export { WATER_SURFACE_DROP } from './patch';
 
 /**
  * Create the ship dynamics for a simulation. The returned object implements ShipDynamics
- * (refresh, step, applyImpulse, wake) plus getStats() for debug overlays and tests.
+ * (refresh, step, applyImpulse, wake) plus getStats() and lastSubsteps for debug overlays and
+ * tests.
  */
 export function createShipDynamics(host: StructureHost, opts?: DynamicsOptions): ShipDynamicsImpl {
   return new ShipDynamicsImpl(host, opts);
