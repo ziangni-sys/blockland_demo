@@ -26,7 +26,20 @@ import { isDryCell } from '../structures/hull';
 import type { VoxelGrid } from '../voxel/grid';
 import { raycastGrids, type CellPredicate } from '../voxel/raycast';
 import type { World } from '../voxel/world';
-import { cameraPose, placeCamera, SELF_HIDE_CLEARANCE, selfModelGap, type CameraRay, type ViewMode } from './camera';
+import {
+  cameraGridFrame,
+  cameraPose,
+  cameraRig,
+  placeCamera,
+  resetCameraRig,
+  SELF_HIDE_CLEARANCE,
+  selfModelGap,
+  sweepGrids,
+  sweepScratch,
+  type CameraGridFrame,
+  type CameraQueries,
+  type ViewMode,
+} from './camera';
 import { approach, interpolateCarried, lerpAngle, lerpVec, type FramePose } from './interp';
 
 /** Radius (blocks) around the player in which glued faces are drawn while holding glue. */
@@ -94,13 +107,24 @@ export class ViewBuilder {
   private selfYaw = 0;
   private readonly pose = cameraPose();
   private readonly eye: Vec3 = vec3();
-  private readonly rayDir: Vec3 = vec3();
-  private readonly rayOrigin: Vec3 = vec3();
-  /** Grids the camera ray of the current updateCamera call tests (null outside the call). */
+  /** Easing state and scratch of the 'back' placement; reset when the view mode changes. */
+  private readonly rig = cameraRig();
+  private lastMode: ViewMode | null = null;
+  /**
+   * Grids the camera queries of the current updateCamera call test (null outside the call),
+   * for the ray of 'front' (current poses).
+   */
   private rayGrids: VoxelGrid[] | null = null;
-  private readonly cameraRay: CameraRay = (o, d, max) => {
-    const h = this.rayGrids === null ? null : raycastGrids(this.rayGrids, o, d, max, blocksCamera);
-    return h === null ? Infinity : h.dist;
+  /** The world and every structure as drawn this frame (render pose), for the sweep of 'back'. */
+  private readonly sweepFrames: CameraGridFrame[] = [];
+  private sweepCount = 0;
+  private readonly sweepTmp = sweepScratch();
+  private readonly cameraQueries: CameraQueries = {
+    ray: (o, d, max) => {
+      const h = this.rayGrids === null ? null : raycastGrids(this.rayGrids, o, d, max, blocksCamera);
+      return h === null ? Infinity : h.dist;
+    },
+    sweep: (o, d, max, half, graded) => sweepGrids(this.sweepFrames, this.sweepCount, blocksCamera, o, d, max, half, graded, this.sweepTmp),
   };
 
   // overlay caches (rebuilt only when the simulation publishes a new object)
@@ -147,9 +171,11 @@ export class ViewBuilder {
 
   /**
    * The camera for the view mode: first person at the local player's eyes, or third person
-   * over the shoulder ('back') or in front of the face ('front', src/client/camera.ts), pulled
-   * in by rays against every grid. `yaw`/`pitch` come straight from the input (blended with the
-   * carrier's turn). The eye position is interpolated exactly like the player model's.
+   * over the shoulder ('back', kept CAMERA_CLEARANCE from every block of every grid as drawn
+   * this frame, moving out again eased over `dt` seconds) or in front of the face ('front',
+   * pulled in by a ray); see src/client/camera.ts. `yaw`/`pitch` come straight from the input
+   * (blended with the carrier's turn). The eye position is interpolated exactly like the player
+   * model's.
    */
   updateCamera(sim: Simulation, alpha: number, yaw: number, pitch: number, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
     const p = sim.player;
@@ -158,9 +184,15 @@ export class ViewBuilder {
     eye.x = pos.x;
     eye.y = pos.y + p.eyeHeight;
     eye.z = pos.z;
-    this.rayGrids = mode === 'first' ? null : sim.grids();
-    const pose = placeCamera(mode, eye, yaw, pitch, this.cameraRay, this.pose, this.rayDir, this.rayOrigin);
+    if (mode !== this.lastMode) {
+      resetCameraRig(this.rig);
+      this.lastMode = mode;
+    }
+    this.rayGrids = mode === 'front' ? sim.grids() : null;
+    this.sweepCount = mode === 'back' ? this.collectSweepFrames(sim, alpha) : 0;
+    const pose = placeCamera(mode, eye, yaw, pitch, this.cameraQueries, this.rig, dt, this.pose);
     this.rayGrids = null;
+    this.sweepCount = 0;
     this.showSelf = mode !== 'first' && !p.dead && selfModelGap(pose.x, pose.y, pose.z, eye, yaw, p.eyeHeight) >= SELF_HIDE_CLEARANCE;
     this.selfYaw = yaw;
     const cam = this.camera;
@@ -173,6 +205,33 @@ export class ViewBuilder {
     this.fovScale = approach(this.fovScale, p.sprinting && moving ? SPRINT_FOV_SCALE : 1, 10, dt);
     cam.fov = Math.min(150, fov * this.fovScale);
     return cam;
+  }
+
+  /**
+   * Fills sweepFrames with the world (identity) and every structure at the pose it is drawn
+   * with at `alpha` (the same renderPose the structure renderer uses), so the camera keeps its
+   * clearance from what is on the screen. Returns the number of frames.
+   */
+  private collectSweepFrames(sim: Simulation, alpha: number): number {
+    const frames = this.sweepFrames;
+    const structures = sim.structures.all();
+    while (frames.length < structures.length + 1) frames.push(cameraGridFrame());
+    const w = frames[0]!;
+    w.grid = sim.world;
+    let n = 1;
+    for (let i = 0; i < structures.length; i++) {
+      const s = structures[i]!;
+      if (s.removed) continue;
+      const f = frames[n++]!;
+      f.grid = s.grid;
+      s.grid.renderPose(alpha, f.position, f.rotation);
+      f.pivot.x = s.grid.pivot.x;
+      f.pivot.y = s.grid.pivot.y;
+      f.pivot.z = s.grid.pivot.z;
+    }
+    // Let go of grids that are gone.
+    for (let i = n; i < frames.length; i++) frames[i]!.grid = null;
+    return n;
   }
 
   updateEnvironment(sim: Simulation, alpha: number, timeSec: number, renderDistance: number): EnvironmentState {
