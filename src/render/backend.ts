@@ -45,7 +45,7 @@ export interface EnvironmentState {
 
 export type EntityKind = 'player' | 'item' | 'falling' | 'tnt' | 'rabbit';
 
-/** One entity to draw this frame (already interpolated by the client). */
+/** One entity to draw this frame (already interpolated by the client). (x, y, z) is the BOTTOM CENTRE of its body. */
 export interface EntityRenderState {
   id: number;
   kind: EntityKind;
@@ -91,7 +91,10 @@ export interface OverlayState {
   preview: OverlayCell[];
   /** Cells blocking a docking / blockify attempt, tinted red. */
   conflicts: OverlayCell[];
-  /** Glued faces to draw (only near the player, only while holding glue). */
+  /**
+   * Glued faces to draw (only near the player, only while holding glue). Each entry is the
+   * face BETWEEN two blocks: the cell plus the direction of its glued neighbour.
+   */
   glue: OverlayFace[];
   /** First cell picked for a glue operation, or null. */
   glueAnchor: OverlayCell | null;
@@ -139,6 +142,15 @@ export interface RenderStats {
   structures: number;
 }
 
+/**
+ * Call ordering: every method may be called at any time. Calls made before init()
+ * resolves are queued (last write wins) and applied when it does; calls after dispose()
+ * are no-ops. setSectionMesh / setStructureMesh TAKE OWNERSHIP of the MeshData typed arrays
+ * (zero copy): the caller must not modify, recycle or transfer them afterwards.
+ * A structure exists from its first setStructureMesh (or non-null setStructureDryVolume)
+ * until setStructureMesh(id, ..., null); it stays hidden until its first pose; a pose for an
+ * unknown id is kept only for the current frame.
+ */
 export interface RenderBackend {
   /** Create the GPU context on the canvas. Must fall back to WebGL2 when WebGPU is unavailable. */
   init(canvas: HTMLCanvasElement): Promise<BackendInfo>;
