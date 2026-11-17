@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { applyBatch, applySamples, ReplicaError, ReplicaState } from '../../src/net/client/apply';
+import { ClientChunks } from '../../src/net/client/chunks';
 import { decodeServerMessage, encodeServerMessage } from '../../src/net/codec';
 import { emptyTickBatch, MAX_STRUCTURE_BOX_CELLS, type EntityMotion, type StructureRecord, type TickBatchMsg } from '../../src/net/protocol';
 import { RELIABLE } from '../../src/net/transport';
@@ -17,7 +18,7 @@ const gen = new FlatGenerator();
 const STONE = makeCell(B.STONE);
 
 function fresh(own = 0): ReplicaState {
-  const st = new ReplicaState({ generate: (cx, cz) => gen.generate(cx, cz) });
+  const st = new ReplicaState(new ClientChunks({ generate: (cx, cz, done) => done(gen.generate(cx, cz)) }, () => {}));
   st.ownEntityId = own;
   return st;
 }
