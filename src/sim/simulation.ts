@@ -22,7 +22,7 @@ import { Fluids } from '../liquid/fluids';
 import { GlueStore } from '../structures/glue';
 import { StructureManager } from '../structures/manager';
 import { createShipDynamics } from '../structures/physics';
-import type { ShipDynamics, StructureHost } from '../structures/structure';
+import { Ship, type ShipDynamics, type StructureHost } from '../structures/structure';
 import { EntityManager } from '../entities/manager';
 import type { Player } from '../entities/entity';
 import type { EntityEvent, EntityHost } from '../entities/host';
@@ -186,6 +186,24 @@ export class Simulation {
   }
   respawn(): void {
     if (this.player.dead) this.entities.respawn(this.player);
+  }
+  /** Let go of the helm, if the player holds one (the client calls this when a screen opens). */
+  releaseHelm(): void {
+    if (this.player.steeringShipId !== 0) this.entities.stopSteering(this.player);
+  }
+  /** Throw the stack held by the inventory cursor into the world (clicking outside the inventory). */
+  dropCursorStack(): void {
+    const stack = this.player.inventory.takeCursor();
+    if (stack) this.entities.dropFromPlayer(this.player, stack.item, stack.count);
+  }
+  /** Steering read-out while the player holds a helm, else null. */
+  helmView(): { throttle: number; rudder: number; speed: number; sails: number } | null {
+    const id = this.player.steeringShipId;
+    if (id === 0) return null;
+    const ship = this.structures.get(id);
+    if (!(ship instanceof Ship)) return null;
+    const v = ship.grid.linearVelocity;
+    return { throttle: ship.throttle, rudder: ship.rudder, speed: Math.hypot(v.x, v.z), sails: ship.sails };
   }
 
   // ------------------------------------------------------------------ tick

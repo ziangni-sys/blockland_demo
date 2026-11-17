@@ -100,7 +100,7 @@ function paintBucket(c: Canvas, contents: 'empty' | 'water' | 'lava'): void {
   if (contents !== 'empty') {
     const r = contents === 'water' ? M.WATER : M.LAVA;
     forEllipse(8, 6, 4.3, 1.05, (x, y, d, ox) => {
-      const t = contents === 'water' ? 2.5 - ox * 0.3 : 3.8 - d * 1.5;
+      const t = contents === 'water' ? 2.5 - ox * 0.3 : 3.2 - d * 1.3;
       c.set(x, y, tone(r, t));
     });
     c.set(6, 5, r[r.length - 1]!);
@@ -196,17 +196,37 @@ function crackTimes(): Float32Array {
   return time;
 }
 
+/** Crack pixels shown at stage 0: the impact point plus a stub of every main crack. */
+const CRACK_FIRST = 7;
+
+/**
+ * Crack overlay for one stage. Two tones, both at CRACK_ALPHA:
+ *  - the dark line itself (reads on light and mid-tone blocks);
+ *  - a 1-px light "chipped" edge on the line's lower-right side, the groove wall that faces
+ *    the top-left light (reads on near-black blocks such as obsidian or black felt, where a
+ *    dark line alone is invisible).
+ * Stages reveal the crack pixels in growth order (time, then index), in equal steps from
+ * CRACK_FIRST to the whole tree, so progress shows evenly over a dig instead of a dot for
+ * the first quarter. A prefix of the growth order is a union of branch prefixes, so every
+ * stage is a connected tree from the centre and contains all of the previous stage.
+ */
 function paintCrack(stage: number): Painter {
   return (c) => {
     c.clear();
     const time = crackTimes();
-    let max = 0;
-    for (let i = 0; i < S * S; i++) if (time[i]! !== Infinity && time[i]! > max) max = time[i]!;
-    // Stage 0 shows the impact point and the stubs; the last stage shows the whole tree.
-    const threshold = 1.2 + (max - 1.2) * Math.pow(stage / (CRACK_STAGES - 1), 1.1);
+    const order: number[] = [];
+    for (let i = 0; i < S * S; i++) if (time[i]! !== Infinity) order.push(i);
+    order.sort((a, b) => time[a]! - time[b]! || a - b);
+    const count = Math.round(CRACK_FIRST + ((order.length - CRACK_FIRST) * stage) / (CRACK_STAGES - 1));
+    const crack = new Uint8Array(S * S);
+    for (let k = 0; k < count; k++) crack[order[k]!] = 1;
+    // Out-of-tile neighbours count as uncracked: the overlay is drawn per face, it never tiles.
+    const at = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < S && y < S && crack[y * S + x] === 1;
     for (let y = 0; y < S; y++) {
       for (let x = 0; x < S; x++) {
-        if (time[y * S + x]! <= threshold) c.set(x, y, M.CRACK, CRACK_ALPHA);
+        if (at(x, y)) c.set(x, y, M.CRACK, CRACK_ALPHA);
+        // Lit wall: below-right of a crack pixel; for a crack running down-right ("\"), to its right.
+        else if (at(x - 1, y - 1) || (at(x - 1, y) && at(x - 2, y - 1))) c.set(x, y, M.CRACK_CHIP, CRACK_ALPHA);
       }
     }
   };

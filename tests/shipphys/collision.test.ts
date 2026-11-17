@@ -176,6 +176,34 @@ describe('collision: full speed into obstacles', () => {
   });
 });
 
+describe('collision: piers and edges', () => {
+  it('a boat yawed 45 degrees driven onto a 1-wide pier rides along it without passing through', () => {
+    const world = channel();
+    fillWorld(world, 0, 36, -60, 0, 48, -20, B.STONE); // pier along z at x = 0, top at y = 49
+    const { dyn } = setup(world);
+    const boat = launch(plankBoat(world, 1, -9, 46, -40, 5, 9, NZ), dyn);
+    const q = boat.grid.rotation;
+    q.y = Math.sin(-Math.PI / 8); // 45 degrees to starboard: bow points north-east, toward the pier
+    q.w = Math.cos(-Math.PI / 8);
+    boat.grid.snapshotPose();
+    boat.sails = 40;
+    boat.throttle = 1;
+    const pts = hullSamplePoints(boat);
+    let maxPen = 0;
+    let contacts = 0;
+    for (let t = 0; t < 200; t++) {
+      tick(dyn, [boat]);
+      contacts += dyn.getStats(boat)!.terrainContacts;
+      maxPen = Math.max(maxPen, terrainPenetration(world, boat, pts));
+      expect(finite(boat)).toBe(true);
+    }
+    expect(contacts).toBeGreaterThan(0);
+    expect(maxPen).toBeLessThan(0.1);
+    // never crossed to the east side of the pier
+    expect(hullExtent(boat, pts).maxX).toBeLessThan(0 + 0.1);
+  });
+});
+
 describe('collision: land', () => {
   it('dropped from 10 blocks onto land: settles, rests at the surface and sleeps', () => {
     const world = makeWorld({ cx0: -2, cx1: 1, cz0: -2, cz1: 1, floorTop: 60, waterTop: 0 });

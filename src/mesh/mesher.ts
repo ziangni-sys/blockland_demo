@@ -7,10 +7,12 @@
  * Space      Box space of the MeshInput: interior cell (x,y,z) spans [x,x+1]^3. Every
  *            vertex of a cell lies inside that cell's box.
  * Quads      Everything is quads: 4 vertices + 6 indices, no shared vertices. Triangles
- *            are COUNTER-CLOCKWISE seen from the front (outside): cull back faces.
- *            Double-sided parts (plants, helm wheel, propeller blades, liquid surfaces)
- *            are emitted twice: the front, and a back copy with reversed winding and
- *            negated normal that reuses the same positions and uvs.
+ *            are COUNTER-CLOCKWISE seen from the front (outside): the renderer must cull
+ *            back faces in EVERY pass (FrontSide). Double-sided parts (plants, helm wheel,
+ *            propeller blades, liquid faces) are emitted twice: the front, and a back copy
+ *            with reversed winding and negated normal that reuses the same positions, uvs,
+ *            light and diagonal. Drawing with DoubleSide would draw those parts twice
+ *            (and compound the alpha of blended liquid faces).
  * Normals    Signed bytes, unit length * 127. Axis faces are exactly (+-127, 0, 0) etc.
  * UV         0..1 across one tile, (0,0) = bottom-left of the tile IMAGE, (1,1) = top-right.
  *            Side faces (+-X, +-Z): v grows with +Y; u grows to the viewer's right when the
@@ -37,13 +39,20 @@
  *                          the layer just outside the face; the diagonal cell is ignored
  *                          when both side cells are opaque. MeshInput.light === null
  *                          (structures): sky 255, block 0.
- *              ao          255 / 204 / 153 / 102 for 0 / 1 / 2 / 3-or-both-sides occluders
- *                          (classic side1 + side2 + corner rule; only OPAQUE cubes occlude).
- *                          A plain multiplier: lit colour * ao / 255.
+ *              ao          LINEAR openness: 255 / 170 / 85 / 0 for 0 / 1 / 2 / 3-or-both-sides
+ *                          occluders (classic side1 + side2 + corner rule; only OPAQUE cubes
+ *                          occlude). No brightness curve is applied here: the renderer maps
+ *                          ao / 255 to brightness with its own curve (lighting.ts aoFactor).
  *              flags       VFLAG_EMISSIVE on every face of a light-emitting block (torch,
- *                          lava, lamp: draw unlit/full bright); VFLAG_LIQUID_SURFACE on both
- *                          sides of liquid top surfaces; VFLAG_PLANT on cross plants (uv.v
- *                          is 0 at the roots, 1 at the tips: scale sway by v).
+ *                          lava, lamp: draw unlit/full bright). VFLAG_PLANT on cross plants
+ *                          (uv.v is 0 at the roots, 1 at the tips: scale sway by v).
+ *                          VFLAG_LIQUID_SURFACE (per vertex) on every liquid vertex that
+ *                          lies on a free surface: the top surface's corners (both sides)
+ *                          and the coincident top corners of liquid side faces — except
+ *                          corners forced to full height by a falling column, which stay
+ *                          pinned. Coincident liquid vertices always agree on the flag, so
+ *                          a vertical displacement that depends only on world xz keeps the
+ *                          liquid watertight.
  * Diagonal   Each quad is split along its brighter diagonal by AO (ties: by light), which
  *            keeps a lone dark corner from smearing a streak across the quad. Liquid top
  *            surfaces fold along their flatter diagonal instead.
@@ -58,6 +67,9 @@
  * between two cells of the same non-opaque full cube (glass, ice, leaves). Faces on the
  * box border are tested against the margin cells. Shapes that only partly fill their cell
  * are culled per part: a part's face is tested only when it lies on the cell boundary.
+ * Liquid faces (top, sides, bottom) are double-sided so they are visible from inside the
+ * liquid, except where the neighbour draws its own face over the whole shared plane
+ * (a full cube, another liquid, ...): only the outward copy is emitted there.
  */
 import * as cellBits from '../blocks/cell';
 import type { MeshData, MeshInput } from './types';

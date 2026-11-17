@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { PY } from '../../src/core/dirs';
-import { qfromAxisAngle, vec3, type Vec3 } from '../../src/core/math';
-import type { Rotor, Ship } from '../../src/structures/structure';
+import { qfromAxisAngle, quat, vec3, type Vec3 } from '../../src/core/math';
+import { Rotor, type Ship } from '../../src/structures/structure';
 import {
   fillWorld,
   finite,
@@ -14,6 +15,7 @@ import {
   plankBoat,
   pointsIntoHull,
   setup,
+  spinRotor,
   terrainPenetration,
   tick,
 } from './helpers';
@@ -100,6 +102,46 @@ describe('rotor vs ship: open water (ACCEPTANCE 15)', () => {
     expect(moved).toBeGreaterThan(1);
     // the blade never sinks deep into the hull: the boat keeps up with it
     expect(tr.maxBladeOverlap).toBeLessThan(0.3);
+  });
+});
+
+describe('rotor vs ship: a rotor mounted on another ship', () => {
+  it("pushes a neighbouring ship but never its own carrier, and follows the carrier's motion", () => {
+    const world = makeSea();
+    const { dyn, host } = setup(world);
+    // carrier: a raft west of the target; its rotor's hub stands on the deck
+    const carrier = launch(plankBoat(world, 1, -14, 46, -3, 5, 7), dyn);
+    const r = new Rotor(60, carrier.grid);
+    r.parent = carrier;
+    r.axis = PY;
+    r.grid.pivot.x = -11.5;
+    r.grid.pivot.y = 48.5;
+    r.grid.pivot.z = 0.5;
+    r.grid.setCell(-12, 48, 0, makeCell(B.CANVAS));
+    for (let x = -11; x <= -5; x++) for (let y = 47; y <= 49; y++) r.grid.setCell(x, y, 0, makeCell(B.CANVAS));
+    r.grid.setPoseImmediate(r.grid.pivot, quat());
+    carrier.children.push(r);
+    dyn.refresh(carrier);
+    const target = launch(plankBoat(world, 2, -9, 46, -8, 4, 3), dyn); // north-east of the hub
+    const targetCells = target.grid.count;
+    const c0 = { ...carrier.grid.position };
+    const t0 = { ...target.grid.position };
+    let contacts = 0;
+    let carrierRotorContacts = 0;
+    for (let t = 0; t < 120; t++) {
+      for (const s of [carrier, target]) s.grid.snapshotPose();
+      spinRotor(r, 1);
+      dyn.step([carrier, target], [r]);
+      contacts += dyn.getStats(target)!.rotorContacts;
+      carrierRotorContacts += dyn.getStats(carrier)!.rotorContacts;
+      expect(finite(carrier) && finite(target)).toBe(true);
+    }
+    expect(contacts).toBeGreaterThan(0);
+    expect(carrierRotorContacts).toBe(0);
+    expect(target.grid.count).toBe(targetCells);
+    expect(host.drops).toHaveLength(0);
+    expect(Math.hypot(target.grid.position.x - t0.x, target.grid.position.z - t0.z)).toBeGreaterThan(0.5);
+    expect(Math.hypot(carrier.grid.position.x - c0.x, carrier.grid.position.z - c0.z)).toBeLessThan(2);
   });
 });
 

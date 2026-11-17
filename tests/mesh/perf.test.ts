@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
-import { makeCell } from '../../src/blocks/cell';
+import { liquidState, makeCell } from '../../src/blocks/cell';
 import { rand2 } from '../../src/core/rng';
 import { Mesher, buildMesh } from '../../src/mesh/mesher';
 import type { MeshInput } from '../../src/mesh/types';
@@ -45,6 +45,29 @@ function oceanSection(): MeshInput {
   return input;
 }
 
+/**
+ * Worst case for liquids: terraced terrain with water spilling over every step — flowing
+ * cells of mixed levels on each terrace and falling columns down each riser. Most liquid
+ * cells have exposed (double-sided) faces and sloped tops.
+ */
+function cascadeSection(): MeshInput {
+  const input = makeInput(16, 16, 16, 0);
+  for (let z = -1; z <= 16; z++) {
+    for (let x = -1; x <= 16; x++) {
+      const ground = 2 + ((x + 1) >> 2) * 3; // a 3-high step every 4 columns
+      for (let y = -1; y <= 16; y++) {
+        let cell = 0;
+        if (y < ground) cell = makeCell(B.STONE);
+        else if (y === ground && (x + z) % 3 !== 0) cell = makeCell(B.WATER, liquidState((x + 2 * z) & 7, false));
+        else if (y > ground && y < ground + 4 && ((x + 1) & 3) === 0 && z % 2 === 0) cell = makeCell(B.WATER, liquidState(0, true));
+        put(input, x, y, z, cell);
+        input.light![idx(input, x, y, z)] = y >= ground ? 0xf0 : 0;
+      }
+    }
+  }
+  return input;
+}
+
 function solidSection(): MeshInput {
   const input = makeInput(16, 16, 16, 0);
   input.cells.fill(makeCell(B.STONE));
@@ -73,9 +96,11 @@ describe('performance', () => {
     const solid = solidSection();
     const empty = makeInput(16, 16, 16, true);
     const ocean = oceanSection();
+    const cascade = cascadeSection();
     const mesher = new Mesher();
     const quads = quadCount(buildMesh(terrain));
     const oceanQuads = quadCount(buildMesh(ocean));
+    const cascadeQuads = quadCount(buildMesh(cascade));
 
     const tTerrainFresh = measure(() => buildMesh(terrain), 100);
     const tTerrainReused = measure(() => mesher.build(terrain), 100);
@@ -83,16 +108,19 @@ describe('performance', () => {
     const tSolidFresh = measure(() => buildMesh(solid), 200);
     const tEmpty = measure(() => buildMesh(empty), 200);
     const tOcean = measure(() => buildMesh(ocean), 100);
+    const tCascade = measure(() => buildMesh(cascade), 100);
 
     console.log(
       `[mesh perf] terrain ${quads} quads: fresh ${tTerrainFresh.toFixed(3)} ms, reused ${tTerrainReused.toFixed(3)} ms; ` +
         `buried: reused ${tSolid.toFixed(3)} ms, fresh ${tSolidFresh.toFixed(3)} ms; empty ${tEmpty.toFixed(4)} ms; ` +
-        `ocean ${oceanQuads} quads: fresh ${tOcean.toFixed(3)} ms`,
+        `ocean ${oceanQuads} quads: fresh ${tOcean.toFixed(3)} ms; cascade ${cascadeQuads} quads: fresh ${tCascade.toFixed(3)} ms`,
     );
     expect(quads).toBeGreaterThan(300);
+    expect(cascadeQuads).toBeGreaterThan(1000);
     expect(tTerrainFresh).toBeLessThan(2.5);
     expect(tTerrainReused).toBeLessThan(2.5);
     expect(tOcean).toBeLessThan(2.5);
+    expect(tCascade).toBeLessThan(2.5);
     // "about 0.1 ms" for a buried section: allow 2.5x headroom for a loaded test machine.
     expect(tSolid).toBeLessThan(0.25);
     expect(tSolidFresh).toBeLessThan(0.25);

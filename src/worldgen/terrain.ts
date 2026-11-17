@@ -18,6 +18,7 @@
  */
 import { CHUNK_SIZE, SEA_LEVEL } from '../core/constants';
 import { BIOME, type BiomeId } from './biome';
+import { LandBalance } from './balance';
 import { deriveSeed, fbm2, latticeHash2, ridged2, simplex2, smoothstep } from './noise';
 
 /** The highest surface the height function can produce (asymptote of the peak compression). */
@@ -71,7 +72,6 @@ export function createColumnSample(): ColumnSample {
 // Salts of the independent noise fields (any distinct integers).
 const S_WARP_X = 1;
 const S_WARP_Z = 2;
-const S_CONT_L = 3;
 const S_CONT_M = 4;
 const S_CONT_S = 5;
 const S_CLIFF = 6;
@@ -90,6 +90,7 @@ const S_FLOOR = 18;
 const S_ROCK = 19;
 const S_CONT_B = 20;
 const S_REGION = 21;
+const S_BALANCE = 22;
 
 const SEA = SEA_LEVEL;
 
@@ -97,7 +98,6 @@ export class TerrainSampler {
   readonly seed: number;
   private readonly sWarpX: number;
   private readonly sWarpZ: number;
-  private readonly sContL: number;
   private readonly sContM: number;
   private readonly sContS: number;
   private readonly sContB: number;
@@ -116,13 +116,13 @@ export class TerrainSampler {
   private readonly sGrove: number;
   private readonly sFloor: number;
   private readonly sRock: number;
+  private readonly balance: LandBalance;
 
   constructor(seed: number) {
     this.seed = seed >>> 0;
     const s = this.seed;
     this.sWarpX = deriveSeed(s, S_WARP_X);
     this.sWarpZ = deriveSeed(s, S_WARP_Z);
-    this.sContL = deriveSeed(s, S_CONT_L);
     this.sContM = deriveSeed(s, S_CONT_M);
     this.sContS = deriveSeed(s, S_CONT_S);
     this.sContB = deriveSeed(s, S_CONT_B);
@@ -141,32 +141,37 @@ export class TerrainSampler {
     this.sGrove = deriveSeed(s, S_GROVE);
     this.sFloor = deriveSeed(s, S_FLOOR);
     this.sRock = deriveSeed(s, S_ROCK);
+    this.balance = new LandBalance(this, deriveSeed(s, S_BALANCE));
   }
 
-  /** Continentalness at a column (the land/sea field; also used by the spawn search). */
+  /** Continentalness at a column (the land/sea field: < 0 sea, > 0 land). */
   continentalness(x: number, z: number): number {
     const wx = x + 70 * fbm2(this.sWarpX, x / 320, z / 320, 3);
     const wz = z + 70 * fbm2(this.sWarpZ, x / 320, z / 320, 3);
-    return this.contWarped(wx, wz, x, z);
+    return this.rawCont(wx, wz, x, z) + this.balance.offset(x, z);
   }
 
-  /** Continentalness from already-warped coordinates (wx, wz) of column (x, z). */
-  private contWarped(wx: number, wz: number, x: number, z: number): number {
-    // Island field: a very low-frequency "region" field blends a broad scale (larger
-    // landmasses with bays) and a fine scale (scattered archipelago). Both are zero-mean,
-    // so the blend changes the CHARACTER of a region without shifting its land/sea balance:
-    // any ~500-block window stays close to half sea. (A large additive term would tilt
-    // whole windows towards land or sea, so it is kept small.)
+  /**
+   * Uncorrected continentalness from already-warped coordinates (wx, wz) of column (x, z).
+   * Island field: a very low-frequency "region" field blends a broad scale (larger
+   * landmasses with bays) and a fine scale (scattered archipelago), so regions differ in
+   * CHARACTER. Its land/sea balance still drifts from window to window (the island
+   * features are only 2-3 times smaller than a 512-block window); LandBalance removes
+   * that drift.
+   */
+  rawCont(wx: number, wz: number, x: number, z: number): number {
     const t = smoothstep(-0.15, 0.15, fbm2(this.sRegion, x / 1500, z / 1500, 2));
     const fine = t < 1 ? fbm2(this.sContM, wx / 180, wz / 180, 3) : 0;
     const broad = t > 0 ? fbm2(this.sContB, wx / 330, wz / 330, 3) : 0;
     const islands = fine + (broad - fine) * t;
-    return (
-      0.08 * fbm2(this.sContL, wx / 1100, wz / 1100, 2) +
-      0.62 * islands +
-      0.18 * fbm2(this.sContS, x / 80, z / 80, 2) + // coast detail and islets
-      0.005
-    );
+    return 0.62 * islands + 0.18 * fbm2(this.sContS, x / 80, z / 80, 2); // + coast detail and islets
+  }
+
+  /** Raw continentalness of column (x, z), warp included (used by LandBalance). */
+  rawContAt(x: number, z: number): number {
+    const wx = x + 70 * fbm2(this.sWarpX, x / 320, z / 320, 3);
+    const wz = z + 70 * fbm2(this.sWarpZ, x / 320, z / 320, 3);
+    return this.rawCont(wx, wz, x, z);
   }
 
   /** Fill `out` with the column at integer world coordinates (x, z). */
@@ -174,7 +179,7 @@ export class TerrainSampler {
     // Domain warp bends coastlines into bays, spits and straits; lakes and ridges share it.
     const wx = x + 70 * fbm2(this.sWarpX, x / 320, z / 320, 3);
     const wz = z + 70 * fbm2(this.sWarpZ, x / 320, z / 320, 3);
-    const e = this.contWarped(wx, wz, x, z);
+    const e = this.rawCont(wx, wz, x, z) + this.balance.offset(x, z);
 
     // Coastal cliffs: where this is high the land jumps up right at the waterline.
     const cliff = smoothstep(0.12, 0.42, fbm2(this.sCliff, x / 260, z / 260, 2));

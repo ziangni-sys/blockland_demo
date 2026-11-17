@@ -17,45 +17,67 @@
  * edges only go down, so every cycle has positive cost and the fixed point is unique. The
  * engine and the brute-force reference in the tests are two ways of reaching it.
  *
- * UNLOADED SPACE. Chunks that are not in the world, or are in it but not yet lit
- * (chunk.lit === false), do not exist for lighting: no light enters or leaves them and the
- * engine never writes into them. initChunk() later pulls light across the border, which is
- * an increase-only operation because adding space can only add sources and paths.
+ * WHICH CHUNKS EXIST. Only chunks this engine has lit (initChunk) and that are still the
+ * world's chunk at their position take part: no light enters or leaves any other chunk and
+ * the engine never writes into one. The engine keeps its own registry of lit chunks and, at
+ * the start of every update() and initChunk(), notices chunks that left the world (or are
+ * being re-initialised) and relights their lit neighbours without them (see "orphans"
+ * below). So unloading needs no hook, and the light is always the fixed point of the chunks
+ * that are present: when an unloaded chunk comes back, initChunk pulls its light back in.
+ *
+ * SUPPORT. The incremental algorithm keeps this invariant between calls: every cell brighter
+ * than its own source is either SUPPORTED (some present neighbour n has
+ * level(n) - cost(c) >= level(c), or is directly above a transparent c with level(n) >=
+ * level(c) for sky) or COVERED (a queued removal entry (r, o) next to it could have supported
+ * it, by the same test with o as r's level). Support strictly increases (level, height), so
+ * support chains cannot loop: once the removal queue is empty every value is reachable from a
+ * real source, i.e. never too bright, and the addition queue then makes it never too dark.
  *
  * INCREMENTAL UPDATES (cellChanged + update):
- *  - A change that cannot lower the light at the cell is handled by raising the cell
- *    (to its new emission / what its neighbours provide through its new opacity) and
- *    flood-filling from it.
- *  - Otherwise the cell is reset to its source value and a removal BFS runs: every neighbour
- *    whose level could have come from the removed level (strictly lower, or equal straight
- *    below for sky) is reset and removed in turn; every other lit neighbour is a seed for
- *    re-propagation. Over-removal is always safe (supporters are re-seeded), under-removal
- *    never happens, which is what makes this robust to budgeted, interleaved processing.
+ *  - cellChanged reads the cell as it is NOW (never the event's old/new arguments, which are
+ *    stale when another listener rewrote the cell first) and computes what the cell's own
+ *    source and its neighbours give it. If that does not lower the cell, raise and flood fill.
+ *    Otherwise reset the cell to its bare source and queue a removal.
+ *  - Removal (classic removal BFS): every neighbour the removed level could have supported is
+ *    reset to its source and removed in turn; every other lit neighbour is re-seeded so the
+ *    hole refills. Removing too much is always safe (supporters are re-seeded); too little
+ *    never happens. That is what makes budgeted, interleaved processing safe.
  *  - Raising a column's heightmap removes the open-sky status of every cell between the old
- *    top and the new block; each of those cells is reset and removed explicitly.
- *    Lowering it needs nothing special: the cell that was removed becomes a 15 source and
- *    its flood fill falls losslessly down the newly opened clear cells.
+ *    top and the new block; each of those cells is reset and removed explicitly. Lowering it
+ *    needs nothing special: the cell that changed becomes a 15 source and its flood fill falls
+ *    losslessly down the newly opened clear cells.
+ *  - Orphans: when a chunk disappears, a lit neighbour's border cell facing it that is no
+ *    longer supported by anything else is reset and removed like any other unsupported cell.
+ *    Only border cells can lose support that way; everything further in is covered through
+ *    them. Re-initialising a lit chunk first orphans its neighbours the same way, so stale
+ *    light that the chunk used to feed them is never pulled back in.
  *
- * QUEUES. Additions use a bucket queue keyed by light level, processed from 15 down: the
- * BFS then behaves like Dijkstra and finalises most cells on their first visit even with
- * mixed costs (water 2, leaves 1). Removals use a plain stack. All queues are growable flat
- * Int32Array stacks of (x, y, z) world coordinates owned by the engine instance; there are
- * no per-cell objects. Chunks are resolved through a small direct-mapped cache, so the inner
- * loops do no Map lookups.
+ * QUEUES. Both additions and removals use bucket queues keyed by light level, processed from
+ * 15 down. For additions this makes the BFS behave like Dijkstra (most cells are settled on
+ * their first visit even with mixed costs). For removals it means a wave is reset in order of
+ * decreasing level, so a lit neighbour is only ever re-seeded once the brighter cells that
+ * could have fed it have been reset (with a stack, depth-first order kept re-seeding cells
+ * that were about to be removed anyway). All queues are growable flat Int32Array stacks of
+ * (x, y, z) world coordinates owned by the engine instance; there are no per-cell objects.
+ * Chunks are resolved through a small direct-mapped cache, so inner loops do no Map lookups.
  *
  * DIRTY MARKING. Light is written straight into chunk.light. Which mesh sections that makes
  * stale follows World.markDirty exactly (the cell's section, plus the neighbouring sections
  * when the cell lies on a section border, since meshing reads a 1-cell margin), but instead
  * of a markDirty call per changed cell the engine ORs a 27-bit "affected neighbour sections"
- * mask per section and, at the end of every public call, marks each affected section once
- * through world.markDirty. Per-cell markDirty was about half the cost of placing a lamp.
- * initChunk writes the new chunk's own light without marking (addChunk already marked all
- * of its sections) but marks every cell it changes in neighbouring chunks.
+ * mask per section (per-cell markDirty was about half the cost of placing a lamp).
+ * The masks are handed to world.markDirty only when the engine has no pending work: a
+ * removal that runs out of budget leaves cells reset but not yet refilled, and meshing that
+ * intermediate state would flash dark for a tick. If the engine stays busy for
+ * MAX_DEFERRED_UPDATES update() calls in a row it flushes anyway, so meshes never freeze.
+ * initChunk writes a newly added chunk's own light without marking (addChunk already marked
+ * all of its sections) but marks every cell it changes in neighbouring chunks, and every cell
+ * whose byte changed when it re-initialises an already lit chunk.
  */
 import * as K from '../core/constants';
 import { ID_MASK as CELL_ID_MASK } from '../blocks/cell';
 import { EMIT as EMIT_TABLE, LIGHT_OPACITY as OPACITY_TABLE } from '../blocks/registry';
-import type { Chunk } from '../voxel/chunk';
+import { chunkKey as chunkKeyOf, type Chunk } from '../voxel/chunk';
 import type { World } from '../voxel/world';
 
 // Module-level copies of everything imported that the per-cell loops touch. Some module
@@ -65,8 +87,10 @@ import type { World } from '../voxel/world';
 const LIGHT_OPACITY = OPACITY_TABLE;
 const EMIT = EMIT_TABLE;
 const ID_MASK = CELL_ID_MASK;
+const chunkKey = chunkKeyOf;
 const CHUNK_SHIFT = K.CHUNK_SHIFT;
 const CHUNK_SIZE = K.CHUNK_SIZE;
+const CHUNK_VOLUME = K.CHUNK_VOLUME;
 const MAX_LIGHT = K.MAX_LIGHT;
 const SECTION_SIZE = K.SECTION_SIZE;
 const SECTIONS_PER_CHUNK = K.SECTIONS_PER_CHUNK;
@@ -81,14 +105,17 @@ const WRAP_X = EDGE; // index delta from lx = 0 to lx = 15 in the neighbouring c
 const WRAP_Z = EDGE * DZ; // index delta from lz = 0 to lz = 15 in the neighbouring chunk
 const OPAQUE_LEVEL = 15;
 
-/** Removal entries pack (y, old level) into one int. */
-const REM_LEVEL_SHIFT = 8;
-const REM_Y_MASK = 0xff;
-
 /** Direct-mapped tables keyed by chunk: 8 x 8 slots indexed by the low chunk-coordinate bits. */
 const SLOT_BITS = 3;
 const SLOT_MASK = (1 << SLOT_BITS) - 1;
 const SLOTS = 1 << (2 * SLOT_BITS);
+
+/**
+ * Consecutive update() calls that may end with work still pending before the dirty sections
+ * collected so far are flushed anyway (one second at 20 ticks per second). Only a sustained
+ * overload of the per-call budget gets here; normally every call ends with nothing pending.
+ */
+const MAX_DEFERRED_UPDATES = 20;
 
 // ---- dirty-section masks (immutable lookup tables)
 // A bit b in 0..26 stands for the section at offset (b % 3 - 1, floor(b / 3) % 3 - 1,
@@ -167,8 +194,8 @@ class LevelQueue {
   top = 0;
   total = 0;
 
-  constructor() {
-    for (let l = 0; l <= MAX_LIGHT; l++) this.buckets.push(new TripleStack(l === 0 ? 1 : 64));
+  constructor(initialTriples: number) {
+    for (let l = 0; l <= MAX_LIGHT; l++) this.buckets.push(new TripleStack(l === 0 ? 1 : initialTriples));
   }
 
   push(level: number, x: number, y: number, z: number): void {
@@ -181,30 +208,42 @@ class LevelQueue {
 export class LightEngine {
   private readonly world: World;
 
-  // Incremental work, per channel.
-  private readonly skyRem = new TripleStack(256);
-  private readonly blockRem = new TripleStack(256);
-  private readonly skyAdd = new LevelQueue();
-  private readonly blockAdd = new LevelQueue();
+  // Incremental work, per channel. Removal entries are keyed by the level the cell had
+  // before it was reset; addition entries by the level it was raised to.
+  private readonly skyRem = new LevelQueue(64);
+  private readonly blockRem = new LevelQueue(64);
+  private readonly skyAdd = new LevelQueue(64);
+  private readonly blockAdd = new LevelQueue(64);
   // Private queues of initChunk, always drained before it returns.
-  private readonly initSky = new LevelQueue();
-  private readonly initBlock = new LevelQueue();
+  private readonly initSky = new LevelQueue(64);
+  private readonly initBlock = new LevelQueue(64);
   /** Per column of the chunk being initialised: highest y whose straight-down sky is 0, or -1. */
   private readonly darkFrom = new Int16Array(COLUMNS);
+  /** Light bytes of a chunk being re-initialised, to mark exactly the cells that changed. */
+  private reinitBefore: Uint8Array | null = null;
+
+  /** Every chunk this engine has lit, by chunk key. A chunk only exists for lighting while it is here AND still the world's chunk. */
+  private readonly litChunks = new Map<number, Chunk>();
+  /** Scratch for syncChunks(): coordinates of chunks found gone (pairs). */
+  private readonly goneCoords: number[] = [];
 
   // Lit-chunk lookup cache.
   private readonly cacheChunk: Array<Chunk | null> = new Array<Chunk | null>(SLOTS).fill(null);
   private readonly cacheCx = new Int32Array(SLOTS);
   private readonly cacheCz = new Int32Array(SLOTS);
   private readonly cacheGen = new Float64Array(SLOTS);
-  /** Bumped whenever chunks may have been added, removed or lit since the last lookup. */
+  /** Bumped at every public call and whenever chunks may have been added, removed or lit. */
   private gen = 1;
 
-  // Pending dirty-section masks, flushed at the end of every public call.
+  // Pending dirty-section masks (see DIRTY MARKING). The direct-mapped slots serve the hot
+  // path; a chunk evicted from its slot by another chunk spills its masks into `dirtySpill`.
   private readonly dirtyOwner: Array<Chunk | null> = new Array<Chunk | null>(SLOTS).fill(null);
   private readonly dirtyMask = new Int32Array(SLOTS * SECTIONS_PER_CHUNK);
   private readonly dirtySlots = new Int32Array(SLOTS);
   private dirtySlotCount = 0;
+  private readonly dirtySpill = new Map<Chunk, Int32Array>();
+  /** update() calls in a row that ended with work pending and did not flush. */
+  private deferredUpdates = 0;
 
   private detach: (() => void) | null = null;
 
@@ -214,10 +253,14 @@ export class LightEngine {
 
   /** Number of queued incremental entries (both channels, removals + additions). */
   get pending(): number {
-    return this.skyRem.size + this.blockRem.size + this.skyAdd.total + this.blockAdd.total;
+    return this.skyRem.total + this.blockRem.total + this.skyAdd.total + this.blockAdd.total;
   }
 
-  /** Subscribe to world.onCellChange so edits enqueue incremental updates. Returns the unsubscribe function. */
+  /**
+   * Subscribe to world.onCellChange so edits enqueue incremental updates. Returns the
+   * unsubscribe function. Calling it again while attached returns the same function. The
+   * engine does not need to be the first listener: it always reads the cell's current state.
+   */
   attach(): () => void {
     if (!this.detach) {
       const off = this.world.onCellChange((x, y, z, oldCell, newCell) => this.cellChanged(x, y, z, oldCell, newCell));
@@ -235,14 +278,28 @@ export class LightEngine {
    * Full lighting of a newly added chunk: heightmap, sky light, block light, and exchange with
    * already-lit neighbour chunks across its 4 vertical borders (light flows both ways).
    * Sets chunk.lit = true. Call right after world.addChunk(chunk).
+   *
+   * Calling it again on a lit chunk recomputes the chunk from its cells as if it had been
+   * removed and added again (neighbours included); the cells whose light changed are marked.
    */
   initChunk(chunk: Chunk): void {
     if (this.world.getChunk(chunk.cx, chunk.cz) !== chunk) {
       throw new Error(`LightEngine.initChunk: chunk ${chunk.cx},${chunk.cz} is not the world's chunk at that position`);
     }
+    const key = chunkKey(chunk.cx, chunk.cz);
     const cells = chunk.cells;
     const light = chunk.light;
     const hm = chunk.heightmap;
+    const reinit = chunk.lit || this.litChunks.get(key) === chunk;
+    if (reinit) {
+      if (!this.reinitBefore) this.reinitBefore = new Uint8Array(CHUNK_VOLUME);
+      this.reinitBefore.set(light);
+    }
+    // Absent for lighting until its fresh light is in place. If it was lit, syncChunks()
+    // orphans what its neighbours got from it, together with any chunk that left the world.
+    chunk.lit = false;
+    this.syncChunks();
+
     const ox = chunk.cx << CHUNK_SHIFT;
     const oz = chunk.cz << CHUNK_SHIFT;
     const skyQ = this.initSky;
@@ -306,6 +363,7 @@ export class LightEngine {
     }
 
     chunk.lit = true;
+    this.litChunks.set(key, chunk);
     this.gen++;
 
     // Exchange across the 4 vertical borders with lit neighbours, both directions, both channels.
@@ -322,7 +380,13 @@ export class LightEngine {
     // their first visit. It may cross into lit neighbours (marking them dirty).
     this.runAdd(skyQ, true, Infinity, chunk);
     this.runAdd(blockQ, false, Infinity, chunk);
-    this.flushDirty();
+
+    if (reinit) {
+      // No addChunk marked this chunk's sections for us.
+      const before = this.reinitBefore!;
+      for (let i = 0; i < CHUNK_VOLUME; i++) if (before[i] !== light[i]) this.touch(chunk, i);
+    }
+    this.finishCall(false);
   }
 
   /**
@@ -391,20 +455,98 @@ export class LightEngine {
     }
   }
 
+  // ================================================================== chunks leaving
+
+  /**
+   * Forget every registered chunk that is no longer the world's lit chunk at its position
+   * (removed, replaced, or flagged unlit for re-initialisation) and orphan the border light of
+   * its lit neighbours. One map walk over the lit chunks; called once per update() and
+   * initChunk(), never per edit.
+   */
+  private syncChunks(): void {
+    const gone = this.goneCoords;
+    for (const [key, c] of this.litChunks) {
+      const present = this.world.getChunk(c.cx, c.cz) === c;
+      if (present && c.lit) continue;
+      // A chunk object that left the world keeps no maintained light: if it is ever added
+      // again it must go through initChunk.
+      if (!present) c.lit = false;
+      this.litChunks.delete(key);
+      gone.push(c.cx, c.cz);
+    }
+    this.gen++;
+    if (gone.length === 0) return;
+    for (let k = 0; k < gone.length; k += 2) {
+      const cx = gone[k]!;
+      const cz = gone[k + 1]!;
+      // Each neighbour's border column facing the departed chunk.
+      const w = this.chunkAt(cx - 1, cz);
+      if (w) this.orphanBorder(w, EDGE, DZ);
+      const e = this.chunkAt(cx + 1, cz);
+      if (e) this.orphanBorder(e, 0, DZ);
+      const n = this.chunkAt(cx, cz - 1);
+      if (n) this.orphanBorder(n, WRAP_Z, 1);
+      const s = this.chunkAt(cx, cz + 1);
+      if (s) this.orphanBorder(s, 0, 1);
+    }
+    gone.length = 0;
+  }
+
+  /**
+   * A neighbouring chunk is gone: each cell of column base + t * stride (t = 0..15) of `c`
+   * that is brighter than its own source and no longer supported by any present neighbour is
+   * reset and queued for removal. Cells deeper inside `c` that the departed chunk fed are
+   * reached through these, by the removal pass.
+   */
+  private orphanBorder(c: Chunk, base: number, stride: number): void {
+    const cells = c.cells;
+    const light = c.light;
+    const ox = c.cx << CHUNK_SHIFT;
+    const oz = c.cz << CHUNK_SHIFT;
+    for (let t = 0; t < CHUNK_SIZE; t++) {
+      const col = base + t * stride;
+      const x = ox + (col & EDGE);
+      const z = oz + (col >> 4);
+      const height = c.heightmap[col]!;
+      for (let y = 0; y <= TOP_Y; y++) {
+        const i = col | (y * DY);
+        const lb = light[i]!;
+        if (lb === 0) continue;
+        const id = cells[i]! & ID_MASK;
+        const op = LIGHT_OPACITY[id]!;
+        const s = lb >> 4;
+        if (s > 0) {
+          const src = skySource(y, height, op);
+          if (s > src && this.pull(c, i, x, y, z, op, true) < s) this.reset(c, i, x, y, z, s, src, true);
+        }
+        const b = lb & 15;
+        if (b > 0) {
+          const src = EMIT[id]!;
+          if (b > src && this.pull(c, i, x, y, z, op, false) < b) this.reset(c, i, x, y, z, b, src, false);
+        }
+      }
+    }
+  }
+
   // ================================================================== incremental updates
 
-  /** A cell changed (attach() wires this to the world hook). */
+  /**
+   * A cell changed (attach() wires this to the world hook). Only the position and whether
+   * the block id's opacity / emission changed are taken from the arguments; the cell's light
+   * properties are read from the chunk, so out-of-order delivery (another listener rewrote
+   * the cell before this event reached the engine) is harmless.
+   */
   cellChanged(x: number, y: number, z: number, oldCell: number, newCell: number): void {
     if (y < 0 || y > TOP_Y) return;
     const oldId = oldCell & ID_MASK;
     const newId = newCell & ID_MASK;
     // Opacity and emission are per block id: state-only changes (liquid levels, log axes,
-    // facings) are free.
+    // facings) are free. Skipping an event whose own arguments do not differ is safe even
+    // when events arrive out of order: every change that does differ is processed against
+    // the cell's state at processing time, and a run of non-differing changes after that
+    // cannot alter opacity or emission.
     if (oldId === newId) return;
-    const opOld = LIGHT_OPACITY[oldId]!;
-    const opNew = LIGHT_OPACITY[newId]!;
-    const eNew = EMIT[newId]!;
-    if (opOld === opNew && EMIT[oldId]! === eNew) return;
+    if (LIGHT_OPACITY[oldId]! === LIGHT_OPACITY[newId]! && EMIT[oldId]! === EMIT[newId]!) return;
 
     this.gen++;
     const c = this.chunkAt(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
@@ -412,13 +554,16 @@ export class LightEngine {
     if (!c) return;
     const col = (x & EDGE) | ((z & EDGE) << 4);
     const i = col | (y * DY);
+    const id = c.cells[i]! & ID_MASK;
+    const op = LIGHT_OPACITY[id]!;
+    const emit = EMIT[id]!;
 
-    // ---- heightmap
+    // ---- heightmap (from the cell's current state: correct whatever order events come in)
     const hOld = c.heightmap[col]!;
     let hNew = hOld;
-    if (opNew > 0) {
+    if (op > 0) {
       if (y >= hOld) hNew = y + 1;
-    } else if (opOld > 0 && y === hOld - 1) {
+    } else if (y === hOld - 1) {
       let yy = y - 1;
       while (yy >= 0 && LIGHT_OPACITY[c.cells[col | (yy * DY)]! & ID_MASK]! === 0) yy--;
       hNew = yy + 1;
@@ -436,17 +581,15 @@ export class LightEngine {
         const l = c.light[k]! >> 4;
         if (l === 0) continue;
         this.writeSky(c, k, 0);
-        this.skyRem.push(x, z, yy | (l << REM_LEVEL_SHIFT));
+        this.skyRem.push(l, x, yy, z);
       }
     }
-    const oldSky = c.light[i]! >> 4;
-    const skySrc = skySource(y, hNew, opNew);
-    this.settle(c, i, x, y, z, oldSky, Math.max(skySrc, this.pull(c, i, x, y, z, opNew, true)), skySrc, true);
+    const skySrc = skySource(y, hNew, op);
+    this.settle(c, i, x, y, z, c.light[i]! >> 4, Math.max(skySrc, this.pull(c, i, x, y, z, op, true)), skySrc, true);
 
     // ---- block
-    const oldBlock = c.light[i]! & 15;
-    this.settle(c, i, x, y, z, oldBlock, Math.max(eNew, this.pull(c, i, x, y, z, opNew, false)), eNew, false);
-    this.flushDirty();
+    this.settle(c, i, x, y, z, c.light[i]! & 15, Math.max(emit, this.pull(c, i, x, y, z, op, false)), emit, false);
+    this.finishCall(false);
   }
 
   /**
@@ -456,8 +599,9 @@ export class LightEngine {
    * flood. If it drops, `target` may be fed by light that came from this very cell, so reset
    * to the bare source and remove.
    *
-   * (When target >= old, the neighbour that provides it has level >= old + 1 and therefore
-   * cannot have been lit by this cell; when target < old it may have been.)
+   * (A raise is never self-feeding in a harmful way: a value taken from a neighbour is
+   * strictly below that neighbour's, so if the neighbour turns out to be stale its removal
+   * chain covers this cell too.)
    */
   private settle(
     c: Chunk,
@@ -478,13 +622,24 @@ export class LightEngine {
       }
       return;
     }
-    if (sky) this.writeSky(c, i, source);
-    else this.writeBlock(c, i, source);
-    (sky ? this.skyRem : this.blockRem).push(x, z, y | (old << REM_LEVEL_SHIFT));
-    if (source > 0) (sky ? this.skyAdd : this.blockAdd).push(source, x, y, z);
+    this.reset(c, i, x, y, z, old, source, sky);
   }
 
-  /** Best level the neighbours of a cell can give it through opacity `op` (sources excluded). */
+  /** Reset a cell holding `old` to its own source `src` and queue the removal of what it fed. */
+  private reset(c: Chunk, i: number, x: number, y: number, z: number, old: number, src: number, sky: boolean): void {
+    if (sky) {
+      this.writeSky(c, i, src);
+      this.skyRem.push(old, x, y, z);
+      if (src > 0) this.skyAdd.push(src, x, y, z);
+    } else {
+      this.writeBlock(c, i, src);
+      this.blockRem.push(old, x, y, z);
+      // Level-1 block light cannot travel.
+      if (src > 1) this.blockAdd.push(src, x, y, z);
+    }
+  }
+
+  /** Best level the present neighbours of a cell can give it through opacity `op` (sources excluded). */
   private pull(c: Chunk, i: number, x: number, y: number, z: number, op: number, sky: boolean): number {
     if (op >= OPAQUE_LEVEL) return 0;
     const cost = stepCost(op);
@@ -544,15 +699,15 @@ export class LightEngine {
    * an efficiency choice; correctness does not depend on it). A visit is one queue entry.
    */
   update(budget: number = Infinity): boolean {
-    this.gen++;
+    this.syncChunks();
     let left = budget;
-    if (left > 0 && this.skyRem.size > 0) left -= this.runRemove(this.skyRem, this.skyAdd, true, left);
-    if (left > 0 && this.blockRem.size > 0) left -= this.runRemove(this.blockRem, this.blockAdd, false, left);
-    if (left > 0 && this.skyRem.size === 0 && this.skyAdd.total > 0) left -= this.runAdd(this.skyAdd, true, left, null);
-    if (left > 0 && this.blockRem.size === 0 && this.blockAdd.total > 0) {
+    if (left > 0 && this.skyRem.total > 0) left -= this.runRemove(this.skyRem, this.skyAdd, true, left);
+    if (left > 0 && this.blockRem.total > 0) left -= this.runRemove(this.blockRem, this.blockAdd, false, left);
+    if (left > 0 && this.skyRem.total === 0 && this.skyAdd.total > 0) left -= this.runAdd(this.skyAdd, true, left, null);
+    if (left > 0 && this.blockRem.total === 0 && this.blockAdd.total > 0) {
       left -= this.runAdd(this.blockAdd, false, left, null);
     }
-    this.flushDirty();
+    this.finishCall(true);
     return this.pending === 0;
   }
 
@@ -652,31 +807,37 @@ export class LightEngine {
   }
 
   /**
-   * Removal BFS. Entry = (cell, the level it had before it was reset). A lit neighbour whose
-   * level could have come from that level — strictly lower, or for sky the equal level
-   * straight below a clear cell — and that is above its own source value is reset to the
-   * source and removed in turn. Every other lit neighbour is independent of the removed
-   * light and becomes a seed for re-propagation.
+   * Removal BFS, highest old level first. Entry = (cell, bucket = the level it had before it
+   * was reset). A lit neighbour that level could have supported (see SUPPORT) and that is
+   * above its own source is reset to the source and removed in turn. Every other lit
+   * neighbour is independent of the removed light and becomes a seed for re-propagation.
    * Returns the number of entries visited.
    */
-  private runRemove(rem: TripleStack, add: LevelQueue, sky: boolean, budget: number): number {
+  private runRemove(rem: LevelQueue, add: LevelQueue, sky: boolean, budget: number): number {
+    const buckets = rem.buckets;
     let visits = 0;
-    while (visits < budget && rem.size > 0) {
-      const k = --rem.size * 3;
-      const d = rem.data;
+    let level = rem.top;
+    while (visits < budget) {
+      while (level > 0 && buckets[level]!.size === 0) level--;
+      rem.top = level;
+      if (level === 0) break;
+      const st = buckets[level]!;
+      const k = --st.size * 3;
+      rem.total--;
+      const d = st.data;
       const x = d[k]!;
-      const z = d[k + 1]!;
-      const packed = d[k + 2]!;
-      const y = packed & REM_Y_MASK;
-      const o = packed >> REM_LEVEL_SHIFT;
+      const y = d[k + 1]!;
+      const z = d[k + 2]!;
       visits++;
       const cx = x >> CHUNK_SHIFT;
       const cz = z >> CHUNK_SHIFT;
       const c = this.chunkAt(cx, cz);
+      // The chunk is gone: syncChunks() orphaned whatever its neighbours got from it.
       if (!c) continue;
       const lx = x & EDGE;
       const lz = z & EDGE;
       const i = lx | (lz << 4) | (y * DY);
+      const o = level;
 
       if (y > 0) this.unlight(c, i - DY, x, y - 1, z, o, sky, true, rem, add);
       if (y < TOP_Y) this.unlight(c, i + DY, x, y + 1, z, o, sky, false, rem, add);
@@ -700,6 +861,9 @@ export class LightEngine {
         const n = this.chunkAt(cx, cz + 1);
         if (n) this.unlight(n, i - WRAP_Z, x, y, z + 1, o, sky, false, rem, add);
       }
+      // Pushes never exceed the level being processed (a dependent neighbour is at most as
+      // bright), but stay safe if that ever changes.
+      if (rem.top > level) level = rem.top;
     }
     return visits;
   }
@@ -713,7 +877,7 @@ export class LightEngine {
     o: number,
     sky: boolean,
     down: boolean,
-    rem: TripleStack,
+    rem: LevelQueue,
     add: LevelQueue,
   ): void {
     const lb = c.light[idx]!;
@@ -722,11 +886,13 @@ export class LightEngine {
     const id = c.cells[idx]! & ID_MASK;
     const op = LIGHT_OPACITY[id]!;
     const src = sky ? skySource(y, c.heightmap[idx & (COLUMNS - 1)]!, op) : EMIT[id]!;
-    const dependent = nl < o || (down && sky && nl === o && op === 0);
+    // Could the removed level have supported this cell? An opaque cell receives nothing, so
+    // any light it holds above its source is unsupported anyway.
+    const dependent = op >= OPAQUE_LEVEL || (down && sky && op === 0 ? nl <= o : nl <= o - stepCost(op));
     if (dependent && nl > src) {
       c.light[idx] = sky ? (lb & 0x0f) | (src << 4) : (lb & 0xf0) | src;
       this.touch(c, idx);
-      rem.push(x, z, y | (nl << REM_LEVEL_SHIFT));
+      rem.push(nl, x, y, z);
       if (src > 1 || (sky && src > 0)) add.push(src, x, y, z);
     } else if (nl > 1 || sky) {
       add.push(nl, x, y, z);
@@ -753,14 +919,14 @@ export class LightEngine {
     }
   }
 
-  /** The lit chunk at chunk coordinates, or null when unloaded or not yet lit. */
+  /** The chunk at chunk coordinates if it exists for lighting (lit by this engine and still in the world), else null. */
   private chunkAt(cx: number, cz: number): Chunk | null {
     const s = (cx & SLOT_MASK) | ((cz & SLOT_MASK) << SLOT_BITS);
     if (this.cacheGen[s] === this.gen && this.cacheCx[s] === cx && this.cacheCz[s] === cz) {
       return this.cacheChunk[s] as Chunk | null;
     }
-    const c = this.world.getChunk(cx, cz);
-    const lit = c !== undefined && c.lit ? c : null;
+    const c = this.litChunks.get(chunkKey(cx, cz));
+    const lit = c !== undefined && c.lit && this.world.getChunk(cx, cz) === c ? c : null;
     this.cacheChunk[s] = lit;
     this.cacheCx[s] = cx;
     this.cacheCz[s] = cz;
@@ -780,18 +946,31 @@ export class LightEngine {
 
   private claimDirtySlot(s: number, c: Chunk): void {
     const prev = this.dirtyOwner[s];
-    if (prev) this.flushDirtySlot(s, prev);
-    else this.dirtySlots[this.dirtySlotCount++] = s;
+    if (prev) {
+      // Keep the evicted chunk's masks until the next flush (flushing now could mesh an
+      // intermediate state, see DIRTY MARKING).
+      const base = s * SECTIONS_PER_CHUNK;
+      let spill = this.dirtySpill.get(prev);
+      if (!spill) {
+        spill = new Int32Array(SECTIONS_PER_CHUNK);
+        this.dirtySpill.set(prev, spill);
+      }
+      for (let sy = 0; sy < SECTIONS_PER_CHUNK; sy++) {
+        spill[sy] |= this.dirtyMask[base + sy]!;
+        this.dirtyMask[base + sy] = 0;
+      }
+    } else {
+      this.dirtySlots[this.dirtySlotCount++] = s;
+    }
     this.dirtyOwner[s] = c;
   }
 
-  /** Mark every section recorded for slot `s` (owned by chunk `c`) dirty, and clear the slot's masks. */
-  private flushDirtySlot(s: number, c: Chunk): void {
-    const base = s * SECTIONS_PER_CHUNK;
+  /** Mark every section recorded in `masks[offset .. offset + SECTIONS_PER_CHUNK)` for chunk (cx, cz) dirty, and clear them. */
+  private flushMasks(cx: number, cz: number, masks: Int32Array, offset: number): void {
     for (let sy = 0; sy < SECTIONS_PER_CHUNK; sy++) {
-      let m = this.dirtyMask[base + sy]!;
+      let m = masks[offset + sy]!;
       if (m === 0) continue;
-      this.dirtyMask[base + sy] = 0;
+      masks[offset + sy] = 0;
       while (m !== 0) {
         const b = 31 - Math.clz32(m & -m);
         m &= m - 1;
@@ -799,11 +978,7 @@ export class LightEngine {
         if (ty < 0 || ty >= SECTIONS_PER_CHUNK) continue;
         // An interior cell of the target section marks exactly that section.
         const half = SECTION_SIZE >> 1;
-        this.world.markDirty(
-          ((c.cx + BIT_DX[b]!) << CHUNK_SHIFT) + half,
-          ty * SECTION_SIZE + half,
-          ((c.cz + BIT_DZ[b]!) << CHUNK_SHIFT) + half,
-        );
+        this.world.markDirty(((cx + BIT_DX[b]!) << CHUNK_SHIFT) + half, ty * SECTION_SIZE + half, ((cz + BIT_DZ[b]!) << CHUNK_SHIFT) + half);
       }
     }
   }
@@ -811,9 +986,25 @@ export class LightEngine {
   private flushDirty(): void {
     for (let k = 0; k < this.dirtySlotCount; k++) {
       const s = this.dirtySlots[k]!;
-      this.flushDirtySlot(s, this.dirtyOwner[s]!);
+      const c = this.dirtyOwner[s]!;
+      this.flushMasks(c.cx, c.cz, this.dirtyMask, s * SECTIONS_PER_CHUNK);
       this.dirtyOwner[s] = null;
     }
     this.dirtySlotCount = 0;
+    if (this.dirtySpill.size > 0) {
+      for (const [c, masks] of this.dirtySpill) this.flushMasks(c.cx, c.cz, masks, 0);
+      this.dirtySpill.clear();
+    }
+  }
+
+  /** End of a public call: hand the dirty sections over once the light is consistent (see DIRTY MARKING). */
+  private finishCall(fromUpdate: boolean): void {
+    if (this.pending === 0) {
+      this.flushDirty();
+      this.deferredUpdates = 0;
+    } else if (fromUpdate && ++this.deferredUpdates >= MAX_DEFERRED_UPDATES) {
+      this.flushDirty();
+      this.deferredUpdates = 0;
+    }
   }
 }

@@ -73,6 +73,8 @@ export class Body {
   rollDampingZ = 2;
 
   // ---- per tick
+  /** Step stamp of the last classification (mode / index are stale when it differs). */
+  stamp = -1;
   mode = MODE_NONE;
   index = -1;
   readonly R: Mat3 = new Float64Array(9);
@@ -124,10 +126,15 @@ export class Body {
   kinEnd = 0;
   /** Rotors (indices into the step's rotor views) that may reach this ship this tick. */
   readonly rotorCandidates: number[] = [];
+  /** Surface sample points that may reach a hard world cell during this tick. */
+  terrainCand: Int32Array = new Int32Array(0);
+  terrainCandCount = 0;
   /** Terrain pushed back during this tick (a supporting contact carried load). */
   supportedThisTick = false;
   /** A rotor touched the ship this tick. */
   rotorTouchThisTick = false;
+  /** Sum of normal impulses of ship/ship contacts this tick (wakes a sleeper that gets pushed). */
+  shipImpulseThisTick = 0;
   /** Best pinned hull cell found this tick (deepest overlap); destroyed after the tick. */
   pinHas = false;
   pinDepth = 0;
@@ -224,6 +231,62 @@ export class Body {
     this.maxX = maxX;
     this.maxY = maxY;
     this.maxZ = maxZ;
+  }
+
+  /**
+   * After the patch is filled: list the sample points that can come within reach of the patch's
+   * hard cells this tick. The hard cells' world box, grown by the farthest a hull point can
+   * travel in a tick, is mapped into the hull's frame (as of the start of the tick); only points
+   * inside its local bounds are tested in the sub-steps. A ship touching a wall with its bow
+   * tests its bow, not its whole surface.
+   */
+  selectTerrainCandidates(travel: number): void {
+    this.terrainCandCount = 0;
+    const p = this.patch;
+    if (!p.hasSolid) return;
+    const s = this.shape;
+    const n = s.pointCount;
+    if (this.terrainCand.length < n) this.terrainCand = new Int32Array(n);
+    const m = travel + 0.5;
+    const x0 = p.solidMinX - m;
+    const y0 = p.solidMinY - m;
+    const z0 = p.solidMinZ - m;
+    const x1 = p.solidMaxX + 1 + m;
+    const y1 = p.solidMaxY + 1 + m;
+    const z1 = p.solidMaxZ + 1 + m;
+    const R = this.R;
+    let lx0 = Infinity;
+    let ly0 = Infinity;
+    let lz0 = Infinity;
+    let lx1 = -Infinity;
+    let ly1 = -Infinity;
+    let lz1 = -Infinity;
+    for (let k = 0; k < 8; k++) {
+      const dx = ((k & 1) === 0 ? x0 : x1) - this.tx;
+      const dy = ((k & 2) === 0 ? y0 : y1) - this.ty;
+      const dz = ((k & 4) === 0 ? z0 : z1) - this.tz;
+      const lx = R[0]! * dx + R[3]! * dy + R[6]! * dz;
+      const ly = R[1]! * dx + R[4]! * dy + R[7]! * dz;
+      const lz = R[2]! * dx + R[5]! * dy + R[8]! * dz;
+      if (lx < lx0) lx0 = lx;
+      if (ly < ly0) ly0 = ly;
+      if (lz < lz0) lz0 = lz;
+      if (lx > lx1) lx1 = lx;
+      if (ly > ly1) ly1 = ly;
+      if (lz > lz1) lz1 = lz;
+    }
+    const px = s.px;
+    const py = s.py;
+    const pz = s.pz;
+    const out = this.terrainCand;
+    let c = 0;
+    for (let i = 0; i < n; i++) {
+      const x = px[i]!;
+      const y = py[i]!;
+      const z = pz[i]!;
+      if (x >= lx0 && x <= lx1 && y >= ly0 && y <= ly1 && z >= lz0 && z <= lz1) out[c++] = i;
+    }
+    this.terrainCandCount = c;
   }
 
   /** Make this body an immovable obstacle for the tick (frozen ships). */
@@ -388,6 +451,7 @@ export class Body {
     s.submerged = 0;
     this.supportedThisTick = false;
     this.rotorTouchThisTick = false;
+    this.shipImpulseThisTick = 0;
     this.pinHas = false;
     this.pinDepth = 0;
   }

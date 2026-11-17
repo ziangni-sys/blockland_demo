@@ -21,9 +21,27 @@
  *      ship crushed between two blades).
  */
 import type { Body } from './body';
-import { F_A, F_CELL, F_HASCELL, F_KIND, F_LN, F_LOC, F_NX, F_OBS, F_PIN, F_PX, F_SRC, F_DEPTH, F_VO, KIND_ROTOR, STRIDE, type ContactSet } from './contacts';
+import type { ContactSet } from './contacts';
+import * as CR from './contacts';
 import { nearestOwnerCell } from './shape';
 import type { ResolvedOptions } from './options';
+
+// Contact record offsets as module constants (hot loops; see solver.ts).
+const F_A = CR.F_A;
+const F_CELL = CR.F_CELL;
+const F_HASCELL = CR.F_HASCELL;
+const F_KIND = CR.F_KIND;
+const F_LN = CR.F_LN;
+const F_LOC = CR.F_LOC;
+const F_NX = CR.F_NX;
+const F_OBS = CR.F_OBS;
+const F_PIN = CR.F_PIN;
+const F_PX = CR.F_PX;
+const F_SRC = CR.F_SRC;
+const F_DEPTH = CR.F_DEPTH;
+const F_VO = CR.F_VO;
+const KIND_ROTOR = CR.KIND_ROTOR;
+const STRIDE = CR.STRIDE;
 
 /** Blade speeds below this (blocks/s) never pin: a stopped rotor is just a wall. */
 const MIN_BLADE_SPEED = 1e-4;

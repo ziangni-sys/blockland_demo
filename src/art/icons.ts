@@ -23,7 +23,15 @@ const T = TILE_SIZE;
 const SHADE_TOP = 1;
 const SHADE_LEFT = 0.8;
 const SHADE_RIGHT = 0.62;
-const SHADE_BACK = 0.55;
+/**
+ * Far faces of see-through blocks are seen from inside, so they are lit by their INWARD
+ * normal: the bottom faces up (like a top), the west face faces +X (like the right face),
+ * the north face +Z (like the left face). Dimmed a little, as if seen through the block.
+ */
+const THROUGH = 0.85;
+const SHADE_BACK_BOTTOM = SHADE_TOP * THROUGH;
+const SHADE_BACK_WEST = SHADE_RIGHT * THROUGH;
+const SHADE_BACK_NORTH = SHADE_LEFT * THROUGH;
 
 /** A textured parallelogram: points o + s*u + t*v for s, t in [0,1). */
 interface Quad {
@@ -132,12 +140,12 @@ function boxQuads(
   if (opts.back) {
     const [bu0, bu1] = r(x0, x1);
     const [bv0, bv1] = r(1 - z1, 1 - z0);
-    out.push({ o: [x0, y0, z1], u: [w, 0, 0], v: [0, 0, -d], tex: src.get(tiles.bottom ?? tiles.top, SHADE_BACK), tu0: bu0, tu1: bu1, tv0: bv0, tv1: bv1 });
+    out.push({ o: [x0, y0, z1], u: [w, 0, 0], v: [0, 0, -d], tex: src.get(tiles.bottom ?? tiles.top, SHADE_BACK_BOTTOM), tu0: bu0, tu1: bu1, tv0: bv0, tv1: bv1 });
     const [wu0, wu1] = r(z0, z1);
     const [wv0, wv1] = r(1 - y1, 1 - y0);
-    out.push({ o: [x0, y1, z0], u: [0, 0, d], v: [0, -h, 0], tex: src.get(tiles.west ?? tiles.east, SHADE_BACK), tu0: wu0, tu1: wu1, tv0: wv0, tv1: wv1 });
+    out.push({ o: [x0, y1, z0], u: [0, 0, d], v: [0, -h, 0], tex: src.get(tiles.west ?? tiles.east, SHADE_BACK_WEST), tu0: wu0, tu1: wu1, tv0: wv0, tv1: wv1 });
     const [nu0, nu1] = r(1 - x1, 1 - x0);
-    out.push({ o: [x1, y1, z0], u: [-w, 0, 0], v: [0, -h, 0], tex: src.get(tiles.north ?? tiles.south, SHADE_BACK), tu0: nu0, tu1: nu1, tv0: wv0, tv1: wv1 });
+    out.push({ o: [x1, y1, z0], u: [-w, 0, 0], v: [0, -h, 0], tex: src.get(tiles.north ?? tiles.south, SHADE_BACK_NORTH), tu0: nu0, tu1: nu1, tv0: wv0, tv1: wv1 });
   }
   const [tu0, tu1] = r(x0, x1);
   const [tv0, tv1] = r(z0, z1);
@@ -163,12 +171,35 @@ interface Projection {
 function projection(size: number): Projection {
   // Width a multiple of 4 keeps the rhombus corners on whole pixels, so the 2:1 edges
   // become perfectly regular stairs. Vertical edge ~ 4/7 of the width reads as a cube.
+  // cx must be an integer as well: with cx = size / 2 an odd size would put the left and
+  // right corners on pixel centres, where the half-open edge test keeps one side and drops
+  // the other (a lopsided silhouette). Half a pixel off-centre is invisible; lopsided is not.
   const margin = Math.max(1, Math.round(size / 16));
   const w = Math.max(4, 4 * Math.floor((size - 2 * margin) / 4));
   const ht = w / 4;
   const h = Math.round((w * 4) / 7);
   const total = 2 * ht + h;
-  return { cx: size / 2, top: Math.floor((size - total) / 2), hw: w / 2, ht, h };
+  return { cx: Math.floor(size / 2), top: Math.floor((size - total) / 2), hw: w / 2, ht, h };
+}
+
+/** A quad prepared for ray casting: screen origin, inverse screen basis, depth plane, bounds. */
+interface Prepared {
+  q: Quad;
+  sx0: number;
+  sy0: number;
+  // inverse of [[ax, bx], [ay, by]]
+  i00: number;
+  i01: number;
+  i10: number;
+  i11: number;
+  d0: number;
+  du: number;
+  dv: number;
+  /** Screen bounding box (pixel-centre test rejects outside it cheaply). */
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
 }
 
 /** Ray-casts the quads into a size x size RGBA image (straight alpha). */
@@ -177,19 +208,6 @@ function rasterize(quads: readonly Quad[], size: number, p: Projection): Uint8Cl
   // Screen mapping: sx = cx + (x - z) * hw ; sy = top + (x + z) * ht + (1 - y) * h.
   // Direction toward the viewer is (1, 2*ht/h, 1): depth = x + z + y * 2ht/h (larger = nearer).
   const ky = (2 * p.ht) / p.h;
-  interface Prepared {
-    q: Quad;
-    sx0: number;
-    sy0: number;
-    // inverse of [[ax, bx], [ay, by]]
-    i00: number;
-    i01: number;
-    i10: number;
-    i11: number;
-    d0: number;
-    du: number;
-    dv: number;
-  }
   const prep: Prepared[] = [];
   for (const q of quads) {
     const ax = (q.u[0] - q.u[2]) * p.hw;
@@ -198,10 +216,12 @@ function rasterize(quads: readonly Quad[], size: number, p: Projection): Uint8Cl
     const by = (q.v[0] + q.v[2]) * p.ht - q.v[1] * p.h;
     const det = ax * by - bx * ay;
     if (Math.abs(det) < 1e-9) continue; // seen edge-on
+    const sx0 = p.cx + (q.o[0] - q.o[2]) * p.hw;
+    const sy0 = p.top + (q.o[0] + q.o[2]) * p.ht + (1 - q.o[1]) * p.h;
     prep.push({
       q,
-      sx0: p.cx + (q.o[0] - q.o[2]) * p.hw,
-      sy0: p.top + (q.o[0] + q.o[2]) * p.ht + (1 - q.o[1]) * p.h,
+      sx0,
+      sy0,
       i00: by / det,
       i01: -bx / det,
       i10: -ay / det,
@@ -209,21 +229,29 @@ function rasterize(quads: readonly Quad[], size: number, p: Projection): Uint8Cl
       d0: q.o[0] + q.o[2] + q.o[1] * ky,
       du: q.u[0] + q.u[2] + q.u[1] * ky,
       dv: q.v[0] + q.v[2] + q.v[1] * ky,
+      // Padded so rounding never rejects a pixel the exact s/t test below would accept.
+      minX: sx0 + Math.min(0, ax, bx, ax + bx) - 1e-6,
+      maxX: sx0 + Math.max(0, ax, bx, ax + bx) + 1e-6,
+      minY: sy0 + Math.min(0, ay, by, ay + by) - 1e-6,
+      maxY: sy0 + Math.max(0, ay, by, ay + by) + 1e-6,
     });
   }
-  const hitDepth: number[] = [];
-  const hitRGBA: number[] = [];
-  const hitQuad: number[] = [];
-  const order: number[] = [];
+  // Per-pixel hit lists live in typed arrays sized once for this render; a pixel rarely has
+  // more than a few hits, so an insertion sort beats Array.prototype.sort with a closure.
+  const n = prep.length;
+  const hitDepth = new Float64Array(n);
+  const hitTexel = new Int32Array(n);
+  const hitQuad = new Int32Array(n);
   for (let py = 0; py < size; py++) {
+    const cy = py + 0.5;
     for (let px = 0; px < size; px++) {
-      hitDepth.length = 0;
-      hitRGBA.length = 0;
-      hitQuad.length = 0;
-      for (let k = 0; k < prep.length; k++) {
+      const cx = px + 0.5;
+      let hits = 0;
+      for (let k = 0; k < n; k++) {
         const e = prep[k]!;
-        const dx = px + 0.5 - e.sx0;
-        const dy = py + 0.5 - e.sy0;
+        if (cx < e.minX || cx > e.maxX || cy < e.minY || cy > e.maxY) continue;
+        const dx = cx - e.sx0;
+        const dy = cy - e.sy0;
         const s = e.i00 * dx + e.i01 * dy;
         const t = e.i10 * dx + e.i11 * dy;
         if (s < 0 || s >= 1 || t < 0 || t >= 1) continue;
@@ -232,22 +260,27 @@ function rasterize(quads: readonly Quad[], size: number, p: Projection): Uint8Cl
         const ty = Math.min(T - 1, Math.max(0, Math.floor(q.tv0 + t * (q.tv1 - q.tv0))));
         const o = (ty * T + tx) * 4;
         if (q.tex[o + 3] === 0) continue;
-        hitDepth.push(e.d0 + s * e.du + t * e.dv);
-        hitRGBA.push(o);
-        hitQuad.push(k);
+        // Insert nearest first; ties (coplanar seams) keep quad order, for determinism.
+        const d = e.d0 + s * e.du + t * e.dv;
+        let j = hits++;
+        while (j > 0 && hitDepth[j - 1]! < d) {
+          hitDepth[j] = hitDepth[j - 1]!;
+          hitTexel[j] = hitTexel[j - 1]!;
+          hitQuad[j] = hitQuad[j - 1]!;
+          j--;
+        }
+        hitDepth[j] = d;
+        hitTexel[j] = o;
+        hitQuad[j] = k;
       }
-      if (!hitDepth.length) continue;
-      order.length = 0;
-      for (let i = 0; i < hitDepth.length; i++) order.push(i);
-      // Nearest first; ties (coplanar seams) resolve by quad order for determinism.
-      order.sort((a, b) => hitDepth[b]! - hitDepth[a]! || hitQuad[a]! - hitQuad[b]!);
+      if (!hits) continue;
       let r = 0;
       let g = 0;
       let b = 0;
       let a = 0;
-      for (const i of order) {
+      for (let i = 0; i < hits; i++) {
         const tex = prep[hitQuad[i]!]!.q.tex;
-        const o = hitRGBA[i]!;
+        const o = hitTexel[i]!;
         const ta = tex[o + 3]! / 255;
         const wgt = (1 - a) * ta;
         r += tex[o]! * wgt;
@@ -266,14 +299,54 @@ function rasterize(quads: readonly Quad[], size: number, p: Projection): Uint8Cl
   return img;
 }
 
-/** Darkens the silhouette's border pixels: a crisp 1-px outline inside the icon bounds. */
+/**
+ * Marks the transparent pixels connected (4-neighbour) to the image border: the background
+ * OUTSIDE the silhouette. Transparent pixels enclosed by the icon (the see-through middle of
+ * glass, gaps between leaves, between wheel spokes) stay unmarked.
+ */
+function exteriorMask(img: Uint8ClampedArray, size: number): Uint8Array {
+  const ext = new Uint8Array(size * size);
+  const stack = new Int32Array(size * size);
+  let top = 0;
+  const seed = (i: number): void => {
+    if (ext[i] || img[i * 4 + 3]! > 0) return;
+    ext[i] = 1;
+    stack[top++] = i;
+  };
+  for (let i = 0; i < size; i++) {
+    seed(i);
+    seed((size - 1) * size + i);
+    seed(i * size);
+    seed(i * size + size - 1);
+  }
+  while (top > 0) {
+    const i = stack[--top]!;
+    const x = i % size;
+    if (x > 0) seed(i - 1);
+    if (x < size - 1) seed(i + 1);
+    if (i >= size) seed(i - size);
+    if (i < size * (size - 1)) seed(i + size);
+  }
+  return ext;
+}
+
+/** True when pixel (x, y) touches the exterior (or the image border) on a 4-neighbour side. */
+function touchesExterior(ext: Uint8Array, size: number, x: number, y: number): boolean {
+  const i = y * size + x;
+  return x === 0 || y === 0 || x === size - 1 || y === size - 1 || ext[i - 1] === 1 || ext[i + 1] === 1 || ext[i - size] === 1 || ext[i + size] === 1;
+}
+
+/**
+ * Darkens the silhouette's border pixels: a crisp 1-px outline inside the icon bounds. Only
+ * the OUTER silhouette is outlined: darkening every pixel next to interior transparency
+ * would turn a light glass frame into a dark wireframe and ring every hole in leaves.
+ */
 function outlineSilhouette(img: Uint8ClampedArray, size: number): void {
-  const solid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < size && y < size && img[(y * size + x) * 4 + 3]! > 0;
+  const ext = exteriorMask(img, size);
   const edge: number[] = [];
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      if (!solid(x, y)) continue;
-      if (!solid(x - 1, y) || !solid(x + 1, y) || !solid(x, y - 1) || !solid(x, y + 1)) edge.push(y * size + x);
+      if (img[(y * size + x) * 4 + 3]! > 0 && touchesExterior(ext, size, x, y)) edge.push(y * size + x);
     }
   }
   for (const i of edge) {
@@ -286,7 +359,11 @@ function outlineSilhouette(img: Uint8ClampedArray, size: number): void {
   }
 }
 
-/** Grows a 1-px dark ring OUTSIDE the silhouette, coloured from the neighbouring pixel. */
+/**
+ * Grows a 1-px dark ring OUTSIDE the silhouette, coloured from the neighbouring pixel. Small
+ * enclosed gaps (between the helm wheel's spokes) are filled too, on purpose: wood seen
+ * through them would merge the wheel with the wooden pedestal behind it.
+ */
 function outlineOutside(img: Uint8ClampedArray, size: number): void {
   const solid = (x: number, y: number): boolean => x >= 0 && y >= 0 && x < size && y < size && img[(y * size + x) * 4 + 3]! > 0;
   const ring: Array<[number, number]> = [];
@@ -390,15 +467,12 @@ function blockQuads(def: BlockDef, src: TileSource, p: Projection): Quad[] | nul
     case 'helm': {
       const [base, wheel] = [t[0]!, t[1]!];
       // Pedestal below, the wheel upright in front of it and turned toward the viewer so it
-      // reads as a wheel at hotbar sizes. Its hub (texel 7.5) sits at the pedestal top.
+      // reads as a wheel at hotbar sizes. Its hub (the tile centre) sits at the pedestal top.
       // The post must be taller than the wheel's radius below the hub, or it vanishes behind it.
       const hubY = 0.96;
       const quads = boxQuads(src, 5 / 16, 0, 5 / 16, 11 / 16, 1, 11 / 16, { top: base, south: base, east: base });
       const d = p.hw * 2 * 0.62;
-      const q = billboard(p, hubY, 0.25, d, d, src.get(wheel, 1));
-      // Shift so the texel centre (7.5, 7.5) of the 16-px wheel, not the tile centre, is the hub.
-      const off = 0.5 / 16;
-      quads.push({ ...q, overlay: true, o: [q.o[0] + (q.u[0] + q.v[0]) * off, q.o[1] + (q.u[1] + q.v[1]) * off, q.o[2] + (q.u[2] + q.v[2]) * off] });
+      quads.push({ ...billboard(p, hubY, 0.25, d, d, src.get(wheel, 1)), overlay: true });
       return quads;
     }
     case 'propeller': {

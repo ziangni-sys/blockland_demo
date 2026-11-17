@@ -14,7 +14,7 @@
  *   pinning.ts    rotor pinning test and the hull cell to destroy
  *   sleep.ts      sleep / wake
  */
-import type { ShipDynamics, StructureHost } from '../structure';
+import type { StructureHost } from '../structure';
 import { ShipDynamicsImpl } from './dynamics';
 import type { DynamicsOptions } from './options';
 
@@ -28,6 +28,6 @@ export { WATER_SURFACE_DROP } from './patch';
  * Create the ship dynamics for a simulation. The returned object implements ShipDynamics
  * (refresh, step, applyImpulse, wake) plus getStats() for debug overlays and tests.
  */
-export function createShipDynamics(host: StructureHost, opts?: DynamicsOptions): ShipDynamics & ShipDynamicsImpl {
+export function createShipDynamics(host: StructureHost, opts?: DynamicsOptions): ShipDynamicsImpl {
   return new ShipDynamicsImpl(host, opts);
 }

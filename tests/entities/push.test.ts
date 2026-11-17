@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { aabb, qfromAxisAngle, vec3 } from '../../src/core/math';
+import { vec3 } from '../../src/core/math';
 import type { Entity } from '../../src/entities/entity';
 import type { Rotor } from '../../src/structures/structure';
-import { boxOverlapsSolid } from '../../src/voxel/shape';
 import { B, Bench, deck, fill, inStructure, inWorld, makeWorld, qfromYaw, TICK_DT } from './harness';
 
 const UP = vec3(0, 1, 0);
@@ -183,7 +182,7 @@ describe('ACCEPTANCE 18 — rabbits and item drops', () => {
     b.entities.createPlayer('survival', 15.5, 61, 15.5);
     fill(b.world, 2, 61, -4, 2, 62, -4, B.STONE);
     fill(b.world, 3, 61, -4, 3, 61, -4, B.STONE);
-    const r = bladeRotor(b, 2);
+    bladeRotor(b, 2);
     const items = [];
     // different items, so they do not merge into each other
     const kinds = [B.COBBLE, B.DIRT, B.GRAVEL, B.PLANKS_OAK, B.PLANKS_PINE, B.GLASS, B.STONE_BRICKS, B.BRICKS];
@@ -202,7 +201,6 @@ describe('ACCEPTANCE 18 — rabbits and item drops', () => {
       expect(inWorld(b.world, it)).toBe(false);
     }
     expect(b.host.count('despawn')).toBe(0);
-    void r;
   });
 });
 
@@ -341,8 +339,3 @@ describe('a ship moving into a standing player', () => {
     expect(p.health).toBeLessThan(20);
   });
 });
-
-// keep the helper import used even if a scenario above changes
-void aabb;
-void boxOverlapsSolid;
-void qfromAxisAngle;

@@ -94,15 +94,17 @@ const paintHelmWheel: Painter = (c) => {
       }
       const r = Math.sqrt(ox * ox + oy * oy);
       const light = -(ox + oy) / r; // +1 toward the top-left
+      // The rim is the boldest part (it is what makes a wheel read as a wheel); spokes stay a
+      // step darker so the four axis spokes do not dominate as a plus sign.
       let t: number;
-      if (part === 'rim') t = 2.1 + light * 1.4;
+      if (part === 'rim') t = 2.7 + light * 1.2;
       else if (part === 'axis' || part === 'axisHandle') {
         // Of the two texels across a 2-px spoke, the one nearer the top-left is lit.
         const lit = ax < ay ? ox < 0 : oy < 0;
-        t = part === 'axis' ? (lit ? 2.6 : 1.5) : lit ? 3.2 : 2;
-        if (Math.max(ax, ay) === 7.5) t = lit ? 1.6 : 0.8; // knob end
+        t = part === 'axis' ? (lit ? 1.9 : 1.1) : lit ? 2.9 : 1.9;
+        if (Math.max(ax, ay) === 7.5) t = lit ? 1.4 : 0.6; // knob end
       } else {
-        t = part === 'diag' ? 2 + light * 0.5 : 2.7 + light * 0.6;
+        t = part === 'diag' ? 1.6 + light * 0.4 : 2.6 + light * 0.6;
         if (Math.max(ax, ay) === 5.5) t = 1.1; // knob end
       }
       c.set(x, y, wood[toneIndex(t, wood.length)]!);

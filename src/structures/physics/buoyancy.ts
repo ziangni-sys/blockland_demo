@@ -9,8 +9,10 @@
  *     tau = rho g (-sum f_i rz_i, 0, sum f_i rx_i).
  */
 import type { Body } from './body';
-import { PF_WATER, WATER_SURFACE_DROP } from './patch';
+import { PF_WATER as PF_WATER_IMPORT, WATER_SURFACE_DROP } from './patch';
 
+// Module constants (not imported bindings) in the hot loop; see solver.ts.
+const PF_WATER = PF_WATER_IMPORT;
 const TOP_FILL = 1 - WATER_SURFACE_DROP;
 
 /**
@@ -25,6 +27,13 @@ export function applyBuoyancy(body: Body, rhoG: number, dt: number): void {
     return;
   }
   const patch = body.patch;
+  // A cube whose bottom is at or above the top of the highest water cell of the patch is dry:
+  // skip it after one row of the transform (half of a floating hull, most of a tall one).
+  const waterTop = patch.waterTop;
+  if (waterTop === -Infinity) {
+    body.submerged = 0;
+    return;
+  }
   const f = patch.flags;
   const pox = patch.ox;
   const poy = patch.oy;
@@ -59,6 +68,7 @@ export function applyBuoyancy(body: Body, rhoG: number, dt: number): void {
     const lz = dz[i]!;
     const wy = r3 * lx + r4 * ly + r5 * lz + ty;
     const y0 = wy - 0.5;
+    if (y0 >= waterTop) continue;
     const k0 = Math.floor(y0);
     const wx = r0 * lx + r1 * ly + r2 * lz + tx;
     const wz = r6 * lx + r7 * ly + r8 * lz + tz;

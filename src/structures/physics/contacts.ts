@@ -20,9 +20,13 @@
 import { DIR_X, DIR_Y, DIR_Z } from '../../core/dirs';
 import type { Body } from './body';
 import { mat3MulTransA, type Mat3 } from './mat3';
-import { PF_SOLID } from './patch';
+import { PF_SOLID as PF_SOLID_IMPORT } from './patch';
 import type { RotorView } from './rotorview';
-import { OCC_SOLID, type GridShape, type ProbeTarget } from './shape';
+import { OCC_SOLID as OCC_SOLID_IMPORT, type GridShape, type ProbeTarget } from './shape';
+
+// Module constants (not imported bindings) in the hot loops; see solver.ts.
+const PF_SOLID = PF_SOLID_IMPORT;
+const OCC_SOLID = OCC_SOLID_IMPORT;
 
 export const KIND_TERRAIN = 0;
 export const KIND_ROTOR = 1;
@@ -240,6 +244,7 @@ export class ContactGenerator {
   private readonly RT: Mat3 = new Float64Array(9);
   private readonly vel = new Float64Array(3);
   private readonly idx: Int32Array[] = [];
+  private readonly counts = new Int32Array(6);
   private keep = new Uint8Array(256);
   private order = new Int32Array(256);
   private keys = new Float64Array(256);
@@ -279,13 +284,16 @@ export class ContactGenerator {
     const psz = patch.sz;
 
     // (1) hull points inside terrain: the intruder normals are hull-local, the target is the world.
+    // Only the points that can reach the patch's hard cells this tick (Body.selectTerrainCandidates).
     pr.setFrame(R);
-    const n = s.pointCount;
+    const cand = b.terrainCand;
+    const n = b.terrainCandCount;
     const px = s.px;
     const py = s.py;
     const pz = s.pz;
     const pm = s.pmask;
-    for (let i = 0; i < n; i++) {
+    for (let k = 0; k < n; k++) {
+      const i = cand[k]!;
       const lx = px[i]!;
       const ly = py[i]!;
       const lz = pz[i]!;
@@ -376,16 +384,18 @@ export class ContactGenerator {
   }
 
   /**
-   * Manifold reduction of body `b`'s terrain contacts in [start, set.count): per dominant normal
-   * direction keep the extreme points along the two tangent axes (they carry the support
-   * polygon) and then the deepest ones, up to `cap`. Keeps the solver cost bounded when a big
-   * hull lies on flat ground, without dropping the penetrations that matter. Returns the new count.
+   * Manifold reduction of the contacts in [start, set.count) — one body against one obstacle
+   * (the terrain, one rotor or one other ship): per dominant normal direction keep the extreme
+   * points along the two tangent axes (they carry the support polygon) and then the deepest
+   * ones, up to `cap`. Keeps the solver cost bounded when a big hull lies on flat ground,
+   * without dropping the penetrations that matter. Returns the new count.
    */
   reduce(set: ContactSet, start: number, cap: number): number {
     const total = set.count - start;
     if (total <= cap) return set.count;
     const a = set.f;
-    const counts = [0, 0, 0, 0, 0, 0];
+    const counts = this.counts;
+    counts.fill(0);
     for (let i = 0; i < 6; i++) if (this.idx[i]!.length < total) this.idx[i] = new Int32Array(total * 2);
     for (let i = start; i < set.count; i++) {
       const base = i * STRIDE;
@@ -425,17 +435,12 @@ export class ContactGenerator {
         if (a[i * STRIDE + v]! < a[iv0 * STRIDE + v]!) iv0 = i;
         if (a[i * STRIDE + v]! > a[iv1 * STRIDE + v]!) iv1 = i;
       }
+      keep[iu0 - start] = 1;
+      keep[iu1 - start] = 1;
+      keep[iv0 - start] = 1;
+      keep[iv1 - start] = 1;
       let kept = 0;
-      const mark = (i: number): void => {
-        if (keep[i - start] === 0) {
-          keep[i - start] = 1;
-          kept++;
-        }
-      };
-      mark(iu0);
-      mark(iu1);
-      mark(iv0);
-      mark(iv1);
+      for (let k = 0; k < cnt; k++) kept += keep[list[k]! - start]!;
       // then the deepest of the rest: stable sort of the remaining by depth (descending)
       const order = this.order;
       const keys = this.keys;

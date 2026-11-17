@@ -118,6 +118,8 @@ export class EntityManager {
   private readonly box2: AABB = aabb();
   private readonly grids: VoxelGrid[] = [];
   private readonly items: ItemEntity[] = [];
+  /** Vertical distance the last moveBody() teleported the body (crush / unstuck): not a fall. */
+  private relocatedDy = 0;
 
   constructor(host: EntityHost) {
     this.host = host;
@@ -176,6 +178,7 @@ export class EntityManager {
     this.pendingBlasts.length = 0;
     this.snapshotDone = false;
     this.cacheTick = -1;
+    this.cache.reset();
   }
 
   // ================================================================== spawning
@@ -332,6 +335,8 @@ export class EntityManager {
       for (const c of s.children) collect(c);
     };
     collect(structure);
+    // Its frame is about to jump (blockify / dock / re-grid): never carry anything across that.
+    for (const id of ids) this.cache.forget(id);
     const list = this.list;
     for (let i = 0; i < list.length; i++) {
       const e = list[i]!;
@@ -489,9 +494,9 @@ export class EntityManager {
       w.bool(e.headWet);
       w.bool(e.inLava);
       w.varuint(e.carrierId);
-      w.varuint(e.noAttachTicks);
+      w.varuint(uint(e.noAttachTicks));
       w.varuint(e.noAttachStructureId);
-      w.varuint(e.age);
+      w.varuint(uint(e.age));
       w.f64(e.fallDistance);
       w.f64(e.contactNx);
       w.f64(e.contactNz);
@@ -500,36 +505,36 @@ export class EntityManager {
         w.u8(e.mode === 'creative' ? 1 : 0);
         w.f64(e.health);
         w.f64(e.maxHealth);
-        w.varuint(e.air);
-        w.varuint(e.maxAir);
+        w.varuint(uint(e.air));
+        w.varuint(uint(e.maxAir));
         w.bool(e.dead);
-        w.varuint(e.hurtTicks);
+        w.varuint(uint(e.hurtTicks));
         w.bool(e.flying);
         w.bool(e.sneaking);
         w.bool(e.sprinting);
         w.varuint(e.steeringShipId);
         writeVec(w, e.seat);
         writeVec(w, e.spawn);
-        w.varuint(e.drownTicks);
-        w.varuint(e.lavaTicks);
-        w.varuint(Math.min(e.unhurtTicks, 1 << 30));
-        w.varint(Math.max(-(1 << 30), e.lastJumpPressAge));
+        w.varuint(uint(e.drownTicks));
+        w.varuint(uint(e.lavaTicks));
+        w.varuint(Math.min(uint(e.unhurtTicks), 1 << 30));
+        w.varint(Math.max(-(1 << 30), int(e.lastJumpPressAge)));
         w.u8(e.input.slot & 0xff);
         e.inventory.serialize(w);
       } else if (e instanceof ItemEntity) {
         w.varuint(e.stack.item);
         w.varuint(e.stack.count);
-        w.varuint(Math.max(0, e.pickupDelay));
+        w.varuint(uint(e.pickupDelay));
       } else if (e instanceof FallingBlockEntity) {
         w.u16(e.cell & 0xffff);
       } else if (e instanceof TntEntity) {
-        w.varuint(Math.max(0, e.fuse));
+        w.varuint(uint(e.fuse));
       } else if (e instanceof Rabbit) {
         w.u8(Math.min(255, e.crushCount));
         w.u8(e.aiState === 'hop' ? 1 : 0);
-        w.varint(e.aiTimer);
-        w.varint(e.hopsLeft);
-        w.varint(e.hopCooldown);
+        w.varint(int(e.aiTimer));
+        w.varint(int(e.hopsLeft));
+        w.varint(int(e.hopCooldown));
         w.f64(e.wanderYaw);
       }
     }
@@ -850,6 +855,11 @@ export class EntityManager {
     this.remove(e);
   }
 
+  /** 'splash' when a body that was dry hits the water fast (call after sampleFluids, before moving). */
+  private splashCheck(e: Entity, wasWet: number): void {
+    if (wasWet === 0 && e.wet > 0 && e.vel.y < -SPLASH_SPEED) this.host.emit({ type: 'splash', entity: e, amount: -e.vel.y });
+  }
+
   /** rel := own velocity relative to the carrier. */
   private loadRel(e: Entity): Vec3 {
     const rel = this.rel;
@@ -885,6 +895,7 @@ export class EntityManager {
   private moveBody(e: Entity, sneakGuard: boolean): StructRec | null {
     const d = this.disp;
     const rel = this.rel;
+    this.relocatedDy = 0;
     if (Math.abs(d.x) + Math.abs(d.y) + Math.abs(d.z) > NEAR_MARGIN * 0.5) this.gatherNear(e, d.x, d.y, d.z);
     const mover = this.mover;
     mover.move(e, rel, d.x, d.y, d.z, sneakGuard);
@@ -926,6 +937,7 @@ export class EntityManager {
     e.pos.x += off.x;
     e.pos.y += off.y;
     e.pos.z += off.z;
+    this.relocatedDy += off.y;
     // Stand still relative to the carrier: no velocity survives being squeezed out.
     this.rel.x = 0;
     this.rel.y = 0;
@@ -1063,8 +1075,8 @@ export class EntityManager {
     } else {
       guard = playerMotion(p, rel, fluid, p.inLava, this.wish, d);
     }
+    this.splashCheck(p, wasWet);
     const y0 = p.pos.y;
-    const vyBefore = p.vel.y;
     this.moveBody(p, guard && !p.flying);
     if (p.removed || p.dead) return;
     if (seated && p.steeringShipId !== 0) {
@@ -1079,16 +1091,21 @@ export class EntityManager {
         if (dx * dx + dy * dy + dz * dz > 0.25) this.releaseHelm(p, 'pushed');
       }
     }
-    // Falls, landing, splash.
-    const fell = p.pos.y < y0 ? y0 - p.pos.y : 0;
-    if (p.wet > 0 && wasWet === 0 && vyBefore < -SPLASH_SPEED) this.host.emit({ type: 'splash', entity: p, amount: -vyBefore });
+    // Falls and landing. A crush / unstuck relocation is a teleport, not a fall.
+    const y1 = p.pos.y - this.relocatedDy;
+    const fell = y1 < y0 ? y0 - y1 : 0;
     if (p.wet > 0 || p.inLava || p.flying || p.steeringShipId !== 0) {
       p.fallDistance = 0;
     } else if (p.onGround) {
       const total = p.fallDistance + fell;
       p.fallDistance = 0;
       if (!wasOnGround && total >= LAND_EVENT_HEIGHT) this.host.emit({ type: 'land', entity: p, amount: total });
-      if (total > FALL_SAFE_HEIGHT) this.damage(p, Math.ceil(total - FALL_SAFE_HEIGHT), 'fall');
+      if (total > FALL_SAFE_HEIGHT) {
+        // Fluids were sampled before this tick's move: a fast fall can enter shallow water and
+        // hit its bottom in the same tick. Water at the landing spot always breaks the fall.
+        this.fluids.sample(p, this.mover.near);
+        if (p.wet === 0 && !p.inLava) this.damage(p, Math.ceil(total - FALL_SAFE_HEIGHT), 'fall');
+      }
     } else {
       p.fallDistance += fell;
     }
@@ -1136,6 +1153,7 @@ export class EntityManager {
       this.remove(e);
       return;
     }
+    const wasWet = e.wet;
     const fluid = this.sampleFluids(e);
     if (e.inLava) {
       this.host.emit({ type: 'despawn', entity: e, cause: 'lava' });
@@ -1143,13 +1161,16 @@ export class EntityManager {
       return;
     }
     const rel = this.loadRel(e);
+    this.splashCheck(e, wasWet);
     passiveMotion(e, rel, fluid, ITEM_GRAVITY, ITEM_BUOYANCY, this.disp);
     this.moveBody(e, false);
   }
 
   private updateTnt(e: TntEntity): void {
+    const wasWet = e.wet;
     const fluid = this.sampleFluids(e);
     const rel = this.loadRel(e);
+    this.splashCheck(e, wasWet);
     passiveMotion(e, rel, fluid, ITEM_GRAVITY, 0, this.disp);
     this.moveBody(e, false);
     if (e.removed) return;
@@ -1161,15 +1182,19 @@ export class EntityManager {
   }
 
   private updateFalling(e: FallingBlockEntity): void {
+    const wasWet = e.wet;
     const fluid = this.sampleFluids(e);
     const rel = this.loadRel(e);
+    this.splashCheck(e, wasWet);
     passiveMotion(e, rel, fluid, ITEM_GRAVITY, 0, this.disp);
     rel.x = 0;
     rel.z = 0;
     this.disp.x = 0;
     this.disp.z = 0;
+    const y0 = e.pos.y;
     this.moveBody(e, false);
     if (e.removed) return;
+    if (e.pos.y < y0) e.fallDistance += y0 - e.pos.y;
     if (this.mover.onWorldGround) this.landFalling(e);
     // LESSONS 沙子落到船上悬浮: landing on a structure always yields an item drop.
     else if (this.mover.groundRec !== null || e.carrierId !== 0) this.fallingToItem(e, 'structure');
@@ -1221,12 +1246,14 @@ export class EntityManager {
 
   private updateRabbit(e: Rabbit): void {
     const rng = this.host.rng;
+    const wasWet = e.wet;
     const fluid = this.sampleFluids(e);
     if (e.inLava) {
       this.kill(e, 'lava');
       return;
     }
     const rel = this.loadRel(e);
+    this.splashCheck(e, wasWet);
     const d = this.disp;
     const dirx = -Math.sin(e.wanderYaw);
     const dirz = -Math.cos(e.wanderYaw);
@@ -1416,6 +1443,14 @@ export class EntityManager {
 /** sweepAxis on the world with a numeric axis. */
 function sweepAxisSafe(world: VoxelGrid, b: AABB, axis: number, d: number): number {
   return sweepAxis(world, b, axis as 0 | 1 | 2, d);
+}
+
+/** A tick counter as a non-negative integer (save fields are integers even if a caller set a fraction). */
+function uint(v: number): number {
+  return v > 0 ? Math.floor(v) : 0;
+}
+function int(v: number): number {
+  return Number.isFinite(v) ? Math.trunc(v) : 0;
 }
 
 function writeVec(w: ByteWriter, v: Vec3): void {

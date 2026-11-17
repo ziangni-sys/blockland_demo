@@ -38,8 +38,10 @@ function blockAt(q: Quad, x: number, z: number): number {
 }
 
 describe('ambient occlusion', () => {
-  it('maps levels to the documented bytes', () => {
-    expect(AO_BYTE).toEqual([102, 153, 204, 255]);
+  it('encodes the occlusion level linearly (level * 85) and leaves the brightness curve to the renderer', () => {
+    // The renderer maps ao / 255 to brightness with its own curve (render/three/lighting.ts
+    // aoFactor); a pre-curved byte would apply a curve twice and wash AO out.
+    expect(AO_BYTE).toEqual([0, 85, 170, 255]);
   });
 
   it('open floor is unoccluded', () => {
@@ -51,8 +53,8 @@ describe('ambient occlusion', () => {
     const s = floorScene();
     put(s, 0, 1, 1, makeCell(B.STONE)); // -x side of the face
     const q = floorTop(s);
-    expect(aoAt(q, 1, 1)).toBe(204);
-    expect(aoAt(q, 1, 2)).toBe(204);
+    expect(aoAt(q, 1, 1)).toBe(170);
+    expect(aoAt(q, 1, 2)).toBe(170);
     expect(aoAt(q, 2, 1)).toBe(255);
     expect(aoAt(q, 2, 2)).toBe(255);
   });
@@ -61,7 +63,7 @@ describe('ambient occlusion', () => {
     const s = floorScene();
     put(s, 0, 1, 0, makeCell(B.STONE));
     const q = floorTop(s);
-    expect(aoAt(q, 1, 1)).toBe(204);
+    expect(aoAt(q, 1, 1)).toBe(170);
     expect([aoAt(q, 2, 1), aoAt(q, 2, 2), aoAt(q, 1, 2)]).toEqual([255, 255, 255]);
   });
 
@@ -69,7 +71,7 @@ describe('ambient occlusion', () => {
     const s = floorScene();
     put(s, 0, 1, 1, makeCell(B.STONE));
     put(s, 0, 1, 0, makeCell(B.STONE));
-    expect(aoAt(floorTop(s), 1, 1)).toBe(153);
+    expect(aoAt(floorTop(s), 1, 1)).toBe(85);
   });
 
   it('both sides blocked = fully occluded, with or without the corner', () => {
@@ -79,9 +81,9 @@ describe('ambient occlusion', () => {
       put(s, 1, 1, 0, makeCell(B.STONE));
       if (withCorner) put(s, 0, 1, 0, makeCell(B.STONE));
       const q = floorTop(s);
-      expect(aoAt(q, 1, 1)).toBe(102);
-      expect(aoAt(q, 2, 1)).toBe(204);
-      expect(aoAt(q, 1, 2)).toBe(204);
+      expect(aoAt(q, 1, 1)).toBe(0);
+      expect(aoAt(q, 2, 1)).toBe(170);
+      expect(aoAt(q, 1, 2)).toBe(170);
       expect(aoAt(q, 2, 2)).toBe(255);
     }
   });
@@ -101,7 +103,7 @@ describe('ambient occlusion', () => {
     put(s, 0, 1, 1, makeCell(B.PLANKS_OAK));
     put(s, 1, 1, 0, makeCell(B.PLANKS_OAK));
     const q = floorTop(s);
-    expect(aoAt(q, 1, 1)).toBe(102);
+    expect(aoAt(q, 1, 1)).toBe(0);
     expect(q.sky).toEqual([255, 255, 255, 255]);
     expect(q.block).toEqual([0, 0, 0, 0]);
   });
@@ -113,8 +115,8 @@ describe('ambient occlusion', () => {
     put(input, 0, 0, 0, makeCell(B.STONE));
     put(input, -1, 1, 0, makeCell(B.STONE));
     const q = allQuads(buildMesh(input)).find((q) => dirOfQuad(q) === 1)!;
-    expect(q.ao[cornerAt(q, 0, 1, 0)]).toBe(204);
-    expect(q.ao[cornerAt(q, 0, 1, 1)]).toBe(204);
+    expect(q.ao[cornerAt(q, 0, 1, 0)]).toBe(170);
+    expect(q.ao[cornerAt(q, 0, 1, 1)]).toBe(170);
     expect(q.ao[cornerAt(q, 0, 0, 0)]).toBe(255);
     expect(q.ao[cornerAt(q, 0, 0, 1)]).toBe(255);
   });

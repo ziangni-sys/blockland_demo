@@ -40,7 +40,8 @@ export const PATINA = rampOf('#3f8a76', '#69b79b');
 
 // ---------------------------------------------------------------- liquids
 export const WATER = ramp('#2e7a8c', { step: 0.065, hueShift: 6, satShift: 0.03 });
-export const LAVA = rampOf('#3a1410', '#6e1f12', '#b23916', '#e46a1e', '#f8a63a', '#ffe17c');
+/** Crust, cooling red, molten orange, amber, white-hot yellow. */
+export const LAVA = rampOf('#3a1410', '#8a2a14', '#d8551b', '#f6a038', '#ffe17c');
 
 // ---------------------------------------------------------------- wood
 export const OAK_BARK = ramp('#6c4b31', { step: 0.06, hueShift: 7 });
@@ -92,3 +93,5 @@ export const TORCH_STICK = rampOf('#3a2a20', '#6f4b2e', '#9c7047');
 export const FLAME = rampOf('#c2401c', '#f07a24', '#ffc046', '#fff3b8');
 export const GLUE = rampOf('#7a4a12', '#b8741c', '#e3a032', '#f6cd6c', '#fff0bf');
 export const CRACK: RGB = hex('#1b1720');
+/** Light edge of a crack (fresh fracture surface catching the light). */
+export const CRACK_CHIP: RGB = hex('#d6cfc2');

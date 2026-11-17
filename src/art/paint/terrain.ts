@@ -358,20 +358,32 @@ export const paintCopperOre: Painter = (c, seed) =>
 
 // ---------------------------------------------------------------- snow, ice, clay
 
+/**
+ * Snow: soft drifts. A periodic height field is lit from the top-left: slopes facing the
+ * light round up to the highlight tone, lee slopes down to the first shadow tone (the
+ * deepest hollows one more), on a base of the material tone. The slope is normalized to
+ * the tile's own steepest slope, so the shading depth does not depend on how much relief
+ * one particular noise seed happens to have.
+ */
 export const paintSnow: Painter = (c, seed) => {
+  // Mostly 4-px ripples with a little broad swell: one 8-px bump per tile repeats as a
+  // visible grid on a snowfield, small drifts read as texture.
+  const height = (x: number, y: number): number => fbm(x, y, 4, 1, seed + 61) + fbm(x, y, 2, 1, seed + 63) * 0.4;
+  const slope = new Field();
+  let steepest = 1e-6;
+  // Height rising toward the lower-right = surface facing the top-left light.
+  slope.each((x, y) => {
+    const s = height(x + 1, y + 1) - height(x - 1, y - 1);
+    steepest = Math.max(steepest, Math.abs(s));
+    return s;
+  });
   const f = new Field();
   f.each((x, y) => {
-    let t = 3.1 + sfbm(x, y, 2, 3, seed + 61) * 0.6;
-    const h = hrand(x, y, seed + 62);
-    if (h > 0.97) t = 4.2; // sparkle
+    let t = 3 + (slope.get(x, y) / steepest) * 0.95 + sfbm(x, y, 4, 1, seed + 64) * 0.12;
+    if (hrand(x, y, seed + 62) > 0.975) t = 4.2; // sparkle
     return t;
   });
-  // Soft drift shadows: lower-right side of the large-scale bumps.
-  f.each((x, y, t) => {
-    const slope = fbm(x - 1, y - 1, 2, 2, seed + 61) - fbm(x + 1, y + 1, 2, 2, seed + 61);
-    return t + slope * 2.2;
-  });
-  paintField(c, f, M.SNOW, { dither: 0.15 });
+  paintField(c, f, M.SNOW, { dither: 0.3 });
 };
 
 export const paintIce: Painter = (c, seed) => {

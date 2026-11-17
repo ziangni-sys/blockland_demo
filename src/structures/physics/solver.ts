@@ -10,42 +10,44 @@
  * demands, the velocity that leaves the solver respects the terrain.
  */
 import type { Body } from './body';
-import {
-  F_A,
-  F_B,
-  F_BIAS,
-  F_DEPTH,
-  F_JAN,
-  F_JAT1,
-  F_JAT2,
-  F_JBN,
-  F_JBT1,
-  F_JBT2,
-  F_KAN,
-  F_KAT1,
-  F_KAT2,
-  F_KBN,
-  F_KBT1,
-  F_KBT2,
-  F_LN,
-  F_LP,
-  F_LT1,
-  F_LT2,
-  F_MN,
-  F_MT1,
-  F_MT2,
-  F_MU,
-  F_NX,
-  F_PIN,
-  F_PX,
-  F_RA,
-  F_RB,
-  F_T1,
-  F_T2,
-  F_VO,
-  STRIDE,
-  type ContactSet,
-} from './contacts';
+import * as C from './contacts';
+import type { ContactSet } from './contacts';
+
+// Record offsets copied into module constants: hot loops index with them on every access, and
+// some module systems (vitest's transform) turn each imported binding read into a property load.
+const F_A = C.F_A;
+const F_B = C.F_B;
+const F_BIAS = C.F_BIAS;
+const F_DEPTH = C.F_DEPTH;
+const F_JAN = C.F_JAN;
+const F_JAT1 = C.F_JAT1;
+const F_JAT2 = C.F_JAT2;
+const F_JBN = C.F_JBN;
+const F_JBT1 = C.F_JBT1;
+const F_JBT2 = C.F_JBT2;
+const F_KAN = C.F_KAN;
+const F_KAT1 = C.F_KAT1;
+const F_KAT2 = C.F_KAT2;
+const F_KBN = C.F_KBN;
+const F_KBT1 = C.F_KBT1;
+const F_KBT2 = C.F_KBT2;
+const F_LN = C.F_LN;
+const F_LP = C.F_LP;
+const F_LT1 = C.F_LT1;
+const F_LT2 = C.F_LT2;
+const F_MN = C.F_MN;
+const F_MT1 = C.F_MT1;
+const F_MT2 = C.F_MT2;
+const F_MU = C.F_MU;
+const F_NX = C.F_NX;
+const F_PIN = C.F_PIN;
+const F_PX = C.F_PX;
+const F_RA = C.F_RA;
+const F_RB = C.F_RB;
+const F_T1 = C.F_T1;
+const F_T2 = C.F_T2;
+const F_VO = C.F_VO;
+const STRIDE = C.STRIDE;
 
 /**
  * Per-contact constants: lever arms, tangent basis, Jacobian rows, effective masses and the

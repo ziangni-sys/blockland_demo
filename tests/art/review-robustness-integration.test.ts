@@ -1,6 +1,7 @@
 /**
  * Adversarial review (robustness / integration lens) of the art module. These tests encode
- * defects found in review; they fail against the reviewed implementation on purpose.
+ * defects found in review: they failed against the reviewed implementation and now guard
+ * the fixes (see also regressions.test.ts).
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';

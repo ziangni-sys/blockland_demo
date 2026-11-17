@@ -9,7 +9,7 @@
  */
 import '../../blocks/defs';
 import { MAX_BLOCK_ID } from '../../blocks/cell';
-import { NY } from '../../core/dirs';
+import { NY, PY } from '../../core/dirs';
 import { BLOCKS, type RenderLayer } from '../../blocks/registry';
 import { VFLAG_EMISSIVE, VFLAG_PLANT } from '../types';
 
@@ -59,6 +59,18 @@ export const GROUP: Uint8Array = new Uint8Array(ID_COUNT);
 export const INFO: Uint8Array = new Uint8Array(ID_COUNT);
 /** Vertex flags every face of the block carries (emissive for light emitters, plant for crosses). */
 export const BASE_FLAGS: Uint8Array = new Uint8Array(ID_COUNT);
+/**
+ * Bit d: when a liquid lies across this block's face d (and does not cover it, which no
+ * liquid does), the block itself draws geometry filling that whole face, facing the liquid.
+ * The liquid then needs no inside copy of its own face on that plane — the block's face is
+ * what a swimmer sees there — and emitting one anyway would put two coplanar faces on the
+ * same plane, facing the same way, which z-fight. Full cubes seal all six faces; a cactus
+ * its top and bottom; a snow-like slab its bottom (a FULL stack seals every face, which is
+ * state-dependent and checked by the liquid emitter). Another liquid counts as sealing
+ * every face: its facing geometry lies on the shared plane too, and lava-water contact is
+ * transient anyway (the liquid simulation hardens the lava).
+ */
+export const SEALS_LIQUID: Uint8Array = new Uint8Array(ID_COUNT);
 /** Tile per face for SH_CUBE blocks, index id * 6 + dir. */
 export const FACE_TILE: Uint16Array = new Uint16Array(ID_COUNT * 6);
 /**
@@ -117,6 +129,15 @@ function fillTables(): void {
       if (shape === SH_CUBE || shape === SH_AXIS || shape === SH_BEARING) info |= INFO_SELF_CULL;
     }
     INFO[id] = info;
+
+    SEALS_LIQUID[id] =
+      shape === SH_CUBE || shape === SH_AXIS || shape === SH_BEARING || shape === SH_LIQUID
+        ? COVER_ALL
+        : shape === SH_CACTUS
+          ? (1 << PY) | (1 << NY)
+          : shape === SH_LAYERS
+            ? 1 << NY
+            : 0;
 
     BASE_FLAGS[id] = (def.emit > 0 ? VFLAG_EMISSIVE : 0) | (shape === SH_CROSS ? VFLAG_PLANT : 0);
 
@@ -223,11 +244,12 @@ export const FACING_ROT: Uint8Array = (() => {
 // ------------------------------------------------------------------ light / AO encoding
 
 /**
- * AO byte per occlusion level (0 = both sides blocked .. 3 = open). Linear 0.4 .. 1.0,
- * the same brightness steps as the classic smooth-lighting average (an occluded sample
- * counts 0.2 instead of 1): the renderer simply multiplies its lighting by ao / 255.
+ * AO byte per occlusion level (0 = both sides blocked .. 3 = open): linear, level * 85, so
+ * ao / 255 is the vertex's openness 0..1. The mesher deliberately applies NO brightness
+ * curve: the renderer owns the look and maps openness to brightness itself
+ * (render/three/lighting.ts aoFactor). Pre-curving here as well would apply the curve twice.
  */
-export const AO_BYTE: readonly number[] = [102, 153, 204, 255];
+export const AO_BYTE: readonly number[] = [0, 85, 170, 255];
 
 /**
  * Rounded average of `count` light levels scaled to a byte: AVG_LIGHT[count * 61 + sum]

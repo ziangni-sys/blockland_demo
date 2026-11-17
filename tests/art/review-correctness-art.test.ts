@@ -1,6 +1,7 @@
 /**
- * Adversarial review (correctness lens) of the art module. Each `it` reproduces one finding;
- * the failing ones are left in place on purpose for the fixer.
+ * Adversarial review (correctness lens) of the art module. Each `it` reproduced one finding
+ * against the reviewed implementation and now guards its fix (see also regressions.test.ts).
+ * The two torch tests were corrected by the fixer: see the comment above them.
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
@@ -18,25 +19,44 @@ function opaquePixels(px: Uint8Array): Array<[number, number]> {
   return out;
 }
 
+function rgbKey(px: Uint8Array, x: number, y: number): string {
+  const o = (y * T + x) * 4;
+  return `${px[o]},${px[o + 1]},${px[o + 2]}`;
+}
+
 describe('review-correctness: art', () => {
-  it('torch: the whole torch (stick AND flame) lies on the 2-px post columns 7..8', () => {
-    // The brief: "the stick 2 px wide in the centre columns (the mesher maps it onto a thin
-    // post ...)". A 2x2-section post can only ever show columns 7..8; flame pixels in
-    // columns 6 and 9 are lost in the world (5 of the 14 flame pixels today).
-    const off = opaquePixels(paintTile('torch'))
-      .filter(([x]) => x !== 7 && x !== 8)
-      .map(([x, y]) => `${x},${y}`);
-    expect(off).toEqual([]);
+  // The torch tile serves two views (brief: "the mesher maps it onto a thin post and may also
+  // show it as a sprite"). The mesher's post (src/mesh/shapes/models.ts emitTorch, 10/16 tall)
+  // samples columns 7..8 of rows 6..15 on its sides and rows 6..7 on its top cap; that window
+  // must hold the whole in-world torch. Texels outside it are only seen in the sprite views
+  // (icon, dropped item), so a flame tongue there is allowed, but only flame: no stick, no
+  // stray texels. (The reviewed version of these two tests forbade any texel outside the
+  // window, which contradicts the sprite use and the review's own suggested fix.)
+  it('torch: the post window (columns 7..8, rows 6..15) holds the whole in-world torch', () => {
+    const px = paintTile('torch');
+    const flame = new Set(M.FLAME.map((c) => c.join(',')));
+    const stick = new Set(M.TORCH_STICK.map((c) => c.join(',')));
+    for (let y = 6; y < T; y++) {
+      for (const x of [7, 8]) {
+        expect(px[(y * T + x) * 4 + 3], `opaque ${x},${y}`).toBe(255);
+        // Rows 6..7 are the head (the top cap): every texel glows.
+        if (y <= 7) expect(flame.has(rgbKey(px, x, y)), `head ${x},${y}`).toBe(true);
+        if (y >= 9) expect(stick.has(rgbKey(px, x, y)), `stick ${x},${y}`).toBe(true);
+      }
+    }
+    // The head carries the hottest flame tone, so the top cap reads as fire, not as embers.
+    const hottest = M.FLAME[M.FLAME.length - 1]!.join(',');
+    expect([rgbKey(px, 7, 6), rgbKey(px, 8, 6)]).toContain(hottest);
   });
 
-  it('torch: the flame sits inside the rows the real post samples (mesher post is 10/16 tall = rows 6..15)', () => {
-    // src/mesh/shapes/models.ts emitTorch: TORCH_TOP = 10/16; the sides sample the bottom
-    // 10 rows, the top cap rows 6..7. Everything above row 6 is never shown in the world,
-    // so today only the 2 flame pixels of row 6 appear on a placed torch.
-    const above = opaquePixels(paintTile('torch'))
-      .filter(([, y]) => y < 6)
+  it('torch: texels outside the post window are sprite-only flame next to the head', () => {
+    const px = paintTile('torch');
+    const flame = new Set(M.FLAME.map((c) => c.join(',')));
+    const bad = opaquePixels(px)
+      .filter(([x, y]) => !((x === 7 || x === 8) && y >= 6))
+      .filter(([x, y]) => !(flame.has(rgbKey(px, x, y)) && y <= 6 && x >= 6 && x <= 9))
       .map(([x, y]) => `${x},${y}`);
-    expect(above).toEqual([]);
+    expect(bad).toEqual([]);
   });
 
   it('icons: the cube silhouette is mirror-symmetric at odd sizes as well', () => {

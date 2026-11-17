@@ -144,6 +144,36 @@ export function plankBoat(world: World, id: number, x0: number, y0: number, z0: 
   return s;
 }
 
+/**
+ * A big closed plank hull (sealed hold) of len (z) x wid (x) x hgt, bow toward -Z, with decks
+ * every other level and bulkheads every third row until `target` cells.
+ */
+export function bigShip(world: World, id: number, len: number, wid: number, hgt: number, target: number, y0: number, z0: number): Ship {
+  const s = new Ship(id, world);
+  const x0 = -(wid >> 1);
+  const c = makeCell(B.PLANKS_OAK);
+  for (let y = 0; y < hgt; y++) {
+    for (let z = 0; z < len; z++) {
+      for (let x = 0; x < wid; x++) {
+        const shell = y === 0 || y === hgt - 1 || x === 0 || x === wid - 1 || z === 0 || z === len - 1;
+        if (shell) s.grid.setCell(x0 + x, y0 + y, z0 + z, c);
+      }
+    }
+  }
+  for (let y = 2; y < hgt - 1 && s.grid.count < target; y += 2) {
+    for (let z = 1; z < len - 1 && s.grid.count < target; z++) {
+      for (let x = 1; x < wid - 1 && s.grid.count < target; x++) s.grid.setCell(x0 + x, y0 + y, z0 + z, c);
+    }
+  }
+  for (let z = 1; z < len - 1 && s.grid.count < target; z += 3) {
+    for (let y = 1; y < hgt - 1 && s.grid.count < target; y++) {
+      for (let x = 1; x < wid - 1 && s.grid.count < target; x++) s.grid.setCell(x0 + x, y0 + y, z0 + z, c);
+    }
+  }
+  addHelm(s, 0, y0 + hgt, z0 + len - 2, 5);
+  return s;
+}
+
 // ------------------------------------------------------------------ rotors
 
 /**

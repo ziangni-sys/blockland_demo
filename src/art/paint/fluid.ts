@@ -65,10 +65,10 @@ const paintLavaStill: Painter = (c, seed) => {
   f.each((x, y) => {
     worley(pts, x, y, w);
     const hot = Math.max(0, 1 - w.f1 / 4.6);
-    let t = 1.7 + hot * 3.6 + sfbm(x, y, 4, 2, seed + 1) * 0.7;
+    let t = 1.65 + hot * 2.9 + sfbm(x, y, 4, 2, seed + 1) * 0.6;
     // Crust flecks where the surface cools between blobs.
     const crust = fbm(x, y, 4, 2, seed + 2);
-    if (w.f2 - w.f1 < 1.2 && crust > 0.5) t = Math.min(t, 0.4 + crust);
+    if (w.f2 - w.f1 < 1.2 && crust > 0.5) t = Math.min(t, 0.2 + crust * 0.9);
     if (hrand(x, y, seed + 3) > 0.96) t = 0;
     return t;
   });
@@ -84,9 +84,9 @@ const paintLavaFlow: Painter = (c, seed) => {
     // Cells stretched along v (sy < 1) give elongated molten streams.
     worley(pts, x, y, w, 0.4);
     const hot = Math.max(0, 1 - w.f1 / 3.6);
-    let t = 1.8 + hot * 3.2 + (vnoise(x, y, 8, 2, seed + 1) - 0.5) * 1.3;
-    if (w.f2 - w.f1 < 0.9 && vnoise(x, y, 4, 2, seed + 2) > 0.5) t = Math.min(t, 0.9);
-    if (hrand(x, y, seed + 3) > 0.965) t = 0.2;
+    let t = 1.7 + hot * 2.6 + (vnoise(x, y, 8, 2, seed + 1) - 0.5) * 1.1;
+    if (w.f2 - w.f1 < 0.9 && vnoise(x, y, 4, 2, seed + 2) > 0.5) t = Math.min(t, 0.8);
+    if (hrand(x, y, seed + 3) > 0.965) t = 0.1;
     return t;
   });
   paintLavaField(c, f);

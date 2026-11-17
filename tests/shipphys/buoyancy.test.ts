@@ -51,6 +51,22 @@ describe('buoyancy: Archimedes', () => {
     expect(tilt(boat)).toBeLessThan(0.01);
   });
 
+  it('a sealed cavity displaces water: a closed glass box floats on its air pocket', () => {
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const box = newShip(world, 1);
+    shipBox(box, -1, 45, -1, 1, 47, 1, B.GLASS); // 3x3x3 glass (density 0.9) ...
+    box.grid.setCell(0, 46, 0, 0); // ... around one sealed air cell
+    launch(box, dyn);
+    expect(box.hull!.sealedCount).toBe(1);
+    expect(box.hull!.floats).toBe(true); // 23.4 < 27
+    run(dyn, [box], 300);
+    const draught = SURFACE - worldOf(box, -1, 45, -1).y;
+    const expected = box.mass / 9; // 9 displacing cells per layer
+    expect(Math.abs(draught - expected) / expected).toBeLessThan(0.03);
+    expect(tilt(box)).toBeLessThan(0.02);
+  });
+
   it('a solid stone raft sinks to the bottom, rests and falls asleep', () => {
     const world = makeSea();
     const { dyn } = setup(world);

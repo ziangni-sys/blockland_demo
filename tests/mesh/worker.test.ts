@@ -3,7 +3,7 @@ import { B } from '../../src/blocks/defs';
 import { makeCell } from '../../src/blocks/cell';
 import { buildMesh } from '../../src/mesh/mesher';
 import { meshTransferables, type MeshRequest, type MeshResponse } from '../../src/mesh/types';
-import { serveMeshRequests, type MeshWorkerScope } from '../../src/mesh/worker';
+import { serveMeshRequests, type MeshErrorResponse, type MeshWorkerScope } from '../../src/mesh/worker';
 import { makeInput, put } from './helpers';
 
 function fakeScope() {
@@ -56,14 +56,27 @@ describe('mesh worker protocol', () => {
     expect(res[2]!.data.opaque!.positions.buffer).not.toBe(res[0]!.data.opaque!.positions.buffer);
   });
 
-  it('answers a malformed job with an empty mesh instead of dropping it', () => {
+  it('answers a malformed job instead of dropping it, marked as an error so the client keeps its old mesh', () => {
     const { scope, posted } = fakeScope();
     serveMeshRequests(scope);
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     scope.onmessage!({ data: { type: 'mesh', id: 5, input: { sx: 4, sy: 4, sz: 4, cells: new Uint16Array(3), light: null } } });
     expect(spy).toHaveBeenCalledOnce();
     spy.mockRestore();
-    expect(posted[0]!.msg).toEqual({ type: 'mesh', id: 5, data: { opaque: null, cutout: null, translucent: null } });
+    const res = posted[0]!.msg as MeshErrorResponse;
+    expect(res.type).toBe('mesh');
+    expect(res.id).toBe(5);
+    expect(res.data).toEqual({ opaque: null, cutout: null, translucent: null });
+    expect(res.error).toMatch(/RangeError: .*cells has 3 entries/);
+    expect(posted[0]!.transfer).toEqual([]);
+    // a legitimately empty section is NOT an error: the two replies are distinguishable
+    scope.onmessage!({ data: { type: 'mesh', id: 6, input: makeInput(4, 4, 4) } });
+    const ok = posted[1]!.msg as MeshResponse;
+    expect(ok.data).toEqual(res.data);
+    expect('error' in ok).toBe(false);
+    expect('error' in res).toBe(true);
+    // and the worker keeps serving after a failure
+    expect(ok.id).toBe(6);
   });
 
   it('ignores unrelated messages', () => {

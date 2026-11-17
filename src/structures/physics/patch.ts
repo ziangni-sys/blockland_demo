@@ -26,9 +26,19 @@ export const PF_WATER = 2;
 export const WATER_SURFACE_DROP = 2 / 16;
 const TOP_FILL = 1 - WATER_SURFACE_DROP;
 
+// Module constants (not imported bindings) for the per-cell fill loop; see solver.ts.
+const SOLID_TABLE: Uint8Array = SOLID;
+const WATER_ID: number = B.WATER;
+const ID_BITS_MASK: number = ID_MASK;
+const SHIFT: number = CHUNK_SHIFT;
+const MASK: number = CHUNK_MASK;
+const HEIGHT: number = WORLD_HEIGHT;
+const BELOW: number = CELL_BELOW_WORLD;
+const UNLOADED: number = CELL_UNLOADED;
+
 export function cellFlags(cell: number): number {
-  const id = cell & ID_MASK;
-  return (SOLID[id] === 1 ? PF_SOLID : 0) | (id === B.WATER ? PF_WATER : 0);
+  const id = cell & ID_BITS_MASK;
+  return (SOLID_TABLE[id] === 1 ? PF_SOLID : 0) | (id === WATER_ID ? PF_WATER : 0);
 }
 
 const EMPTY_U8 = new Uint8Array(0);
@@ -89,16 +99,17 @@ export class WorldPatch implements ProbeTarget {
     let waterTop = -Infinity;
     for (let z = z0; z <= z1; z++) {
       for (let x = x0; x <= x1; x++) {
-        const chunk = world.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
-        const col = (x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4);
+        const chunk = world.getChunk(x >> SHIFT, z >> SHIFT);
+        const cells = chunk !== undefined ? chunk.cells : null;
+        const col = (x & MASK) | ((z & MASK) << 4);
         let i = ((z - z0) * sx + (x - x0)) * sy;
         let colSolid = false;
         for (let y = y0; y <= y1; y++, i++) {
           let cell: number;
-          if (y < 0) cell = CELL_BELOW_WORLD;
-          else if (y >= WORLD_HEIGHT) cell = AIR;
-          else if (chunk === undefined) cell = CELL_UNLOADED;
-          else cell = chunk.cells[col | (y << 8)]!;
+          if (y < 0) cell = BELOW;
+          else if (y >= HEIGHT) cell = AIR;
+          else if (cells === null) cell = UNLOADED;
+          else cell = cells[col | (y << 8)]!;
           const fl = cellFlags(cell);
           f[i] = fl;
           if (fl === PF_SOLID) {

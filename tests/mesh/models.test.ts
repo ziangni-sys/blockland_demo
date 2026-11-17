@@ -151,7 +151,7 @@ describe('layers (snow cover)', () => {
     put(input, 0, 0, 0, makeCell(B.SNOW_LAYER, layersState(1)));
     put(input, -1, 0, 0, makeCell(B.STONE));
     const top = allQuads(buildMesh(input)).find((q) => dirOfQuad(q) === 2)!;
-    for (let k = 0; k < 4; k++) expect(top.ao[k]).toBe(top.p[k]!.x === 0 ? 204 : 255);
+    for (let k = 0; k < 4; k++) expect(top.ao[k]).toBe(top.p[k]!.x === 0 ? 170 : 255);
   });
 });
 

@@ -12,10 +12,12 @@ import {
   makeSea,
   makeWorld,
   newRotor,
+  newShip,
   plankBoat,
   pointsIntoHull,
   run,
   setup,
+  shipBox,
   tick,
 } from './helpers';
 
@@ -165,6 +167,60 @@ describe('sleep and wake', () => {
     });
     expect(bWoke).toBe(true);
     expect(b.grid.position.z).toBeLessThan(-1); // pushed north by a
+  });
+});
+
+describe('sleep islands: ships resting against each other', () => {
+  it('two boats moored side by side, touching, both fall asleep and stay put', () => {
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const a = launch(plankBoat(world, 1, -5, 47, -4, 5, 9, NZ), dyn); // x in [-5, 0)
+    const b = launch(plankBoat(world, 2, 0, 47, -4, 5, 9, NZ), dyn); // x in [0, 5): touching
+    run(dyn, [a, b], 400);
+    expect(a.asleep).toBe(true);
+    expect(b.asleep).toBe(true);
+    const pa = { ...a.grid.position };
+    const pb = { ...b.grid.position };
+    run(dyn, [a, b], 600);
+    expect(a.asleep && b.asleep).toBe(true);
+    expect(a.grid.position).toEqual(pa);
+    expect(b.grid.position).toEqual(pb);
+  });
+
+  it("a raft resting in another boat's hold: both sleep", () => {
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const boat = launch(plankBoat(world, 1, -3, 46, -5, 7, 11, NZ), dyn); // floor y=46, rim y=47
+    const raft = newShip(world, 2);
+    shipBox(raft, -1, 47, -2, 0, 47, -1, B.PLANKS_OAK); // on the floor, inside the rim
+    launch(raft, dyn);
+    let bothAt = -1;
+    run(dyn, [boat, raft], 600, (t) => {
+      if (bothAt < 0 && boat.asleep && raft.asleep) bothAt = t;
+    });
+    expect(bothAt).toBeGreaterThan(0);
+    const pr = { ...raft.grid.position };
+    run(dyn, [boat, raft], 200);
+    expect(raft.grid.position).toEqual(pr);
+    // the raft never sank into the floor
+    const pts = hullSamplePoints(raft);
+    expect(pointsIntoHull(boat, pts.map((p) => raft.grid.toWorld(p)))).toBeLessThan(0.05);
+  });
+
+  it('a quiet awake ship does not wake its sleeping neighbour; a moving one does', () => {
+    const world = makeSea();
+    const { dyn } = setup(world);
+    const a = launch(plankBoat(world, 1, -5, 47, -4, 5, 9, NZ), dyn);
+    const b = launch(plankBoat(world, 2, 0, 47, -4, 5, 9, NZ), dyn);
+    run(dyn, [a, b], 400);
+    expect(a.asleep && b.asleep).toBe(true);
+    dyn.wake(a);
+    run(dyn, [a, b], 5);
+    expect(b.asleep).toBe(true);
+    expect(dyn.getStats(a)!.simulated).toBe(true);
+    dyn.applyImpulse(a, { ...a.grid.position }, vec3(2 * a.mass, 0, 0)); // shove a into b
+    run(dyn, [a, b], 3);
+    expect(b.asleep).toBe(false);
   });
 });
 

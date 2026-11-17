@@ -138,35 +138,39 @@ const paintLeavesOak: Painter = (c, seed) => {
   const rng = rngOf(seed);
   const pts = scatter(rng, 8, 4.8);
   const rad = pts.map(() => 3 + rng.next() * 1.3);
-  const owner = new Int16Array(S * S);
-  const build = (scale: number): number => {
-    owner.fill(-1);
-    let holes = S * S;
-    for (let y = 0; y < S; y++) {
-      for (let x = 0; x < S; x++) {
-        for (let i = pts.length - 1; i >= 0; i--) {
-          const dx = wrapDelta(x + 0.5 - pts[i]!.x);
-          const dy = wrapDelta(y + 0.5 - pts[i]!.y);
-          if (dx * dx + dy * dy <= rad[i]! * rad[i]! * scale * scale) {
-            owner[y * S + x] = i; // later clusters sit on top
-            holes--;
-            break;
-          }
+  // Cluster scale for a 22 % hole fraction: a pixel is covered once the scale reaches its
+  // smallest dist / radius over all clusters, so the hole fraction at scale s is the share
+  // of pixels whose cover scale exceeds s. The smallest scale leaving at most 22 % holes is
+  // therefore the (HOLES + 1)-th largest cover scale; no search needed.
+  const HOLES = Math.floor(0.22 * S * S);
+  const cover = new Float64Array(S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let m = Infinity;
+      for (let i = 0; i < pts.length; i++) {
+        const dx = wrapDelta(x + 0.5 - pts[i]!.x);
+        const dy = wrapDelta(y + 0.5 - pts[i]!.y);
+        m = Math.min(m, Math.sqrt(dx * dx + dy * dy) / rad[i]!);
+      }
+      cover[y * S + x] = m;
+    }
+  }
+  const sorted = Float64Array.from(cover).sort();
+  // Nudged up by a relative epsilon so the pixel that defines the scale passes the <= test below.
+  const scale = Math.min(2, Math.max(0.4, sorted[S * S - 1 - HOLES]! * (1 + 1e-9)));
+  const owner = new Int16Array(S * S).fill(-1);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      for (let i = pts.length - 1; i >= 0; i--) {
+        const dx = wrapDelta(x + 0.5 - pts[i]!.x);
+        const dy = wrapDelta(y + 0.5 - pts[i]!.y);
+        if (Math.sqrt(dx * dx + dy * dy) <= rad[i]! * scale) {
+          owner[y * S + x] = i; // later clusters sit on top
+          break;
         }
       }
     }
-    return holes / (S * S);
-  };
-  // Bisection on cluster size for a 22 % hole fraction (monotone in scale).
-  let lo = 0.4;
-  let hi = 2;
-  for (let i = 0; i < 24; i++) {
-    const mid = (lo + hi) / 2;
-    if (build(mid) > 0.22) lo = mid;
-    else hi = mid;
   }
-  const scale = hi;
-  build(scale);
   const f = new Field(S, NaN);
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {

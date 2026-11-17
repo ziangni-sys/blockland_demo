@@ -6,7 +6,7 @@
  * allocates per face. All state lives on instances — one MeshContext per Mesher.
  */
 import * as cellBits from '../../blocks/cell';
-import type { GeometryData, MeshInput } from '../types';
+import { VFLAG_LIQUID_SURFACE, type GeometryData, type MeshInput } from '../types';
 import * as tables from './tables';
 
 // Hot-path imports are bound to module-local constants once, at module init. Module
@@ -289,7 +289,8 @@ export class MeshContext {
    * Emit face d of the current box (this.box, cell-local) of the cell at padded index p,
    * whose box-space origin is (x, y, z). Positions, uvs (from position unless useUvRect,
    * then rotated by `rot` quarter turns), smooth light and optionally AO are derived here;
-   * culling is the caller's job because its rules differ per shape.
+   * culling is the caller's job because its rules differ per shape. `twoSided` also emits
+   * the back copy (same corners, light and diagonal; reversed winding, negated normal).
    */
   boxFace(
     g: GeometryBuilder,
@@ -302,6 +303,7 @@ export class MeshContext {
     rot: number,
     flags: number,
     ao: boolean,
+    twoSided = false,
   ): void {
     const box = this.box;
     const na = d >> 1;
@@ -340,7 +342,8 @@ export class MeshContext {
       quv[k * 2] = rotU(rot, u, v);
       quv[k * 2 + 1] = rotV(rot, u, v);
     }
-    this.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO, false);
+    if (twoSided) this.commitDoubleSided(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO);
+    else this.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO, false);
   }
 
   /** Write corner k of a free quad (absolute box-space position, uv). */
@@ -359,10 +362,19 @@ export class MeshContext {
    * behind shows the same pixel at the same spot, and both sides use the same diagonal so
    * non-planar quads (liquid surfaces) stay exactly coincident.
    */
-  commitDoubleSided(g: GeometryBuilder, nx: number, ny: number, nz: number, tile: number, flags: number, diag: number): void {
+  commitDoubleSided(
+    g: GeometryBuilder,
+    nx: number,
+    ny: number,
+    nz: number,
+    tile: number,
+    flags: number,
+    diag: number,
+    surfaceCorners = 0,
+  ): void {
     const d = diag === DIAG_AUTO ? this.autoDiagonal() : diag;
-    this.commit(g, nx, ny, nz, tile, flags, d, false);
-    this.commit(g, -nx, -ny, -nz, tile, flags, d, true);
+    this.commit(g, nx, ny, nz, tile, flags, d, false, surfaceCorners);
+    this.commit(g, -nx, -ny, -nz, tile, flags, d, true, surfaceCorners);
   }
 
   /**
@@ -385,9 +397,21 @@ export class MeshContext {
   /**
    * Append the scratch quad to group g. `reverse` writes the corners in the order
    * 0,3,2,1 (the back side of the same quad); the diagonal code keeps addressing the same
-   * two original corners, so front and back triangulate identically.
+   * two original corners, so front and back triangulate identically. `surfaceCorners`:
+   * bit k set = scratch corner k lies on a free liquid surface and also carries
+   * VFLAG_LIQUID_SURFACE (the wave flag is per vertex: see liquid.ts).
    */
-  commit(g: GeometryBuilder, nx: number, ny: number, nz: number, tile: number, flags: number, diag: number, reverse: boolean): void {
+  commit(
+    g: GeometryBuilder,
+    nx: number,
+    ny: number,
+    nz: number,
+    tile: number,
+    flags: number,
+    diag: number,
+    reverse: boolean,
+    surfaceCorners = 0,
+  ): void {
     const dg = diag === DIAG_AUTO ? this.autoDiagonal() : diag;
     g.reserveQuad();
     const q = g.quads++;
@@ -417,7 +441,7 @@ export class MeshContext {
       li[v * 4] = qsky[k]!;
       li[v * 4 + 1] = qblock[k]!;
       li[v * 4 + 2] = AO_BYTE[qao[k]!]!;
-      li[v * 4 + 3] = flags;
+      li[v * 4 + 3] = ((surfaceCorners >> k) & 1) !== 0 ? flags | VFLAG_LIQUID_SURFACE : flags;
     }
     const idx = g.indices;
     const ib = q * 6;

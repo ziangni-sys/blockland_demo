@@ -33,6 +33,29 @@ describe('review: world requirements on more seeds', () => {
     }
   });
 
+  it('generated lava is at rest: no lava source next to cave air (seed 123)', () => {
+    // The lava zone is a 2D flag per column (simplex2 > 0.05). Where a cave crosses the
+    // zone border, carved cells at y <= 10 are lava on one side and AIR on the other, so a
+    // vertical wall of lava sources stands next to open air. It flows as soon as the chunk
+    // is loaded and the fluid engine ticks it; the first World.setCell marks the pristine
+    // chunk `modified`, so it is saved / stashed instead of re-generated. Measured: 16.8 %
+    // of all chunks (40 % of the chunks that contain lava) around 4 spawns.
+    const gen = new TerrainGenerator(123);
+    const area = new ChunkArea(gen, -3, -6, 4); // contains e.g. (-28, 8, -75) and (-9, 7, -77)
+    const bad: string[] = [];
+    for (let z = area.z0 + 1; z < area.z0 + area.size - 1; z++) {
+      for (let x = area.x0 + 1; x < area.x0 + area.size - 1; x++) {
+        for (let y = 1; y <= 10; y++) {
+          if (cellId(area.get(x, y, z)) !== B.LAVA) continue;
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+            if (area.get(x + dx, y, z + dz) === B.AIR) bad.push(`${x},${y},${z}`);
+          }
+        }
+      }
+    }
+    expect(bad.slice(0, 8)).toEqual([]);
+  });
+
   it("a branch never replaces a cell inside another tree's trunk (seed 9)", () => {
     // Tree (113, 57, 3)'s +x branch lands in tree (115, *, 3)'s trunk column at y = 62:
     // stampLogs of the first tree in list order places an X-axis log there, and the second

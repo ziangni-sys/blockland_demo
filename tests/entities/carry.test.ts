@@ -38,6 +38,47 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     expect(b.host.count('crush')).toBe(0);
   });
 
+  it('riders follow the real motion even when a structure skips snapshotPose() or entity ticks are skipped', () => {
+    const b = new Bench();
+    const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
+    const pose = (t: number) => ({ p: vec3(0.5 + 1.5 * t * DT, 60.5 + 0.1 * Math.sin(t * 0.3), 0.5), q: qfromYaw(0.4 * t * DT) });
+    const p = b.entities.createPlayer('survival', 2.5, 61, 1.5);
+    p.carrierId = ship.id;
+    const l0 = local({ ship }, p.pos);
+    const g = ship.grid;
+    for (let t = 1; t <= 300; t++) {
+      // every 7th tick the "physics" forgets to snapshot; every 11th tick the entities are not run
+      if (t % 7 !== 0) g.snapshotPose();
+      const q = pose(t);
+      g.position.x = q.p.x;
+      g.position.y = q.p.y;
+      g.position.z = q.p.z;
+      g.rotation.x = q.q.x;
+      g.rotation.y = q.q.y;
+      g.rotation.z = q.q.z;
+      g.rotation.w = q.q.w;
+      if (t % 11 === 0) continue;
+      b.entities.syncCarried();
+      b.entities.update();
+      const l = local({ ship }, p.pos);
+      expect(Math.abs(l.x - l0.x) + Math.abs(l.z - l0.z)).toBeLessThan(1e-6);
+      expect(p.carrierId).toBe(ship.id);
+    }
+  });
+
+  it('moving the pivot (centre of mass changed) does not move the riders', () => {
+    const b = new Bench();
+    const ship = b.ship(1, deck(-5, -5, 5, 5, 60), vec3(0.5, 60.5, 0.5));
+    ship.grid.setPoseImmediate(vec3(0.5, 60.5, 0.5), qfromYaw(0.5));
+    const p = b.entities.createPlayer('survival', 1.5, 61, 1.5);
+    b.tick(5);
+    expect(p.carrierId).toBe(ship.id);
+    const w0 = vec3(p.pos.x, p.pos.y, p.pos.z);
+    ship.grid.setPivotKeepingPose(vec3(2.25, 60.5, -1.75));
+    b.tick(5);
+    expect(Math.abs(p.pos.x - w0.x) + Math.abs(p.pos.y - w0.y) + Math.abs(p.pos.z - w0.z)).toBeLessThan(1e-9);
+  });
+
   it('walking on a moving, turning deck feels like walking on land', () => {
     const b = new Bench();
     const ship = b.ship(1, deck(-8, -8, 8, 8, 60), vec3(0.5, 60.5, 0.5));
@@ -134,36 +175,58 @@ describe('ACCEPTANCE 19 — riding a ship', () => {
     expect(p.pos.y).toBe(41);
   });
 
-  it('a swimmer treading water next to the corner of a ship turned 45 degrees is never attached or lifted', () => {
+  it.each([
+    [3.5, 3.5],
+    [-3.5, 3.5],
+    [3.5, -3.5],
+  ])('a swimmer treading water at the corner (%f, %f) of a ship turned 45 degrees is never attached or lifted', (lx, lz) => {
     const b = new Bench();
     fill(b.world, -20, 40, -20, 19, 40, 19, B.STONE);
     fill(b.world, -20, 41, -20, 19, 47, 19, makeCell(B.WATER));
     const cells = deck(-3, -3, 3, 3, 46);
     for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) if (Math.abs(x) === 3 || Math.abs(z) === 3) cells.push([x, 47, z, B.PLANKS_OAK]);
     const ship = b.ship(1, cells, vec3(0.5, 47, 0.5));
-    b.drive(ship, (t) => ({ p: vec3(0.5, 47 + 0.06 * Math.sin(t * 0.25), 0.5), q: qfromYaw(Math.PI / 4 + 0.03 * Math.sin(t * 0.11)) }));
-    b.tick();
-    // The corner at local (+3.5, +3.5) and at local (-3.5, +3.5); put a swimmer just off each tip.
-    for (const [lx, lz] of [
-      [3.5, 3.5],
-      [-3.5, 3.5],
-      [3.5, -3.5],
-    ]) {
-      const c = ship.grid.toWorld(vec3(0.5 + lx, 47, 0.5 + lz));
-      const dx = c.x - 0.5;
-      const dz = c.z - 0.5;
-      const l = Math.hypot(dx, dz);
-      const p = b.entities.createPlayer('survival', c.x + (dx / l) * 0.2, 46.6, c.z + (dz / l) * 0.2);
-      p.input.jump = true; // treading water
-      let maxY = -Infinity;
-      for (let i = 0; i < 300; i++) {
-        b.tick();
-        expect(p.carrierId).toBe(0);
-        maxY = Math.max(maxY, p.pos.y);
-      }
-      expect(maxY).toBeLessThan(47.6); // never lifted onto the rim (top at 48)
-      expect(p.wet).toBeGreaterThan(0.3);
+    // World position of the corner tip: local (lx, lz) from the pivot, turned 45 degrees about
+    // +Y (x' = x cos + z sin, z' = -x sin + z cos). The ship then drifts corner-first into the
+    // swimmer while it bobs and wobbles, so the corner keeps shoving the swimmer around.
+    const a = Math.PI / 4;
+    const corner = vec3(0.5 + lx * Math.cos(a) + lz * Math.sin(a), 0, 0.5 - lx * Math.sin(a) + lz * Math.cos(a));
+    const ux = (corner.x - 0.5) / Math.hypot(corner.x - 0.5, corner.z - 0.5);
+    const uz = (corner.z - 0.5) / Math.hypot(corner.x - 0.5, corner.z - 0.5);
+    b.drive(ship, (t) => ({
+      p: vec3(0.5 + ux * 0.4 * t * DT, 47 + 0.08 * Math.sin(t * 0.25), 0.5 + uz * 0.4 * t * DT),
+      q: qfromYaw(Math.PI / 4 + 0.12 * Math.sin(t * 0.11)),
+    }));
+    const p = b.entities.createPlayer('survival', corner.x + ux * 0.35, 46.6, corner.z + uz * 0.35);
+    p.input.jump = true; // treading water
+    const start = vec3(p.pos.x, p.pos.y, p.pos.z);
+    let maxY = -Infinity;
+    for (let i = 0; i < 300; i++) {
+      b.tick();
+      expect(p.carrierId).toBe(0);
+      expect(inStructure(ship, p)).toBe(false);
+      maxY = Math.max(maxY, p.pos.y);
     }
+    expect(maxY).toBeLessThan(47.6); // never lifted onto the rim (top at 48)
+    expect(p.wet).toBeGreaterThan(0.3);
+    // the corner really did shove the swimmer (the ship drifted 6 blocks into it)
+    expect(Math.hypot(p.pos.x - start.x, p.pos.z - start.z)).toBeGreaterThan(2);
+  });
+
+  it('swimming INTO a low raft while holding jump climbs aboard and attaches (deliberate, unlike drifting next to it)', () => {
+    const b = new Bench();
+    fill(b.world, -20, 40, -20, 19, 40, 19, B.STONE);
+    fill(b.world, -20, 41, -20, 19, 47, 19, makeCell(B.WATER));
+    const ship = b.ship(1, deck(-3, -3, 3, 3, 47), vec3(0.5, 47.5, 0.5)); // top at 48, just above the water
+    b.drive(ship, (t) => ({ p: vec3(0.5, 47.5 + 0.05 * Math.sin(t * 0.2), 0.5), q: qfromYaw(0.3) }));
+    const p = b.entities.createPlayer('survival', 0.5, 46.6, 6.5);
+    p.input.jump = true;
+    b.tick(40);
+    expect(p.carrierId).toBe(0);
+    p.input.forward = 1; // north, into the raft
+    const n = b.tickUntil(() => p.carrierId === ship.id && p.onGround, 200);
+    expect(n).toBeLessThan(200);
+    expect(ship.grid.toLocal(p.pos, vec3()).y).toBeCloseTo(48, 3);
   });
 
   it.each([0.17, -0.17, 0.4])('walking along a world wall on a ship yawed by %f rad costs no health', (shipYaw) => {

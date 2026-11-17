@@ -24,15 +24,24 @@ import { BLOCKS } from '../../blocks/registry';
 import type { Rotor, Ship, ShipDynamics, StructureHost } from '../structure';
 import { Body, MODE_ACTIVE, MODE_NONE, type ShipPhysicsStats } from './body';
 import { applyBuoyancy } from './buoyancy';
-import { ContactGenerator, ContactSet, F_A, F_B, F_DEPTH, F_LN, F_PIN, STRIDE } from './contacts';
+import { ContactGenerator, ContactSet } from './contacts';
+import * as CR from './contacts';
 import { applyHydrodynamics } from './hydro';
 import { mat3Congruence } from './mat3';
 import { refreshShip } from './massprops';
 import { resolveOptions, type DynamicsOptions, type ResolvedOptions } from './options';
 import { PinDetector } from './pinning';
 import { RotorView } from './rotorview';
-import { updateSleep, wakeShip } from './sleep';
+import { Islands, isQuiet, putToSleep, updateRest, wakeShip } from './sleep';
 import { prepareContacts, resetImpulses, solvePositionPass, solveVelocityPass } from './solver';
+
+// Contact record offsets as module constants (hot loops; see solver.ts).
+const F_A = CR.F_A;
+const F_B = CR.F_B;
+const F_DEPTH = CR.F_DEPTH;
+const F_LN = CR.F_LN;
+const F_PIN = CR.F_PIN;
+const STRIDE = CR.STRIDE;
 
 /** World cells copied around a ship beyond its box (>= max travel per tick + neighbour lookups). */
 const PATCH_MARGIN = 3;
@@ -48,6 +57,10 @@ export class ShipDynamicsImpl implements ShipDynamics {
   private readonly bodies: Body[] = [];
   private readonly active: Body[] = [];
   private readonly sleeping: Body[] = [];
+  /** Sleepers next to quiet awake ships: immovable obstacles in this tick's solve. */
+  private readonly sleepersInSolve: Body[] = [];
+  private readonly islands = new Islands();
+  private islandMin = new Int32Array(16);
   private readonly views: RotorView[] = [];
   private readonly pairs: number[] = [];
   private readonly kin = new ContactSet();
@@ -58,6 +71,8 @@ export class ShipDynamicsImpl implements ShipDynamics {
   private readonly mI = new Float64Array(9);
   private readonly mT = new Float64Array(9);
   private readonly cellCentre: Vec3 = vec3();
+  /** Incremented every step; a body's mode is only meaningful when its stamp matches. */
+  private stamp = 0;
 
   constructor(host: StructureHost, opts?: DynamicsOptions) {
     this.host = host;
@@ -111,6 +126,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
     bodies.length = 0;
     active.length = 0;
     sleeping.length = 0;
+    const stamp = ++this.stamp;
 
     // ---- 1. classify
     for (let i = 0; i < ships.length; i++) {
@@ -119,6 +135,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
       const b = this.bodyOf(ship);
       if (refreshShip(ship, b, o)) wakeShip(ship);
       b.resetTickStats();
+      b.stamp = stamp;
       b.mode = MODE_NONE;
       b.index = -1;
       if (b.mass <= 0 || b.shape.solidCount === 0) continue;
@@ -150,28 +167,44 @@ export class ShipDynamicsImpl implements ShipDynamics {
         view = new RotorView(r);
         this.viewMap.set(r, view);
       }
-      const pb = r.parent !== null ? this.bodyMap.get(r.parent as Ship) : undefined;
-      view.beginTick(pb !== undefined && pb.mode === MODE_ACTIVE ? pb : null);
+      view.beginTick(this.activeParent(r));
       views.push(view);
     }
 
-    // ---- 3. wake sleepers disturbed by a moving rotor or an awake ship in reach
+    // ---- 3. wake sleepers disturbed by a moving rotor or a moving ship in reach; a sleeper
+    // next to a quiet awake ship joins the solve as an immovable obstacle instead
     const travel = o.substeps * o.maxSubstepTravel;
+    const inSolve = this.sleepersInSolve;
+    inSolve.length = 0;
     for (let i = 0; i < sleeping.length; i++) {
       const sb = sleeping[i]!;
       let disturb = false;
+      let near = false;
       for (let k = 0; k < views.length && !disturb; k++) {
         const v = views[k]!;
         if (v.rotor.parent === sb.ship || !v.moving || v.shape.solidCount === 0) continue;
         if (sphereNearBox(v, sb, 1 + (v.parentBody !== null ? travel : 0))) disturb = true;
       }
       for (let k = 0; k < active.length && !disturb; k++) {
-        if (boxesOverlap(active[k]!, sb, 1 + travel)) disturb = true;
+        const ab = active[k]!;
+        if (!boxesOverlap(ab, sb, 1 + travel)) continue;
+        near = true;
+        if (!isQuiet(ab, o)) disturb = true;
       }
       if (disturb) {
         wakeShip(sb.ship);
         this.activate(sb);
+      } else if (near) {
+        sb.makeStatic();
+        sb.index = bodies.length;
+        bodies.push(sb);
+        inSolve.push(sb);
       }
+    }
+    // rotors riding on a ship woken just now move with it this tick
+    for (let k = 0; k < views.length; k++) {
+      const v = views[k]!;
+      if (v.parentBody === null) v.parentBody = this.activeParent(v.rotor);
     }
 
     // ---- 4. per-tick setup of awake ships
@@ -186,7 +219,17 @@ export class ShipDynamicsImpl implements ShipDynamics {
       const y1 = Math.floor(b.maxY) + PATCH_MARGIN;
       const z1 = Math.floor(b.maxZ) + PATCH_MARGIN;
       b.patch.fill(world, x0, y0, z0, x1, y1, z1);
-      b.patch.collectCorners(x0 + 1, y0 + 1, z0 + 1, x1, y1, z1);
+      // terrain edge corners the hull can reach this tick
+      const reach = travel + 0.5;
+      b.patch.collectCorners(
+        Math.floor(b.minX - reach),
+        Math.floor(b.minY - reach),
+        Math.floor(b.minZ - reach),
+        Math.ceil(b.maxX + reach),
+        Math.ceil(b.maxY + reach),
+        Math.ceil(b.maxZ + reach),
+      );
+      b.selectTerrainCandidates(travel);
       const cand = b.rotorCandidates;
       cand.length = 0;
       for (let k = 0; k < views.length; k++) {
@@ -209,6 +252,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
     }
 
     // ---- 5. sub-steps
+    this.islands.reset(bodies.length);
     if (active.length > 0) {
       for (let k = 0; k < n; k++) this.substep(k / n, (k + 1) / n, dt, invDt);
     }
@@ -223,8 +267,33 @@ export class ShipDynamicsImpl implements ShipDynamics {
       const b = active[i]!;
       b.stats.submerged = b.submerged;
       if (refreshShip(b.ship, b, o)) wakeShip(b.ship);
-      updateSleep(b, o);
-      b.rememberPose();
+      updateRest(b, o);
+    }
+    // a sleeper pushed hard enough to leave the sleep band wakes for the next tick
+    for (let i = 0; i < inSolve.length; i++) {
+      const sb = inSolve[i]!;
+      if (sb.shipImpulseThisTick * sb.invMass > o.sleepLinearSpeed) wakeShip(sb.ship);
+    }
+    // islands fall asleep together, once every member has rested long enough
+    this.sleepIslands(o.sleepTicks);
+    for (let i = 0; i < active.length; i++) active[i]!.rememberPose();
+  }
+
+  private sleepIslands(sleepTicks: number): void {
+    const active = this.active;
+    const isl = this.islands;
+    const n = this.bodies.length;
+    if (this.islandMin.length < n) this.islandMin = new Int32Array(n * 2);
+    const min = this.islandMin;
+    min.fill(0x7fffffff, 0, n);
+    for (let i = 0; i < active.length; i++) {
+      const b = active[i]!;
+      const r = isl.find(b.index);
+      if (b.ship.restTicks < min[r]!) min[r] = b.ship.restTicks;
+    }
+    for (let i = 0; i < active.length; i++) {
+      const b = active[i]!;
+      if (min[isl.find(b.index)]! >= sleepTicks) putToSleep(b);
     }
   }
 
@@ -245,6 +314,14 @@ export class ShipDynamicsImpl implements ShipDynamics {
       this.bodyMap.set(ship, b);
     }
     return b;
+  }
+
+  /** Body of the ship a rotor rides on, when that ship is simulated in this step. */
+  private activeParent(r: Rotor): Body | null {
+    const p = r.parent;
+    if (p === null) return null;
+    const pb = this.bodyMap.get(p as Ship);
+    return pb !== undefined && pb.stamp === this.stamp && pb.mode === MODE_ACTIVE ? pb : null;
   }
 
   private activate(b: Body): void {
@@ -300,7 +377,9 @@ export class ShipDynamicsImpl implements ShipDynamics {
       const cand = b.rotorCandidates;
       for (let k = 0; k < cand.length; k++) {
         const vi = cand[k]!;
+        const start = kin.count;
         gen.rotor(b, views[vi]!, vi, kin, o.rotorFriction, invDt);
+        gen.reduce(kin, start, o.maxContactsPerNormal); // per rotor: each keeps its own manifold
       }
       b.kinEnd = kin.count;
       const st = b.stats;
@@ -313,7 +392,9 @@ export class ShipDynamicsImpl implements ShipDynamics {
     const shipStart = kin.count;
     const pairs = this.pairs;
     for (let p = 0; p < pairs.length; p += 2) {
+      const start = kin.count;
       gen.ships(bodies[pairs[p]!]!, bodies[pairs[p + 1]!]!, kin, o.shipFriction);
+      gen.reduce(kin, start, o.maxContactsPerNormal);
     }
     this.contactStats(shipStart);
 
@@ -348,6 +429,20 @@ export class ShipDynamicsImpl implements ShipDynamics {
             break;
           }
         }
+      }
+      // ship/ship contacts that carried load: support, sleep islands, pushes on sleepers
+      const kf = kin.f;
+      for (let i = shipStart; i < kin.count; i++) {
+        const c = i * STRIDE;
+        const l = kf[c + F_LN]!;
+        if (!(l > 0)) continue;
+        const A = bodies[kf[c + F_A]!]!;
+        const B = bodies[kf[c + F_B]!]!;
+        A.supportedThisTick = true;
+        B.supportedThisTick = true;
+        A.shipImpulseThisTick += l;
+        B.shipImpulseThisTick += l;
+        if (A.mode === MODE_ACTIVE && B.mode === MODE_ACTIVE) this.islands.union(A.index, B.index);
       }
     }
     for (let i = 0; i < active.length; i++) active[i]!.clampVelocity(o.maxSubstepTravel, dt);

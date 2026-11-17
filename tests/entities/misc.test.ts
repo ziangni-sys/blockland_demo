@@ -245,6 +245,17 @@ describe('player health', () => {
     b.tick(80);
     expect(p.health).toBe(20);
     expect(b.host.count('splash', p)).toBe(1);
+    // one block of water still breaks a fall from high up, even when the body goes from dry to
+    // the bottom within a single tick
+    for (const startY of [90, 91.3, 92.7, 95.1, 101.9]) {
+      const c = new Bench();
+      fill(c.world, -5, 40, -5, 5, 40, 5, B.STONE);
+      fill(c.world, -5, 41, -5, 5, 41, 5, makeCell(B.WATER));
+      const q = c.entities.createPlayer('survival', 0.5, startY, 0.5);
+      c.tick(100);
+      expect(q.pos.y).toBe(41);
+      expect(q.health).toBe(20);
+    }
   });
 
   it('lava hurts in survival; creative takes no damage and keeps its breath', () => {
