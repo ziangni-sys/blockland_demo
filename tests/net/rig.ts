@@ -24,6 +24,7 @@ import { expect } from 'vitest';
 import { ID_MASK } from '../../src/blocks/cell';
 import type { Dir } from '../../src/core/dirs';
 import { applyBatch, applySamples, applyWelcome, ReplicaState } from '../../src/net/client/apply';
+import { ClientChunks } from '../../src/net/client/chunks';
 import { decodeServerMessage } from '../../src/net/codec';
 import type { SamplesMsg, TickBatchMsg } from '../../src/net/protocol';
 import { Replicator, type BatchLimits, type ClientFeed } from '../../src/net/server/replicator';
@@ -75,7 +76,7 @@ export class TestClient {
     /** The subscription radius the Replicator was given. */
     public viewRadius: number,
   ) {
-    this.state = new ReplicaState({ generate: (cx, cz) => sim.generator.generate(cx, cz) });
+    this.state = new ReplicaState(new ClientChunks({ generate: (cx, cz, done) => done(sim.generator.generate(cx, cz)) }, () => {}));
   }
 
   /** Decode and apply everything recorded; returns the number of TickBatches. */

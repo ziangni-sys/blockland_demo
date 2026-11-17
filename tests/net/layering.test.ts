@@ -226,6 +226,20 @@ describe('src/net import rules (NETCODE section 15)', () => {
     expect(netViolations('net/client/x.ts', "import { StructureManager } from '../../structures/manager';")).toHaveLength(1);
     expect(netViolations('net/client/x.ts', "import { Replicator } from '../server/replicator';")).toHaveLength(1);
     expect(netViolations('net/client/x.ts', 'const t = performance.now();')).toHaveLength(1);
+    // Package 5's client modules: light, hull, rotor kinematics, the body movement and worldgen pass;
+    // the simulation's chunk manager, persistence, the host and timers do not.
+    expect(
+      netViolations(
+        'net/client/x.ts',
+        "import { LightEngine } from '../../light/engine';\nimport { analyzeHull } from '../../structures/hull';\nimport { advanceRotor } from '../../structures/rotor';\nimport { headingOf } from '../../entities/structs';\nimport type { ChunkGenerator } from '../../worldgen/generator';\nimport { ServerClock } from './clock';",
+      ),
+    ).toHaveLength(0);
+    expect(netViolations('net/client/x.ts', "import { ChunkManager } from '../../sim/chunks';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', "import { exportSave } from '../../sim/persist';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', "import { NetServer } from '../host/netserver';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', "import { StructureManager } from '../../structures/assembly';")).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', 'setTimeout(() => {}, 1000);')).toHaveLength(1);
+    expect(netViolations('net/client/x.ts', 'requestAnimationFrame(frame);')).toHaveLength(1);
     expect(mutableState(base, 'let scratch = 0;\nexport const cache = new Map();\nconst tmp = [];\nconst T = Object.freeze({ a: 1 });\nconst N = 4;')).toHaveLength(3);
     // Factories and static fields; frozen values, Math, arrow functions and static methods pass.
     const state = [
