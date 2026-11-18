@@ -103,11 +103,17 @@ export function spinningWindmill(sim: Simulation, x: number, z: number): Rotor {
   return r.structure;
 }
 
-/** Aim at a cell and right-click it, then let the server run one tick. */
+/** A server-driven bot aims at a cell and right-clicks it, then the server runs one tick. */
 export function useOn(h: NetHarness, ctrl: PlayerControl, x: number, y: number, z: number, gridId = 0): void {
+  if (ctrl.drive !== 'server') throw new Error(`${ctrl.key} is client-driven: its client clicks (clickOn)`);
   if (!ctrl.aimAt(x, y, z, undefined, gridId)) throw new Error(`${ctrl.key} cannot aim at ${x},${y},${z}`);
   ctrl.use();
   h.ticks(1);
+}
+
+/** A client aims at a cell and right-clicks it (intents), and waits for the server's answer. */
+export function clickOn(c: HeadlessClient, x: number, y: number, z: number, gridId = 0): void {
+  if (!c.useOn(x, y, z, undefined, gridId)) throw new Error(`${c.key} cannot aim at ${x},${y},${z}`);
 }
 
 export interface Boat {

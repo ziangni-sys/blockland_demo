@@ -13,6 +13,7 @@ import { lossTicks, ServerClock } from '../../src/net/client/clock';
 import { defaultSinks } from '../../src/net/host/host';
 import type { MoveSink } from '../../src/net/host/netserver';
 import type { NetMoveReport } from '../../src/net/protocol';
+import type { Replicator } from '../../src/net/server/replicator';
 import type { Simulation } from '../../src/sim/simulation';
 import type { PlayerKey } from '../../src/sim/view';
 import { link, NetHarness } from './harness';
@@ -301,10 +302,10 @@ describe('ServerClock on a real connection (package 5)', () => {
       rabbits: true,
       ...(acker !== undefined
         ? {
-            sinks: (sim: Simulation) => {
+            sinks: (sim: Simulation, replicator: Replicator) => {
               const moves = new ReportAcker(sim);
               acker(moves);
-              return { moves, intents: defaultSinks(sim).intents };
+              return { moves, intents: defaultSinks(sim, replicator).intents };
             },
           }
         : {}),

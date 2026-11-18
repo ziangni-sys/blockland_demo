@@ -22,7 +22,7 @@ import { headingOf } from '../../src/entities/structs';
 import { STEER_TIMEOUT_TICKS } from '../../src/net/protocol';
 import { planDock, rotorSnap, snapPoint } from '../../src/structures/assembly';
 import type { Rotor, Ship } from '../../src/structures/structure';
-import { fill, LINKS, useOn } from './e2e-scenes';
+import { clickOn, fill, LINKS } from './e2e-scenes';
 import type { HeadlessClient, NetHarness } from './harness';
 import { assemble, buildRaft, dist, OWN_SEA, OWN_SEA_TOP, ownWorld, stat, type OwnRun } from './own-scenes';
 
@@ -165,9 +165,9 @@ describe('32. docking while another player stands on the deck (150 ms, 20 ms jit
     const cb = sim.players.get('b')!;
     ca.teleport(13.5, S, 3.5);
     r.h.run(1000);
-    ca.emptyHand();
-    useOn(r.h, ca, helm.x, helm.y, helm.z);
-    useOn(r.h, ca, helm.x, helm.y, helm.z);
+    a.emptyHand();
+    clickOn(a, helm.x, helm.y, helm.z);
+    clickOn(a, helm.x, helm.y, helm.z);
     const ship = sim.structures.ships()[0]!;
     expect(ca.player.steeringShipId).toBe(ship.id);
     // The rider on the deck corner farthest from the pivot.
@@ -205,8 +205,8 @@ describe('32. docking while another player stands on the deck (150 ms, 20 ms jit
       return dock(s);
     };
     const since = sim.ticks;
-    ca.use();
-    r.h.ticks(1);
+    a.use(true);
+    a.waitAck();
     a.input.sneak = false;
     expect(ship.removed).toBe(true);
     expect(expectB).not.toBeNull();
@@ -289,10 +289,11 @@ async function helmsman(seed: number): Promise<{ r: OwnRun; ship: Ship }> {
   const c = sim.players.get('p')!;
   c.teleport(13.5, S, 3.5);
   r.h.run(1000);
-  c.emptyHand();
   c.giveItem(B.GLASS, 5);
-  useOn(r.h, c, helm.x, helm.y, helm.z);
-  useOn(r.h, c, helm.x, helm.y, helm.z);
+  r.h.run(200);
+  r.c.emptyHand();
+  clickOn(r.c, helm.x, helm.y, helm.z);
+  clickOn(r.c, helm.x, helm.y, helm.z);
   const ship = sim.structures.ships()[0]!;
   r.c.input.forward = 1;
   r.h.run(1500);

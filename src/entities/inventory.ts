@@ -11,7 +11,10 @@
  * counts only through these methods (or replace the slot) — a stack object is never shared
  * between two slots.
  */
-import { isItem, itemDef, type ItemStack } from '../blocks/items';
+import { AIR, ID_MASK } from '../blocks/cell';
+import { B } from '../blocks/defs';
+import { isBlockItem, isItem, itemDef, type ItemStack } from '../blocks/items';
+import { LIQUID } from '../blocks/registry';
 import type { ByteReader, ByteWriter } from '../save/bytes';
 
 export const HOTBAR_SLOTS = 9;
@@ -248,6 +251,18 @@ export class Inventory {
     return c;
   }
 
+  /**
+   * Closing the inventory screen: the cursor stack goes back into the inventory like a pickup
+   * (add). Returns what did not fit, taken off the cursor too (the caller throws it into the
+   * world), or null.
+   */
+  stowCursor(): ItemStack | null {
+    const c = this.takeCursor();
+    if (c === null) return null;
+    const left = this.add(c.item, c.count);
+    return left > 0 ? { item: c.item, count: left } : null;
+  }
+
   clear(): void {
     this.hotbar.fill(null);
     this.main.fill(null);
@@ -321,6 +336,49 @@ export class Inventory {
     if (s.count <= 0) slots[i] = null;
     return left - n;
   }
+}
+
+/**
+ * The item pick block puts in hand for a cell: the block itself (block id == item id), never its
+ * mining drop; -1 for air, liquids, the unloaded sentinel and blocks that are no item.
+ */
+export function pickBlockItem(cell: number): number {
+  const id = cell & ID_MASK;
+  if (id === AIR || id === B.UNLOADED || LIQUID[id] !== 0 || !isBlockItem(id)) return -1;
+  return id;
+}
+
+/**
+ * Pick block (DESIGN 选取方块) on an inventory: put block item `item` in hand. Pure: the result
+ * depends on the inventory alone, so a client predicts it exactly (NETCODE section 10).
+ *  - Already in the hotbar: that slot is selected (the selected slot first, if it holds it).
+ *  - Creative, not in the hotbar: a full stack goes into the selected slot when it is empty, else
+ *    into the first empty hotbar slot (selected), else it replaces the selected slot.
+ *  - Survival, only in the backpack: that stack swaps places with the selected hotbar slot. No
+ *    items are ever created; with none at all nothing happens (false).
+ * The off-hand is never involved. Returns true when the item is in hand afterwards (inv.selected).
+ */
+export function pickBlockInto(inv: Inventory, item: number, creative: boolean): boolean {
+  if (!isItem(item)) return false;
+  const holds = (s: ItemStack | null | undefined): boolean => s != null && s.count > 0 && s.item === item;
+  const empty = (s: ItemStack | null | undefined): boolean => s == null || s.count <= 0;
+  let slot = holds(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(holds);
+  if (slot < 0) {
+    if (creative) {
+      slot = empty(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(empty);
+      if (slot < 0) slot = inv.selected;
+      inv.hotbar[slot] = { item, count: maxStackOf(item) };
+    } else {
+      const j = inv.main.findIndex(holds);
+      if (j < 0) return false;
+      slot = inv.selected;
+      const cur = inv.hotbar[slot] ?? null;
+      inv.hotbar[slot] = inv.main[j]!;
+      inv.main[j] = empty(cur) ? null : cur;
+    }
+  }
+  inv.selected = slot;
+  return true;
 }
 
 /** A count consume() accepts: a non-negative integer. */

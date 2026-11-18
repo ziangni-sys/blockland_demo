@@ -157,12 +157,12 @@ describe('survival: the timed glue operation', () => {
       sim.advance(n - 2);
       expect(sim.worldGlue.size).toBe(0);
       expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(3);
-      expect(sim.soloPlayer.view.glueProgress).toBeCloseTo((n - 1) / n, 5);
-      expect(sim.soloPlayer.view.hint).toEqual({ key: 'hint.glue.working', params: { pct: Math.floor(sim.soloPlayer.view.glueProgress * 100) } });
+      expect(sim.soloPlayer.view.gluing!.progress).toBeCloseTo((n - 1) / n, 5);
+      expect(sim.soloPlayer.view.hint).toEqual({ key: 'hint.glue.working', params: { pct: Math.floor(sim.soloPlayer.view.gluing!.progress * 100) } });
       sim.tick();
       expect(sim.worldGlue.has(0, T, -2, PZ)).toBe(true);
       expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(2);
-      expect(sim.soloPlayer.view.glueProgress).toBe(0);
+      expect(sim.soloPlayer.view.gluing).toBeNull();
       sim.advance(n + 5); // still holding: nothing more happens
       expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(2);
       expect(sim.worldGlue.size).toBe(1);
@@ -189,10 +189,10 @@ describe('survival: the timed glue operation', () => {
       const sim = scene(B.STONE);
       const n = ticksOf(B.STONE);
       sim.advance(n - 6);
-      expect(sim.soloPlayer.view.glueProgress).toBeGreaterThan(0.5);
+      expect(sim.soloPlayer.view.gluing!.progress).toBeGreaterThan(0.5);
       act(sim);
       sim.tick();
-      expect(sim.soloPlayer.view.glueProgress).toBe(0);
+      expect(sim.soloPlayer.view.gluing).toBeNull();
       // Back to the start: glue in hand, aimed at the same face, button held.
       const inv = sim.soloPlayer.player.inventory;
       if (inv.selectedStack()?.item !== I.GLUE) {
@@ -204,7 +204,7 @@ describe('survival: the timed glue operation', () => {
       sim.advance(3 * n);
       expect(sim.worldGlue.size).toBe(0);
       expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(3);
-      expect(sim.soloPlayer.view.glueProgress).toBe(0);
+      expect(sim.soloPlayer.view.gluing).toBeNull();
     });
   }
 });

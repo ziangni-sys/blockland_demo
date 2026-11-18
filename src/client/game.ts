@@ -428,15 +428,7 @@ export class Game implements InputHost {
     const s = this.session;
     if (s) {
       try {
-        const inv = s.me.player.inventory;
-        const c = inv.takeCursor();
-        if (c) {
-          const left = inv.add(c.item, c.count);
-          if (left > 0) {
-            inv.cursor = { item: c.item, count: left };
-            s.me.dropCursorStack();
-          }
-        }
+        s.me.closeInventory();
       } catch (e) {
         this.faults.report('inventory', e);
       }

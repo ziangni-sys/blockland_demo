@@ -35,9 +35,15 @@
  * CONTROL. PlayerControl is the handle of one joined player: its entity, its InteractionView,
  * its helm read-out, its chunk view radius, and the scripted controls (look, click, hold, give,
  * teleport, set the mode, respawn ...). They only write what that player's client would write
- * (input, inventory) or what a command would (teleport, mode), so a scripted player behaves
- * exactly like a played one. A control is valid until its player leaves; a rejoin hands out a
- * new one.
+ * (input, inventory, the claimed aim) or what a command would (teleport, mode), so a scripted
+ * player behaves exactly like a played one. A control is valid until its player leaves; a rejoin
+ * hands out a new one.
+ *
+ * CLAIMED AIM (docs/NETCODE.md section 10). A client-driven player's client chooses its targets
+ * itself; the server checks them (net/server/intents.ts) and claims them for the player
+ * (claimAim, claimUseTarget, claimMineTarget): its hands act on them instead of casting rays
+ * (sim/interact.ts). Scripted looks at a client-driven player (lookAt, lookAtCell, aimAt) claim
+ * what its client would claim looking there: the rays from its eyes.
  *
  * DRIVE. A joined player starts server-driven: the server moves it from its input (the present
  * client, tests and scripted control). setDrive('client') makes it client-driven: its client moves
@@ -58,7 +64,7 @@ import { Ship } from '../structures/structure';
 import { boxOverlapsSolid } from '../voxel/shape';
 import { Hands } from './interact';
 import type { Simulation } from './simulation';
-import type { GridCell, HelmView, InteractionView, PlayerKey } from './view';
+import type { AimTarget, GridCell, HelmView, InteractionView, PlayerKey } from './view';
 
 /** Longest PlayerKey (UTF-16 code units). */
 export const MAX_PLAYER_KEY_LENGTH = 128;
@@ -378,9 +384,20 @@ export class PlayerControl {
   setMode(mode: GameMode): void {
     this.sim.entities.setMode(this.player, mode);
   }
+  /** Back to the spawn point, if dead. Both buttons count as let go (NETCODE section 10). */
   respawn(): void {
     const p = this.player;
-    if (p.dead) this.sim.entities.respawn(p);
+    if (!p.dead) return;
+    this.sim.entities.respawn(p);
+    this.releaseButtons();
+  }
+  /** Let go of both mouse buttons and forget their pending clicks (death and respawn: sim/interact.ts, respawn()). */
+  releaseButtons(): void {
+    const input = this.player.input;
+    input.use = false;
+    input.attack = false;
+    input.usePresses = 0;
+    input.attackPresses = 0;
   }
   /** Let go of the helm, if the player holds one (the client calls this when a screen opens). */
   releaseHelm(): void {
@@ -393,16 +410,41 @@ export class PlayerControl {
     const stack = p.inventory.takeCursor();
     if (stack) this.sim.entities.dropFromPlayer(p, stack.item, stack.count);
   }
+  /** Close the inventory screen: the cursor stack goes back into the inventory; what does not fit is thrown into the world. */
+  closeInventory(): void {
+    const p = this.player;
+    const left = p.inventory.stowCursor();
+    if (left !== null) this.sim.entities.dropFromPlayer(p, left.item, left.count);
+  }
   /**
-   * Pick block (middle click): put the block the player looks at (the use ray's target, what
-   * the outline shows; world or structure) in hand — see Hands.pickBlock for the hotbar and
-   * backpack rules (creative fills a slot, survival only selects or swaps). Also writes
-   * input.slot, so the next tick keeps the selection; a client that drives input.slot must
-   * adopt player.inventory.selected afterwards. Returns true when the block is in hand.
+   * Pick block (middle click): put the block the player looks at (`target` when given: a client's
+   * PickBlock intent; else the use ray's target, what the outline shows; world or structure) in
+   * hand — see entities/inventory.ts pickBlockInto for the hotbar and backpack rules (creative
+   * fills a slot, survival only selects or swaps). Also writes input.slot, so the next tick keeps
+   * the selection; a client that drives input.slot must adopt player.inventory.selected
+   * afterwards. Returns true when the block is in hand.
    */
-  pickBlock(): boolean {
+  pickBlock(target?: AimTarget): boolean {
     this.requireOnline();
-    return this.hands.pickBlock();
+    return this.hands.pickBlock(target);
+  }
+
+  // ------------------------------------------------------------------ claimed aim (see CLAIMED AIM in the header)
+
+  /** The use and mining targets this client-driven player's client claims (checked by the caller). */
+  claimAim(use: AimTarget | null, mine: AimTarget | null): void {
+    this.requireOnline();
+    this.hands.claimAim(use, mine);
+  }
+  /** The use target alone (a right-click's own target). */
+  claimUseTarget(t: AimTarget | null): void {
+    this.requireOnline();
+    this.hands.claimUseTarget(t);
+  }
+  /** The mining target alone (a left-click's own target). */
+  claimMineTarget(t: AimTarget | null): void {
+    this.requireOnline();
+    this.hands.claimMineTarget(t);
   }
 
   // ------------------------------------------------------------------ scripted control
@@ -423,6 +465,8 @@ export class PlayerControl {
     p.input.pitch = pitch;
     p.yaw = yaw;
     p.pitch = pitch;
+    // A client-driven player's client would claim what it now looks at (CLAIMED AIM).
+    if (this.drive === 'client') this.hands.claimLook();
   }
 
   /**

@@ -16,9 +16,12 @@
  * measures it, net/client/clock.ts). Reports lost or dropped never merge two falls: package 2
  * counts the client's landings (entities/drive.ts LANDINGS).
  *
+ * For package 7 (section 10, check 2), the reports package 2 ACCEPTED, as it took them: accepted()
+ * and newest() read the history package 2 records at acceptance (entities/drive.ts ACCEPTED
+ * REPORTS). Never a report merely received here: it is not checked until the tick's entity step,
+ * and a forged one would lend its eyes to an intent applied before that.
+ *
  * Also kept per player:
- *  - the last MOVE_HISTORY reports received (seq, carrier, feet, sneaking), oldest first, where
- *    package 7 finds an intent's eyes (section 10: history(), report());
  *  - its view lag (section 4: viewLag(), the ticks between the server's present tick and the
  *    viewTick of the last report package 2 accepted);
  *  - moveAck: the seq of the last report package 2 accepted in the tick (the Replicator's ClientFeed);
@@ -28,26 +31,15 @@
  *    client's first report: until then it is loading (section 3, ready), and the server holds the
  *    player where it is (a host who joins a loaded world at the wheel keeps it).
  */
-import { copyReport, emptyReport, type MoveReport } from '../../entities/drive';
-import { vec3, type Vec3 } from '../../core/math';
+import { copyReport, emptyReport, type AcceptedReport, type MoveReport } from '../../entities/drive';
 import type { Simulation } from '../../sim/simulation';
 import type { PlayerKey } from '../../sim/view';
-import { MOVE_HISTORY, STEER_TIMEOUT_TICKS, type NetMoveReport } from '../protocol';
+import { STEER_TIMEOUT_TICKS, type NetMoveReport } from '../protocol';
 
 /** Two reports are handed over in a tick while more than this many wait. */
 export const QUEUE_CATCH_UP = 2;
 /** More than this many waiting: the oldest are dropped. */
 export const QUEUE_LIMIT = 10;
-
-/** A report as package 7 needs it (section 8): where the eyes were. */
-export interface MoveRecord {
-  readonly seq: number;
-  /** 0 = the world; pos is local to that structure otherwise. */
-  readonly carrierId: number;
-  /** Feet. */
-  readonly pos: Vec3;
-  readonly sneaking: boolean;
-}
 
 /** What happened to one player's reports (tests, the debug panel). */
 export interface MoveStats {
@@ -69,8 +61,6 @@ class PlayerMoves {
   readonly spare: MoveReport[] = [];
   /** Highest seq received. */
   newest = -Infinity;
-  /** The last MOVE_HISTORY received, oldest first. */
-  readonly history: MoveRecord[] = [];
   /** A report arrived since the last beforeTick. */
   heard = false;
   /** Ticks since the last report arrived; null before the first. */
@@ -106,9 +96,6 @@ export class MoveQueue {
     }
     m.newest = report.seq;
     m.queue.push(copyReport(report, m.spare.pop() ?? emptyReport()));
-    const h = m.history;
-    if (h.length >= MOVE_HISTORY) h.shift();
-    h.push({ seq: report.seq, carrierId: report.carrierId, pos: vec3(report.pos.x, report.pos.y, report.pos.z), sneaking: report.sneaking });
   }
 
   beforeTick(): void {
@@ -155,16 +142,14 @@ export class MoveQueue {
 
   // ------------------------------------------------------------------ for package 7 and tests
 
-  /** The last MOVE_HISTORY reports received from `key`, oldest first (empty for an unknown key). */
-  history(key: PlayerKey): readonly MoveRecord[] {
-    return this.players.get(key)?.history ?? [];
+  /** `key`'s report `seq` as package 2 accepted it, if it is of the present epoch and still remembered; else null (ClientDrive.acceptedReport). */
+  accepted(key: PlayerKey, seq: number): AcceptedReport | null {
+    return this.sim.players.get(key)?.player.remote?.acceptedReport(seq) ?? null;
   }
 
-  /** The received report `seq` of `key` if the history still has it, else the newest received; null before any. */
-  report(key: PlayerKey, seq: number): MoveRecord | null {
-    const h = this.history(key);
-    for (let i = h.length - 1; i >= 0; i--) if (h[i]!.seq === seq) return h[i]!;
-    return h.length > 0 ? h[h.length - 1]! : null;
+  /** The newest report package 2 accepted from `key` in the present epoch, or null: none since the last correction (ClientDrive.lastAccepted). */
+  newest(key: PlayerKey): AcceptedReport | null {
+    return this.sim.players.get(key)?.player.remote?.lastAccepted() ?? null;
   }
 
   /** `key`'s view lag in ticks (section 4: present tick - viewTick of the last accepted report), null before one was accepted. */

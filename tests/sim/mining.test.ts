@@ -17,8 +17,8 @@ describe('mining', () => {
     sim.soloPlayer.player.input.attack = true;
     sim.advance(29);
     expect(idAt(sim.world, 0, Y, -2)).toBe(B.STONE);
-    expect(sim.soloPlayer.view.breakProgress).toBeGreaterThan(0.9);
-    expect(sim.soloPlayer.view.breakProgress).toBeLessThan(1);
+    expect(sim.soloPlayer.view.mining!.progress).toBeGreaterThan(0.9);
+    expect(sim.soloPlayer.view.mining!.progress).toBeLessThan(1);
     sim.tick();
     expect(idAt(sim.world, 0, Y, -2)).toBe(B.AIR);
     const broken = log.of('blockBroken');
@@ -61,7 +61,7 @@ describe('mining', () => {
     // look at the sky for a tick
     p.input.pitch = 1.4;
     sim.tick();
-    expect(sim.soloPlayer.view.breakProgress).toBe(0);
+    expect(sim.soloPlayer.view.mining).toBeNull();
     sim.soloPlayer.lookAtCell(0, Y, -2, PZ);
     sim.advance(29);
     expect(idAt(sim.world, 0, Y, -2)).toBe(B.STONE);
@@ -124,23 +124,36 @@ describe('mining', () => {
       sim.advance(200);
       expect(idAt(sim.world, 0, Y, -2)).toBe(B.DEEPROCK);
       expect(sim.soloPlayer.view.hint?.key).toBe('hint.unbreakable');
-      expect(sim.soloPlayer.view.breakProgress).toBe(0);
+      expect(sim.soloPlayer.view.mining).toBeNull();
     }
   });
 
-  it('a dead player does nothing; presses are consumed', () => {
+  it('a dead player does nothing; presses are consumed; death and respawn let go of the buttons', () => {
     const sim = flatSim({ mode: 'survival' });
     sim.world.setCell(0, Y, -2, makeCell(B.DIRT));
     sim.soloPlayer.lookAtCell(0, Y, -2, PZ);
+    const input = sim.soloPlayer.player.input;
+    input.attack = true;
+    input.use = true;
+    sim.tick();
     sim.entities.kill(sim.soloPlayer.player, 'test');
+    // Death lets go of both buttons (NETCODE section 10).
+    expect(input.attack).toBe(false);
+    expect(input.use).toBe(false);
     sim.soloPlayer.attack();
-    sim.soloPlayer.player.input.attack = true;
+    input.attack = true;
     sim.advance(40);
     expect(idAt(sim.world, 0, Y, -2)).toBe(B.DIRT);
-    expect(sim.soloPlayer.player.input.attackPresses).toBe(0);
+    expect(input.attackPresses).toBe(0);
     expect(sim.soloPlayer.view.target).toBeNull();
+    // A button held through the respawn does not go on mining: it takes a new press.
     sim.soloPlayer.respawn();
+    expect(input.attack).toBe(false);
     sim.soloPlayer.lookAtCell(0, Y, -2, PZ);
+    sim.advance(10);
+    expect(idAt(sim.world, 0, Y, -2)).toBe(B.DIRT);
+    sim.soloPlayer.attack();
+    input.attack = true;
     sim.advance(10);
     expect(idAt(sim.world, 0, Y, -2)).toBe(B.AIR);
     void NZ;
@@ -163,7 +176,7 @@ describe('mining', () => {
     sim.advance(5);
     expect(sim.soloPlayer.view.hint?.key).not.toBe('hint.unbreakable');
     expect(sim.soloPlayer.view.target).toMatchObject({ gridId: 0, x: 0, y: T - 2, z: -1, face: PY });
-    expect(sim.soloPlayer.view.breakProgress).toBeGreaterThan(0);
+    expect(sim.soloPlayer.view.mining!.progress).toBeGreaterThan(0);
     sim.advance(10); // dirt: 0.5 s
     sim.soloPlayer.player.input.attack = false;
     expect(idAt(sim.world, 0, T - 2, -1)).not.toBe(B.DIRT); // (the water runs down into the hole)

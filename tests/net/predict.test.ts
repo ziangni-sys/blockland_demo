@@ -14,7 +14,7 @@ import { NY, PZ } from '../../src/core/dirs';
 import { REPORT_DEBT_TICKS } from '../../src/entities/constants';
 import { BLEND_MS, RELOAD_DISTANCE } from '../../src/net/client/predict';
 import { boxOverlapsSolid } from '../../src/voxel/shape';
-import { fill, LINKS, useOn } from './e2e-scenes';
+import { clickOn, fill, LINKS } from './e2e-scenes';
 import { assemble, buildRaft, dist, hdist, LAND, LAND_TOP, OWN_SEA, OWN_SEA_TOP, ownWorld, startRotor } from './own-scenes';
 
 const T = LAND_TOP;
@@ -240,9 +240,9 @@ describe('LESSONS 舵手穿过方块: a block put into the helmsman\'s seat', ()
     const c = r.ctrl;
     c.teleport(13.5, S, 3.5);
     r.h.run(1000);
-    c.emptyHand();
-    useOn(r.h, c, helm.x, helm.y, helm.z);
-    useOn(r.h, c, helm.x, helm.y, helm.z);
+    r.c.emptyHand();
+    clickOn(r.c, helm.x, helm.y, helm.z);
+    clickOn(r.c, helm.x, helm.y, helm.z);
     const ship = sim.structures.ships()[0]!;
     expect(c.player.steeringShipId).toBe(ship.id);
     r.h.run(1000);

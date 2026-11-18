@@ -233,10 +233,10 @@ describe('28. 潜行右键露出的胶面去掉胶。生存模式涂胶耗时等
     input.use = true;
     glueClick(sim, ex, ey, ez, PX);
     sim.advance(total - 5);
-    expect(sim.soloPlayer.view.glueProgress).toBeGreaterThan(0.5);
+    expect(sim.soloPlayer.view.gluing!.progress).toBeGreaterThan(0.5);
     sim.soloPlayer.lookAt(ex + 0.5, ey + 30, ez + 0.5); // the sky, button still held
     sim.tick();
-    expect(sim.soloPlayer.view.glueProgress).toBe(0);
+    expect(sim.soloPlayer.view.gluing).toBeNull();
     sim.soloPlayer.lookAtCell(ex, ey, ez, PX); // back on the face, still holding
     sim.advance(3 * total);
     input.use = false;
@@ -252,7 +252,7 @@ describe('28. 潜行右键露出的胶面去掉胶。生存模式涂胶耗时等
     sim.soloPlayer.hold(I.GLUE, 1);
     glueClick(sim, ex, ey, ez, PX); // one tick, button not held
     expect(sim.worldGlue.has(ex, ey, ez, PX)).toBe(true);
-    expect(sim.soloPlayer.view.glueProgress).toBe(0);
+    expect(sim.soloPlayer.view.gluing).toBeNull();
     expect(sim.soloPlayer.player.inventory.count(I.GLUE)).toBe(1);
   });
 });

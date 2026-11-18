@@ -70,8 +70,6 @@ export const CELL_MULTI_BIT = 1 << 24;
 export const ROTOR_RESYNC_TICKS = 100;
 /** Pose samples kept per ship / entity on the client (section 7). */
 export const SAMPLE_BUFFER_TICKS = 32;
-/** Movement reports remembered per player for the intents' eyes (section 8). */
-export const MOVE_HISTORY = 40;
 /** Reach slack added by the server's intent check, blocks (section 10). */
 export const REACH_SLACK = 0.5;
 /** Intents applied per player per tick (Aim not counted, section 10). */

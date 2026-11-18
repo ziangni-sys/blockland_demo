@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
-import { Inventory } from '../../src/entities/inventory';
+import { Inventory, maxStackOf, pickBlockInto, pickBlockItem } from '../../src/entities/inventory';
+import { liquidState, makeCell } from '../../src/blocks/cell';
 import { ByteReader, ByteWriter, SaveFormatError } from '../../src/save/bytes';
 
 describe('Inventory', () => {
@@ -247,5 +248,64 @@ describe('Inventory', () => {
     inv.slotClick('hotbar', 0, 0, true); // shift from the hotbar goes to the backpack, not the off-hand
     expect(inv.offhand).toBeNull();
     expect(inv.main[0]).toEqual({ item: I.GLUE, count: 5 });
+  });
+});
+
+describe('pick block and closing the screen as pure functions on the inventory (NETCODE section 10)', () => {
+  it('pickBlockItem: the block itself; nothing for air, liquids, the unloaded sentinel', () => {
+    expect(pickBlockItem(makeCell(B.STONE))).toBe(B.STONE);
+    expect(pickBlockItem(makeCell(B.LOG_OAK, 2))).toBe(B.LOG_OAK);
+    expect(pickBlockItem(makeCell(B.AIR))).toBe(-1);
+    expect(pickBlockItem(makeCell(B.WATER, liquidState(0, false)))).toBe(-1);
+    expect(pickBlockItem(makeCell(B.UNLOADED))).toBe(-1);
+  });
+
+  it('pickBlockInto: hotbar first; creative fills the selected empty slot, else the first empty one, else replaces; survival swaps from the backpack or does nothing', () => {
+    const inv = new Inventory();
+    inv.hotbar[4] = { item: B.STONE, count: 3 };
+    expect(pickBlockInto(inv, B.STONE, false)).toBe(true);
+    expect(inv.selected).toBe(4);
+    // creative, not in the hotbar: the selected slot when empty
+    inv.selected = 1;
+    expect(pickBlockInto(inv, B.GLASS, true)).toBe(true);
+    expect(inv.hotbar[1]).toEqual({ item: B.GLASS, count: maxStackOf(B.GLASS) });
+    // ... else the first empty slot
+    expect(pickBlockInto(inv, B.BRICKS, true)).toBe(true);
+    expect(inv.selected).toBe(0);
+    expect(inv.hotbar[0]!.item).toBe(B.BRICKS);
+    // ... else it replaces the selected slot
+    for (let i = 0; i < 9; i++) inv.hotbar[i] ??= { item: B.DIRT, count: 1 };
+    inv.selected = 8;
+    expect(pickBlockInto(inv, B.SAND, true)).toBe(true);
+    expect(inv.hotbar[8]!.item).toBe(B.SAND);
+    // survival: from the backpack, swapping with the selected slot; nothing created
+    const s = new Inventory();
+    s.hotbar[2] = { item: B.DIRT, count: 7 };
+    s.main[5] = { item: B.GLASS, count: 2 };
+    s.selected = 2;
+    expect(pickBlockInto(s, B.GLASS, false)).toBe(true);
+    expect(s.hotbar[2]).toEqual({ item: B.GLASS, count: 2 });
+    expect(s.main[5]).toEqual({ item: B.DIRT, count: 7 });
+    expect(pickBlockInto(s, B.BRICKS, false)).toBe(false);
+    expect(s.count(B.BRICKS)).toBe(0);
+    // the off-hand is never involved
+    s.offhand = { item: B.LAMP, count: 1 };
+    expect(pickBlockInto(s, B.LAMP, false)).toBe(false);
+  });
+
+  it('stowCursor: the cursor goes back like a pickup; what does not fit is returned, off the cursor', () => {
+    const inv = new Inventory();
+    inv.cursor = { item: B.COBBLE, count: 20 };
+    expect(inv.stowCursor()).toBeNull();
+    expect(inv.cursor).toBeNull();
+    expect(inv.count(B.COBBLE)).toBe(20);
+    for (let i = 0; i < 9; i++) inv.hotbar[i] = { item: B.DIRT, count: 64 };
+    for (let i = 0; i < 27; i++) inv.main[i] = { item: B.DIRT, count: 64 };
+    inv.hotbar[0] = { item: B.COBBLE, count: 60 };
+    inv.cursor = { item: B.COBBLE, count: 10 };
+    expect(inv.stowCursor()).toEqual({ item: B.COBBLE, count: 6 });
+    expect(inv.cursor).toBeNull();
+    expect(inv.hotbar[0]!.count).toBe(64);
+    expect(inv.stowCursor()).toBeNull();
   });
 });

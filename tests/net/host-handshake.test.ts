@@ -147,8 +147,8 @@ describe('handshake (package 8)', () => {
   it('the host connection is the one the host marks local, not a key: Welcome, player table, intents', async () => {
     const joins: Array<[PlayerKey, boolean]> = [];
     const h = await world({
-      sinks: (sim) => {
-        const s = defaultSinks(sim);
+      sinks: (sim, replicator) => {
+        const s = defaultSinks(sim, replicator);
         s.intents.join = (key, host) => joins.push([key, host]);
         return s;
       },
@@ -203,8 +203,8 @@ describe('handshake (package 8)', () => {
     let refuse = false;
     const received: IntentMessage[] = [];
     const h = await world({
-      sinks: (sim) => {
-        const s = defaultSinks(sim);
+      sinks: (sim, replicator) => {
+        const s = defaultSinks(sim, replicator);
         s.intents.receive = (_k, m) => {
           received.push(m);
           return !refuse;
