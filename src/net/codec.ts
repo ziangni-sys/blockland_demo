@@ -780,6 +780,7 @@ function writeClientPayload(w: ByteWriter, m: ClientMessage): void {
       return;
     case 'ping':
       w.u32(m.clientMs);
+      w.varuint(m.rttMs);
       return;
     case 'moveReport':
       writeMoveReport(w, m);
@@ -854,7 +855,7 @@ function readClientPayload(r: ByteReader, id: number): ClientMessage {
     case MSG.bye:
       return { type: 'bye' };
     case MSG.ping:
-      return { type: 'ping', clientMs: r.u32() };
+      return { type: 'ping', clientMs: r.u32(), rttMs: r.varuint() };
     case MSG.moveReport:
       return { type: 'moveReport', ...readMoveReport(r) };
     case MSG.aim: {

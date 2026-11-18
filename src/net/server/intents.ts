@@ -13,8 +13,10 @@
  * the last processed, is dropped). At the start of every tick (beforeTick, after the movement
  * reports reached the simulation, and before sim.tick()), first the standing claimed aim is checked
  * again (below), then the queue is applied in order: up to and including the first PRESS (Use,
- * Attack, SwapHands), or INTENTS_PER_TICK others (Aim not counted); the rest waits for the next
- * tick. Every press then acts on its own target and the held item of its moment, never on an Aim
+ * Attack, SwapHands, and DropCursor, which spawns an item), or INTENTS_PER_TICK others (Aim not
+ * counted; an Aim directly followed by another is not even checked); the rest waits for the next
+ * tick. SetViewRadius takes effect at most once every VIEW_RADIUS_INTERVAL_TICKS (the newest value
+ * waits). Every press then acts on its own target and the held item of its moment, never on an Aim
  * or an inventory action that came after it. Nothing is ever dropped: a burst that arrives together
  * after a stall (retransmissions, a guest's link back after seconds) is worked off a tick at a time
  * (a lost AttackRelease would hold the button down for good). More than INTENT_QUEUE_LIMIT waiting
@@ -75,6 +77,7 @@ import {
   MAX_VIEW_RADIUS,
   REACH_SLACK,
   SIM_RADIUS_CAP,
+  VIEW_RADIUS_INTERVAL_TICKS,
   type HostCommand,
   type IntentMessage,
   type Target,
@@ -130,6 +133,9 @@ class PlayerIntents {
   /** The standing claimed aim as the client sent it. */
   use: Target | null = null;
   mine: Target | null = null;
+  /** A SetViewRadius waiting for its turn (applyRadius), and the tick the last one took effect. */
+  radius: number | null = null;
+  radiusTick = -Infinity;
   readonly stats: IntentStats = {
     received: 0,
     duplicate: 0,
@@ -209,6 +215,7 @@ export class IntentQueue {
       const st = this.players.get(ctrl.key);
       if (st === undefined) continue;
       this.recheckAim(ctrl, st);
+      this.applyRadius(ctrl, st);
       this.applyQueued(ctrl, st);
     }
   }
@@ -287,7 +294,9 @@ export class IntentQueue {
       }
       st.head++;
       if (m.type !== 'aim') counted++;
-      const press = this.apply(ctrl, st, m);
+      // An Aim followed by another is overwritten before anything uses it: not checked (package 13:
+      // a burst of Aims costs one check).
+      const press = m.type === 'aim' && q[st.head]?.type === 'aim' ? false : this.apply(ctrl, st, m);
       st.ack = m.seq;
       st.stats.applied++;
       if (press) {
@@ -358,8 +367,10 @@ export class IntentQueue {
         if (p.mode === 'creative' && isItem(m.item)) p.inventory.creativePick(m.item, m.shift);
         return false;
       case 'dropCursor':
+        // Paced like a press (package 13): one drop a tick, so creative pick + drop cannot spawn
+        // items faster than clicks place blocks.
         ctrl.dropCursorStack();
-        return false;
+        return true;
       case 'closeInventory':
         ctrl.closeInventory();
         return false;
@@ -370,12 +381,10 @@ export class IntentQueue {
       case 'respawn':
         ctrl.respawn();
         return false;
-      case 'setViewRadius': {
-        const r = Math.max(0, Math.min(MAX_VIEW_RADIUS, m.radius));
-        this.replicator.setViewRadius(ctrl.key, r);
-        ctrl.viewRadius = Math.min(r, SIM_RADIUS_CAP);
+      case 'setViewRadius':
+        st.radius = Math.max(0, Math.min(MAX_VIEW_RADIUS, m.radius));
+        this.applyRadius(ctrl, st);
         return false;
-      }
       case 'hostCommand':
         if (!st.host) {
           st.stats.hostRefused++;
@@ -385,6 +394,21 @@ export class IntentQueue {
         this.hostCommand(ctrl, m.command);
         return false;
     }
+  }
+
+  /**
+   * The newest SetViewRadius takes effect at most once every VIEW_RADIUS_INTERVAL_TICKS (package
+   * 13): every change resubscribes columns and loads or drops the simulation's, and a client
+   * flipping its radius every tick would keep the server generating and its own share of the
+   * uplink full. The value waits (beforeTick tries again), the ack does not.
+   */
+  private applyRadius(ctrl: PlayerControl, st: PlayerIntents): void {
+    const r = st.radius;
+    if (r === null || this.sim.ticks - st.radiusTick < VIEW_RADIUS_INTERVAL_TICKS) return;
+    st.radius = null;
+    st.radiusTick = this.sim.ticks;
+    this.replicator.setViewRadius(ctrl.key, r);
+    ctrl.viewRadius = Math.min(r, SIM_RADIUS_CAP);
   }
 
   private consumed(st: PlayerIntents, press: boolean): boolean {

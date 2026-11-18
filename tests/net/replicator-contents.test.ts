@@ -249,40 +249,51 @@ describe('contents about what a client has (package 4)', () => {
     rig.check('full');
   });
 
-  it('more moving entities than four Samples messages hold: the ones left out go first in the next tick', () => {
-    const rig = flatRig();
+  it('more moving entities than the samples room holds: every one gets its turn, a far one less often than a near one', () => {
+    const rig = flatRig(7);
     const sim = rig.sim;
-    const a = rig.join('a', { viewRadius: 2 });
+    const a = rig.join('a', { viewRadius: 7 });
     rig.tick(5);
-    rig.checkPoses = false; // the poses left out of a tick's samples lag by a tick
-    const drops = [];
-    for (let i = 0; i < 300; i++) drops.push(sim.entities.spawnItem(-12.5 + (i % 20) * 1.5, T + 60 + Math.floor(i / 20) * 2, -12.5 + (i % 7) * 3, B.COBBLE, 1));
-    rig.tick(2);
+    rig.checkPoses = false; // the poses left out of a tick's samples lag
+    // 150 drops about 4 blocks from the player, 150 about 90 blocks away; all fall the whole time.
+    const near = [];
+    const far = [];
+    for (let i = 0; i < 150; i++) near.push(sim.entities.spawnItem(-10.5 + (i % 15) * 1.5, T + 80 + Math.floor(i / 15), -6.5 + (i % 5), B.COBBLE, 1));
+    for (let i = 0; i < 150; i++) far.push(sim.entities.spawnItem(80.5 + (i % 15) * 1.5, T + 80 + Math.floor(i / 15), -6.5 + (i % 5), B.COBBLE, 1));
+    rig.tick(15); // the samples room has grown to its four messages (the recorder's link drains everything)
     const from = sim.ticks;
-    rig.tick(20); // all of them fall the whole time
+    rig.tick(20);
     const seen = new Map<number, number[]>();
-    for (const s of a.samples) {
-      if (s.msg.tick <= from) continue;
-      for (const e of s.msg.entities) {
-        let l = seen.get(e.id);
-        if (l === undefined) seen.set(e.id, (l = []));
-        l.push(s.msg.tick);
-      }
-    }
     const messages = new Map<number, number>();
     const sampled = new Map<number, number>();
     for (const s of a.samples) {
       if (s.msg.tick <= from) continue;
       messages.set(s.msg.tick, (messages.get(s.msg.tick) ?? 0) + 1);
       sampled.set(s.msg.tick, (sampled.get(s.msg.tick) ?? 0) + s.msg.entities.length);
+      for (const e of s.msg.entities) {
+        let l = seen.get(e.id);
+        if (l === undefined) seen.set(e.id, (l = []));
+        l.push(s.msg.tick);
+      }
     }
     expect(Math.max(...messages.values())).toBeLessThanOrEqual(4);
     expect(Math.max(...sampled.values())).toBeLessThan(250); // some are left out every tick
-    for (const d of drops) {
+    // Ticks between two samples of a drop, and before its first one in the window.
+    const gaps = (ticks: number[]): number => Math.max(...ticks.map((t, i) => t - (i === 0 ? from : ticks[i - 1]!)));
+    let nearCount = 0;
+    let farCount = 0;
+    for (const d of near) {
       const ticks = seen.get(d.id) ?? [];
-      expect(ticks.length, `drop ${d.id}`).toBeGreaterThanOrEqual(9);
-      for (let i = 1; i < ticks.length; i++) expect(ticks[i]! - ticks[i - 1]!, `drop ${d.id}`).toBeLessThanOrEqual(2);
+      nearCount += ticks.length;
+      expect(gaps(ticks), `near drop ${d.id}`).toBeLessThanOrEqual(2);
     }
+    for (const d of far) {
+      const ticks = seen.get(d.id) ?? [];
+      farCount += ticks.length;
+      expect(ticks.length, `far drop ${d.id}`).toBeGreaterThanOrEqual(3);
+      expect(gaps(ticks), `far drop ${d.id}`).toBeLessThanOrEqual(6);
+    }
+    expect(farCount).toBeLessThan(nearCount / 2);
     rig.tick(200); // they land: the final states bring every pose
     rig.checkPoses = true;
     rig.check('full');
