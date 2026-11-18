@@ -18,6 +18,7 @@ import { ROTOR_MAX_CELLS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../cor
 import type { Axis, Dir } from '../core/dirs';
 import type { Quat, Vec3 } from '../core/math';
 import type { ItemStack } from '../blocks/items';
+import type { MoveReport } from '../entities/drive';
 import type { Message } from '../sim/view';
 import type { GeneratorSpec } from '../worldgen/generator';
 import { RELIABLE, UNRELIABLE, type Channel } from './transport';
@@ -270,36 +271,11 @@ export type { GeneratorSpec };
 // ====================================================================== movement (package 2 on the wire)
 
 /**
- * A client tick of a client-driven player (section 9): package 2's MoveReport plus `viewTick`
- * and `landings`. Positions and velocities are in the carrier's frame (world when carrierId is 0).
+ * A client tick of a client-driven player (section 9): package 2's MoveReport, which carries
+ * `viewTick` and `landings` since package 6. Positions and velocities are in the carrier's frame
+ * (world when carrierId is 0). On the wire: pos f64, vel / yaw / pitch f32, the stick axes i8 x 127.
  */
-export interface NetMoveReport {
-  seq: number;
-  epoch: number;
-  /** The renderTick (floored) the client posed the structures at for this step (section 4). */
-  viewTick: number;
-  /** 0 = none. */
-  carrierId: number;
-  /** Feet, f64. */
-  pos: Vec3;
-  /** f32. */
-  vel: Vec3;
-  /** f32. */
-  yaw: number;
-  /** f32. */
-  pitch: number;
-  onGround: boolean;
-  sneaking: boolean;
-  sprinting: boolean;
-  flying: boolean;
-  /** Stick axes -1..1, sent as i8 x 127. */
-  forward: number;
-  strafe: number;
-  /** The held sneak key. */
-  sneak: boolean;
-  /** Landings of the client's body so far, mod 256 (section 9). */
-  landings: number;
-}
+export type NetMoveReport = MoveReport;
 
 /** The server's authoritative state of a client-driven player (section 9; package 2's Correction). */
 export interface NetCorrection {

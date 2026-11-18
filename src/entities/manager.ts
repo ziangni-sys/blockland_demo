@@ -44,6 +44,7 @@ import { ID_MASK } from '../blocks/cell';
 import { isItem } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID } from '../blocks/registry';
 import type { ByteReader, ByteWriter } from '../save/bytes';
+import { snapPoint, type SnapTransform } from '../structures/assembly';
 import type { Ship, Structure } from '../structures/structure';
 import { boxOverlapsSolid, hasSupportBelow } from '../voxel/shape';
 import {
@@ -81,7 +82,6 @@ import {
   REGEN_INTERVAL_TICKS,
   REPORT_CREDIT_TICKS,
   REPORT_DEBT_TICKS,
-  REPORT_MAX_LAG,
   REPORT_QUEUE_LIMIT,
   REPORT_SLACK_BURST,
   REPORT_SLACK_RATE,
@@ -102,7 +102,7 @@ import {
   WATER_SINK_ACCEL,
 } from './constants';
 import { BodyMover, sanitizeInput, takeJumpPresses, trackFall } from './body';
-import { ClientDrive, ReportJudge, copyReport, emptyReport, hardDepth, type Correction, type DriveMode, type MoveReport } from './drive';
+import { ClientDrive, ReportJudge, copyReport, emptyReport, hardDepth, reportLag, type Correction, type DriveMode, type MoveReport } from './drive';
 import { Entity, FallingBlockEntity, ItemEntity, Player, Rabbit, TntEntity, type EntityKind, type GameMode } from './entity';
 import type { EntityHost } from './host';
 import { axisValue } from './input';
@@ -116,11 +116,6 @@ const SAVE_VERSION = 2;
 const KIND_TAG: Readonly<Record<EntityKind, number>> = Object.freeze({ player: 1, item: 2, falling: 3, tnt: 4, rabbit: 5 });
 /** spawnItem() splits a count above the item's stack size into at most this many drops. */
 const MAX_SPAWN_STACKS = 64;
-/**
- * A client-driven player's checks remember a structure's motion near / through the body this long
- * (ticks): REPORT_MAX_LAG, the lead of the server's poses over the client's copies they allow for.
- */
-const PUSH_MEMORY_TICKS = Math.ceil(REPORT_MAX_LAG / TICK_DT);
 /** judgeSqueeze() results. */
 const SQUEEZE_CLEAR = 0;
 const SQUEEZE_HELD = 1;
@@ -440,18 +435,31 @@ export class EntityManager {
   /**
    * Everything carried by `structure` (or by a structure mounted on it) lets go, and its
    * helmsman releases the wheel. Call before a structure blockifies / docks / dies / is re-gridded.
+   * With `snap` (a blockify or a dock: `structure`'s local cells -> its parent grid's), the riders
+   * follow the snap (NETCODE section 9 item 7): each one's new place is the snapped pose applied
+   * to where it was in `structure`, so it stays on the very cell it stood on (a dock turns a ship
+   * by up to 45 degrees and shifts it by half a block). Client-driven riders get a 'release'
+   * correction.
    */
-  releaseRiders(structure: Structure): void {
+  releaseRiders(structure: Structure, snap: SnapTransform | null): void {
     const body = this.body;
     body.beginRelease(structure);
     const list = this.list;
+    const t = this.t1;
     this.beginIteration();
     try {
       for (let i = 0; i < list.length; i++) {
         const e = list[i]!;
         if (e.removed) continue;
         if (e instanceof Player && e.steeringShipId !== 0 && body.isReleasing(e.steeringShipId)) this.releaseHelm(e, 'released');
-        if (body.handOff(e) && e instanceof Player) this.raise(e, 'release');
+        if (!body.handOff(e)) continue;
+        if (snap !== null) {
+          structure.grid.toLocal(e.pos, t);
+          snapPoint(snap, t, t);
+          structure.grid.parent.toWorld(t, t);
+          e.setPosition(t.x, t.y, t.z);
+        }
+        if (e instanceof Player) this.raise(e, 'release');
       }
     } finally {
       this.endIteration();
@@ -495,9 +503,9 @@ export class EntityManager {
     return true;
   }
 
-  /** Let go of the wheel (clears both sides, zeroes throttle and rudder). The player stays aboard as a rider. */
-  stopSteering(player: Player): void {
-    this.releaseHelm(player, 'stopped');
+  /** Let go of the wheel (clears both sides, zeroes throttle and rudder; `cause` goes to the event and the correction). The player stays aboard as a rider. */
+  stopSteering(player: Player, cause = 'stopped'): void {
+    this.releaseHelm(player, cause);
   }
 
   /** The helmsman follows its seat, as long as it may sit there (tick step 4). */
@@ -724,6 +732,13 @@ export class EntityManager {
   private settle(p: Player, d: ClientDrive): void {
     const c = d.correction;
     c.epoch = d.epoch;
+    d.settledTick = this.host.world.time;
+    // A carrier the structure cache has not seen yet (raised before the first tick after a load,
+    // or for a ship assembled in this tick): read the poses now, else the frame would be lost.
+    if (p.carrierId !== 0 && this.body.record(p.carrierId) === undefined) {
+      const s = this.host.structure(p.carrierId);
+      if (s !== undefined && !s.removed) this.body.beginCarry();
+    }
     this.judge.toReportFrame(p, c);
     if (c.carrierId === 0 && p.carrierId !== 0) {
       // The carrier has no record any more: the player stands in the world.
@@ -756,7 +771,8 @@ export class EntityManager {
       // body up, else no more upward speed than it has (a knock-back's included).
       const vy = p.vel.y - p.carrierVel.y;
       const up = Math.min(vy > 0 ? vy : 0, JUMP_SPEED + d.inherit);
-      d.resetEnvelope(this.judge.heldUp(p) ? Math.max(up, JUMP_SPEED) : up);
+      const held = this.judge.heldUp(p);
+      d.resetEnvelope(held ? Math.max(up, JUMP_SPEED) : up, held);
     }
   }
 
@@ -814,6 +830,8 @@ export class EntityManager {
         continue;
       }
       d.lastSeq = rep.seq;
+      d.viewTick = rep.viewTick;
+      d.lag = reportLag(this.host.world.time, rep.viewTick);
       d.accepted++;
       inp.forward = axisValue(rep.forward);
       inp.strafe = axisValue(rep.strafe);
@@ -880,7 +898,11 @@ export class EntityManager {
       // Movement time: the client ticks the report claims, within what the server's clock grants.
       const gap = d.fresh ? 1 : rep.seq - d.lastSeq;
       const ticks = Math.max(0, Math.min(gap, d.credit + REPORT_DEBT_TICKS));
-      const fail = judge.check(p, d, rep, ticks);
+      // Landings the server did not see (drive.ts LANDINGS): the first report of an epoch is the
+      // baseline; else the count beyond this report's own landing.
+      const ownLanding = !d.reportedOnGround && rep.onGround === true ? 1 : 0;
+      const missed = d.fresh ? 0 : ((rep.landings - d.landings) & 255) - ownLanding;
+      const fail = judge.check(p, d, rep, ticks, this.host.world.time, missed > 0);
       if (fail !== null) {
         // The rest of the queue carries the old epoch: it is dropped below.
         d.rejected++;
@@ -893,14 +915,30 @@ export class EntityManager {
       d.credit -= ticks;
       d.slack -= judge.slackUsed;
       d.lastSeq = rep.seq;
+      d.viewTick = rep.viewTick;
+      d.lag = judge.lag;
+      d.landings = rep.landings & 255;
+      d.reportedOnGround = rep.onGround === true;
       d.fresh = false;
       d.idleTicks = 0;
       d.takeover = false;
       if (judge.switchSpeed > d.inherit) d.inherit = judge.switchSpeed;
       // Flight ended: the body keeps the flight's speed and loses it as any airborne body does.
       if (d.flying && !rep.flying) d.inherit = Math.max(d.inherit, FLY_SPEED * FLY_SPRINT_MULTIPLIER - SPRINT_SPEED);
-      const y0 = p.pos.y;
+      let y0 = p.pos.y;
       const wasOnGround = d.onGround;
+      const unseen = judge.landedUnseen;
+      if (unseen) {
+        // The fall tracked so far ended in a landing no report showed: judged by what was tracked
+        // (fluids where the body last was); the next fall starts at this report.
+        const total = p.wet > 0 || p.inLava || p.flying ? 0 : p.fallDistance;
+        p.fallDistance = 0;
+        if (total > landed) {
+          landed = total;
+          landedFromAir = true;
+          landedDry = true;
+        }
+      }
       d.carrierId = rep.carrierId;
       d.pos.x = rep.pos.x;
       d.pos.y = rep.pos.y;
@@ -920,15 +958,23 @@ export class EntityManager {
       inp.strafe = axisValue(rep.strafe);
       inp.sneak = rep.sneak === true;
       this.followReference(p, d);
+      if (unseen) y0 = p.pos.y;
       // Vitals where the report puts the body; the fall on the reported track (a fall that ends
       // on a moving deck counts from where it began: both ends at the server's present poses).
       body.sampleFluids(p);
       sampled = true;
-      if (d.onGround || p.wet > 0 || p.inLava || p.flying) d.resetEnvelope(JUMP_SPEED);
+      // Held up where the report put it: the envelope starts again there. Else it goes on (after an
+      // unseen landing, from the ground the body came down on: drive.ts VERTICAL ENVELOPE).
+      if (d.onGround || p.wet > 0 || p.inLava || p.flying) d.resetEnvelope(JUMP_SPEED, true);
       else {
-        d.envRise += judge.dy;
+        d.envRise = judge.envRise;
         d.envTop = judge.envTop;
         d.envVy = judge.envVy;
+        d.envTopLate = judge.envTopLate;
+        d.envVyLate = judge.envVyLate;
+        d.envPeak = judge.envPeak;
+        d.envHeld = judge.envHeld;
+        d.envPaid = judge.envPaid;
       }
       const total = trackFall(p, y0 > p.pos.y ? y0 - p.pos.y : 0, false);
       // Several reports can arrive in one tick (jitter, coalescing): the landing report may be
@@ -941,8 +987,10 @@ export class EntityManager {
     }
     this.recycleReports(d);
     if (!sampled) body.sampleFluids(p);
-    // Reports stopped while nothing holds the body up: it may not hang in the air.
-    if (!d.takeover && d.idleTicks > REPORT_STALL_TICKS && !judge.heldUp(p)) d.takeover = true;
+    // Reports stopped while nothing holds the body up: it may not hang in the air. After a
+    // correction no report of its epoch can come before a round trip: the lag is waited for too.
+    const stall = REPORT_STALL_TICKS + (d.fresh ? Math.ceil(d.lag / DT - 1e-9) : 0);
+    if (!d.takeover && d.idleTicks > stall && !judge.heldUp(p)) d.takeover = true;
     if (d.takeover) {
       // (Its step reports a splash with the rest of its facts.)
       this.fallOnServer(p, d);
@@ -960,8 +1008,8 @@ export class EntityManager {
   }
 
   /**
-   * Remember, for REPORT_MAX_LAG, the fastest structure motion near a client-driven player and the
-   * fastest speed of its carrier at it (ClientDrive.pushRecent, carrierRecent).
+   * Remember this tick's fastest structure motion near a client-driven player and the speed of its
+   * carrier at it (ClientDrive.recordSpeeds: the checks look back over a report's lag).
    */
   private holdPush(p: Player, d: ClientDrive): void {
     const cv = p.carrierVel;
@@ -992,7 +1040,7 @@ export class EntityManager {
       v.x = cv.x + (rx * hMax) / h;
       v.z = cv.z + (rz * hMax) / h;
     }
-    if (v.y - cv.y > d.envVy) v.y = cv.y + d.envVy;
+    if (v.y - cv.y > d.envVyLate) v.y = cv.y + d.envVyLate;
     this.stepOnServer(p, 0, false);
     if (p.removed || p.dead) {
       d.takeover = false;
@@ -1048,7 +1096,8 @@ export class EntityManager {
         d.pushDir.x = vx / s;
         d.pushDir.y = vy / s;
         d.pushDir.z = vz / s;
-        d.pushDirTicks = PUSH_MEMORY_TICKS;
+        // (Remembered for the lag: the client's copy may still be moving that way.)
+        d.pushDirTicks = Math.ceil(d.lag / DT - 1e-9);
       }
     }
     if (!overlap) {
@@ -1095,7 +1144,7 @@ export class EntityManager {
    * to the nearest free spot (a correction), or suffocating when there is none.
    */
   private judgeWorldStuck(p: Player, d: ClientDrive): void {
-    const tol = this.judge.worldTolerance(p.carrierId, p.carrierId !== 0 ? Math.max(this.judge.speedAt(p.carrierId, p.pos), d.carrierRecent) : 0);
+    const tol = this.judge.worldTolerance(p.carrierId, p.carrierId !== 0 ? Math.max(this.judge.speedAt(p.carrierId, p.pos), d.carrierWithin(d.lag)) : 0, d.lag);
     if (!(hardDepth(this.host.world, p.box(this.box1)) > tol)) {
       p.unstuckFails = 0;
       p.unstuckWait = 0;
@@ -1782,18 +1831,34 @@ function applyCommon(e: Entity, c: CommonFields): void {
 }
 
 /** Layout version of a player record (writePlayerRecord). Only this version is read. */
-const PLAYER_RECORD_VERSION = 1;
+const PLAYER_RECORD_VERSION = 2;
+
+/** A player read back from its record (readPlayerRecord). */
+export interface PlayerRecord {
+  readonly player: Player;
+  /**
+   * Feet local to the structure player.carrierId named when the record was written (the carrier
+   * it stood on); null when it had none (player.carrierId is then 0).
+   */
+  readonly carrierPos: Vec3 | null;
+}
 
 /**
- * Everything a player keeps between sessions: position and motion, look, carrier and seat,
- * mode, health, air, death, flight, spawn point, the selected slot and the whole inventory
- * (hotbar, backpack, off-hand, cursor), and the timers that go with them (hurt flash, breath and
- * lava timers, regeneration, the double-tap-to-fly timer). Not part of it: the entity id (the
- * caller keeps it next to the record) and the input, except the selected slot. Never writes a value readPlayerRecord would reject (non-finite fields become safe defaults).
+ * Everything a player keeps between sessions: position and motion, look, carrier (with the feet
+ * local to it: `carrierPos`, the caller's conversion; null = no carrier) and seat, mode, health,
+ * air, death, flight, spawn point, the selected slot and the whole inventory (hotbar, backpack,
+ * off-hand, cursor), and the timers that go with them (hurt flash, breath and lava timers,
+ * regeneration, the double-tap-to-fly timer). Not part of it: the entity id (the caller keeps it
+ * next to the record) and the input, except the selected slot. Never writes a value
+ * readPlayerRecord would reject (non-finite fields become safe defaults; a non-finite carrierPos
+ * writes no carrier).
  */
-export function writePlayerRecord(w: ByteWriter, p: Player): void {
+export function writePlayerRecord(w: ByteWriter, p: Player, carrierPos: Readonly<Vec3> | null): void {
+  const carried = carrierPos !== null && p.carrierId !== 0 && finiteVec(carrierPos);
   w.u8(PLAYER_RECORD_VERSION);
   writeCommon(w, p, finiteVec(p.pos) ? p.pos : finiteVec(p.spawn) ? p.spawn : ORIGIN);
+  w.bool(carried);
+  if (carried) writeVec(w, carrierPos);
   w.u8(p.mode === 'creative' ? 1 : 0);
   w.f64(finiteOr(p.health, p.maxHealth));
   w.f64(finiteOr(p.maxHealth, PLAYER_MAX_HEALTH));
@@ -1818,10 +1883,15 @@ export function writePlayerRecord(w: ByteWriter, p: Player): void {
  * A player entity with id `id` from a record written by writePlayerRecord. Throws
  * SaveFormatError on a corrupt or truncated record.
  */
-export function readPlayerRecord(r: ByteReader, id: number): Player {
+export function readPlayerRecord(r: ByteReader, id: number): PlayerRecord {
   const v = r.u8();
   if (v !== PLAYER_RECORD_VERSION) r.fail(`unsupported player record version ${v}`);
   const common = readCommon(r);
+  const carrierPos = r.bool() ? readVec(r) : null;
+  if (carrierPos === null) {
+    common.carrierId = 0;
+    common.cvel = vec3();
+  }
   const mode: GameMode = r.u8() === 1 ? 'creative' : 'survival';
   const p = new Player(id, mode);
   p.health = readFinite(r);
@@ -1847,5 +1917,5 @@ export function readPlayerRecord(r: ByteReader, id: number): Player {
   // the view to 0 until the client writes its own.
   p.input.yaw = p.yaw;
   p.input.pitch = p.pitch;
-  return p;
+  return { player: p, carrierPos };
 }

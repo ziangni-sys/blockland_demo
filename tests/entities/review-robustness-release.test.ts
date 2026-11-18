@@ -1,7 +1,7 @@
 /**
  * Review (integration): releaseRiders(rotor) for a rotor mounted on a MOVING ship.
  *
- * StructureManager.stopRotor() calls host.releaseRiders(rotor) and then blockifies the rotor's
+ * StructureManager.stopRotor() calls host.releaseRiders(rotor, null) and then blockifies the rotor's
  * cells INTO ITS PARENT SHIP (bearing mined / blown up while sailing). EntityManager.releaseRiders
  * strips the rider's whole carrier velocity ("The structure turns into blocks that do not move:
  * keep only the own motion") although those blocks keep moving with the ship. On the next tick
@@ -32,7 +32,7 @@ describe('review: releaseRiders on a rotor mounted on a moving ship', () => {
 
     // What StructureManager.stopRotor does: release the riders, unregister the rotor, write its
     // cells into the parent ship's grid (same local coordinates: the turntable did not turn).
-    b.entities.releaseRiders(tt);
+    b.entities.releaseRiders(tt, null);
     tt.removed = true;
     b.host.list.splice(b.host.list.indexOf(tt), 1);
     ship.children.length = 0;

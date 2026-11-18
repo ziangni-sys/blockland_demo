@@ -24,6 +24,7 @@ import type { VoxelGrid } from '../voxel/grid';
 import { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
 import { GlueStore } from './glue';
+import type { SnapTransform } from './assembly';
 import type { HullInfo } from './hull';
 
 export type StructureKind = 'ship' | 'rotor';
@@ -182,7 +183,9 @@ export interface StructureHost {
   /**
    * Called BEFORE a structure's cells leave it (blockify / dock / destroyed) or its frame
    * is re-gridded: every entity carried by it, and its helmsman, must let go now
-   * (LESSONS "停靠时站在转盘上的人被瞬移").
+   * (LESSONS "停靠时站在转盘上的人被瞬移"). A blockify or dock passes its snap (the structure's
+   * local cells -> its parent grid's): the riders are moved by it too, so they stay on the cells
+   * they stood on; null when the cells do not move (destroyed).
    */
-  releaseRiders(structure: Structure): void;
+  releaseRiders(structure: Structure, snap: SnapTransform | null): void;
 }

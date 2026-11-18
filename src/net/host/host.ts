@@ -48,6 +48,7 @@ import { giveStarterItems } from '../../sim/starter';
 import { generatorFromSpec, type GeneratorSpec } from '../../worldgen/generator';
 import { readGeneratorSpec, writeGeneratorSpec } from '../codec';
 import { AUTOSAVE_TICKS, MAX_CATCHUP_TICKS } from '../protocol';
+import { MoveQueue } from '../server/moves';
 import { Replicator } from '../server/replicator';
 import type { Transport } from '../transport';
 import type { CreateOptions, HostToPage, PageToHost } from './control';
@@ -109,16 +110,19 @@ export interface ServerHostOptions {
   report(msg: HostToPage): void;
   /** Default { ms: CHUNK_BUDGET_MS }. */
   chunkBudget?: ChunkBudget;
-  /** The movement and intent packages of a world; default: drop what arrives. */
+  /** The movement and intent packages of a world; default: defaultSinks. */
   sinks?: (sim: Simulation, replicator: Replicator) => ServerSinks;
   /** Ambient rabbits (default true; tests that count entities turn them off). */
   rabbits?: boolean;
 }
 
-/** Sinks that drop every report and intent (until packages 6 and 7 provide theirs). */
-export function droppingSinks(): ServerSinks {
+/**
+ * The packages behind NetServer of a world: the movement reports (package 6, net/server/moves.ts);
+ * intents are dropped until package 7 provides its sink.
+ */
+export function defaultSinks(sim: Simulation): ServerSinks {
   return {
-    moves: { join() {}, leave() {}, receive() {}, beforeTick() {}, moveAck: () => null },
+    moves: new MoveQueue(sim),
     intents: { join() {}, leave() {}, receive: () => true, beforeTick() {}, intentAck: () => null },
   };
 }
@@ -391,7 +395,7 @@ export class ServerHost {
 
   private start(sim: Simulation, generator: GeneratorSpec, meta: WorldMeta): void {
     const replicator = new Replicator(sim);
-    const sinks = (this.o.sinks ?? droppingSinks)(sim, replicator);
+    const sinks = (this.o.sinks ?? defaultSinks)(sim, replicator);
     const net = new NetServer({
       sim,
       replicator,

@@ -10,7 +10,7 @@ import { MAX_PLAYERS, MSG, type IntentMessage } from '../../src/net/protocol';
 import { RELIABLE, UNRELIABLE } from '../../src/net/transport';
 import { ByteWriter } from '../../src/save/bytes';
 import type { PlayerKey } from '../../src/sim/view';
-import { droppingSinks } from '../../src/net/host/host';
+import { defaultSinks } from '../../src/net/host/host';
 import { NetHarness, type HeadlessClient, type RawClient } from './harness';
 
 async function world(o: ConstructorParameters<typeof NetHarness>[0] = {}): Promise<NetHarness> {
@@ -147,8 +147,8 @@ describe('handshake (package 8)', () => {
   it('the host connection is the one the host marks local, not a key: Welcome, player table, intents', async () => {
     const joins: Array<[PlayerKey, boolean]> = [];
     const h = await world({
-      sinks: () => {
-        const s = droppingSinks();
+      sinks: (sim) => {
+        const s = defaultSinks(sim);
         s.intents.join = (key, host) => joins.push([key, host]);
         return s;
       },
@@ -203,8 +203,8 @@ describe('handshake (package 8)', () => {
     let refuse = false;
     const received: IntentMessage[] = [];
     const h = await world({
-      sinks: () => {
-        const s = droppingSinks();
+      sinks: (sim) => {
+        const s = defaultSinks(sim);
         s.intents.receive = (_k, m) => {
           received.push(m);
           return !refuse;

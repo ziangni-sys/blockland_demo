@@ -8,15 +8,16 @@ import { describe, expect, it } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { NZ, PZ } from '../../src/core/dirs';
-import { droppingSinks, type ServerSinks } from '../../src/net/host/host';
+import { defaultSinks, type ServerSinks } from '../../src/net/host/host';
 import { createLoopbackPair } from '../../src/net/loopback';
 import { CONNECTION_TIMEOUT_MS, MAX_BACKLOG, type IntentMessage, type NetMoveReport } from '../../src/net/protocol';
 import type { Channel, Transport } from '../../src/net/transport';
+import type { Simulation } from '../../src/sim/simulation';
 import type { PlayerKey } from '../../src/sim/view';
 import { Ship } from '../../src/structures/structure';
 import { INSTANT, NetHarness, RawClient } from './harness';
 
-async function room(sinks?: () => ServerSinks): Promise<NetHarness> {
+async function room(sinks?: (sim: Simulation) => ServerSinks): Promise<NetHarness> {
   const h = new NetHarness(sinks !== undefined ? { sinks } : {});
   await h.create();
   h.host.setRoomOpen(true);
@@ -206,8 +207,8 @@ describe('leaving (package 8)', () => {
     const calls: string[] = [];
     let moveAck: number | null = null;
     let intentAck: number | null = null;
-    const h = await room(() => {
-      const s = droppingSinks();
+    const h = await room((sim) => {
+      const s = defaultSinks(sim);
       s.moves = {
         join: (k) => calls.push(`moves.join ${k}`),
         leave: (k) => calls.push(`moves.leave ${k}`),

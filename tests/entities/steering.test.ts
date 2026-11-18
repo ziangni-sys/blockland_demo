@@ -102,7 +102,7 @@ describe('ACCEPTANCE 21 — steering', () => {
     expect(p.carrierId).toBe(ship.id);
     b.entities.startSteering(p, ship, 0, 61, -2);
     b.tick(2);
-    b.entities.releaseRiders(ship);
+    b.entities.releaseRiders(ship, null);
     expect(p.steeringShipId).toBe(0);
     expect(p.carrierId).toBe(0);
     expect(item.carrierId).toBe(0);

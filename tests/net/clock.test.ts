@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
 import { lossTicks, ServerClock } from '../../src/net/client/clock';
-import { droppingSinks } from '../../src/net/host/host';
+import { defaultSinks } from '../../src/net/host/host';
 import type { MoveSink } from '../../src/net/host/netserver';
 import type { NetMoveReport } from '../../src/net/protocol';
 import type { Simulation } from '../../src/sim/simulation';
@@ -304,7 +304,7 @@ describe('ServerClock on a real connection (package 5)', () => {
             sinks: (sim: Simulation) => {
               const moves = new ReportAcker(sim);
               acker(moves);
-              return { moves, intents: droppingSinks().intents };
+              return { moves, intents: defaultSinks(sim).intents };
             },
           }
         : {}),
@@ -355,6 +355,7 @@ describe('ServerClock on a real connection (package 5)', () => {
     const h = await world((m) => (acker = m));
     const up = link(75, 10, 0, 7);
     const a = h.addClient('a', { up, down: link(75, 10, 0, 8) });
+    a.silent = true; // the test sends the reports itself
     h.runUntil(() => a.ready);
     // A movement report every 50 ms (package 6's client tick); remember rotorTick at each.
     let seq = 0;

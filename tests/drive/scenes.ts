@@ -194,26 +194,12 @@ export function copy(v: Vec3): Vec3 {
   return vec3(v.x, v.y, v.z);
 }
 
-export function local(s: { grid: { toLocal(p: Vec3, out?: Vec3): Vec3 } }, p: Vec3): Vec3 {
-  return s.grid.toLocal(p, vec3());
-}
-
 export function hdist(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
 }
 
 export function dist(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-}
-
-/** Let go of all held movement keys. */
-export function idle(sim: Simulation): void {
-  const i = sim.soloPlayer.player.input;
-  i.forward = 0;
-  i.strafe = 0;
-  i.jump = false;
-  i.sneak = false;
-  i.sprint = false;
 }
 
 export { B, makeCell, facingState };

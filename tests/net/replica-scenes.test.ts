@@ -302,10 +302,13 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
     // Dock from the wheel with everyone aboard.
     trackJumps = true;
     ticks(w, 20);
+    const before = new Map(watched.map((id) => [id, { ...sim.entities.get(id)!.pos }]));
     bot.player.input.sneak = true;
     bot.use();
     ticks(w, 1);
     bot.player.input.sneak = false;
+    // The riders follow the dock's snap (NETCODE section 9 item 7) with the deck under them.
+    const snapMoved = Math.max(...watched.map((id) => dist(sim.entities.get(id)!.pos, before.get(id)!)));
     expect(ship.removed).toBe(true);
     ticks(w, 60);
     expect(a.replica!.state.structures.has(ship.id)).toBe(false);
@@ -318,7 +321,8 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
     expect(stats.localChecks).toBeGreaterThan(1000);
     expect(stats.localWorst).toBeLessThan(0.05);
     expect(jumps.frames).toBeGreaterThan(200);
-    expect(jumps.pos).toBeLessThan(0.15);
+    // What is shown jumps with the deck at the dock, no more than the snap moved them.
+    expect(jumps.pos).toBeLessThan(snapMoved + 0.15);
     expect(jumps.yaw).toBeLessThan(0.15);
     expect(jumps.world).toBeLessThan(0.05);
     expect(jumps.worldYaw).toBeLessThan(0.01);

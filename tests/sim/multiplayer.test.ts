@@ -154,7 +154,7 @@ describe('player registry', () => {
     expect(c.player.inventory.count(B.COBBLE)).toBe(0);
   });
 
-  it('leaving at the wheel lets go (addressed event); the record does not keep the carrier', () => {
+  it('leaving at the wheel lets go (addressed event); the record keeps the carrier: a rejoin is back aboard, not at the wheel', () => {
     const { sim, ps } = world(['a', 'b'], { spawn: { x: 2.5, y: SEA_TOP, z: 7.5 } }, true);
     const [a] = ps as [PlayerControl, PlayerControl];
     raft(sim, 0);
@@ -172,7 +172,7 @@ describe('player registry', () => {
     expect(ship.helmsmanId).toBe(0);
     const back = sim.join('a').player;
     expect(back.steeringShipId).toBe(0);
-    expect(back.carrierId).toBe(0);
+    expect(back.carrierId).toBe(ship.id);
   });
 });
 
@@ -710,7 +710,7 @@ describe('saving several players', () => {
     return exportSave(sim);
   }
 
-  it('a helmsman saved while joined who is absent at the first tick after loading lets go: the ship stops and a later join is not at the wheel', () => {
+  it('a helmsman saved while joined who is absent at the first tick after loading lets go: the ship stops and a later join is aboard, not at the wheel', () => {
     const bundle = saveWithHelmsman();
     const loaded = new Simulation(seaOpts({ spawn: { x: 2.5, y: SEA_TOP, z: 7.5 } }));
     importSave(loaded, bundle);
@@ -727,7 +727,7 @@ describe('saving several players', () => {
     const a2 = loaded.join('a');
     loaded.advance(3);
     expect(a2.player.steeringShipId).toBe(0);
-    expect(a2.player.carrierId).toBe(0);
+    expect(a2.player.carrierId).toBe(ship.id); // the record kept its carrier
     expect(ship.helmsmanId).toBe(0);
     expect(ship.throttle).toBe(0);
     // A save made now no longer has anyone at the wheel either.
