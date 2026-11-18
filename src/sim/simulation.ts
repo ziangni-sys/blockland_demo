@@ -216,7 +216,7 @@ export class Simulation {
       spawnDrop: (x, y, z, item, count) => {
         sim.entities.spawnItem(x, y, z, item, count);
       },
-      releaseRiders: (structure) => sim.entities.releaseRiders(structure),
+      releaseRiders: (structure, snap) => sim.entities.releaseRiders(structure, snap),
       blockUpdate: (x, y, z) => sim.blocks.updateAround(x, y, z),
     };
   }

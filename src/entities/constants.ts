@@ -264,8 +264,20 @@ export const RABBIT_CRUSH_LIMIT = 3;
 // The client's copies of moving structures lag the server's by up to the network delay; the
 // checks run in the carrier's frame (where that lag cancels) and tolerate what lag can explain.
 
-/** Largest lead of the server's structure poses over a client's copy the checks allow for (seconds). */
+/**
+ * Lead of the server's structure poses over a client's copy that the checks allow for (seconds):
+ * the report's own lag, (server tick - viewTick) / TPS, but at least REPORT_MAX_LAG ...
+ */
 export const REPORT_MAX_LAG = 0.4;
+/** ... and at most REPORT_LAG_LIMIT (a report claiming an older view gains nothing beyond it). */
+export const REPORT_LAG_LIMIT = 2;
+/**
+ * A client's copies of the ships advance at most this many ticks of view time (viewTick) per client
+ * tick: after its reliable channel stalled they catch up at this pace, never in one jump that would
+ * fling a rider off its deck. Structures may push a body by as far as they moved in the view time
+ * that passed between two reports, up to this pace (the checks, entities/drive.ts).
+ */
+export const REPORT_VIEW_RATE = 1.5;
 /** A claimed carrier must have a cell within this many blocks of the reported feet (in its own frame). */
 export const REPORT_CARRIER_REACH = 3;
 /**
@@ -277,7 +289,8 @@ export const REPORT_CREDIT_TICKS = 10;
 /**
  * ... and at least minus this many: reports may run ahead of the server's clock by
  * REPORT_MAX_LAG (the uplink delay dropping delivers several in one tick). A client must pace its
- * ticks by the server's clock; one that runs faster is corrected once the debt is spent.
+ * ticks by the server's clock (net/client/predict.ts); one that runs faster is corrected once the
+ * debt is spent.
  */
 export const REPORT_DEBT_TICKS = Math.round(REPORT_MAX_LAG / TICK_DT);
 /**
@@ -304,7 +317,7 @@ export const REPORT_SUPPORT_REACH = 0.1;
  * (ground, liquid, flight) falls on the server's own authority until something does.
  */
 export const REPORT_STALL_TICKS = 10;
-/** Reports a player may have waiting for the next tick; older ones are dropped. */
+/** Reports a player may have waiting for the next tick; older ones are dropped (net/server/moves.ts hands it at most two a tick). */
 export const REPORT_QUEUE_LIMIT = 16;
 /**
  * Penetration (blocks) of the reported body into hard cells of the world or of its carrier that is

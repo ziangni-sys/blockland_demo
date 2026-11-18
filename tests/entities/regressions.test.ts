@@ -319,7 +319,7 @@ describe('re-entrancy', () => {
       emit(ev);
       if (ev.type === 'helmReleased' && ev.entity instanceof Player) b.entities.remove(ev.entity);
     };
-    b.entities.releaseRiders(ship);
+    b.entities.releaseRiders(ship, null);
     expect(p.removed).toBe(true);
     expect(rabbit.carrierId).toBe(0);
     expect(b.entities.all()).not.toContain(p);

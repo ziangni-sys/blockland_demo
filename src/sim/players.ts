@@ -18,18 +18,19 @@
  * in that order. The entity list is kept in id order too, so a saved world continues exactly as
  * it would have without the save.
  *
- * LEAVING. A player who leaves lets go of the wheel and of any carrier; the record keeps the
- * world position, so a ship that sails on while its passenger is away does not take the
- * passenger along (a rejoining player lands where they stood, on the deck again if the ship is
- * still there). What the hands were doing (a preview, mining progress, a timed glue operation)
- * is dropped, as on a reload.
+ * LEAVING. A player who leaves lets go of the wheel; the record keeps the world position and,
+ * when it stood on a structure, that structure and the feet local to it (NETCODE "场景 36 和玩家
+ * 记录"). A rejoining player whose carrier still exists is put back on it where it stood on it,
+ * if that spot is free (so a passenger of a ship that sailed on while they were away comes back
+ * aboard), else at the world position. What the hands were doing (a preview, mining progress, a
+ * timed glue operation) is dropped, as on a reload.
  *
  * LOADING. A save holds the records of the players who were joined as they were, still at the
  * wheel or on a carrier, so a player who joins the loaded world before it first ticks carries on
  * exactly (the single-player client does). Whoever has not joined by the first tick is settled as
- * if they had left when the world was saved (settleAfterLoad): the record lets go of the wheel and
- * of the carrier, and a ship nobody steers loses throttle and rudder instead of sailing on
- * unmanned. A later join then restores the player where they stood, not at the wheel.
+ * if they had left when the world was saved (settleAfterLoad): the record lets go of the wheel
+ * (keeping its carrier), and a ship nobody steers loses throttle and rudder instead of sailing on
+ * unmanned. A later join then restores the player on its carrier as above, not at the wheel.
  *
  * CONTROL. PlayerControl is the handle of one joined player: its entity, its InteractionView,
  * its helm read-out, its chunk view radius, and the scripted controls (look, click, hold, give,
@@ -47,13 +48,14 @@
  * to its client, except the stick axes and sneak, which its reports carry (helm, docking).
  */
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../core/dirs';
-import { vec3 } from '../core/math';
+import { vec3, type Vec3 } from '../core/math';
 import type { Correction, DriveMode, MoveReport } from '../entities/drive';
 import { Player, type GameMode } from '../entities/entity';
 import { maxStackOf } from '../entities/inventory';
 import { readPlayerRecord, writePlayerRecord } from '../entities/manager';
 import { ByteReader, ByteWriter } from '../save/bytes';
 import { Ship } from '../structures/structure';
+import { boxOverlapsSolid } from '../voxel/shape';
 import { Hands } from './interact';
 import type { Simulation } from './simulation';
 import type { GridCell, HelmView, InteractionView, PlayerKey } from './view';
@@ -65,6 +67,10 @@ export const MAX_PLAYER_KEY_LENGTH = 128;
  * client's largest render distance, 16, plus the ring that is loaded but not drawn).
  */
 export const MAX_VIEW_RADIUS = 17;
+/** A rejoining player fits on its carrier when its body box, inset this much (blocks), overlaps no hard cell. */
+const BOARD_INSET = 0.1;
+/** A carrier that puts the record's feet this close (blocks, summed over the axes) to its world position has not moved since. */
+const SAME_PLACE = 1e-9;
 /** Layout of the 'players' save blob. Only this version is read. */
 const PLAYERS_BLOB_VERSION = 1;
 
@@ -100,7 +106,10 @@ export class PlayerRegistry {
     if (record !== undefined) {
       // The kept id; only a damaged save could have given it to something else meanwhile.
       const id = sim.entities.get(record.id) === undefined ? record.id : sim.entities.allocateId();
-      p = sim.entities.add(readPlayerRecord(new ByteReader(record.bytes, 'player'), id));
+      const rec = readPlayerRecord(new ByteReader(record.bytes, 'player'), id);
+      p = rec.player;
+      if (rec.carrierPos !== null) this.boardAgain(p, rec.carrierPos);
+      sim.entities.add(p);
     } else {
       const s = sim.spawnPoint;
       p = sim.entities.spawnPlayer(sim.rules.defaultMode, s.x, s.y, s.z);
@@ -131,28 +140,67 @@ export class PlayerRegistry {
     control.detach();
   }
 
-  /** Keep the record of a player who is out of the world: no carrier, so no carrier velocity. */
-  private storeOffline(key: PlayerKey, p: Player): void {
+  /**
+   * A rejoining player whose record names a carrier: back on that structure, `local` being its feet
+   * there, when the structure still exists and the body fits there (no hard cell of the world or of
+   * any structure in it); else it stays at the record's world position, carried by nothing.
+   */
+  private boardAgain(p: Player, local: Vec3): void {
+    const sim = this.sim;
+    const s = sim.structures.get(p.carrierId);
+    if (s !== undefined && !s.removed) {
+      const w = s.grid.toWorld(local, vec3());
+      // The carrier has not moved since the record was written (a save loaded and joined before
+      // the first tick): the player carries on exactly as it was, motion included.
+      if (Math.abs(w.x - p.pos.x) + Math.abs(w.y - p.pos.y) + Math.abs(w.z - p.pos.z) < SAME_PLACE) return;
+      // Else it comes back standing still on it (the motion it left with means nothing now).
+      p.vel.x = p.vel.y = p.vel.z = 0;
+      p.carrierVel.x = p.carrierVel.y = p.carrierVel.z = 0;
+      sim.chunks.loadAround(sim.generator, w.x, w.z, 1);
+      const prev = vec3(p.pos.x, p.pos.y, p.pos.z);
+      p.setPosition(w.x, w.y, w.z);
+      // (A little inset: on a rolling deck the world-aligned box dips into it at a corner.)
+      const box = p.box();
+      box.minX += BOARD_INSET;
+      box.minY += BOARD_INSET;
+      box.minZ += BOARD_INSET;
+      box.maxX -= BOARD_INSET;
+      box.maxY -= BOARD_INSET;
+      box.maxZ -= BOARD_INSET;
+      if (!boxOverlapsSolid(sim.world, box) && !sim.structures.all().some((o) => !o.removed && boxOverlapsSolid(o.grid, box))) return;
+      p.setPosition(prev.x, prev.y, prev.z);
+    }
     p.carrierId = 0;
+    p.vel.x = p.vel.y = p.vel.z = 0;
     p.carrierVel.x = p.carrierVel.y = p.carrierVel.z = 0;
+  }
+
+  /** The record of player `p` now: its carrier's frame, when it stands on a live structure, goes with it. */
+  private recordOf(p: Player): Uint8Array {
+    const s = p.carrierId !== 0 ? this.sim.structures.get(p.carrierId) : undefined;
     const w = new ByteWriter();
-    writePlayerRecord(w, p);
-    this.offline.set(key, { id: p.id, bytes: w.finish() });
+    writePlayerRecord(w, p, s !== undefined && !s.removed ? s.grid.toLocal(p.pos, vec3()) : null);
+    return w.finish();
+  }
+
+  /** Keep the record of a player who is out of the world. */
+  private storeOffline(key: PlayerKey, p: Player): void {
+    this.offline.set(key, { id: p.id, bytes: this.recordOf(p) });
   }
 
   /**
    * Called at the start of every tick; does something only at the first tick after a save was
-   * loaded (see LOADING in the header). A record that is still offline then lets go of the wheel
-   * and of its carrier, as leave() would have: its ship loses throttle and rudder unless a joined
-   * player steers it, and the record keeps the world position.
+   * loaded (see LOADING in the header). A record that is still offline then lets go of the wheel,
+   * as leave() would have: its ship loses throttle and rudder unless a joined player steers it.
+   * The record keeps its carrier.
    */
   settleAfterLoad(): void {
     if (!this.loaded) return;
     this.loaded = false;
     const sim = this.sim;
     for (const [key, rec] of [...this.offline]) {
-      const p = readPlayerRecord(new ByteReader(rec.bytes, 'player'), rec.id);
-      if (p.steeringShipId === 0 && p.carrierId === 0) continue;
+      const { player: p, carrierPos } = readPlayerRecord(new ByteReader(rec.bytes, 'player'), rec.id);
+      if (p.steeringShipId === 0) continue;
       const shipId = p.steeringShipId;
       p.steeringShipId = 0;
       const ship = shipId === 0 ? undefined : sim.structures.get(shipId);
@@ -165,7 +213,9 @@ export class PlayerRegistry {
           ship.rudder = 0;
         }
       }
-      this.storeOffline(key, p);
+      const w = new ByteWriter();
+      writePlayerRecord(w, p, carrierPos);
+      this.offline.set(key, { id: rec.id, bytes: w.finish() });
     }
   }
 
@@ -197,15 +247,12 @@ export class PlayerRegistry {
     const keys = this.keys();
     w.varuint(PLAYERS_BLOB_VERSION);
     w.varuint(keys.length);
-    const rec = new ByteWriter();
     for (const key of keys) {
       w.string(key);
       const c = this.byKey.get(key);
       if (c !== undefined) {
         w.varuint(c.entityId);
-        rec.reset();
-        writePlayerRecord(rec, c.player);
-        w.bytes(rec.finish());
+        w.bytes(this.recordOf(c.player));
       } else {
         const o = this.offline.get(key)!;
         w.varuint(o.id);

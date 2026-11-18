@@ -141,9 +141,9 @@ describe('joining (package 8)', () => {
     h.run(30);
     expect(firstB!.tick).toBe(tick);
     expect(firstB!.structureSpawns.map((s) => s.id)).toEqual([ship!.id]);
-    ctrl.player.input.forward = 1;
+    a.input.forward = 1; // the helmsman's client holds the key (its reports carry the stick)
     h.run(2000);
-    ctrl.player.input.forward = 0;
+    a.input.forward = 0;
     h.run(1000);
     expect(a.mismatches).toEqual([]);
     expect(b.mismatches).toEqual([]);

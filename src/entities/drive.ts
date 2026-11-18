@@ -26,6 +26,11 @@
  * takeCorrection); a later package sends it. The client adopts a correction by taking its state
  * (no replay): the first report of a new epoch moved one client tick from it.
  *
+ * LAG. A report's `viewTick` is the server tick its client's copies of the ships showed when it
+ * moved (the renderTick of that step); (server tick - viewTick) / TPS, clamped to
+ * [REPORT_MAX_LAG, REPORT_LAG_LIMIT], is the lag the checks allow for: how far the server's poses
+ * lead the copies the client moved against (NETCODE section 9).
+ *
  * CHECKS (ReportJudge.check; a failure is a correction 'check:<what>', never a kick):
  *  - movement time: each report claims its seq gap in client ticks, granted from a credit that
  *    refills one per server tick (REPORT_CREDIT_TICKS at most) and may run REPORT_DEBT_TICKS into
@@ -33,21 +38,45 @@
  *    clock is corrected once the debt is spent;
  *  - speed relative to the carrier ('speed'): within the movement limits for the granted time, plus
  *    what may move the body besides its legs — momentum (a carrier left, a knock-back, flight
- *    ended), other structures (as fast as one near the body moved over the last REPORT_MAX_LAG: the
+ *    ended), other structures (as fast as one near the body moved over the report's lag: the
  *    client's copy may still move after the server's stopped), the world scraping it along its
- *    moving carrier; excess beyond that is drawn from a slack budget (REPORT_SLACK_BURST, refilled
- *    at REPORT_SLACK_RATE), so no sustained speed-up hides in it;
- *  - the vertical envelope ('rise'): a body nothing holds up (ground or deck under its feet at the
- *    server's poses, liquid, flight) rises no higher than a jump (or the upward speed it was given)
- *    under gravity allows; claiming to stand in mid-air does not count as standing, so the fall
- *    goes on. A report that rises above it, and a body whose reports stop in mid-air
- *    (REPORT_STALL_TICKS), falls on the server's own authority (EntityManager.fallOnServer: a
- *    correction 'fall' every tick until something holds it up or its client catches up);
- *  - not deep in world blocks or in the carrier's ('world', 'hull'), unless it was as deep before or
- *    is caught there (the world holds it while its carrier moves into it: a squeeze, judged by the
- *    squeeze rules), nor through them on the way ('path': the straight path, or a dog-leg as the
- *    mover takes it, sampled every REPORT_PATH_STEP);
+ *    moving carrier; on a carrier switch, both carriers' speeds times the lag (the client placed
+ *    the body by its copies, the server by its present poses); excess beyond that is drawn from a
+ *    slack budget (REPORT_SLACK_BURST, refilled at REPORT_SLACK_RATE), so no sustained speed-up
+ *    hides in it;
+ *  - the vertical envelope ('rise', see VERTICAL ENVELOPE): a body nothing holds up (ground or deck
+ *    under its feet at the server's poses, liquid, flight) rises no higher than a jump (or the
+ *    upward speed it was given) under gravity allows; claiming to stand in mid-air does not count
+ *    as standing, so the fall goes on. A report that rises above it, and a body whose reports stop
+ *    in mid-air (REPORT_STALL_TICKS), falls on the server's own authority
+ *    (EntityManager.fallOnServer: a correction 'fall' every tick until something holds it up or
+ *    its client catches up);
+ *  - not deep in world blocks or in the carrier's ('world', 'hull'; a carried body may overlap the
+ *    world by its carrier's speed times the lag), unless it was as deep before or is caught there
+ *    (the world holds it while its carrier moves into it: a squeeze, judged by the squeeze rules),
+ *    nor through them on the way ('path': the straight path, or a dog-leg as the mover takes it,
+ *    sampled every REPORT_PATH_STEP);
  *  - plus: garbage, flight only in creative, a claimed carrier near the reported feet.
+ *
+ * VERTICAL ENVELOPE. Its base is where something last held the body up (or a correction put it);
+ * envRise sums the accepted vertical displacements since. From the base the body follows an arc:
+ * a jump (or the upward speed it was given) under gravity, the motion model's step. A body held
+ * up at the base may take off in any tick until the next accepted report: the reports of the
+ * ticks it stood in after the base may be lost, so its arc may start up to that many ticks late.
+ * The envelope is the highest of those arcs: the earliest take-off's while both ends still rise,
+ * the latest one's once both fall, the arc's peak in between. A report above it (beyond what
+ * pushes and a carrier switch allow) draws the excess from the slack once: the overshoot is
+ * carried on in envRise, and a later report is charged only for an increase of it (envPaid),
+ * so the slack pays for a small departure from the arc once and a sustained climb all the way.
+ *
+ * LANDINGS. Every report counts the landings of the client's body so far (mod 256). A report
+ * that counts more landings than the last applied one, beyond its own (the first on the ground
+ * after airborne ones), shows a landing the server never saw (reports lost or dropped): the fall
+ * tracked so far ends there, judged by what was tracked, and the next fall starts at this report
+ * (EntityManager.updateClientDriven). Two short drops whose landing report was lost are not one
+ * long fall. The landing needs ground within the reachable fall below the lower of the two
+ * places, and the vertical envelope starts again on that ground, the take-off in any tick of the
+ * gap: no higher than a jump from there (a client that counts landings in mid-air climbs nothing).
  *
  * SEAT. A seated player's body is the server's: it follows the seat and is pushed off it on the
  * server whatever the drive mode. From a seated client's reports only the stick axes (helm), the
@@ -67,12 +96,13 @@ import {
   MAX_INHERITED_SPEED,
   REPORT_CARRIER_REACH,
   REPORT_CREDIT_TICKS,
-  REPORT_DEBT_TICKS,
   REPORT_HARD_TOLERANCE,
+  REPORT_LAG_LIMIT,
   REPORT_MAX_LAG,
   REPORT_PATH_STEP,
   REPORT_SLACK_BURST,
   REPORT_SUPPORT_REACH,
+  REPORT_VIEW_RATE,
   SPRINT_SPEED,
   SQUEEZE_DEPTH,
   SQUEEZE_PREFER_WEIGHT,
@@ -109,6 +139,10 @@ export interface MoveReport {
   forward: number;
   strafe: number;
   sneak: boolean;
+  /** The server tick the client's copies of the ships showed for this step (its renderTick, floored): see LAG. */
+  viewTick: number;
+  /** Landings of the client's body so far, mod 256: see LANDINGS. */
+  landings: number;
 }
 
 /** The authoritative state of a client-driven player, in the frames of a report (see the file comment). */
@@ -144,6 +178,8 @@ export function emptyReport(): MoveReport {
     forward: 0,
     strafe: 0,
     sneak: false,
+    viewTick: 0,
+    landings: 0,
   };
 }
 
@@ -166,8 +202,20 @@ export function copyReport(src: MoveReport, out: MoveReport): MoveReport {
   out.forward = src.forward;
   out.strafe = src.strafe;
   out.sneak = src.sneak;
+  out.viewTick = src.viewTick;
+  out.landings = src.landings;
   return out;
 }
+
+/** The lag (seconds) the checks allow for a report of `viewTick` applied in server tick `tick` (see LAG). */
+export function reportLag(tick: number, viewTick: number): number {
+  const lag = (tick - viewTick) * TICK_DT;
+  // (NaN, from a garbage viewTick, gets the least.)
+  return lag > REPORT_LAG_LIMIT ? REPORT_LAG_LIMIT : lag > REPORT_MAX_LAG ? lag : REPORT_MAX_LAG;
+}
+
+/** Ticks of structure motion the checks remember (the largest lag, REPORT_LAG_LIMIT). */
+const SPEED_MEMORY_TICKS = Math.ceil(REPORT_LAG_LIMIT / TICK_DT);
 
 function emptyCorrection(): Correction {
   return { epoch: 0, cause: '', carrierId: 0, pos: vec3(), vel: vec3(), yaw: 0, pitch: 0, onGround: false, flying: false, seatShipId: 0, seat: vec3() };
@@ -207,46 +255,67 @@ export class ClientDrive {
   slack = REPORT_SLACK_BURST;
   /** Speed (blocks/s) the body may still have from a carrier it left, a knock-back or flight it ended; decays. */
   inherit = 0;
+  /** viewTick of the last accepted report (-1 before the first), and the lag (seconds, see LAG) the checks allowed it. */
+  viewTick = -1;
+  lag = REPORT_MAX_LAG;
+  /** Server tick at which the last correction was settled (its state taken). */
+  settledTick = 0;
+  /** `landings` of the last accepted report, and whether that report claimed to stand (see LANDINGS). */
+  landings = 0;
+  reportedOnGround = false;
   /**
-   * Fastest motion (blocks/s, relative to the body's carrier) of a structure near the body over
-   * the last REPORT_MAX_LAG: the client's lagging copy may still move like that after the server's
-   * stopped (a ship ramming a pier stops dead on the server first).
+   * Per tick (the last REPORT_LAG_LIMIT): the fastest motion (blocks/s, relative to the body's
+   * carrier) of a structure near the body, and the speed of its carrier at it. Over a report's lag,
+   * the client's lagging copy may still move like that after the server's stopped (a ship ramming a
+   * pier stops dead on the server first, and carries its rider into what it stopped at).
    */
-  pushRecent = 0;
-  /**
-   * Fastest speed of the body's carrier at the body over the last REPORT_MAX_LAG (blocks/s): a ship
-   * that stopped dead on the server still sails on the client's copy, and carries the body into
-   * what the server's ship already stopped at.
-   */
-  carrierRecent = 0;
-  /** The per-tick speeds behind pushRecent / carrierRecent (rings of REPORT_DEBT_TICKS ticks). */
-  private readonly pushRing = new Float64Array(REPORT_DEBT_TICKS);
-  private readonly carrierRing = new Float64Array(REPORT_DEBT_TICKS);
+  private readonly pushRing = new Float64Array(SPEED_MEMORY_TICKS);
+  private readonly carrierRing = new Float64Array(SPEED_MEMORY_TICKS);
   private ringAt = 0;
 
-  /** This tick's structure speed near the body and carrier speed at it: pushRecent / carrierRecent become the maxima of the last REPORT_MAX_LAG. */
+  /** This tick's structure speed near the body and carrier speed at it. */
   recordSpeeds(push: number, carrier: number): void {
-    const n = this.pushRing.length;
-    this.ringAt = (this.ringAt + 1) % n;
+    this.ringAt = (this.ringAt + 1) % this.pushRing.length;
     this.pushRing[this.ringAt] = push;
     this.carrierRing[this.ringAt] = carrier;
-    let mp = 0;
-    let mc = 0;
-    for (let i = 0; i < n; i++) {
-      if (this.pushRing[i]! > mp) mp = this.pushRing[i]!;
-      if (this.carrierRing[i]! > mc) mc = this.carrierRing[i]!;
-    }
-    this.pushRecent = mp;
-    this.carrierRecent = mc;
+  }
+
+  /** Fastest structure motion near the body over the last `lag` seconds (recordSpeeds). */
+  pushWithin(lag: number): number {
+    return this.ringMax(this.pushRing, lag);
+  }
+
+  /** Fastest speed of the body's carrier at it over the last `lag` seconds (recordSpeeds). */
+  carrierWithin(lag: number): number {
+    return this.ringMax(this.carrierRing, lag);
+  }
+
+  private ringMax(ring: Float64Array, lag: number): number {
+    const n = Math.min(ring.length, Math.ceil(lag / TICK_DT - 1e-9));
+    let m = 0;
+    for (let k = 0, i = this.ringAt; k < n; k++, i = i === 0 ? ring.length - 1 : i - 1) if (ring[i]! > m) m = ring[i]!;
+    return m;
   }
 
   // ---- vertical envelope: nothing lifts a body that nothing holds up (ground, liquid, flight)
-  /** Height (blocks) the reference rose above where something last held it up (accepted vertical displacements summed). */
+  /** Height (blocks) the reference rose above the envelope's base, where something last held it up (accepted vertical displacements summed). */
   envRise = 0;
-  /** Highest it may be by now above that point: a jump (or the upward speed it was given) under gravity since. */
+  /**
+   * The arcs the body may be on: from the base, a jump (or the upward speed it was given) under
+   * gravity, taken off at any tick of a window (see VERTICAL ENVELOPE). The earliest take-off's
+   * arc: its height above the base by now and its upward speed (blocks/s) ...
+   */
   envTop = 0;
-  /** Largest upward speed (blocks/s) it may have by now. */
   envVy = JUMP_SPEED;
+  /** ... the latest take-off's arc ... */
+  envTopLate = 0;
+  envVyLate = JUMP_SPEED;
+  /** ... the highest point of the arc ... */
+  envPeak = arcPeak(JUMP_SPEED);
+  /** ... and whether the body is still held up at the base (the reference is): its take-off may still come in any tick up to the next accepted report. */
+  envHeld = true;
+  /** How far the reference is above the envelope: overshoot the slack already paid for, which envRise carries on (only an increase is charged again). */
+  envPaid = 0;
 
   /** Ticks since a report was last accepted (or the reference last set by a correction). */
   idleTicks = 0;
@@ -291,14 +360,38 @@ export class ClientDrive {
   plainStuckRun = 0;
 
   /**
-   * The vertical envelope starts again where something holds the body up (or a correction put
-   * it), with upward speed `vy` at most.
+   * The vertical envelope starts again where something holds the body up (`held`: it may take off
+   * in any tick until the next report) or where a correction put it, with upward speed `vy` at most.
    */
-  resetEnvelope(vy: number): void {
+  resetEnvelope(vy: number, held: boolean): void {
     this.envRise = 0;
     this.envTop = 0;
     this.envVy = vy;
+    this.envTopLate = 0;
+    this.envVyLate = vy;
+    this.envPeak = arcPeak(vy);
+    this.envHeld = held;
+    this.envPaid = 0;
   }
+}
+
+/** Does an arc with upward speed `vy` (blocks/s) still rise in the next tick (the motion model's gravity step)? */
+function rising(vy: number): boolean {
+  let v1 = vy - GRAVITY * TICK_DT;
+  if (v1 < -TERMINAL_SPEED) v1 = -TERMINAL_SPEED;
+  return vy + v1 > 0;
+}
+
+/** The highest point (blocks above its start) of an arc that starts with upward speed `vy`, tick by tick. */
+function arcPeak(vy: number): number {
+  let top = 0;
+  // (Bounded: every step takes GRAVITY * TICK_DT off the speed.)
+  for (let i = 0; i < 1000 && rising(vy); i++) {
+    const v1 = vy - GRAVITY * TICK_DT;
+    top += (vy + v1) * 0.5 * TICK_DT;
+    vy = v1;
+  }
+  return top;
 }
 
 /**
@@ -368,8 +461,6 @@ export class ReportJudge {
   private pathBody: Player | null = null;
   private limWorld = 0;
   private limCarrier = 0;
-  private readonly pa: Vec3 = vec3();
-  private readonly pb: Vec3 = vec3();
   private readonly pl: Vec3 = vec3();
   private readonly pw: Vec3 = vec3();
   private readonly pbox: AABB = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
@@ -383,11 +474,19 @@ export class ReportJudge {
   slackUsed = 0;
   /** The report stands on something: it says so, and the world or a structure holds up its feet at the server's poses. */
   groundOk = false;
-  /** Vertical displacement of the report (the carrier frame's up, or the world's on a carrier switch). */
-  dy = 0;
-  /** The vertical envelope advanced to the report (DriveState.envTop / envVy). */
+  /** The vertical envelope advanced to the report (ClientDrive.envRise ... envPaid). */
+  envRise = 0;
   envTop = 0;
   envVy = 0;
+  envTopLate = 0;
+  envVyLate = 0;
+  envPeak = 0;
+  envHeld = false;
+  envPaid = 0;
+  /** The report showed a landing the server did not see (see LANDINGS), and ground near enough below for it. */
+  landedUnseen = false;
+  /** The report's lag (seconds, reportLag). */
+  lag = REPORT_MAX_LAG;
 
   constructor(body: BodyMover, world: VoxelGrid) {
     this.body = body;
@@ -454,13 +553,18 @@ export class ReportJudge {
   /**
    * Check a report against the drive's reference (the last accepted state, its world position
    * being p.pos right now). Returns null when it passes (and sets switchSpeed, slackUsed,
-   * groundOk, dy, envTop, envVy for the caller to commit), else what failed. `ticks` is the
-   * movement time (in ticks) granted to this report.
+   * groundOk, envRise, envTop, envVy, landedUnseen for the caller to commit), else what failed.
+   * `ticks` is the movement time (in ticks) granted to this report, `tick` the server's present
+   * tick (the report's lag, reportLag, is set into `lag`); `unseen`: its landings count shows a
+   * landing no report showed.
    */
-  check(p: Player, d: ClientDrive, rep: MoveReport, ticks: number): CheckFailure | null {
+  check(p: Player, d: ClientDrive, rep: MoveReport, ticks: number, tick: number, unseen: boolean): CheckFailure | null {
+    const lag = reportLag(tick, rep.viewTick);
+    this.lag = lag;
     this.switchSpeed = 0;
     this.slackUsed = 0;
     this.groundOk = false;
+    this.landedUnseen = false;
     // Garbage.
     if (!finite3(rep.pos) || !finite3(rep.vel) || !Number.isFinite(rep.yaw) || !Number.isFinite(rep.pitch)) return 'garbage';
     if (Math.abs(rep.pos.x) > MAX_BOX_COORD || Math.abs(rep.pos.y) > MAX_BOX_COORD || Math.abs(rep.pos.z) > MAX_BOX_COORD) return 'garbage';
@@ -482,8 +586,23 @@ export class ReportJudge {
     const w1 = this.w1;
     const cv = this.c;
     this.toWorld(rep.carrierId, rep.pos, rep.vel, rep.yaw, w1, cv, this.vw);
+    const allow = ticks * TICK_DT;
+    // The view time (seconds) the client's copies of the structures moved through between the
+    // reference and this report (viewTick): at least the movement time, at most REPORT_VIEW_RATE
+    // times it (after a stalled channel a client's copies catch up at that pace). That motion
+    // happened on the server between `lag` and `lag + viewed` ago: what the checks remember of
+    // structure speeds near the body goes back that far.
+    // The first report of an epoch: its client took the correction's state a round trip after
+    // the server settled it, and the structures moved on meanwhile (a blade sweeps into the spot a
+    // squeeze moved the body to): the time since the correction, at most the lag.
+    const viewed = d.fresh
+      ? Math.min(lag, Math.max(allow, (tick - d.settledTick) * TICK_DT))
+      : d.viewTick < 0
+        ? allow
+        : Math.min((REPORT_VIEW_RATE * ticks + 1) * TICK_DT, Math.max(allow, (rep.viewTick - d.viewTick) * TICK_DT));
+    const memory = lag + viewed + TICK_DT;
     // (As fast as the carrier moved lately: the client's copy may still move like that.)
-    const newCarrierSpeed = Math.max(this.carrierSpeed, d.carrierRecent);
+    const newCarrierSpeed = Math.max(this.carrierSpeed, d.carrierWithin(memory));
     // Velocity: no faster than anything can make a body.
     const vh = Math.sqrt(rep.vel.x * rep.vel.x + rep.vel.z * rep.vel.z);
     if (vh > MAX_INHERITED_SPEED + FLY_SPEED * FLY_SPRINT_MULTIPLIER || Math.abs(rep.vel.y) > TERMINAL_SPEED + MAX_INHERITED_SPEED) return 'velocity';
@@ -494,7 +613,7 @@ export class ReportJudge {
     let dz: number;
     let switchSlack = 0;
     const sameFrame = rep.carrierId === d.carrierId;
-    const prevCarrierSpeed = d.carrierId !== 0 ? Math.max(this.speedAt(d.carrierId, p.pos), d.carrierRecent) : 0;
+    const prevCarrierSpeed = d.carrierId !== 0 ? Math.max(this.speedAt(d.carrierId, p.pos), d.carrierWithin(memory)) : 0;
     if (sameFrame) {
       // Same frame: the local displacement, turned into world axes by the present pose.
       w0.x = rep.pos.x - d.pos.x;
@@ -506,52 +625,83 @@ export class ReportJudge {
       dz = w0.z;
     } else {
       // A carrier switch: compared in the world at the server's poses, which lead the client's
-      // copies by up to REPORT_MAX_LAG at the carriers' speeds.
+      // copies by the lag at the carriers' speeds.
       dx = w1.x - p.pos.x;
       dy = w1.y - p.pos.y;
       dz = w1.z - p.pos.z;
-      switchSlack = (prevCarrierSpeed + newCarrierSpeed) * REPORT_MAX_LAG + 1;
+      switchSlack = (prevCarrierSpeed + newCarrierSpeed) * lag + 1;
     }
-    this.dy = dy;
     const nb = boxAt(p, w1.x, w1.y, w1.z, this.box);
-    const allow = ticks * TICK_DT;
     // What may move the body besides its own legs: another structure pushing it (as fast as one
-    // near it moved lately: the client's copy may still be moving), or the world scraping it
-    // along its moving carrier (in the carrier's frame the world passes at the carrier's speed).
-    let push = Math.max(this.structureSpeed(p, w1, rep.carrierId, cv), d.pushRecent);
-    if (rec !== undefined && newCarrierSpeed > push && this.nearWorld(nb, 0.05 + newCarrierSpeed * (allow + REPORT_MAX_LAG))) push = newCarrierSpeed;
+    // near it moved in the remembered time: the client's copy may still be moving), or the world
+    // scraping it along its moving carrier (in the carrier's frame the world passes at the
+    // carrier's speed); both for the view time.
+    let push = Math.max(this.structureSpeed(p, w1, rep.carrierId, cv), d.pushWithin(memory));
+    if (rec !== undefined && newCarrierSpeed > push && this.nearWorld(nb, 0.05 + newCarrierSpeed * (allow + lag))) push = newCarrierSpeed;
     // A body that just stopped flying still has the flight's speed (its momentum goes into
     // d.inherit when the report is accepted).
     const own = rep.flying || d.flying ? FLY_SPEED * FLY_SPRINT_MULTIPLIER : SPRINT_SPEED;
-    const extra = d.inherit + push;
-    const hMax = (own + extra) * allow + switchSlack;
-    const upMax = (Math.max(JUMP_SPEED, FLY_VERTICAL_SPEED) + extra) * allow + STEP_HEIGHT + switchSlack;
-    const downMax = (TERMINAL_SPEED + extra) * allow + switchSlack;
+    const extra = d.inherit * allow + push * viewed;
+    const hMax = own * allow + extra + switchSlack;
+    const upMax = Math.max(JUMP_SPEED, FLY_VERTICAL_SPEED) * allow + extra + STEP_HEIGHT + switchSlack;
+    const downMax = TERMINAL_SPEED * allow + extra + switchSlack;
     const h = Math.sqrt(dx * dx + dz * dz);
     let excess = (h > hMax ? h - hMax : 0) + (dy > upMax ? dy - upMax : -dy > downMax ? -dy - downMax : 0);
     if (excess > d.slack) return 'speed';
     // Standing on something: claimed, and true at the server's poses (else it keeps falling).
-    this.groundOk = rep.onGround && this.supported(nb, rec);
-    // The vertical envelope: rising needs something that lifted the body. A flying body is bound
-    // by the speed limits alone (the envelope starts again when the report is accepted).
-    advanceEnvelope(d.envTop, d.envVy, ticks, this.env);
-    this.envTop = this.env.top;
-    this.envVy = this.env.vy;
+    this.groundOk = rep.onGround && this.supported(nb, rec, 0);
+    // The vertical envelope over the report's movement time (VERTICAL ENVELOPE): rising needs
+    // something that lifted the body. A flying body is bound by the speed limits alone (the
+    // envelope starts again when the report is accepted).
+    let spanPeak = this.advanceArcs(d.envTop, d.envVy, d.envTopLate, d.envVyLate, d.envPeak, d.envHeld, ticks);
+    let rise = d.envRise;
+    let paid = d.envPaid;
+    // A landing no report showed (LANDINGS) needs ground the body can have reached in the gap
+    // below the lower of its two places (a client cannot end a fall early by counting landings).
+    // The envelope then starts again on the highest ground under either place that the body can
+    // have come down on (no higher than its arcs got in the gap, plus a step), with a jump from
+    // there in any tick of the gap.
+    if (unseen) {
+      const ob = boxAt(p, p.pos.x, p.pos.y, p.pos.z, this.oldBox);
+      const reach = (Math.max(0, -d.envVy) + GRAVITY * allow) * allow;
+      if (this.supported(ob.minY <= nb.minY ? ob : nb, rec, reach)) {
+        const highest = p.pos.y - d.envRise + d.envPaid + spanPeak + STEP_HEIGHT + extra + switchSlack;
+        const ground = Math.max(this.groundUnder(ob, rec, reach, highest), this.groundUnder(nb, rec, reach, highest));
+        if (ground > -Infinity) {
+          this.landedUnseen = true;
+          rise = p.pos.y - ground;
+          paid = 0;
+          spanPeak = this.advanceArcs(0, JUMP_SPEED, 0, JUMP_SPEED, arcPeak(JUMP_SPEED), true, ticks);
+        }
+      }
+    }
+    this.envRise = rise + dy;
+    this.envPaid = 0;
     if (!rep.flying) {
+      // Where the arcs are now: the peak when it lies between the two take-offs, else the later
+      // take-off's while both fall, the earlier one's while both rise.
+      const nowPeak = rising(this.envVyLate) ? (rising(this.envVy) ? this.envTop : this.envPeak) : this.envTopLate;
       // Ending on something, the body may have come down on it at any tick of the report (a
       // step up included); ending in liquid, the liquid may have slowed its fall; ending in the
       // air, it is where gravity has it by now at the highest.
-      const bound = this.groundOk ? this.env.peak + STEP_HEIGHT : this.inLiquid(p, w1) ? this.env.peak : this.env.top;
-      const top = bound + extra * allow + switchSlack;
-      const rise = d.envRise + dy;
-      if (rise > top) excess += rise - top;
+      const bound = this.groundOk ? spanPeak + STEP_HEIGHT : this.inLiquid(p, w1) ? spanPeak : nowPeak;
+      const top = bound + extra + switchSlack;
+      // Overshoot is drawn from the slack once: the part already paid for (carried on in envRise)
+      // is not charged again while the body goes on along the arc.
+      const over = this.envRise > top ? this.envRise - top : 0;
+      if (over > paid) excess += over - paid;
       if (excess > d.slack) return 'rise';
+      // What pushes or a carrier switch (both carriers' poses lead the client's copies) allowed
+      // above the arc is not carried on: the body goes on along the arc from where it is. What
+      // the slack paid for is (so no sustained climb hides in it).
+      if (this.envRise > bound) this.envRise = Math.max(bound, this.envRise - extra - switchSlack);
+      this.envPaid = over;
     }
     this.slackUsed = excess;
     // Not deep inside hard cells of the world or of the carrier — unless the body was as deep
     // before (then it did not move in by itself: that is a squeeze or a block put into it, the
     // squeeze and unstuck rules handle it).
-    const worldTol = this.worldTolerance(rep.carrierId, newCarrierSpeed);
+    const worldTol = this.worldTolerance(rep.carrierId, newCarrierSpeed, lag);
     const wNew = hardDepth(this.world, nb);
     const wOld = hardDepth(this.world, boxAt(p, p.pos.x, p.pos.y, p.pos.z, this.oldBox));
     if (wNew > worldTol && wNew > wOld + 1e-6) return 'world';
@@ -671,11 +821,11 @@ export class ReportJudge {
     return g.wet > 0 || g.inLava;
   }
 
-  /** World-overlap a body may have without counting as inside the world (see worldTolerance). */
-  worldTolerance(carrierId: number, carrierSpeed: number): number {
+  /** World-overlap a body may have without counting as inside the world, for a report of lag `lag` (seconds). */
+  worldTolerance(carrierId: number, carrierSpeed: number, lag: number): number {
     // A carried body is placed by the server's pose of its carrier, which leads the client's copy:
     // a deck carrying it past a wall puts it into the wall by up to the carrier's speed times the lag.
-    return carrierId === 0 ? REPORT_HARD_TOLERANCE : REPORT_HARD_TOLERANCE + carrierSpeed * REPORT_MAX_LAG;
+    return carrierId === 0 ? REPORT_HARD_TOLERANCE : REPORT_HARD_TOLERANCE + carrierSpeed * lag;
   }
 
   /** World speed of structure `id`'s material at a world point (0 when it has no record). */
@@ -714,17 +864,18 @@ export class ReportJudge {
   /** Is the player, where it is now, held up: standing on something, in liquid (as last sampled) or flying? */
   heldUp(p: Player): boolean {
     if (p.flying || p.wet > 0 || p.inLava) return true;
-    return this.supported(boxAt(p, p.pos.x, p.pos.y, p.pos.z, this.sb), p.carrierId !== 0 ? this.body.record(p.carrierId) : undefined);
+    return this.supported(boxAt(p, p.pos.x, p.pos.y, p.pos.z, this.sb), p.carrierId !== 0 ? this.body.record(p.carrierId) : undefined, 0);
   }
 
   /**
-   * Is a body box at the server's poses held up by the world, its carrier or another structure?
-   * Probed a little deeper and wider than a body stands (REPORT_SUPPORT_REACH): the box is
-   * world-aligned, and the server's pose of a deck that rolls or turns tilts it against the deck
-   * a little differently than the client's copy did (a rider at the very edge of a rolling deck).
+   * Is a body box at the server's poses held up by the world, its carrier or another structure,
+   * `deeper` blocks below it included? Probed a little deeper and wider than a body stands
+   * (REPORT_SUPPORT_REACH): the box is world-aligned, and the server's pose of a deck that rolls or
+   * turns tilts it against the deck a little differently than the client's copy did (a rider at
+   * the very edge of a rolling deck).
    */
-  private supported(b: AABB, carrier: StructRec | undefined): boolean {
-    const gap = SUPPORT_GAP + REPORT_SUPPORT_REACH;
+  private supported(b: AABB, carrier: StructRec | undefined, deeper: number): boolean {
+    const gap = SUPPORT_GAP + REPORT_SUPPORT_REACH + deeper;
     const inset = -REPORT_SUPPORT_REACH;
     if (hasSupportBelow(this.world, b, gap, inset)) return true;
     if (carrier !== undefined && hasSupportBelow(carrier.grid, b, gap, inset)) return true;
@@ -738,24 +889,66 @@ export class ReportJudge {
   }
 
   /**
+   * The vertical envelope's arcs (VERTICAL ENVELOPE) `ticks` ticks on: the earliest take-off's from
+   * (top, vy), the latest one's from (topLate, vyLate), or, when `held`, taking off in the last of
+   * those ticks. Writes envTop ... envHeld; returns the highest the arcs got on the way: the arc's
+   * peak when one of them passed it, else the higher of the two (an arc rises, then falls).
+   */
+  private advanceArcs(top: number, vy: number, topLate: number, vyLate: number, peak: number, held: boolean, ticks: number): number {
+    const late = held ? Math.min(1, ticks) : ticks;
+    advanceEnvelope(top, vy, ticks, this.env);
+    this.envTop = this.env.top;
+    this.envVy = this.env.vy;
+    const peakEarly = this.env.peak;
+    advanceEnvelope(topLate, vyLate, late, this.env);
+    this.envTopLate = this.env.top;
+    this.envVyLate = this.env.vy;
+    this.envPeak = peak;
+    this.envHeld = held && late === 0;
+    return rising(vyLate) && !rising(this.envVy) ? peak : Math.max(peakEarly, this.env.peak);
+  }
+
+  /** World height of the first thing under a body box (within `reach`) that would hold it up, if no higher than `highest`; else -Infinity. */
+  private groundUnder(b: AABB, carrier: StructRec | undefined, reach: number, highest: number): number {
+    const depth = this.supportDepth(b, carrier, reach);
+    const y = b.minY - depth;
+    return depth >= 0 && y <= highest ? y : -Infinity;
+  }
+
+  /**
+   * How far below a body box at the server's poses the first thing that would hold it up lies
+   * (supported() with `deeper`, to within 0.01): -1 when nothing does within `reach` below it.
+   */
+  private supportDepth(b: AABB, carrier: StructRec | undefined, reach: number): number {
+    if (!(reach >= 0) || !this.supported(b, carrier, reach)) return -1;
+    if (this.supported(b, carrier, 0)) return 0;
+    let lo = 0;
+    let hi = reach;
+    while (hi - lo > 0.01) {
+      const mid = (lo + hi) * 0.5;
+      if (this.supported(b, carrier, mid)) hi = mid;
+      else lo = mid;
+    }
+    return lo;
+  }
+
+  /**
    * May the body get from `a` to `b` (in the path frame: local to pathRec, else world) without
    * passing through hard cells of the world or of pathRec deeper than limWorld / limCarrier? The
    * client's mover moves a tick's displacement axis by axis (vertical first, then horizontal) and
-   * steps up ledges, so a corner it went round may lie on the straight line: the path is clear
-   * when the straight line, the vertical-first or the vertical-last dog-leg is.
+   * steps up ledges, and over several ticks (reports lost) it may have slid along a wall and then
+   * gone round its end, so a corner it went round may lie on the straight line: the path is clear
+   * when the straight line, the vertical-first or the vertical-last dog-leg, or one along the
+   * frame's x or z axis first, is.
    */
   private pathClear(a: Vec3, b: Vec3): boolean {
     if (this.legClear(a.x, a.y, a.z, b.x, b.y, b.z, false)) return true;
-    const ma = this.pa;
-    ma.x = a.x;
-    ma.y = b.y;
-    ma.z = a.z;
-    if (this.legClear(a.x, a.y, a.z, ma.x, ma.y, ma.z, true) && this.legClear(ma.x, ma.y, ma.z, b.x, b.y, b.z, false)) return true;
-    const mb = this.pb;
-    mb.x = b.x;
-    mb.y = a.y;
-    mb.z = b.z;
-    return this.legClear(a.x, a.y, a.z, mb.x, mb.y, mb.z, true) && this.legClear(mb.x, mb.y, mb.z, b.x, b.y, b.z, false);
+    return this.dogLegClear(a, b, a.x, b.y, a.z) || this.dogLegClear(a, b, b.x, a.y, b.z) || this.dogLegClear(a, b, b.x, a.y, a.z) || this.dogLegClear(a, b, a.x, a.y, b.z);
+  }
+
+  /** The path from `a` to `b` by way of the corner (cx, cy, cz). */
+  private dogLegClear(a: Vec3, b: Vec3, cx: number, cy: number, cz: number): boolean {
+    return this.legClear(a.x, a.y, a.z, cx, cy, cz, true) && this.legClear(cx, cy, cz, b.x, b.y, b.z, false);
   }
 
   /** Samples of a straight leg, every REPORT_PATH_STEP, without its start (and without its end unless `end`). */

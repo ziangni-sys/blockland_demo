@@ -1,0 +1,10 @@
+/**
+ * End to end (package 6): scenes of package 2's lag tests (tests/drive) rebuilt with the real client,
+ * clock and links; the table and what is judged are in own-table.ts.
+ */
+import { describe } from 'vitest';
+import { sceneTests } from './own-table';
+
+describe('the own player end to end: land scenes', () => {
+  sceneTests(['walk', 'fly', 'flyStop', 'turntable', 'blade', 'cage', 'lava', 'teleportWalk', 'deathRespawn', 'blockifyUnder']);
+});

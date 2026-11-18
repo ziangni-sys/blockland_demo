@@ -340,12 +340,13 @@ export class StructureManager {
    */
   stopRotor(rotor: Rotor): BlockifyReport {
     if (!this.isLive(rotor)) return emptyReport();
-    this.host.releaseRiders(rotor);
+    // Riders follow the snap (NETCODE section 9 item 7): taken before anything moves.
+    const t = rotorSnap(rotor.grid);
+    this.host.releaseRiders(rotor, t);
     if (!this.isLive(rotor)) return emptyReport(); // stopped re-entrantly by the host
     const ship = rotor.parent instanceof Ship ? rotor.parent : null;
     const dst: VoxelGrid = ship !== null ? ship.grid : this.world;
     const dstGlue = ship !== null ? ship.glue : this.host.worldGlue;
-    const t = rotorSnap(rotor.grid);
     // The face between the bearing and the hub's place keeps the glue the parent already holds
     // on it (it stayed on the bearing when the rotor started: ACCEPTANCE 14). Read before the
     // writes: a bearing that is gone, or replaced, has no such face.
@@ -386,9 +387,11 @@ export class StructureManager {
     const verdict = planVerdict(plan);
     if (!verdict.ok) return verdict;
     const host = this.host;
-    host.releaseRiders(ship);
+    // Riders follow the snap, those of its rotors too (they ride the ship's frame); the rotors
+    // themselves stay running in the world, re-mounted by the same snap.
+    host.releaseRiders(ship, plan.t);
     const children = ship.children.slice();
-    for (let i = 0; i < children.length; i++) host.releaseRiders(children[i]!);
+    for (let i = 0; i < children.length; i++) host.releaseRiders(children[i]!, null);
     if (!this.isLive(ship)) return { ok: false, reason: 'blocked', conflicts: [] };
     const hull = this.currentHull(ship);
     this.unregister(ship);
@@ -690,7 +693,7 @@ export class StructureManager {
     for (let i = 0; i < ships.length; i++) {
       const s = ships[i]!;
       if (s.grid.count !== 0 || s.children.length !== 0 || !this.isLive(s)) continue;
-      this.host.releaseRiders(s);
+      this.host.releaseRiders(s, null);
       this.unregister(s);
     }
   }

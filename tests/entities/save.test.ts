@@ -52,14 +52,16 @@ function script(b: Bench, t: number): void {
  * The entity blob followed by every player's record with its id — what a world save holds (the
  * simulation keeps players in their own blob, sim/players.ts).
  */
-function save(b: Bench): Uint8Array {
+/** `frames` holds the structures the players' carrier frames are taken from (default b's). */
+function save(b: Bench, frames: Bench = b): Uint8Array {
   const w = new ByteWriter();
   b.entities.serialize(w);
   const players = b.entities.all().filter((e): e is Player => e instanceof Player && !e.removed);
   w.varuint(players.length);
   for (const p of players) {
     w.varuint(p.id);
-    writePlayerRecord(w, p);
+    const carrier = p.carrierId !== 0 ? frames.host.structure(p.carrierId) : undefined;
+    writePlayerRecord(w, p, carrier !== undefined ? carrier.grid.toLocal(p.pos) : null);
   }
   return w.finish();
 }
@@ -70,7 +72,7 @@ function load(c: Bench, bytes: Uint8Array): void {
   const n = r.varuint();
   for (let i = 0; i < n; i++) {
     const id = r.varuint();
-    c.entities.add(readPlayerRecord(r, id));
+    c.entities.add(readPlayerRecord(r, id).player);
   }
   r.expectEnd();
 }
@@ -118,8 +120,8 @@ describe('entity save', () => {
     // the player takes its old place in the (id-ordered) list, its look seeds the input
     expect(a2.findIndex((e) => e.kind === 'player')).toBe(a1.findIndex((e) => e.kind === 'player'));
     expect(playerOf(c.entities).input.yaw).toBe(playerOf(b.entities).yaw);
-    // the bytes are stable
-    expect(save(c)).toEqual(bytes);
+    // the bytes are stable (the carriers' frames at b's poses: c's ship was not moved)
+    expect(save(c, b)).toEqual(bytes);
     // a fresh id never collides with a loaded one
     expect(a2.some((e) => e.id === c.entities.allocateId())).toBe(false);
   });
@@ -189,8 +191,8 @@ describe('players are not part of the entity blob', () => {
     expect(c.entities.all().some((e) => e instanceof Player)).toBe(false);
     const p = playerOf(b.entities);
     const rw = new ByteWriter();
-    writePlayerRecord(rw, p);
-    const back = readPlayerRecord(new ByteReader(rw.finish(), 'player'), 77);
+    writePlayerRecord(rw, p, null);
+    const back = readPlayerRecord(new ByteReader(rw.finish(), 'player'), 77).player;
     expect(back.id).toBe(77);
     expect(back.pos).toEqual(p.pos);
     expect(back.inventory.hotbar).toEqual(p.inventory.hotbar);

@@ -9,8 +9,9 @@
  * clock is the net's, and whose ChunkSource is the generator Welcome's GeneratorSpec describes,
  * synchronous or answering after `genDelayMs` (an event on the net's queue, like a worker pool). The harness gives every
  * client frames (every 16.7 ms of virtual time, each client with its own phase) and a heartbeat
- * every second (a page's timer: it goes on while the page is hidden). Packages 6 and 7 add the
- * prediction, the movement reports and the intents to HeadlessClient (see its comment).
+ * every second (a page's timer: it goes on while the page is hidden). From its ready on, a
+ * HeadlessClient moves its own player with OwnPlayer (package 6) from its held input, as a person
+ * at the keys would; package 7 adds the intents (see its comment).
  * addRawClient() gives a RawClient for the tests that must misbehave in ways NetClient never does
  * (raw bytes, messages before Hello, silence, a connection that reports late); it only sends what
  * its test tells it to and keeps what it receives, decoded.
@@ -43,6 +44,7 @@ import type { Quat, Vec3 } from '../../src/core/math';
 import type { ReplicaState } from '../../src/net/client/apply';
 import type { ChunkSource } from '../../src/net/client/chunks';
 import { NetClient, type NetStatus } from '../../src/net/client/netclient';
+import { emptyHeldInput, OwnPlayer, type AdoptedCorrection, type HeldInput } from '../../src/net/client/predict';
 import type { ClientReplica } from '../../src/net/client/replica';
 import { decodeServerMessage, encodeClientMessage } from '../../src/net/codec';
 import type { CreateOptions, HostToPage } from '../../src/net/host/control';
@@ -53,6 +55,8 @@ import {
   MESSAGE_CHANNEL,
   type ClientMessage,
   type KickMsg,
+  type NetCorrection,
+  type NetMoveReport,
   type PongMsg,
   type RefuseMsg,
   type ServerMessage,
@@ -125,15 +129,15 @@ function generatorSource(gen: ChunkGenerator, net: LoopbackNet, delayMs: number,
 /**
  * A real client (section 15): NetClient and its ClientReplica on a loopback link (see the file
  * comment). The harness calls frame() and heartbeat(); a test reads the replica and drives the
- * connection (leave, hidden).
+ * connection (leave, hidden) and the player.
  *
- * Packages 6 and 7 attach here: frame(now) applies what arrived (NetClient.frame) and is where
- * the prediction steps (OwnPlayer on the replica, movement reports through
- * NetClient.sendMoveReport) and the intents go out (NetClient.send) after it; their held input
- * (forward, strafe, jump, sneak) and the scripted controls named like PlayerControl's (lookAtCell,
- * aimAt, use, attack, hold, mine ...) become fields and methods of this class, and stopInput()
- * releases them. Corrections, inventory and acks reach them through onBatch, which this class
- * owns (it calls onApplied for track()).
+ * frame(now) applies what arrived (NetClient.frame), then, from the connection's ready on, runs
+ * the prediction (package 6): an OwnPlayer per connection on the replica, moving the player from
+ * the held `input` (forward, strafe, jump, sneak, sprint, look; jumpPresses for a double tap),
+ * its reports through NetClient.sendMoveReport; corrections reach it through onBatch, which this
+ * class owns (it calls onApplied for track()). `silent` stops the prediction and the reports (a
+ * page that froze), stopInput() lets go of the keys. Package 7 adds the intents (NetClient.send)
+ * and the scripted controls named like PlayerControl's (aimAt, use, attack, hold, mine ...).
  */
 export class HeadlessClient {
   readonly net: NetClient;
@@ -158,6 +162,20 @@ export class HeadlessClient {
   checked = 0;
   /** Stopped by crash(): no frames, no heartbeats. */
   crashed = false;
+  /** What the player holds (kept across connections; OwnPlayer turns the look with the carrier). */
+  readonly input: HeldInput = emptyHeldInput();
+  /** The prediction of the current connection (null before its ready). */
+  own: OwnPlayer | null = null;
+  /** No prediction and no reports while true (a page that froze, or a client that stopped reporting). */
+  silent = false;
+  /** Every correction applied, with its batch's tick, over every connection. */
+  readonly corrections: Array<{ tick: number; c: NetCorrection }> = [];
+  /** Every correction the prediction adopted, with how it was shown. */
+  readonly adopted: AdoptedCorrection[] = [];
+  /** Called at every client tick before the held input is read (scripted input per tick); `seq` = the tick's report. */
+  onStep: ((seq: number) => void) | null = null;
+  /** Called with every report as it is sent (the prediction's state is own.player). */
+  onReport: ((r: NetMoveReport, own: OwnPlayer) => void) | null = null;
 
   constructor(
     readonly key: PlayerKey,
@@ -173,6 +191,8 @@ export class HeadlessClient {
     };
     this.net.onBatch = (b) => {
       this.applied.push(b.tick);
+      if (b.private?.correction !== undefined) this.corrections.push({ tick: b.tick, c: b.private.correction });
+      if (this.own !== null && this.own.replica === this.net.replica) this.own.onBatch(b);
       this.onApplied?.(b.tick);
       this.onBatch?.(b);
     };
@@ -225,7 +245,39 @@ export class HeadlessClient {
     if (clock !== null && r !== null && clock.renderTick > r.state.tick) {
       this.mismatches.push(`frame at ${now}: renderTick ${clock.renderTick} beyond the newest applied batch ${r.state.tick}`);
     }
+    // The prediction (package 6): from the connection's ready on, unless paused or silent.
+    if (this.own !== null && this.own.replica !== r) this.own = null;
+    if (this.net.status === 'ready' && r !== null && clock !== null && !this.net.paused && !this.silent) {
+      this.own ??= new OwnPlayer(r, this.input, (rep) => this.report(rep), {
+        viewRadius: this.net.viewRadius,
+        beforeStep: (seq) => this.onStep?.(seq),
+        onCorrection: (c) => this.adopted.push(c),
+      });
+      this.own.frame(now, clock);
+    }
     this.onFrame?.(now);
+  }
+
+  private report(r: NetMoveReport): void {
+    this.onReport?.(r, this.own!);
+    this.net.sendMoveReport(r);
+  }
+
+  /** Point the held look at a world point (from the predicted eyes). */
+  lookAt(x: number, y: number, z: number): void {
+    const p = this.own?.player;
+    if (p === undefined) throw new Error(`${this.key}: no prediction yet`);
+    const dx = x - p.pos.x;
+    const dy = y - (p.pos.y + p.eyeHeight);
+    const dz = z - p.pos.z;
+    const h = Math.hypot(dx, dz);
+    if (h > 1e-12) this.input.yaw = Math.atan2(-dx, -dz);
+    this.input.pitch = Math.atan2(dy, h);
+  }
+
+  /** Causes of the corrections applied in batches after server tick `tick` that pass `pick`. */
+  correctionsSince(tick: number, pick: (cause: string) => boolean = () => true): string[] {
+    return this.corrections.filter((x) => x.tick > tick && pick(x.c.cause)).map((x) => x.c.cause);
   }
 
   /** The page's timer, about once a second, hidden or not. */
@@ -233,8 +285,16 @@ export class HeadlessClient {
     if (!this.crashed) this.net.heartbeat(now);
   }
 
-  /** Release the held input and drop scripted actions (packages 6 and 7 have them; quiesce()). */
-  stopInput(): void {}
+  /** Let go of the held keys (the look stays) and drop scripted actions (package 7 adds those; quiesce()). */
+  stopInput(): void {
+    const i = this.input;
+    i.forward = 0;
+    i.strafe = 0;
+    i.jump = false;
+    i.sneak = false;
+    i.sprint = false;
+    i.jumpPresses = 0;
+  }
 
   /** Quit properly: Bye, then close. */
   leave(): void {

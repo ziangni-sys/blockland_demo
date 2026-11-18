@@ -5,7 +5,10 @@
  * for its own copy of the player, against the SAME world as the server and a LAGGED copy of the
  * server's structures: every structure is mirrored by a replica whose cells are the server's
  * (shared storage) and whose pose — and whether it exists at all — is the server's of `lag`
- * ticks before. It reports every tick in the carrier frame and adopts the server's corrections.
+ * ticks before. It reports every tick in the carrier frame (viewTick = the tick its copies show;
+ * the landings of its body counted as OwnPlayer counts them) and adopts the server's corrections.
+ * The end-to-end tests use the real client instead (tests/net/e2e-own-*.test.ts); this harness
+ * stays for the server's judgements with an exact, fixed lag (lag.test.ts).
  *
  * Timing (one server tick = one client tick):
  *  - The client step for server tick M runs inside tick M, after the structures moved (phase 3)
@@ -93,6 +96,7 @@ export class LaggedClient implements BodyHost {
   private lastDue = -Infinity;
   private epoch = 0;
   private seq = 0;
+  private landings = 0;
   private readonly report: MoveReport = emptyReport();
   /** The server input's look right after the server applied our last report (see the file comment). */
   private seenYaw = NaN;
@@ -212,7 +216,9 @@ export class LaggedClient implements BodyHost {
     sanitizeInput(p);
     const presses = takeJumpPresses(p);
     if (p.mode !== 'creative') p.flying = false;
+    const wasOnGround = p.onGround;
     body.stepPlayer(p, presses, p.mode === 'creative');
+    if (p.onGround && !wasOnGround) this.landings = (this.landings + 1) & 255;
     body.endTick();
     this.sendReport();
   }
@@ -268,6 +274,8 @@ export class LaggedClient implements BodyHost {
     const rep = this.report;
     rep.seq = ++this.seq;
     rep.epoch = this.epoch;
+    rep.viewTick = Math.max(0, this.sim.ticks - this.lag);
+    rep.landings = this.landings;
     const r = p.carrierId !== 0 ? this.body.record(p.carrierId) : undefined;
     if (r !== undefined) {
       rep.carrierId = r.id;
