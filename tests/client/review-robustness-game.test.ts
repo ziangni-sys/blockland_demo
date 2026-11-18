@@ -399,7 +399,7 @@ describe('review: the server fails', { timeout: 60_000 }, () => {
       throw new Error('no WebRTC in this test');
     });
     const { game, host } = await gameWithWorld(new MemoryStorage());
-    expect((await game.openRoom('broadcast', { code: 'RXAMCDEF' })).ok).toBe(true);
+    expect((await game.openRoom('service', { signal: 'broadcast', code: 'RXAMCDEF' })).ok).toBe(true);
     await until(game, () => host().netServer.roomOpen);
     const dial = (): Promise<SignalPath> =>
       new BroadcastSignaller({
@@ -414,7 +414,7 @@ describe('review: the server fails', { timeout: 60_000 }, () => {
       throw new Error('review: injected simulation failure');
     };
     await until(game, () => game.screen === 'pause');
-    expect(game.room?.state).toBe('closed');
+    expect(game.lobby.currentRoom?.state).toBe('closed');
     await until(game, () => !host().netServer.roomOpen);
     await expect(dial()).rejects.toMatchObject({ code: 'unknown' });
   });

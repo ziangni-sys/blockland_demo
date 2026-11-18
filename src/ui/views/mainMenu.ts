@@ -1,16 +1,17 @@
 /**
  * Main menu: logotype, saved-world list (play / delete with an in-page confirm step — the
- * host has no window.confirm), new-world form, settings button, controls cheat-sheet and a
- * renderer / version line, over a blueprint backdrop with a faint construction drawing.
+ * host has no window.confirm), new-world form, "Join a room" and settings buttons, controls
+ * cheat-sheet and a renderer / version line, over a blueprint backdrop with a faint construction
+ * drawing. A build that cannot go online shows one line saying so in place of "Join a room".
  */
 import { CHEAT_SHEET } from '../controls';
 import type { UiContext } from '../context';
 import { worldsEq } from '../diff';
 import { formatLastPlayed } from '../format';
 import type { GameMode, Screen, UiState, WorldSummary } from '../model';
-import { h, svg, TextSlot } from '../dom';
+import { h, setHidden, svg, TextSlot } from '../dom';
 import { focusInto, type ScreenView } from './screen';
-import { buildLogo, button, ICON_SLIDERS, ICON_TRASH, keyTable, Segmented } from './widgets';
+import { buildLogo, button, ICON_PEOPLE, ICON_SLIDERS, ICON_TRASH, keyTable, Segmented } from './widgets';
 
 /** How long world actions stay latched when the client neither switches screen nor updates the list. */
 const LATCH_MS = 2000;
@@ -52,6 +53,8 @@ export class MainMenuView implements ScreenView {
   private readonly modeSeg: Segmented<GameMode>;
   private readonly modeHint: HTMLElement;
   private readonly settingsBtn: HTMLButtonElement;
+  private readonly joinBtn: HTMLButtonElement;
+  private readonly offlineNote: HTMLElement;
   private readonly renderer: TextSlot;
   private readonly version: TextSlot;
   private mode: GameMode = 'creative';
@@ -75,9 +78,12 @@ export class MainMenuView implements ScreenView {
 
     // ---- header
     this.settingsBtn = button(ctx, { variant: 'ghost', icon: ICON_SLIDERS, label: 'menu.settings', cls: 'bl-menu-settings', onClick: () => a.openSettings() });
+    this.joinBtn = button(ctx, { icon: ICON_PEOPLE, label: 'menu.join', cls: 'bl-menu-join', onClick: () => a.openJoinScreen() });
+    this.joinBtn.dataset.act = 'join-room';
+    this.offlineNote = ctx.text(h(d, 'p', 'bl-menu-offline', { hidden: true }), 'menu.offline');
     const head = h(d, 'header', 'bl-menu-head', null, [
       h(d, 'div', 'bl-menu-brand', null, [buildLogo(ctx), ctx.text(h(d, 'p', 'bl-tagline'), 'brand.tagline')]),
-      this.settingsBtn,
+      h(d, 'div', 'bl-menu-actions', null, [this.offlineNote, this.joinBtn, this.settingsBtn]),
     ]);
 
     // ---- saved worlds
@@ -175,10 +181,13 @@ export class MainMenuView implements ScreenView {
     }
     this.renderer.set(s.renderer);
     this.version.set(s.version);
+    setHidden(this.joinBtn, !s.online.available);
+    setHidden(this.offlineNote, s.online.available);
   }
 
   onShow(_s: UiState, from: Screen | null): void {
     if (from === 'settings') focusInto(this.settingsBtn);
+    else if (from === 'join') focusInto(this.joinBtn);
   }
 
   onHide(): void {

@@ -11,42 +11,14 @@ import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { Rng } from '../../src/core/rng';
 import { BACKLOG_REPORT_MS, PortForwarder, type ForwardedLink } from '../../src/client/forward';
-import { PortTransport, type PortBacklog, type PortLike } from '../../src/net/host/port';
+import { PortTransport, type PortBacklog } from '../../src/net/host/port';
 import { createLoopbackPair, type LoopbackNet } from '../../src/net/loopback';
 import { RELIABLE, UNRELIABLE, type Channel, type Transport } from '../../src/net/transport';
 import { BUFFERED_LOW_BYTES } from '../../src/net/webrtc/transport';
+import { fakePorts } from './fakeport';
 import { netTimers } from './fakertc';
 import { INSTANT, NetHarness } from './harness';
 
-/** A MessagePort pair on the loopback's virtual clock; postMessage structured-clones and transfers like the real one. */
-class FakePort implements PortLike {
-  onmessage: ((ev: MessageEvent) => void) | null = null;
-  peer: FakePort | null = null;
-  closed = false;
-  /** Every frame posted, as received by the peer. */
-  readonly posted: unknown[] = [];
-  constructor(private readonly net: LoopbackNet) {}
-  postMessage(message: unknown, transfer: Transferable[]): void {
-    if (this.closed) return;
-    const data = structuredClone(message, { transfer });
-    this.posted.push(data);
-    const peer = this.peer!;
-    this.net.schedule(this.net.now, () => {
-      if (!peer.closed) peer.onmessage?.({ data } as MessageEvent);
-    });
-  }
-  close(): void {
-    this.closed = true;
-  }
-}
-
-function fakePorts(net: LoopbackNet): [FakePort, FakePort] {
-  const a = new FakePort(net);
-  const b = new FakePort(net);
-  a.peer = b;
-  b.peer = a;
-  return [a, b];
-}
 
 /** A scripted guest link: records what the forwarder sends, reports the backlog the test sets. */
 class ScriptedLink implements ForwardedLink {
@@ -243,6 +215,9 @@ describe('PortForwarder (package 10)', () => {
     expect(withReports.maxWaitMs).toBeLessThan(100);
     // All the snapshots arrived, paced by the link (what went through it at 256 KB/s), none dropped.
     expect(withReports.readyMs).toBeGreaterThanOrEqual(0.9 * withReports.linkMs);
+    // ... and not much slower than the link (measured 1.35 s for 1.0 s of link bytes): between two
+    // reports the server counts what the channel goes on sending (package 13; without that, 9.8 s).
+    expect(withReports.readyMs).toBeLessThan(2 * withReports.linkMs);
     expect(withReports.columns).toBe(blind.columns);
     // A forwarder that reports a backlog of 0 lets the same join put more than twice as much in front of the batches (measured 102 ms).
     expect(blind.maxWaitMs).toBeGreaterThan(2 * withReports.maxWaitMs);
@@ -279,7 +254,7 @@ async function slowJoin(seesBacklog: boolean): Promise<{ maxWaitMs: number; read
         const [ps, pf] = fakePorts(h.net);
         link = new LoopbackLink(h.net, pair.server, bandwidth, seesBacklog);
         new PortForwarder(pf, link, netTimers(h.net));
-        h.host.connect(new PortTransport(ps), false);
+        h.host.connect(new PortTransport(ps, () => h.net.now), false);
         return pair.client;
       },
     },

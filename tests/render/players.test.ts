@@ -16,7 +16,7 @@ import { I } from '../../src/blocks/items';
 import type { EntityRenderState, PlayerPosture } from '../../src/render/backend';
 import { ThreeBackend } from '../../src/render/three/backend';
 import { HEAD_TURN_LIMIT, type EntityLayer } from '../../src/render/three/entities';
-import { LABEL_MIN_PX, LABEL_WORLD_HEIGHT, labelHeight, labelText, labelView, type LabelView } from '../../src/render/three/labels';
+import { LABEL_MAX_PX, LABEL_MIN_PX, LABEL_WORLD_HEIGHT, labelHeight, labelText, labelView, type LabelView } from '../../src/render/three/labels';
 import { computeFog, createFogParams, fogFactor } from '../../src/render/three/lighting';
 
 interface Internals {
@@ -108,12 +108,15 @@ describe('name tags', () => {
     be.dispose();
   });
 
-  it('keep at least LABEL_MIN_PX on screen far away, LABEL_WORLD_HEIGHT near; hidden beyond the view distance; not for other kinds', () => {
-    expect(labelHeight(2, 70, 540)).toBe(LABEL_WORLD_HEIGHT);
-    for (const d of [20, 60, 150]) {
-      const h = labelHeight(d, 70, 540);
-      const px = (h / (2 * Math.tan((35 * Math.PI) / 180) * d)) * 540;
-      expect(px).toBeGreaterThanOrEqual(LABEL_MIN_PX - 1e-9);
+  it('keep at least LABEL_MIN_PX on screen far away, LABEL_WORLD_HEIGHT between, at most LABEL_MAX_PX close by; hidden beyond the view distance; not for other kinds', () => {
+    const px = (d: number): number => (labelHeight(d, 70, 540) / (2 * Math.tan((35 * Math.PI) / 180) * d)) * 540;
+    expect(labelHeight(6, 70, 540)).toBe(LABEL_WORLD_HEIGHT);
+    for (const d of [20, 60, 150]) expect(px(d)).toBeGreaterThanOrEqual(LABEL_MIN_PX - 1e-9);
+    // A player a block or two away (package 11): the tag stops growing on screen.
+    for (const d of [0.4, 1, 2, 3]) expect(px(d)).toBeCloseTo(LABEL_MAX_PX, 6);
+    for (let d = 0.3; d < 200; d *= 1.1) {
+      expect(px(d)).toBeLessThanOrEqual(LABEL_MAX_PX + 1e-9);
+      expect(px(d)).toBeGreaterThanOrEqual(LABEL_MIN_PX - 1e-9);
     }
     const { be, layer } = readyBackend();
     be.setEntities([player(1, { x: 0, z: 0 }), player(2, { x: 0, z: -300 }), { ...player(3), kind: 'rabbit', label: null }]);

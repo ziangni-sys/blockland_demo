@@ -206,7 +206,7 @@ export class RoomHost {
   readonly code: string;
   readonly signaller: Signaller;
   private readonly listener: RoomListener;
-  private readonly forwarders = new Set<PortForwarder>();
+  private readonly forwarders = new Map<PortForwarder, WebRtcTransport>();
   private stateValue: RoomState = 'closed';
   private relisten: unknown = null;
   /** Guests that connected so far. */
@@ -228,6 +228,11 @@ export class RoomHost {
   /** Guests connected now. */
   get guests(): number {
     return this.forwarders.size;
+  }
+
+  /** The guests' links now (the page's connection diagnostics read their statistics). */
+  links(): WebRtcTransport[] {
+    return [...this.forwarders.values()];
   }
 
   /** Listen, then mark the server's room open. Rejects with the signaller's DialError. */
@@ -262,7 +267,7 @@ export class RoomHost {
     this.setState('closed');
     if (this.forwarders.size === 0) return;
     this.o.deps.timers.set(() => {
-      for (const f of [...this.forwarders]) f.close('shutdown');
+      for (const f of [...this.forwarders.keys()]) f.close('shutdown');
     }, END_GRACE_MS);
   }
 
@@ -272,7 +277,7 @@ export class RoomHost {
       return;
     }
     let silent = 0;
-    for (const f of this.forwarders) if (!f.heard) silent++;
+    for (const f of this.forwarders.keys()) if (!f.heard) silent++;
     if (silent >= MAX_SILENT_GUESTS) {
       t.close('too many silent guests');
       return;
@@ -285,7 +290,7 @@ export class RoomHost {
       return;
     }
     const f = new PortForwarder(port, t, this.o.intervals);
-    this.forwarders.add(f);
+    this.forwarders.set(f, t);
     this.connections++;
     const hello = this.o.deps.timers.set(() => {
       if (!f.heard) f.close('no_hello');
@@ -324,6 +329,13 @@ export class RoomHost {
   }
 }
 
+/**
+ * Where a guest's way to the host is: reaching the signalling service and finding the room
+ * ('service'), the WebRTC handshake with the host ('host'), the transport handed to NetClient
+ * ('world': the game's own handshake and loading follow).
+ */
+export type JoinStage = 'service' | 'host' | 'world';
+
 export interface GuestJoinOptions {
   signaller: Signaller;
   code: string;
@@ -332,6 +344,8 @@ export interface GuestJoinOptions {
   now(): number;
   /** The join failed for good: the page shows `key` (with `params`) and leaves the world. */
   onFinal(key: ClientStringKey, detail: string): void;
+  /** The stage changed (the loading screen says which). */
+  onStage?(stage: JoinStage): void;
 }
 
 /**
@@ -349,6 +363,10 @@ export class GuestJoin {
   /** The last failure, and how many joins were attempted. */
   failure: DialError | null = null;
   attempts = 0;
+  /** The stage of the current attempt. */
+  stage: JoinStage = 'service';
+  /** The last transport handed to NetClient (the page's connection diagnostics read its statistics). */
+  transport: WebRtcTransport | null = null;
   private everConnected = false;
   /** The last transport handed to NetClient (null when the last attempt has not given one), and when. */
   private handedAt: number | null = null;
@@ -370,7 +388,10 @@ export class GuestJoin {
     if (this.ended) return failed('ended');
     this.attempts++;
     this.handedAt = null;
-    joinRoom(this.o.signaller, this.o.code, this.o.deps).then(
+    this.setStage('service');
+    joinRoom(this.o.signaller, this.o.code, this.o.deps, () => {
+      if (!this.ended) this.setStage('host');
+    }).then(
       (t) => {
         if (this.ended) {
           t.close('left');
@@ -379,6 +400,8 @@ export class GuestJoin {
         }
         this.failure = null;
         this.handedAt = this.o.now();
+        this.transport = t;
+        this.setStage('world');
         ready(t);
       },
       (e: unknown) => {
@@ -417,6 +440,12 @@ export class GuestJoin {
   end(): void {
     this.ended = true;
     this.stopGiveUp();
+  }
+
+  private setStage(stage: JoinStage): void {
+    if (stage === this.stage) return;
+    this.stage = stage;
+    this.o.onStage?.(stage);
   }
 
   private judge(err: DialError): void {

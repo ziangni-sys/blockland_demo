@@ -7,8 +7,9 @@
  * Page -> host: create a world or load one, connect a client (one MessagePort per connection; the
  * page's own client is `local`, which makes it the host's connection), pause (single player:
  * only while the room is closed), save, open or close the room, shut down.
- * Host -> page: the world is ready, a save finished, status (measured TPS and players), the time
- * the ticks take (for the page's debug overlay), errors, closed.
+ * Host -> page: the world is ready, a save finished, status (measured TPS, players, and each
+ * guest's bytes a second, backlog and round trip), the time the ticks take (for the page's debug
+ * overlay), errors, closed.
  *
  * THE PAGE'S STORAGE. A server Worker that cannot open IndexedDB itself saves into the storage of
  * the page that started it (pagestorage.ts), which outlives the Worker: the page starts a new
@@ -56,8 +57,12 @@ export type HostToPage =
   | { type: 'ready'; meta: WorldMeta; persistent: boolean; reason: string | null }
   /** A save finished; `code` is the storage error code when it failed ('quota', 'newer-version' ...). */
   | { type: 'saved'; ok: boolean; code: string | null }
-  /** Measured ticks per second and players in the world; sent when it changes, at most once a second. */
-  | { type: 'status'; tps: number; players: number }
+  /**
+   * Measured ticks per second, players in the world and every guest's connection; sent when the
+   * TPS or the players change, and every second while guests are in (their numbers move), at most
+   * once a second.
+   */
+  | { type: 'status'; tps: number; players: number; guests: GuestTraffic[] }
   /** Mean and longest milliseconds of the host's clock one tick took since the last report; about once a second while ticks run. */
   | { type: 'tickTime'; meanMs: number; maxMs: number }
   /** A command could not be carried out (`what` = the command, or 'tick' when the simulation threw). */
@@ -66,6 +71,19 @@ export type HostToPage =
   | { type: 'closed' }
   /** A call on the page's storage (see the file comment); answered by a StorageResult with the same id. */
   | { type: 'storage'; id: number; call: StorageCall };
+
+/** One guest's connection as the host page shows it to whoever debugs a room (package 13). */
+export interface GuestTraffic {
+  /** The guest's player (the player table's entity id) and name. */
+  entityId: number;
+  name: string;
+  /** Bytes the server sent it per second since the last status (batches and samples, without headers). */
+  bytesPerSec: number;
+  /** Bytes waiting to go out to it, both channels (the server's estimate from the forwarder's reports). */
+  backlogBytes: number;
+  /** Its round trip as its client measured it, ms (0 until it reported one). */
+  rttMs: number;
+}
 
 /**
  * What the host asks of the page's storage: whether it persists (`open`), and the SaveStorage

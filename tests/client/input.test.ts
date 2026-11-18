@@ -138,8 +138,8 @@ describe('InputState keyboard', () => {
   });
 
   it('knows which keys are game keys', () => {
-    for (const k of ['KeyW', 'Space', 'ShiftLeft', 'F3', 'F5', 'Digit1', 'Escape', 'KeyE', 'KeyF']) expect(isGameKey(k)).toBe(true);
-    for (const k of ['KeyQ', 'Tab', 'F6', 'KeyR']) expect(isGameKey(k)).toBe(false);
+    for (const k of ['KeyW', 'Space', 'ShiftLeft', 'F3', 'F5', 'Tab', 'Digit1', 'Escape', 'KeyE', 'KeyF']) expect(isGameKey(k)).toBe(true);
+    for (const k of ['KeyQ', 'KeyT', 'F6', 'KeyR']) expect(isGameKey(k)).toBe(false);
   });
 
   it('releaseAll lets go of keys, buttons and pending presses (the page releases the buttons the server still holds)', () => {

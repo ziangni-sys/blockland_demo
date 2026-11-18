@@ -212,7 +212,7 @@ export class Gen {
     return [
       { type: 'hello', build: this.str(20), playerKey: this.str(32), name: this.str(24), viewRadius: this.int(0, MAX_VIEW_RADIUS) },
       { type: 'bye' },
-      { type: 'ping', clientMs: this.int(0, 0xffffffff) },
+      { type: 'ping', clientMs: this.int(0, 0xffffffff), rttMs: this.int(0, 60_000) },
       { type: 'moveReport', ...this.moveReport() },
       { type: 'aim', seq: seq(), moveSeq: seq(), use, mine: this.bool() ? (use === null ? null : { ...use }) : this.optTarget() },
       { type: 'use', seq: seq(), moveSeq: seq(), slot: this.int(0, 8), sneak: this.bool(), target: this.optTarget() },

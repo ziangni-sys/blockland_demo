@@ -1,10 +1,10 @@
 /**
  * The loopback network (NETCODE section 2, tests of package 3 in section 16): order and loss per
  * channel, the SCTP retransmission model with head-of-line blocking, the bandwidth queue and
- * backpressure, close, determinism and the real-timer mode.
+ * backpressure, the shared uplink (package 13), close, determinism and the real-timer mode.
  */
 import { describe, expect, it } from 'vitest';
-import { LoopbackNet, createLoopbackPair, type LinkConditions } from '../../src/net/loopback';
+import { LoopbackNet, SharedUplink, createLoopbackPair, type LinkConditions } from '../../src/net/loopback';
 import { DEFAULT_RTO_MS, MAX_RELIABLE_BYTES, MAX_UNRELIABLE_BYTES } from '../../src/net/protocol';
 import { RELIABLE, UNRELIABLE, type Channel, type Transport } from '../../src/net/transport';
 
@@ -235,6 +235,72 @@ describe('bandwidth', () => {
     const { server } = createLoopbackPair(net, PERFECT, link());
     server.send(RELIABLE, new Uint8Array(100_000));
     expect(server.bufferedBytes(RELIABLE)).toBe(0);
+  });
+});
+
+describe('shared uplink', () => {
+  /** Two links (two guests) leaving through one 10 000 B/s uplink without headers, 10 ms latency. */
+  function twoGuests(headerBytes = 0): { net: LoopbackNet; up: SharedUplink; a: { client: Transport; server: Transport }; b: { client: Transport; server: Transport } } {
+    const net = new LoopbackNet();
+    const up = new SharedUplink(net, 10_000, headerBytes);
+    const a = createLoopbackPair(net, PERFECT, link({ latencyMs: 10, shared: up }));
+    const b = createLoopbackPair(net, PERFECT, link({ latencyMs: 10, shared: up, seed: 2 }));
+    return { net, up, a, b };
+  }
+
+  it('one busy link gets the whole uplink; two busy links get half each, each in its own order', () => {
+    const { net, a, b } = twoGuests();
+    const ga = record(net, a.client);
+    const gb = record(net, b.client);
+    a.server.send(RELIABLE, msg(1, 1000)); // alone: leaves at 100 ms
+    net.advanceTo(50);
+    b.server.send(RELIABLE, msg(2, 1000)); // from 50 ms both share: a's last 500 B take 100 ms
+    b.server.send(UNRELIABLE, msg(3, 500));
+    net.advanceTo(1000);
+    expect(ga).toEqual([{ t: 160, channel: RELIABLE, n: 1 }]);
+    // b: 500 B by 150 ms at half the rate, the other 500 alone by 200; then its 500 B unreliable alone by 250.
+    expect(gb).toEqual([
+      { t: 210, channel: RELIABLE, n: 2 },
+      { t: 260, channel: UNRELIABLE, n: 3 },
+    ]);
+  });
+
+  it("bufferedBytes is each link's own payload not yet sent, per channel; headers use bandwidth only", () => {
+    const { net, up, a, b } = twoGuests(80);
+    a.server.send(RELIABLE, msg(1, 1150)); // one packet: 1230 wire bytes
+    b.server.send(RELIABLE, msg(2, 1151)); // two packets: 1311
+    expect(a.server.bufferedBytes(RELIABLE)).toBe(1150);
+    expect(a.server.bufferedBytes(UNRELIABLE)).toBe(0);
+    expect(b.server.bufferedBytes(RELIABLE)).toBe(1151);
+    expect(up.wireBytes).toBe(1230 + 1311);
+    net.advanceTo(123); // a: 615 of 1230 wire bytes sent at half the rate
+    expect(a.server.bufferedBytes(RELIABLE)).toBe(Math.ceil(1150 * 615 / 1230));
+    net.advanceTo(246); // a has left
+    expect(a.server.bufferedBytes(RELIABLE)).toBe(0);
+    expect(b.server.bufferedBytes(RELIABLE)).toBeGreaterThan(0);
+    net.advanceTo(10_000);
+    expect(b.server.bufferedBytes(RELIABLE)).toBe(0);
+  });
+
+  it('a close leaves behind the link\'s messages, not behind the other links\'', () => {
+    const { net, a, b } = twoGuests();
+    let closedAt = -1;
+    a.client.onClose = () => (closedAt = net.now);
+    const gb = record(net, b.client);
+    b.server.send(RELIABLE, msg(1, 2000));
+    a.server.send(RELIABLE, msg(2, 500));
+    a.server.close('bye');
+    net.advanceTo(1000);
+    // a's 500 B at half the rate leave at 100 ms; the close goes then, b alone afterwards.
+    expect(closedAt).toBe(110);
+    expect(gb).toEqual([{ t: 260, channel: RELIABLE, n: 1 }]);
+  });
+
+  it('rejects a shared uplink together with a bandwidth of its own, and invalid uplinks', () => {
+    const net = new LoopbackNet();
+    const up = new SharedUplink(net, 1000);
+    expect(() => createLoopbackPair(net, PERFECT, { ...PERFECT, shared: up, bandwidthBytesPerSec: 100 })).toThrow(RangeError);
+    expect(() => new SharedUplink(net, 0)).toThrow(RangeError);
   });
 });
 

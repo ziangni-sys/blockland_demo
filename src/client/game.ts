@@ -40,22 +40,28 @@
  * another). The player's mode, the time of day, teleport and give (debug helpers) are host
  * commands.
  *
- * ROOMS (package 10, client/room.ts). The host opens its world to guests (openRoom: the page owns
+ * PLAYING TOGETHER (packages 10 and 11; client/lobby.ts has the rules, client/room.ts the
+ * connections). The pause menu's "Play together" screen opens the world to friends (the page owns
  * the guests' WebRTC connections and forwards each to its server Worker; the world no longer
- * pauses while the room is open or guests are in). A guest page joins someone else's room
- * (joinRoom, or the address `?join=<code>&signal=cloud|broadcast|manual`): no server of its own,
- * a NetClient over a WebRtcTransport; "Save & quit" just leaves. Every way a join fails ends in
- * its own message and back at the menu. The single-file build has no network: it says so. Until
- * the lobby (package 11) these are reached through the debug helpers and the address.
+ * pauses while the room is open or guests are in), shows the link and the room code or the manual
+ * invitation codes, the player list with the host's controls, and the diagnostics. A guest page
+ * joins someone else's room from the main menu's "Join a room" or the address
+ * `?join=<code>&signal=cloud|broadcast|manual`: no server of its own, a NetClient over a
+ * WebRtcTransport. The loading screen shows the stages, then every failure with "Try again" and
+ * "Back to the menu", and "Give up" while reconnecting; the guest's pause menu offers "Leave the
+ * room" and never pauses. The player's name is asked once (the name screen, before the main menu
+ * the first time, and before joining through a link), changeable in the settings. Tab held during
+ * play shows the player list. The single-file build has no network: one line says so.
  */
 import { hashString } from '../core/rng';
 import { paintAllTiles } from '../art/tiles';
 import { renderItemIcon } from '../art/icons';
 import type { MeshResponse } from '../mesh/types';
 import type { HostToPage } from '../net/host/control';
+import type { NetStatus } from '../net/client/netclient';
+import { cleanName } from '../net/names';
 import type { HostCommand } from '../net/protocol';
 import { ManualSignaller } from '../net/webrtc/manual';
-import { DialError, newRoomCode } from '../net/webrtc/signal';
 import type { BackendInfo, RenderBackend } from '../render/backend';
 import { createThreeBackend } from '../render/three/index';
 import type { WorldMeta } from '../save/codec';
@@ -80,25 +86,13 @@ import { nextViewMode, type ViewMode } from './camera';
 import { debugLines } from './debug';
 import type { DevBots } from './devbots';
 import { describeError, Faults } from './faults';
-import { DEFAULT_PLAYER_NAME, pageRandom, playerKeyFor, slotFromSearch } from './identity';
+import { pageRandom, playerKeyFor, slotFromSearch } from './identity';
 import { InputState, type InputCommand, type LookSettings } from './input';
 import { InputBinder, type InputHost } from './inputdom';
 import { FrameLoop } from './loop';
+import { Lobby, parseJoinText, type JoinTarget } from './lobby';
 import { checkWorld, listWorlds, makeWorldId, newWorldMeta } from './saves';
-import {
-  dialFailureKey,
-  GuestJoin,
-  joinFromSearch,
-  kickKey,
-  onlineAvailable,
-  pageConnectDeps,
-  pageSignaller,
-  pageTimers,
-  refuseKey,
-  RoomHost,
-  type RoomState,
-  type SignalKind,
-} from './room';
+import { joinFromSearch, kickKey, onlineAvailable, pageConnectDeps, pageSignaller, pageTimers, refuseKey, signalFromSearch, type SignalKind } from './room';
 import { LocalServer, type OpenCommand, type ServerWay } from './server';
 import { WorldSession, type SessionDeps } from './session';
 import { applySettingsPatch, languageFromLocale, SettingsStore, type KeyValueStore } from './settings';
@@ -189,12 +183,8 @@ export class Game implements InputHost {
   session: WorldSession | null = null;
   /** The open world's game server (null while this page is a guest). */
   server: LocalServer | null = null;
-  /** The open world's room for guests (package 10), null until it is opened. */
-  room: RoomHost | null = null;
-  /** The way to the host while this page is a guest in someone else's room (package 10). */
-  guest: GuestJoin | null = null;
-  /** Rooms closed and replaced by another while their guests stay (ended with the world). */
-  private readonly retiredRooms: RoomHost[] = [];
+  /** Playing together: the room, a join, the player list, the name (client/lobby.ts). */
+  readonly lobby: Lobby;
   /** The open world's meta as the server reported it. */
   worldMeta: WorldMeta | null = null;
   /** What the open world's server said about its storage (`ready`). */
@@ -250,8 +240,10 @@ export class Game implements InputHost {
   private fpsFrames = 0;
   private fpsSince = 0;
   private serverTps: number | null = null;
-  /** The room's signalling was lost (its return is announced). */
-  private roomWasLost = false;
+  /** A join waiting for the name screen (the page was opened through an invitation link). */
+  private pendingJoin: JoinTarget | null = null;
+  /** The signalling of room codes typed on this page: the public service, or the same-browser channel (?signal=broadcast). */
+  private readonly service: 'cloud' | 'broadcast';
   /** Dev tooling: the scripted extra players of the current server (debug.bots()), or null. */
   private devBots: { server: LocalServer; bots: Promise<DevBots> } | null = null;
   private readonly traffic = { at: -Infinity, in: 0, out: 0, inRate: 0, outRate: 0 };
@@ -267,7 +259,8 @@ export class Game implements InputHost {
     const local = safeLocalStorage(env.win);
     this.settingsStore = new SettingsStore(local);
     this.settings = this.settingsStore.load({ ...DEFAULT_SETTINGS, language: languageFromLocale(env.win.navigator?.language) });
-    this.playerKey = playerKeyFor(local, slotFromSearch(search(env.win)), pageRandom(env.win));
+    const slot = slotFromSearch(search(env.win));
+    this.playerKey = playerKeyFor(local, slot, pageRandom(env.win));
     this.faults = new Faults(
       (rec) => this.toast(clientText(this.settings.language, 'fault', { what: rec.what, msg: rec.message }), 'error'),
       (msg, err) => console.error(msg, err),
@@ -275,6 +268,25 @@ export class Game implements InputHost {
     // Adding #webgl2 to the page address forces the WebGL2 backend (an escape hatch for
     // machines where the WebGPU path misbehaves).
     this.backend = createThreeBackend({ forceWebGL: wantsWebGL2(env.win) });
+    const win = env.win;
+    const service = signalFromSearch(search(win)) === 'broadcast' ? 'broadcast' : 'cloud';
+    this.service = service;
+    this.lobby = new Lobby({
+      online: onlineAvailable(),
+      lang: () => this.settings.language,
+      signaller: (kind) => pageSignaller(kind, win, pageRandom(win)),
+      connectDeps: (iceServers) => pageConnectDeps(win, iceServers),
+      intervals: pageTimers(win),
+      random: pageRandom(win),
+      now: () => win.performance.now(),
+      baseUrl: pageBaseUrl(win),
+      service,
+      store: local,
+      slot,
+      playerKey: this.playerKey,
+      toast: (text, kind) => this.toast(text, kind),
+      log: (level, text) => console[level](text),
+    });
     this.actions = this.makeActions();
     this.ui = createUi(env.uiRoot, this.actions, {
       iconProvider: (item, size) => {
@@ -284,6 +296,8 @@ export class Game implements InputHost {
           return null;
         }
       },
+      nameOk: (text) => cleanName(text) !== null,
+      canJoin: (text) => parseJoinText(text, service) !== null,
     });
     // Sandboxed hosts without allow-forms never deliver form submit events (see uishim.ts).
     installFormSubmitShim(env.uiRoot);
@@ -311,9 +325,16 @@ export class Game implements InputHost {
     }
     this.heartbeat = this.win.setInterval(() => this.session?.heartbeat(this.win.performance.now()), HEARTBEAT_MS);
     this.loop.start();
-    // A link to someone's room (package 10): join it at once.
+    // A link to someone's room: join it at once (after the name, the first time).
     const join = joinFromSearch(search(this.win));
-    if (join !== null) void this.joinRoom(join.signal, join.code, { fromAddress: true });
+    const target: JoinTarget | null = join === null ? null : join.code.replace(/\s+/g, '').startsWith('BL1I.') ? { kind: 'manual', code: join.code } : { kind: join.signal, code: join.code };
+    if (this.lobby.nameChosen || !onlineAvailable()) {
+      if (target !== null) void this.joinRoom(target.kind, target.code);
+    } else {
+      // The name is asked once, before anything else (a build that cannot go online never needs it).
+      this.pendingJoin = target;
+      this.setScreen('name');
+    }
   }
 
   // ================================================================== InputHost
@@ -607,7 +628,7 @@ export class Game implements InputHost {
     const server = this.server;
     if (!s || !server || this.worldPaused === paused) return;
     // A world open to guests, or with guests in, does not pause (DESIGN: 联机的世界不暂停).
-    if (paused && [this.room, ...this.retiredRooms].some((r) => r !== null && (r.state !== 'closed' || r.guests > 0))) return;
+    if (paused && this.lobby.blocksPause) return;
     this.worldPaused = paused;
     if (paused) {
       s.setPaused(true);
@@ -632,6 +653,9 @@ export class Game implements InputHost {
         break;
       case 'settings':
         this.actions.closeSettings();
+        break;
+      case 'room':
+        this.setScreen(this.inWorld() ? 'pause' : 'mainMenu');
         break;
       default:
         break;
@@ -699,8 +723,75 @@ export class Game implements InputHost {
         if (this.screen === 'inventory') this.closeInventory(true);
         else if (this.screen === 'settings') this.actions.closeSettings();
         else if (this.screen === 'pause') this.resume();
+        else if (this.screen === 'room') this.setScreen(this.inWorld() ? 'pause' : 'mainMenu');
+        else if (this.screen === 'join') this.setScreen('mainMenu');
       },
+      setPlayerName: (name) => this.setPlayerName(name),
+      openRoomScreen: () => {
+        if (this.screen === 'pause' && this.inWorld() && this.lobby.role !== null) this.setScreen('room');
+      },
+      openJoinScreen: () => {
+        if (this.screen === 'mainMenu' && onlineAvailable()) this.setScreen('join');
+      },
+      openRoom: (way) => void this.openRoom(way),
+      closeRoom: () => this.closeRoom(),
+      makeInvitation: () => void this.lobby.makeInvitation(),
+      acceptAnswer: (code) => void this.lobby.acceptAnswer(code),
+      setPlayerMode: (entityId, mode) => void this.lobby.setPlayerMode(entityId, mode === 'survival' ? 'survival' : 'creative'),
+      kickPlayer: (entityId) => void this.lobby.kick(entityId),
+      setWorldRules: (mode) => void this.lobby.setWorldRules(mode === 'survival' ? 'survival' : 'creative'),
+      join: (text) => {
+        const t = parseJoinText(text, this.service);
+        if (t === null || this.screen !== 'join') return;
+        if (t.kind === 'manual' && this.lobby.invitationUsed(t.code)) this.toast(clientText(this.settings.language, 'join.invitationUsed'), 'warn');
+        else void this.joinRoom(t.kind, t.code);
+      },
+      retryJoin: () => {
+        const t = this.lobby.joinTarget;
+        if (t === null || this.session !== null || this.busy) return;
+        this.lobby.clearJoin();
+        void this.joinRoom(t.kind, t.code);
+      },
+      abandonJoin: () => {
+        if (this.lobby.role !== 'guest') return;
+        const j = this.lobby.view().join;
+        const used = j !== null && j.signal === 'manual' && j.answer !== null && !j.wasIn;
+        this.leaveWorld();
+        // Given up before getting in with an answered invitation: say that another one is needed.
+        if (used) this.toast(clientText(this.settings.language, 'join.invitationUsed'), 'info');
+      },
+      leaveRoom: () => {
+        if (this.session !== null && this.lobby.role === 'guest' && !this.busy) this.leaveWorld();
+      },
+      copyDiagnostics: () => void this.copyDiagnostics(),
     };
+  }
+
+  /** The name screen's Continue and the settings field. */
+  private setPlayerName(name: string): void {
+    if (!this.lobby.setPlayerName(name)) return;
+    this.renderDirty = true;
+    if (this.screen !== 'name') return;
+    const join = this.pendingJoin;
+    this.pendingJoin = null;
+    this.setScreen('mainMenu');
+    if (join !== null) void this.joinRoom(join.kind, join.code);
+  }
+
+  /** Measure the connection diagnostics (about a second) for the room screen, which shows and copies them. */
+  private async copyDiagnostics(): Promise<string> {
+    return this.lobby.diagnostics(() => {
+      const s = this.session;
+      const clock = s?.net.clock ?? null;
+      return {
+        rttMs: clock?.rtt ?? null,
+        loss: clock?.lossRate ?? null,
+        delayTicks: clock?.D ?? null,
+        serverTps: s?.replica?.state.tps ?? this.serverTps,
+        netStatus: s?.net.status ?? null,
+        traffic: s ? { in: s.traffic.in, out: s.traffic.out } : null,
+      };
+    });
   }
 
   changeSettings(patch: Partial<Settings>): void {
@@ -715,14 +806,15 @@ export class Game implements InputHost {
   }
 
   /**
-   * The pause menu's mode switch: this player's mode and the world's rules with it (host
-   * commands, section 10), as single player always did.
+   * The pause menu's mode switch: this player's mode (host commands, section 10), and in single
+   * play the world's rules with it. Online (a room open or guests in) the world's rules are set
+   * apart on the room screen (DESIGN: 联机时由房主另外设置).
    */
   private setMode(mode: GameMode): void {
     const s = this.session;
     if (!s || (mode !== 'creative' && mode !== 'survival')) return;
     try {
-      s.requestMode(mode);
+      s.requestMode(mode, !this.lobby.blocksPause);
     } catch (e) {
       this.faults.report('set mode', e);
     }
@@ -863,6 +955,7 @@ export class Game implements InputHost {
     }
     if (server.failures.length > 0) console.warn(`[blocklands] game server: ${server.failures.join('; ')}; running as ${server.mode}`);
     this.server = server;
+    this.lobby.beginHosting(server);
     this.worldMeta = first.meta;
     this.worldPersistent = first.persistent;
     if (!first.persistent) {
@@ -891,26 +984,49 @@ export class Game implements InputHost {
       onError: (what, err) => this.faults.report(what, err),
       openTransport,
       playerKey: this.playerKey,
-      name: DEFAULT_PLAYER_NAME,
+      name: this.lobby.playerName,
       viewRadius: loadRadiusFor(this.settings.renderDistance),
       onToast: (message, kind) => this.toast(formatMessage(this.settings.language, message), kind),
       onStatus: (status) => this.onNetStatus(session, status),
+      onBatch: (batch) => {
+        if (session === this.session) this.lobby.onBatch(batch);
+      },
     });
     this.session = session;
+    this.lobby.attach({
+      get welcome() {
+        return session.net.welcome;
+      },
+      get players() {
+        return session.replica?.state.players ?? null;
+      },
+      get rules() {
+        return session.replica?.state.rules ?? null;
+      },
+      hostCommand: (c) => session.hostCommand(c),
+    });
     this.input.releaseAll();
     this.input.setLook(0, 0);
     this.envTime = 0;
     this.worldPaused = false;
     this.binder.exitLock();
-    this.showLoading(this.guest !== null ? 'join.connecting' : 'loading.connecting', 0.05);
+    this.showLoading(this.lobby.role === 'guest' ? 'join.connecting' : 'loading.connecting', 0.05);
     session.start();
   }
 
-  /** The connection ended for good (kicked, refused, broken): the world closes (saved first when possible). */
-  private onNetStatus(s: WorldSession, status: string): void {
+  /**
+   * The connection's status changed. A guest's: the lobby decides (stages, reconnecting, the end
+   * of the connection, which keeps its message on the loading screen). The host's own connection
+   * ends only through a bug: the world closes (saved first when possible).
+   */
+  private onNetStatus(s: WorldSession, status: NetStatus): void {
     if (s !== this.session || this.quitting) return;
-    if (status === 'joining' || status === 'ready') this.guest?.connected();
-    else if (status === 'reconnecting') this.guest?.linkLost();
+    const guest = this.lobby.role === 'guest';
+    if (this.lobby.netStatus(status, s.net)) {
+      this.joinEnded();
+      return;
+    }
+    if (guest) return;
     const lang = this.settings.language;
     let msg: string | null = null;
     const kick = s.net.kick;
@@ -949,7 +1065,7 @@ export class Game implements InputHost {
     // No new guests for a world that no longer runs: they hear at once that there is no room
     // instead of waiting for a Welcome that never comes. The guests in stay until the host quits
     // (Kick(shutdown) when the server can still close, their links closed with the room otherwise).
-    this.room?.close();
+    this.lobby.stopNewGuests();
     if (this.screen === 'inventory') this.closeInventory(false);
     // Settings opened from the pause menu return to it.
     if (this.screen !== 'settings') {
@@ -960,7 +1076,9 @@ export class Game implements InputHost {
   }
 
   private backToMenu(): void {
+    this.binder.exitLock();
     this.loading = null;
+    this.lobby.clearJoin();
     this.setScreen('mainMenu');
     void this.refreshWorlds();
   }
@@ -976,8 +1094,6 @@ export class Game implements InputHost {
   async saveAndQuit(): Promise<void> {
     const s = this.session;
     const server = this.server;
-    // A guest has nothing to save: it leaves (Bye), the host keeps its record.
-    if (s && !server && this.guest && !this.busy) return this.leaveWorld();
     if (!s || !server || this.busy) return;
     this.busy = true;
     const from = this.screen;
@@ -1020,7 +1136,20 @@ export class Game implements InputHost {
     this.backToMenu();
   }
 
-  private endSession(): void {
+  /**
+   * A guest's connection ended for good (a failed join, Kick, Refuse, a lost link given up): the
+   * session goes, the loading screen stays with the message, "Try again" and "Back to the menu".
+   */
+  private joinEnded(): void {
+    // The guest may be playing with the pointer locked: the buttons of the message must be clickable.
+    this.binder.exitLock();
+    this.endSession(true);
+    this.loading = { text: '', progress: 0 };
+    this.setScreen('loading');
+  }
+
+  /** `keepJoin`: a failed join's message stays for the loading screen. */
+  private endSession(keepJoin = false): void {
     void this.devBots?.bots.then((b) => b.dispose());
     this.devBots = null;
     const s = this.session;
@@ -1028,11 +1157,7 @@ export class Game implements InputHost {
       this.session = null;
       s.dispose();
     }
-    for (const room of [this.room, ...this.retiredRooms]) room?.end();
-    this.room = null;
-    this.retiredRooms.length = 0;
-    this.guest?.end();
-    this.guest = null;
+    this.lobby.endWorld(keepJoin);
     this.server?.terminate();
     this.server = null;
     this.worldMeta = null;
@@ -1056,97 +1181,23 @@ export class Game implements InputHost {
     return answer.then((m) => m !== null && m.type === 'saved' && m.ok);
   }
 
-  // ================================================================== rooms (package 10)
+  // ================================================================== playing together (packages 10, 11)
 
   /**
-   * Open the world to guests through the signalling `kind`: listens (the room code: `opts.code`,
-   * or a new random one), then the server's openRoom. Resolves with the code, or the failure (its
-   * message is shown).
+   * Open the world to friends: through the page's signalling service ('service': the public one,
+   * or `signal` for tests) or for invitation codes ('manual'). Resolves with the room code (null
+   * for invitation codes), or the failure (its message is shown).
    */
-  async openRoom(kind: SignalKind, opts: { code?: string; iceServers?: readonly RTCIceServer[] } = {}): Promise<{ ok: boolean; code: string | null; error: string | null }> {
-    const lang = this.settings.language;
-    if (!onlineAvailable()) {
-      this.toast(clientText(lang, 'room.offline'), 'error');
-      return { ok: false, code: null, error: 'offline' };
-    }
-    const server = this.server;
-    if (server === null || this.session === null || this.guest !== null) {
-      this.toast(clientText(lang, 'room.noWorld'), 'error');
-      return { ok: false, code: null, error: 'no_world' };
-    }
-    if (this.room !== null && this.room.state !== 'closed') return { ok: true, code: this.room.code, error: null };
-    // A room closed before keeps its guests: it is retired (ended with the world), not ended now.
-    if (this.room !== null) this.retiredRooms.push(this.room);
-    this.room = null;
-    const random = pageRandom(this.win);
-    const code = opts.code ?? newRoomCode(random);
+  async openRoom(way: 'service' | 'manual', opts: { code?: string; signal?: SignalKind; iceServers?: readonly RTCIceServer[] } = {}): Promise<{ ok: boolean; code: string | null; error: string | null }> {
+    if (this.session === null || this.server === null) return this.lobby.openRoom(way, opts);
     // The room's world runs: a page paused (pause menu) resumes, client after server.
     this.pauseWorld(false);
-    const room: RoomHost = new RoomHost({
-      server,
-      signaller: pageSignaller(kind, this.win, random),
-      code,
-      deps: pageConnectDeps(this.win, opts.iceServers),
-      intervals: pageTimers(this.win),
-      onState: (st) => this.onRoomState(room, st),
-      onGuestFailed: (e) => console.warn(`[blocklands] a guest could not connect (${e.code}): ${e.message}`),
-    });
-    this.room = room;
-    try {
-      await room.open();
-    } catch (e) {
-      if (this.room === room) this.room = null;
-      const failure = e instanceof DialError ? e.code : describeError(e);
-      const msg = e instanceof DialError ? clientText(lang, dialFailureKey(e.code)) : describeError(e);
-      console.error(`[blocklands] could not open the room: ${failure}`);
-      this.toast(clientText(lang, 'room.failed', { msg }), 'error');
-      return { ok: false, code: null, error: failure };
-    }
-    if (this.room !== room || room.state === 'closed') return { ok: false, code: null, error: 'closed' };
-    console.info(`[blocklands] room open (${kind}): ${code}`);
-    this.toast(kind === 'manual' ? clientText(lang, 'room.openManual') : clientText(lang, 'room.open', { code }), 'info');
-    return { ok: true, code, error: null };
+    return this.lobby.openRoom(way, opts);
   }
 
   /** Close the room to new guests (the guests already in stay). */
   closeRoom(): void {
-    const room = this.room;
-    if (room === null || room.state === 'closed') return;
-    room.close();
-    this.toast(clientText(this.settings.language, 'room.closed'), 'info');
-  }
-
-  /** Manual signalling: a new invitation code for one guest (null when the room is not open with manual signalling). */
-  async inviteManual(): Promise<string | null> {
-    const signaller = this.room?.signaller;
-    if (!(signaller instanceof ManualSignaller) || this.room?.state === 'closed') return null;
-    try {
-      return await signaller.invite();
-    } catch (e) {
-      console.error('[blocklands] the invitation could not be made', e);
-      return null;
-    }
-  }
-
-  /** Manual signalling: the guest's answer code; false (and a message) when it does not fit an open invitation. */
-  acceptManual(answer: string): boolean {
-    const signaller = this.room?.signaller;
-    if (!(signaller instanceof ManualSignaller)) return false;
-    try {
-      signaller.accept(answer);
-      return true;
-    } catch (e) {
-      this.toast(clientText(this.settings.language, e instanceof DialError ? dialFailureKey(e.code) : 'join.badCode'), 'error');
-      return false;
-    }
-  }
-
-  private onRoomState(room: RoomHost, state: RoomState): void {
-    if (room !== this.room) return;
-    const lang = this.settings.language;
-    if (state === 'lost') this.toast(clientText(lang, 'room.lost'), 'warn');
-    else if (state === 'open' && this.roomWasLost) this.toast(clientText(lang, 'room.back'), 'info');
-    this.roomWasLost = state === 'lost';
+    this.lobby.closeRoom();
   }
 
   /**
@@ -1154,62 +1205,55 @@ export class Game implements InputHost {
    * the code): the page plays it as a guest, with no server of its own. False when it could not
    * start (another world is open, this build cannot go online, no graphics).
    */
-  async joinRoom(kind: SignalKind, code: string, opts: { iceServers?: readonly RTCIceServer[]; fromAddress?: boolean } = {}): Promise<boolean> {
+  async joinRoom(kind: SignalKind, code: string, opts: { iceServers?: readonly RTCIceServer[] } = {}): Promise<boolean> {
     const lang = this.settings.language;
-    if (this.busy || this.session) return false;
+    // Not `busy`: a join given up while the graphics start (the loading screen's "Back to the
+    // menu") must not hold the next one back. The lobby's current join is the guard instead.
+    if (this.busy || this.session || this.lobby.currentJoin !== null) return false;
     if (!onlineAvailable()) {
       this.toast(clientText(lang, 'room.offline'), 'error');
       return false;
     }
-    this.busy = true;
+    this.forgetJoinLink();
+    const join = this.lobby.beginJoin({ kind, code }, () => this.joinEnded(), opts);
+    const mine = (): boolean => this.lobby.currentJoin === join;
     try {
-      this.showLoading('loading.graphics', 0);
-      if (!(await this.graphicsReady())) {
+      this.loading = { text: clientText(lang, 'loading.graphics'), progress: 0 };
+      this.setScreen('loading');
+      const ready = await this.graphicsReady();
+      // Given up (or replaced) meanwhile: that join is not this call's any more.
+      if (!mine()) return false;
+      if (!ready) {
+        this.lobby.clearJoin();
         this.backToMenu();
         return false;
       }
-      const signaller = pageSignaller(kind, this.win, pageRandom(this.win));
-      // From the address there is no lobby yet (package 11): the answer code goes in a box the player can copy.
-      if (signaller instanceof ManualSignaller && opts.fromAddress) signaller.onAnswer = (answer) => this.showAnswerCode(answer);
-      const join: GuestJoin = new GuestJoin({
-        signaller,
-        code,
-        deps: pageConnectDeps(this.win, opts.iceServers),
-        now: () => this.win.performance.now(),
-        onFinal: (key, detail) => this.joinFailed(join, key, detail),
-      });
-      this.guest = join;
       this.startSession(join.openTransport);
       return true;
     } catch (e) {
       this.faults.report('join room', e);
-      this.guest = null;
-      this.backToMenu();
+      if (mine()) this.backToMenu();
       return false;
-    } finally {
-      this.busy = false;
     }
   }
 
-  /** A join failed for good: its message, and back to the menu. */
-  private joinFailed(join: GuestJoin, key: ClientStringKey, detail: string): void {
-    if (this.guest !== join) return;
-    const msg = clientText(this.settings.language, key);
-    console.error(`[blocklands] ${msg} (${detail})`);
-    this.toast(msg, 'error');
-    this.leaveWorld();
-  }
-
-  private showAnswerCode(answer: string): void {
-    const text = clientText(this.settings.language, 'join.answer');
-    console.info(`[blocklands] answer code: ${answer}`);
-    this.win.setTimeout(() => {
-      try {
-        this.win.prompt(text, answer);
-      } catch {
-        // no dialogs in this page (a sandbox): the console has it
-      }
-    }, 0);
+  /**
+   * Drop ?join= from the page address once a join starts: a reload after the join ended (left,
+   * removed, the host gone) must open the menu, not join again or report a room that is gone.
+   * ?signal= and ?slot= stay (they say how this page works, not where it goes).
+   */
+  private forgetJoinLink(): void {
+    try {
+      const loc = this.win.location;
+      const history = this.win.history;
+      if (!loc || !history || typeof history.replaceState !== 'function') return;
+      const url = new URL(loc.href);
+      if (!url.searchParams.has('join')) return;
+      url.searchParams.delete('join');
+      history.replaceState(history.state, '', url.toString());
+    } catch {
+      // A sandboxed page may refuse: the link stays, nothing else changes.
+    }
   }
 
   // ================================================================== frame
@@ -1306,15 +1350,32 @@ export class Game implements InputHost {
   private loadingFrame(s: WorldSession, now: number, dt: number, shown: boolean): boolean {
     const prog = s.loadingProgress();
     const lang = this.settings.language;
+    const join = this.lobby.view().join;
+    // A guest still on its way to the host: what that stage is doing.
+    const stage = join !== null && s.net.status === 'connecting' && (join.stage === 'service' || join.stage === 'host') ? join.stage : null;
+    const stageKey: ClientStringKey | null =
+      stage === 'service'
+        ? join!.signal === 'cloud'
+          ? 'join.detailCloud'
+          : join!.signal === 'broadcast'
+            ? 'join.detailBroadcast'
+            : 'join.detailManual'
+        : stage === 'host'
+          ? join!.answer !== null
+            ? 'join.detailAnswer'
+            : 'join.detailHost'
+          : null;
     const text =
-      prog.phase === 'connecting'
-        ? clientText(lang, s.net.status === 'reconnecting' ? 'loading.reconnecting' : this.guest !== null ? 'join.connecting' : 'loading.connecting')
+      stageKey !== null
+        ? clientText(lang, stageKey)
+        : prog.phase === 'connecting'
+        ? clientText(lang, s.net.status === 'reconnecting' ? 'loading.reconnecting' : join !== null ? 'join.connecting' : 'loading.connecting')
         : prog.phase === 'terrain'
           ? clientText(lang, 'loading.terrain', { done: prog.chunksLoaded, total: prog.chunksNeeded })
           : prog.phase === 'meshing'
             ? clientText(lang, 'loading.meshing', { done: prog.sectionsReady, total: prog.sectionsNeeded })
             : clientText(lang, 'loading.finishing');
-    this.loading = { text, progress: Math.max(0.05, prog.progress) };
+    this.loading = { text, progress: stage === 'service' ? 0.02 : stage === 'host' ? 0.04 : Math.max(0.05, prog.progress) };
     if (this.screen !== 'loading') {
       // A far respawn or teleport reloads: the loading screen covers it (the body is frozen meanwhile).
       if (this.screen === 'inventory') this.closeInventory(false);
@@ -1413,6 +1474,8 @@ export class Game implements InputHost {
         dragLook: this.binder.dragLook,
         quitUnsaved: this.quitUnsaved,
         worldStopped: this.worldStopped,
+        online: this.lobby.view(),
+        playerList: this.screen === 'none' && inWorld && this.input.isHeld('Tab'),
         renderer: this.backendInfo ? (this.backendInfo.api === 'webgpu' ? 'WebGPU' : 'WebGL2') : this.backendError ? '—' : '…',
         version: this.version,
       });
@@ -1500,6 +1563,8 @@ export class Game implements InputHost {
     /** Summary of the running state (used by the browser scripts). */
     state: (): Record<string, unknown> => {
       const s = this.session;
+      const room = this.lobby.currentRoom;
+      const guest = this.lobby.currentJoin;
       const r = s?.replica ?? null;
       const own = s?.own ?? null;
       const shownFeet = s?.shown.feet;
@@ -1562,31 +1627,36 @@ export class Game implements InputHost {
         isHost: s?.net.welcome?.isHost ?? null,
         roomOpen: r ? r.state.roomOpen : null,
         players: r ? r.state.players.size : 0,
-        room: this.room ? { code: this.room.code, signal: this.room.signaller.kind, state: this.room.state, guests: this.room.guests, connections: this.room.connections } : null,
-        join: this.guest
+        room: room ? { code: room.code, signal: room.signaller.kind, state: room.state, guests: room.guests, connections: room.connections } : null,
+        join: guest
           ? {
-              signal: this.guest.signaller.kind,
-              code: this.guest.code,
-              attempts: this.guest.attempts,
-              failure: this.guest.failure?.code ?? null,
-              answer: this.guest.signaller instanceof ManualSignaller ? this.guest.signaller.answer : null,
+              signal: guest.signaller.kind,
+              code: guest.code,
+              attempts: guest.attempts,
+              stage: this.lobby.view().join?.stage ?? null,
+              failure: guest.failure?.code ?? null,
+              answer: guest.signaller instanceof ManualSignaller ? guest.signaller.answer : null,
             }
           : null,
-        online: onlineAvailable(),
+        online: this.lobby.view(),
+        onlineAvailable: onlineAvailable(),
       };
     },
     /**
-     * Open the world to guests (package 10; the lobby comes with package 11): `signal` 'cloud'
-     * (default), 'broadcast' or 'manual'; `code` a room code of your choice; `iceServers` instead of
-     * the public STUN servers (an empty list for loopback tests).
+     * Open the world to guests as the room screen does, through `signal` 'cloud' (default),
+     * 'broadcast' or 'manual'; `code` a room code of your choice; `iceServers` instead of the
+     * public STUN servers (an empty list for loopback tests).
      */
-    openRoom: (signal: SignalKind = 'cloud', opts: { code?: string; iceServers?: RTCIceServer[] } = {}) => this.openRoom(signal, opts),
+    openRoom: (signal: SignalKind = 'cloud', opts: { code?: string; iceServers?: RTCIceServer[] } = {}) =>
+      this.openRoom(signal === 'manual' ? 'manual' : 'service', { ...opts, signal }),
     /** Close the room to new guests. */
     closeRoom: (): void => this.closeRoom(),
     /** Manual signalling: a new invitation code (resolves when it is ready). */
-    invite: (): Promise<string | null> => this.inviteManual(),
+    invite: (): Promise<string | null> => this.lobby.makeInvitation(),
     /** Manual signalling: paste a guest's answer code. */
-    accept: (answer: string): boolean => this.acceptManual(answer),
+    accept: (answer: string): boolean => this.lobby.acceptAnswer(answer),
+    /** The connection diagnostics text, as "Copy diagnostics" makes it (about a second). */
+    diagnostics: (): Promise<string> => this.copyDiagnostics(),
     /**
      * FNV-1a hashes of the replica's columns within `radius` columns of the player, and the cell
      * count of every structure: two pages in one room compare theirs (scripts/e2e-room.mjs).
@@ -1709,6 +1779,16 @@ function countItem(s: WorldSession, item: number): number {
  */
 export function loadRadiusFor(renderDistance: number): number {
   return renderDistance + 1;
+}
+
+/** The page's address without query or fragment: invitation links add ?join=<code> to it. */
+function pageBaseUrl(win: Window): string {
+  try {
+    const l = win.location;
+    return `${l.origin}${l.pathname}`;
+  } catch {
+    return '';
+  }
 }
 
 /** True when the page address asks for the WebGL2 backend (#webgl2). */

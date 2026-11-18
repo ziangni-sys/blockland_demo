@@ -73,6 +73,10 @@ export const UI_CSS = String.raw`
   --astern: #e9876c;
   --astern-08: rgba(233, 135, 108, 0.08);
   --astern-35: rgba(233, 135, 108, 0.35);
+  --live: #6fd39a;
+  --live-glow: rgba(111, 211, 154, 0.45);
+  --live-wash: rgba(111, 211, 154, 0.1);
+  --live-edge: rgba(111, 211, 154, 0.4);
   --info: #ebc77a;
   --warn: #f2b34e;
   --error: #f06a5a;
@@ -797,6 +801,123 @@ ${twin('bl-hit', HIT)}
 .bl-loading-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 13px; color: var(--canvas-300); }
 .bl-loading-pct { font: 600 13px/1 var(--font-mono); color: var(--canvas-50); }
 
+/* ------------------------------------------------------------------ joining (the loading screen) */
+.bl-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.bl-step {
+  display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--canvas-700);
+  transition: color 0.15s ease;
+}
+.bl-step::before {
+  content: ""; flex: none; width: 16px; height: 16px; border-radius: 50%;
+  border: 1.5px solid var(--line); background: transparent; box-sizing: border-box;
+}
+.bl-step[data-state="done"] { color: var(--canvas-300); }
+.bl-step[data-state="done"]::before { border-color: var(--brass-400); background: radial-gradient(circle, var(--brass-300) 0 3px, transparent 3.5px); }
+.bl-step[data-state="now"] { color: var(--canvas-50); font-weight: 600; }
+.bl-step[data-state="now"]::before { border-color: var(--brass-200); box-shadow: 0 0 0 3px var(--brass-wash-18); animation: bl-step-pulse 1.4s ease-in-out infinite; }
+@keyframes bl-step-pulse { 50% { box-shadow: 0 0 0 6px var(--brass-wash-30); } }
+.bl-loading-answer { display: flex; flex-direction: column; gap: 8px; }
+.bl-loading-fail { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-radius: 12px; border: 1px solid var(--danger-edge); background: var(--danger-row); }
+.bl-loading-fail-title { font: 600 24px/1.2 var(--font-display); color: var(--canvas-50); letter-spacing: 0.03em; }
+.bl-loading-fail-text { font-size: 15px; color: var(--canvas-100); overflow-wrap: anywhere; }
+.bl-loading-fail .bl-actions { justify-content: flex-start; }
+.bl-loading > .bl-loading-inner > .bl-btn { align-self: center; }
+
+/* ------------------------------------------------------------------ playing together */
+.bl-mono { font-family: var(--font-mono); }
+.bl-copy { display: flex; gap: 8px; align-items: stretch; }
+.bl-copy .bl-input { flex: 1; min-width: 0; font-size: 14px; }
+.bl-copy--multi { align-items: flex-start; }
+.bl-copy-text { resize: none; font-size: 12px; line-height: 1.35; word-break: break-all; }
+.bl-copy--code .bl-input { font-size: 22px; font-weight: 700; letter-spacing: 0.22em; color: var(--brass-200); text-align: center; }
+.bl-copy--diag { flex-direction: column; align-items: stretch; }
+.bl-copy--diag .bl-copy-btn { align-self: flex-end; }
+.bl-copy--diag .bl-copy-text { white-space: pre; word-break: normal; overflow-x: auto; min-height: 14.2em; font-size: 12px; }
+.bl-copy-btn { flex: none; min-height: 40px; }
+.bl-copy-btn.is-done { color: var(--live); border-color: var(--live-edge); }
+.bl-btn--sm { min-height: 32px; padding: 4px 12px; font-size: 13px; }
+.bl-seg-sm button { min-height: 28px; min-width: 64px; padding: 3px 10px; font-size: 12.5px; }
+.bl-badge--host { color: var(--brass-300); }
+.bl-badge--you { color: var(--canvas-300); }
+.bl-badge--live { color: var(--live); margin-left: auto; }
+
+.bl-room-panel, .bl-join-panel, .bl-name-panel { display: flex; flex-direction: column; gap: 16px; }
+.bl-room-panel { width: min(980px, 100%); padding: 24px 26px; }
+.bl-join-panel { width: min(560px, 100%); padding: 24px 26px; }
+.bl-name-panel { width: min(460px, 100%); padding: 24px 26px; }
+.bl-room-panel .bl-title-lg, .bl-join-panel .bl-title-lg, .bl-name-panel .bl-title-lg { margin-bottom: 0; }
+.bl-room-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 26px; align-items: start; }
+.bl-room-grid > .bl-room-sec:only-of-type, .bl-room-grid > [hidden] + .bl-room-sec { grid-column: 1 / -1; }
+.bl-room-sec { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.bl-room-players { padding-left: 26px; border-left: 1px solid var(--line-faint); }
+.bl-room-grid > [hidden] + .bl-room-players { padding-left: 0; border-left: 0; }
+.bl-room-players-title { display: flex; align-items: center; gap: 8px; }
+.bl-room-players-title svg { width: 16px; height: 16px; }
+.bl-room-players-title svg * { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.bl-room-players-title .bl-count { margin-left: auto; font: 500 12px/1 var(--font-mono); letter-spacing: 0; color: var(--canvas-500); }
+.bl-room-status {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px;
+  background: var(--row-bg); border: 1px solid var(--line-faint); font-size: 14px; color: var(--canvas-100);
+}
+.bl-room-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--canvas-700); }
+.bl-room-status[data-status="open"] { border-color: var(--live-edge); background: var(--live-wash); }
+.bl-room-status[data-status="open"] .bl-room-dot { background: var(--live); box-shadow: 0 0 0 3px var(--live-wash), 0 0 10px var(--live-glow); }
+.bl-room-status[data-status="opening"] .bl-room-dot { background: var(--brass-300); animation: bl-step-pulse 1.4s ease-in-out infinite; }
+.bl-room-status[data-status="lost"] { border-color: var(--danger-edge); }
+.bl-room-status[data-status="lost"] .bl-room-dot { background: var(--warn); }
+.bl-room-box { display: flex; flex-direction: column; gap: 8px; }
+.bl-room-box .bl-form-label { margin-top: 4px; font-size: 13px; color: var(--canvas-300); letter-spacing: 0.04em; }
+.bl-room-box .bl-actions { justify-content: flex-start; }
+.bl-room-hint { font-size: 12.5px; color: var(--canvas-500); }
+.bl-room-error { font-size: 13px; color: var(--danger); }
+.bl-room-closebox { padding-top: 10px; border-top: 1px solid var(--line-faint); }
+.bl-room-rules { padding-top: 10px; border-top: 1px solid var(--line-faint); }
+.bl-room-rules-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.bl-player-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.bl-player {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; min-height: 48px; padding: 8px 10px 8px 14px; border-radius: 11px;
+  background: var(--row-bg); border: 1px solid var(--line-faint);
+}
+.bl-player-name { min-width: 0; max-width: 14em; font-size: 15px; font-weight: 650; color: var(--canvas-50); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bl-player-badges { display: inline-flex; gap: 6px; }
+.bl-player-controls { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.bl-player--confirm { border-color: var(--danger-edge-strong); background: var(--danger-row); }
+.bl-player-confirm { flex: 1 1 12em; min-width: 0; font-size: 14px; color: var(--canvas-50); overflow-wrap: anywhere; }
+.bl-room-diag { display: flex; flex-direction: column; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line-faint); }
+.bl-room-diag-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.bl-room-diag-head .bl-subtitle { margin: 0; }
+.bl-join-input { resize: vertical; min-height: 5.2em; font: 500 14px/1.35 var(--font-mono); word-break: break-all; }
+.bl-join-as { font-size: 13px; color: var(--canvas-300); }
+.bl-name-text { font-size: 14px; color: var(--canvas-300); }
+.bl-name-form { display: flex; flex-direction: column; gap: 8px; }
+.bl-name-form .bl-form-label { font-size: 13px; color: var(--canvas-300); letter-spacing: 0.04em; }
+.bl-name-input { font-size: 17px; }
+.bl-name-form .bl-actions { margin-top: 6px; }
+.bl-pause-together.has-badge { justify-content: flex-start; }
+.bl-pause-together .bl-badge { margin-left: auto; }
+.bl-pause-running { margin: -6px 0 6px; color: var(--live); letter-spacing: 0.08em; }
+.bl-menu-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.bl-menu-offline { font-size: 13px; color: var(--canvas-500); padding: 6px 12px; border: 1px dashed var(--line); border-radius: 9px; }
+.bl-field--name { grid-template-columns: minmax(110px, 160px) 1fr; }
+.bl-field--name .bl-field-note { grid-column: 2; margin-top: -8px; font-size: 12px; color: var(--canvas-500); }
+.bl-field--name .bl-field-note--bad { color: var(--danger); }
+.bl-settings-name { grid-column: 2; justify-self: stretch; max-width: 22em; }
+/* The player list over the HUD (held Tab). */
+.bl-plist {
+  position: absolute; top: 14%; left: 50%; transform: translateX(-50%); width: min(380px, calc(100vw - 32px));
+  padding: 12px 14px; border-radius: 12px; pointer-events: none;
+  background: var(--panel-bg); border: 1px solid var(--panel-edge); box-shadow: var(--shadow-md);
+}
+.bl-plist-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-faint); font: 700 12px/1.2 var(--font-ui); letter-spacing: 0.16em; text-transform: uppercase; color: var(--brass-300);
+}
+.bl-plist-head .bl-count { font: 500 12px/1 var(--font-mono); letter-spacing: 0; color: var(--canvas-500); }
+.bl-plist-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.bl-plist-row { display: flex; align-items: center; gap: 8px; }
+.bl-plist-room { margin-top: 8px; font-size: 12px; color: var(--canvas-500); }
+.bl-plist-room[data-status="open"] { color: var(--live); }
+
 /* ------------------------------------------------------------------ pause */
 .bl-pause-panel { width: min(960px, 100%); display: grid; grid-template-columns: minmax(230px, 280px) 1fr; gap: 26px; padding: 26px 28px; align-items: start; }
 .bl-pause-main { display: flex; flex-direction: column; gap: 10px; }
@@ -906,6 +1027,8 @@ ${twin('bl-hit', HIT)}
   .bl-world-list { max-height: none; }
   .bl-pause-panel { grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 22px 18px; }
   .bl-pause-ref { padding-left: 0; padding-top: 16px; border-left: 0; border-top: 1px solid var(--line-faint); }
+  .bl-room-grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .bl-room-players { padding-left: 0; padding-top: 16px; border-left: 0; border-top: 1px solid var(--line-faint); }
   .bl-palette-scroll { max-height: calc(var(--islot) * 4.6 + 40px); }
   .bl-pgrid { grid-template-columns: repeat(9, var(--islot)); }
 }
@@ -950,7 +1073,7 @@ ${twin('bl-hit', HIT)}
    (held stack, tooltip box) or by the layout pass (toast column, helm, drag banner's veil)
    scale their size only, so their placement stays in plain viewport px. */
 .bl-menu-inner, .bl-loading-inner, .bl-panel-modal, .bl-toast, .bl-veil-card, .bl-debug, .bl-hint, .bl-crosshair,
-.bl-gauges, .bl-itemname, .bl-tooltip > * { zoom: var(--ui-zoom); }
+.bl-gauges, .bl-itemname, .bl-plist, .bl-tooltip > * { zoom: var(--ui-zoom); }
 
 /* ------------------------------------------------------------------ reduced motion */
 @media (prefers-reduced-motion: reduce) {

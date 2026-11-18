@@ -21,11 +21,25 @@
  * that appeared in this tick inside the client's interest (with a structure: its whole root group,
  * so a new rotor never waits for a deferred ship). What entered the interest because the player
  * moved or just joined may wait: structure groups (nearest first), then entities (nearest first),
- * then column snapshots (nearest first), at most SNAPSHOT_BUDGET bytes per tick (the item that
- * crosses the budget still goes, so a large structure is never starved), and only while the
- * reliable backlog is at most max(8 KiB, 0.1 s of the measured send rate) (section 2). The cells
- * of all CellVolumes of one batch stay within MAX_BATCH_CELLS: a deferred item that does not fit
- * waits, a resend that does not fit goes as a delta.
+ * then column snapshots (nearest first). They fill the reliable backlog up to the line,
+ * max(RELIABLE_BACKLOG_FLOOR, BACKLOG_WINDOW_S of the measured send rate), and at most
+ * SNAPSHOT_BUDGET bytes per tick (section 2; package 13): a must-send batch then waits behind about
+ * 0.1 s of the link at most. An item longer than what is left waits, except the first of a tick
+ * while the backlog is under half the floor, so a large structure or snapshot is never starved.
+ * The send rate is smoothed, but never below what a channel that emptied carried in the tick (the
+ * line doubles every tick while the link keeps up). The host's own connection has no link to
+ * protect (a port inside one machine that reports no backlog): it gets SNAPSHOT_BUDGET a tick,
+ * the item that crosses it included, and every sample that fits the messages. The cells of all
+ * CellVolumes of one batch stay within MAX_BATCH_CELLS: a deferred item that does not fit waits,
+ * a resend that does not fit goes as a delta.
+ *
+ * SAMPLES (section 13 step 3; package 13) share the link with the batches and are stale a tick
+ * later: none in a tick while more than max(SAMPLE_FLOOR_BYTES, a tick of the unreliable send
+ * rate) is still queued, or while the reliable backlog is above the line (must-send content
+ * already queues longer than 0.1 s: the link is over its share, samples would only deepen it),
+ * otherwise at most max(SAMPLE_FLOOR_BYTES, two ticks of it), and never
+ * more than SAMPLE_MESSAGES_PER_TICK messages. What does not fit waits, stalest first, staleness
+ * weighted by nearness (sendSamples).
  *
  * INTEREST (interest.ts). The subscription circle is recomputed whenever the player's column or
  * the radius changes (not on a fixed 4-tick beat): every column whose snapshot was sent then lies
@@ -170,26 +184,33 @@ export interface ClientView {
 
 // ====================================================================== constants (completed here)
 
-/** At most this many Samples messages per client per tick; the rest wait a tick (section 13). */
+/** At most this many Samples messages per client per tick (section 13). */
 const SAMPLE_MESSAGES_PER_TICK = 4;
 /** Upper bounds of one ship / entity sample's encoded size, for choosing what fits the messages above. */
 const SHIP_SAMPLE_MAX_BYTES = 23;
 const ENTITY_SAMPLE_MAX_BYTES = 24;
 /** Header of a Samples message, at most (id, tick, seq, two counts). */
 const SAMPLES_HEADER_MAX_BYTES = 16;
-/** Deferred new interest waits while the reliable backlog is above max(this, rate x BACKLOG_WINDOW_S) (section 2). */
-const RELIABLE_BACKLOG_FLOOR = 8 * 1024;
+/**
+ * The reliable line: deferred new interest fills the reliable backlog up to max(this, rate x
+ * BACKLOG_WINDOW_S) and no further (sections 2, 13; package 13).
+ */
+const RELIABLE_BACKLOG_FLOOR = 2 * 1024;
 const BACKLOG_WINDOW_S = 0.1;
-/** No samples while the unreliable backlog is above max(this, 3 x last tick's sample bytes) (section 2). */
-const UNRELIABLE_BACKLOG_FLOOR = 2 * 1024;
+/**
+ * Samples (section 13 step 3; package 13): none in a tick while more than max(this, one tick of
+ * the unreliable send rate) is still queued (they would be stale); otherwise at most
+ * max(this, two ticks of that rate) bytes of them, and never more than SAMPLE_MESSAGES_PER_TICK messages.
+ */
+const SAMPLE_FLOOR_BYTES = 512;
+/** Sample priority: ticks since an entity's (or ship's) last sample x SAMPLE_NEAR / (SAMPLE_NEAR + horizontal distance in blocks). */
+const SAMPLE_NEAR = 32;
 /** A reliable backlog above MAX_BACKLOG this long (ticks, 10 s) makes a client too slow (section 2). */
 const TOO_SLOW_TICKS = 200;
 /** Weight of the newest measurement in the smoothed send rate. */
 const RATE_SMOOTHING = 0.25;
 /** Budget charge of one entity spawn record (they are 17 to 30 bytes). */
 const ENTITY_RECORD_COST = 32;
-/** Sort key offset that puts owed samples before all others (squared horizontal distances stay far below it). */
-const OWED = 2 ** 60;
 /** Shared snapshot bytes unused for this long are dropped (ticks). */
 const SNAPSHOT_CACHE_TICKS = 200;
 
@@ -335,6 +356,8 @@ interface SentStructure {
   sails: number;
   frozen: boolean;
   rotorTick: number;
+  /** Tick of its last sample (its spawn before the first). */
+  sampled: number;
 }
 
 interface SentEntity {
@@ -347,6 +370,8 @@ interface SentEntity {
   flags: number;
   steering: number;
   held: number | null;
+  /** Tick of its last sample (its spawn before the first). */
+  sampled: number;
 }
 
 interface SentView {
@@ -379,9 +404,6 @@ interface Client {
   ready: boolean;
   // ---- samples
   sampleSeq: number;
-  lastSampleBytes: number;
-  readonly owedShips: Set<number>;
-  readonly owedEntities: Set<number>;
   /** Every entity is a spawn candidate at the next deferral (the client gained columns or structures, or a deferral was cut short). */
   entityScan: boolean;
   /** Its must-send content did not fit a batch: it gets nothing more (tooSlow()). */
@@ -467,9 +489,6 @@ export class Replicator {
       joinRoots: null,
       ready: false,
       sampleSeq: 0,
-      lastSampleBytes: 0,
-      owedShips: new Set(),
-      owedEntities: new Set(),
       entityScan: true,
       overflowed: false,
       backlog: [0, 0],
@@ -776,7 +795,12 @@ export class Replicator {
     const backlogR = this.measure(c, RELIABLE);
     const backlogU = this.measure(c, UNRELIABLE);
     c.slowTicks = backlogR > MAX_BACKLOG ? c.slowTicks + 1 : 0;
-    const mayDefer = backlogR <= Math.max(RELIABLE_BACKLOG_FLOOR, BACKLOG_WINDOW_S * c.rate[RELIABLE]);
+    // Deferred new interest fills the reliable backlog up to the line, never past one item more.
+    // The host's own connection has no link to protect (a port in one machine that reports no
+    // backlog): its line is the whole budget.
+    const line = c.host ? SNAPSHOT_BUDGET : Math.max(RELIABLE_BACKLOG_FLOOR, BACKLOG_WINDOW_S * c.rate[RELIABLE]);
+    const deferBudget = Math.min(SNAPSHOT_BUDGET, line - backlogR);
+    const mayDefer = deferBudget > 0;
 
     const b = emptyTickBatch(tick);
     const snapshotPieces: EncodedPiece[] = [];
@@ -870,10 +894,14 @@ export class Replicator {
     // ---- deferred new interest, in budget (section 13 step 2)
     if (!mayDefer) c.entityScan = true;
     else {
-      let budget = SNAPSHOT_BUDGET;
+      let budget = deferBudget;
+      // An item longer than what is left of the budget waits; on an almost empty link the first
+      // item of the tick goes whatever its size, so a big structure or snapshot is never starved.
+      // The host's own connection (nothing queues behind its items) sends while budget is left.
+      let first = backlogR < RELIABLE_BACKLOG_FLOOR / 2;
+      const goes = (bytes: number): boolean => (c.host ? budget > 0 : bytes <= budget || first);
       deferredGroups.sort((p, q) => p.gap - q.gap);
       for (const { group } of deferredGroups) {
-        if (budget <= 0) break;
         let cells = 0;
         let bytes = 0;
         for (const s of group) {
@@ -881,7 +909,8 @@ export class Replicator {
           cells += piece.cells;
           bytes += piece.bytes.length;
         }
-        if (cells > cellBudget) break;
+        if (cells > cellBudget || !goes(bytes)) break;
+        first = false;
         cellBudget -= cells;
         budget -= bytes;
         for (const s of group) {
@@ -890,12 +919,15 @@ export class Replicator {
         }
         c.entityScan = true;
       }
+      const before = budget;
       budget = this.deferredEntities(c, f, own, b, budget, tick);
+      if (budget !== before) first = false;
       let taken = 0;
-      while (budget > 0 && taken < c.pending.length) {
+      while (taken < c.pending.length) {
         const key = c.pending[taken]!;
         const piece = this.snapshotPiece(key, tick);
-        if (piece.cells > cellBudget) break;
+        if (piece.cells > cellBudget || !goes(piece.bytes.length)) break;
+        first = false;
         cellBudget -= piece.cells;
         budget -= piece.bytes.length;
         snapshotPieces.push(piece);
@@ -935,11 +967,13 @@ export class Replicator {
 
     // ---- samples (section 13 step 3)
     c.sentLast[UNRELIABLE] = 0;
-    if (backlogU > Math.max(UNRELIABLE_BACKLOG_FLOOR, 3 * c.lastSampleBytes)) {
-      c.lastSampleBytes = 0;
+    if (c.host) {
+      this.sendSamples(c, f, player.pos, Infinity);
       return;
     }
-    this.sendSamples(c, f, player.pos);
+    const perTickU = c.rate[UNRELIABLE] * TICK_DT;
+    if (backlogU > Math.max(SAMPLE_FLOOR_BYTES, perTickU) || backlogR > line) return;
+    this.sendSamples(c, f, player.pos, Math.max(SAMPLE_FLOOR_BYTES, 2 * perTickU));
   }
 
   /** The client's must-send content does not fit a batch: it gets nothing more and the host kicks it (tooSlow()). */
@@ -947,11 +981,17 @@ export class Replicator {
     c.overflowed = true;
   }
 
-  /** Backlog of a channel now, and the smoothed send rate it implies (section 2). */
+  /**
+   * Backlog of a channel now, and the smoothed send rate it implies (section 2). A channel that
+   * emptied carried all it was given, which is less than it can carry: the rate is then at least
+   * this tick's, so it follows a link that has more room at once (the line doubles every tick
+   * while each tick's bytes go through, like a slow start).
+   */
   private measure(c: Client, ch: Channel): number {
     const now = c.sink.bufferedBytes(ch);
-    const drained = Math.max(0, c.backlog[ch] + c.sentLast[ch] - now);
-    c.rate[ch] += RATE_SMOOTHING * (drained / TICK_DT - c.rate[ch]);
+    const drained = Math.max(0, c.backlog[ch] + c.sentLast[ch] - now) / TICK_DT;
+    c.rate[ch] += RATE_SMOOTHING * (drained - c.rate[ch]);
+    if (now === 0 && drained > c.rate[ch]) c.rate[ch] = drained;
     c.backlog[ch] = now;
     return now;
   }
@@ -1102,6 +1142,7 @@ export class Replicator {
       sails: rotor?.sails ?? 0,
       frozen: s.frozen,
       rotorTick: tick,
+      sampled: tick,
     });
   }
 
@@ -1180,7 +1221,7 @@ export class Replicator {
   private spawnEntity(c: Client, info: EntityInfo, tick: number): EntityRecord {
     const e = info.e;
     const m = this.motionOf(info, tick);
-    const sent: SentEntity = { e, since: tick, item: 0, count: 0, fuse: 0, fuseTick: tick, flags: 0, steering: 0, held: null };
+    const sent: SentEntity = { e, since: tick, item: 0, count: 0, fuse: 0, fuseTick: tick, flags: 0, steering: 0, held: null, sampled: tick };
     c.entities.set(e.id, sent);
     const base = { id: e.id, carrierId: m.carrierId, pos: m.pos, yaw: m.yaw };
     if (e instanceof Player) {
@@ -1478,61 +1519,62 @@ export class Replicator {
   // ------------------------------------------------------------------ samples
 
   /**
-   * Samples of the ships and entities the client has whose pose changed in this tick. When they do
-   * not fit SAMPLE_MESSAGES_PER_TICK messages, the ones left out in the last tick (owed) go first,
-   * then the nearest (section 13 step 3: the rest go in the next tick), so no pose waits more than
-   * a tick while there are at most twice as many as fit. An owed one that did not move again has
-   * stopped: its final pose goes reliably (rest, final state), so it needs no sample.
+   * Samples of the ships and entities the client has whose pose changed in this tick, at most
+   * `room` bytes (and SAMPLE_MESSAGES_PER_TICK messages). When they do not all fit, the ones whose
+   * samples are stalest go first, staleness weighted by nearness: ticks since the last sample x
+   * SAMPLE_NEAR / (SAMPLE_NEAR + horizontal distance). Every moving thing gets its turn, a far
+   * one less often than a near one: at 150 blocks about every sixth tick when the near ones fill
+   * every tick (package 13). One left out that does not move again has stopped: its final pose
+   * goes reliably (rest, final state), so it needs no sample.
    */
-  private sendSamples(c: Client, f: Frame, at: Vec3): void {
-    const cand: Array<{ d: number; ship: ShipSample | null; entity: EntitySample | null }> = [];
+  private sendSamples(c: Client, f: Frame, at: Vec3, room: number): void {
+    const tick = f.tick;
+    const cand: Array<{ w: number; size: number; ship: ShipSample | null; entity: EntitySample | null; sent: SentStructure | SentEntity }> = [];
+    let total = 0;
     for (const [id, sample] of f.shipSamples) {
-      const s = c.structures.get(id)?.s;
-      if (!(s instanceof Ship) || this.sim.structures.get(id) !== s) continue;
+      const sent = c.structures.get(id);
+      const s = sent?.s;
+      if (sent === undefined || !(s instanceof Ship) || this.sim.structures.get(id) !== s) continue;
       const p = s.grid.position;
-      const d = (p.x - at.x) ** 2 + (p.z - at.z) ** 2;
-      cand.push({ d: c.owedShips.has(id) ? d - OWED : d, ship: sample, entity: null });
+      cand.push({ w: weight(tick - sent.sampled, p, at), size: SHIP_SAMPLE_MAX_BYTES, ship: sample, entity: null, sent });
+      total += SHIP_SAMPLE_MAX_BYTES;
     }
     for (const info of f.movedEntities) {
-      if (c.entities.get(info.e.id)?.e !== info.e) continue;
-      const p = info.e.pos;
-      const d = (p.x - at.x) ** 2 + (p.z - at.z) ** 2;
-      cand.push({ d: c.owedEntities.has(info.e.id) ? d - OWED : d, ship: null, entity: { id: info.e.id, ...this.motionOf(info, f.tick) } });
+      const sent = c.entities.get(info.e.id);
+      if (sent === undefined || sent.e !== info.e) continue;
+      cand.push({ w: weight(tick - sent.sampled, info.e.pos, at), size: ENTITY_SAMPLE_MAX_BYTES, ship: null, entity: { id: info.e.id, ...this.motionOf(info, tick) }, sent });
+      total += ENTITY_SAMPLE_MAX_BYTES;
     }
-    c.owedShips.clear();
-    c.owedEntities.clear();
-    if (cand.length === 0) {
-      c.lastSampleBytes = 0;
-      return;
-    }
-    cand.sort((p, q) => p.d - q.d);
-    const room = SAMPLE_MESSAGES_PER_TICK * (MAX_UNRELIABLE_BYTES - SAMPLES_HEADER_MAX_BYTES - ENTITY_SAMPLE_MAX_BYTES);
+    if (cand.length === 0) return;
+    const limit = Math.min(room, SAMPLE_MESSAGES_PER_TICK * (MAX_UNRELIABLE_BYTES - SAMPLES_HEADER_MAX_BYTES - ENTITY_SAMPLE_MAX_BYTES));
+    if (total > limit) cand.sort((p, q) => q.w - p.w);
     const ships: ShipSample[] = [];
     const ents: EntitySample[] = [];
     let used = 0;
     for (const x of cand) {
-      const size = x.ship !== null ? SHIP_SAMPLE_MAX_BYTES : ENTITY_SAMPLE_MAX_BYTES;
-      if (used + size > room) {
-        if (x.ship !== null) c.owedShips.add(x.ship.id);
-        else c.owedEntities.add(x.entity!.id);
-        continue;
-      }
-      used += size;
+      if (used + x.size > limit) continue;
+      used += x.size;
+      x.sent.sampled = tick;
       if (x.ship !== null) ships.push(x.ship);
       else ents.push(x.entity!);
     }
-    const msgs = packSamples(f.tick, c.sampleSeq, ships, ents);
+    if (ships.length === 0 && ents.length === 0) return;
+    const msgs = packSamples(tick, c.sampleSeq, ships, ents);
     let bytes = 0;
     for (const m of msgs) {
       c.sink.send(UNRELIABLE, m);
       bytes += m.length;
     }
     c.sampleSeq += msgs.length;
-    c.lastSampleBytes = bytes;
     c.sentLast[UNRELIABLE] = bytes;
     c.stats.sampleMessages += msgs.length;
     c.stats.sampleBytes += bytes;
   }
+}
+
+/** Sample priority (sendSamples): staleness in ticks weighted by nearness. */
+function weight(stale: number, p: Vec3, at: Vec3): number {
+  return (stale * SAMPLE_NEAR) / (SAMPLE_NEAR + Math.hypot(p.x - at.x, p.z - at.z));
 }
 
 // ====================================================================== records

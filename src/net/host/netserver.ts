@@ -16,7 +16,7 @@
  *    Refuse(closed); a guest with the key of the host's connection: Refuse(same_key);
  *  - MAX_PLAYERS identities already have a player or a connection: Refuse(full).
  * A refused connection gets the Refuse and is closed. An accepted one waits for the next tick.
- * Names: control characters removed, then 1..MAX_NAME_LENGTH characters (code points). Keys:
+ * Names: the rule of net/names.ts (invisible characters removed, 1..MAX_NAME_LENGTH code points). Keys:
  * 1..MAX_PLAYER_KEY_LENGTH printable ASCII characters without spaces.
  *
  * REPLACEMENT. A Hello with a key that already has a connection (accepted or joined) replaces it:
@@ -24,21 +24,33 @@
  * any more (its later close or silence is ignored). At the next tick the player leaves and joins
  * again for the new connection, which syncs from scratch.
  *
- * LEAVING. Bye, the transport's onClose, a Kick (protocol_error, too_slow, timeout) and
+ * LEAVING. Bye, the transport's onClose, a Kick (protocol_error, too_slow, timeout; kicked: the
+ * host's Kick command, which IntentSink.kicks() hands over after its beforeTick) and
  * CONNECTION_TIMEOUT_MS without any message (not for local connections: the host's own client
  * lives in the same page) all end a connection at once; its player leaves at the next tick
  * (sim.leave keeps the record). Only an identity's CURRENT connection makes it leave. A
  * connection still in its handshake after CONNECTION_TIMEOUT_MS gets Refuse(bad_hello). Timeouts
  * are checked at the start of each tick (a paused server times nobody out).
  *
- * AFTER THE HANDSHAKE (on arrival): Ping is answered at once with Pong(tick); a second Hello, a
- * message that does not decode, an unknown id or one on the wrong channel: Kick(protocol_error).
- * Everything else is queued in arrival order.
+ * AFTER THE HANDSHAKE (on arrival): Ping is answered at once with Pong(tick), one per
+ * PONG_INTERVAL_MS at most (its round trip, clamped to MAX_REPORTED_RTT_MS, kept for the host
+ * page's status); a second Hello, a message that does not decode, an unknown id or one on the
+ * wrong channel: Kick(protocol_error). Everything else is queued in arrival order; of the
+ * movement reports only the newest QUEUE_LIMIT of a tick are kept (moves.ts keeps no more).
+ *
+ * LIMITS of a guest's connection (section 13, package 13; the host's own is not limited):
+ *  - bytes: a budget of CLIENT_BURST_BYTES refilled at CLIENT_RATE_BYTES a second; every message
+ *    costs its length plus MESSAGE_COST_BYTES; an empty budget is Kick(protocol_error) (in the
+ *    handshake Refuse(bad_hello)). This bounds what one client makes the server decode and queue;
+ *  - joins: an identity joins at most JOINS_PER_KEY_PER_MINUTE times in any minute; an accepted
+ *    connection past that waits, unjoined (still counted for `full`), until the minute allows it.
+ *    There is no count across identities: one client cycling identities would hold every other
+ *    guest's reconnect behind it.
  *
  * beforeTick(), in this order:
  *  1. connections silent for CONNECTION_TIMEOUT_MS are kicked (timeout);
  *  2. players whose connection ended, or was replaced, leave (moves, intents, Replicator, sim);
- *  3. accepted connections join, in the order they were accepted: sim.join(key), client-driven
+ *  3. accepted connections join, in the order they were accepted (while the join limits allow): sim.join(key), client-driven
  *     (setDrive raises the 'drive' correction, epoch 1), the first-join hook for an identity this
  *     world has never seen (ServerHost: starter items), simulation radius min(viewRadius,
  *     SIM_RADIUS_CAP), Replicator.addClient, Welcome, then moves and intents learn of the player;
@@ -53,13 +65,20 @@ import type { PlayerControl } from '../../sim/players';
 import type { Simulation } from '../../sim/simulation';
 import type { PlayerKey } from '../../sim/view';
 import { decodeClientMessage, encodeServerMessage, ProtocolError, readHelloBuild } from '../codec';
+import { cleanName } from '../names';
 import {
   BUILD_ID,
+  CLIENT_BURST_BYTES,
+  CLIENT_RATE_BYTES,
   CONNECTION_TIMEOUT_MS,
   INTENT_QUEUE_LIMIT,
+  JOINS_PER_KEY_PER_MINUTE,
+  MESSAGE_COST_BYTES,
   MAX_NAME_LENGTH,
   MAX_PLAYER_KEY_LENGTH,
   MAX_PLAYERS,
+  MAX_REPORTED_RTT_MS,
+  PONG_INTERVAL_MS,
   SIM_RADIUS_CAP,
   type ClientMessage,
   type GeneratorSpec,
@@ -71,6 +90,7 @@ import {
   type RefuseReason,
   type ServerMessage,
 } from '../protocol';
+import { QUEUE_LIMIT } from '../server/moves';
 import type { Replicator } from '../server/replicator';
 import { RELIABLE, UNRELIABLE, type Channel, type Transport } from '../transport';
 
@@ -107,6 +127,8 @@ export interface IntentSink {
   beforeTick(): void;
   /** Highest intent seq processed for `key`, or null before the first (ClientFeed.intentAck). */
   intentAck(key: PlayerKey): number | null;
+  /** Guests the host removed with the Kick host command since the last call (package 11): their connections end with Kick('kicked'). */
+  kicks(): PlayerKey[];
 }
 
 // ====================================================================== the server
@@ -146,17 +168,26 @@ interface Connection {
   viewRadius: number;
   /** When the last message arrived (or the connection was made). */
   lastHeard: number;
-  /** Movement reports and intents received since the last tick, in arrival order. */
-  inbox: Array<MoveReportMsg | IntentMessage>;
-  /** Intents in the inbox (a flood past INTENT_QUEUE_LIMIT is kicked before the tick). */
-  inboxIntents: number;
+  /** Movement reports received since the last tick, in arrival order: the newest QUEUE_LIMIT. */
+  reports: MoveReportMsg[];
+  /** Intents received since the last tick, in arrival order (a flood past INTENT_QUEUE_LIMIT is kicked before the tick). */
+  intents: IntentMessage[];
+  /** What it may still send (CLIENT_BURST_BYTES, refilled at CLIENT_RATE_BYTES a second), and when it was refilled. */
+  budget: number;
+  refilled: number;
+  /** The round trip its client measured, ms (its last Ping, at most MAX_REPORTED_RTT_MS; 0 before one). */
+  rttMs: number;
+  /** When it was last sent a Pong (one per PONG_INTERVAL_MS at most). */
+  pongAt: number;
 }
 
-/** Name of a Hello with its control characters removed, or null when not 1..MAX_NAME_LENGTH characters remain. */
-export function cleanName(name: string): string | null {
-  const clean = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
-  const n = [...clean].length;
-  return n >= 1 && n <= MAX_NAME_LENGTH ? clean : null;
+/** One connection's traffic for the host page (control.ts status: per guest bytes, backlog, round trip). */
+export interface ConnectionTraffic {
+  readonly key: PlayerKey;
+  readonly name: string;
+  readonly local: boolean;
+  readonly transport: Transport;
+  readonly rttMs: number;
 }
 
 /** A PlayerKey: 1..MAX_PLAYER_KEY_LENGTH printable ASCII characters, no spaces. */
@@ -174,8 +205,10 @@ export class NetServer {
   private readonly byKey = new Map<PlayerKey, Connection>();
   /** Identities whose player is in the simulation through this server. */
   private readonly inSim = new Set<PlayerKey>();
-  /** Accepted connections waiting for the next tick, in order. */
+  /** Accepted connections waiting for the next tick (or for the join rate to allow them), in order. */
   private accepted: Connection[] = [];
+  /** When each guest identity joined in the last minute, oldest first (identities with none are dropped). */
+  private readonly keyJoins = new Map<PlayerKey, number[]>();
   private roomOpenValue = false;
   /** Hellos are refused (shutting_down) while true. */
   shuttingDown = false;
@@ -207,9 +240,17 @@ export class NetServer {
     return [...this.live].map((c) => ({ key: c.key, name: c.name, local: c.local, state: c.state }));
   }
 
+  /** The joined connections' traffic, for the host page's status (ServerHost). */
+  traffic(): ConnectionTraffic[] {
+    const out: ConnectionTraffic[] = [];
+    for (const c of this.live) if (c.state === 'joined') out.push({ key: c.key!, name: c.name, local: c.local, transport: c.transport, rttMs: c.rttMs });
+    return out;
+  }
+
   /** A new connection; `local` = the host's own (decided by the host, never by the key). */
   connect(transport: Transport, local: boolean): void {
-    const c: Connection = { transport, local, state: 'hello', key: null, name: '', viewRadius: 0, lastHeard: this.o.now(), inbox: [], inboxIntents: 0 };
+    const now = this.o.now();
+    const c: Connection = { transport, local, state: 'hello', key: null, name: '', viewRadius: 0, lastHeard: now, reports: [], intents: [], budget: CLIENT_BURST_BYTES, refilled: now, rttMs: 0, pongAt: -Infinity };
     this.live.add(c);
     transport.onMessage = (channel, bytes) => this.onMessage(c, channel, bytes);
     transport.onClose = () => this.end(c);
@@ -229,26 +270,29 @@ export class NetServer {
       const c = this.byKey.get(key);
       if (c === undefined || c.state === 'accepted') this.leave(key);
     }
-    const joining = this.accepted;
+    const waiting = this.accepted;
     this.accepted = [];
-    for (const c of joining) if (c.state === 'accepted') this.join(c);
+    for (const c of waiting) {
+      if (c.state !== 'accepted') continue;
+      if (this.mayJoin(c, now)) this.join(c);
+      else this.accepted.push(c);
+    }
     // Dispatch: reports first, then intents (section 10).
     const moves = this.o.moves;
     const intents = this.o.intents;
     const order: Connection[] = [];
     for (const ctrl of this.sim.players.online()) {
       const c = this.byKey.get(ctrl.key);
-      if (c !== undefined && c.state === 'joined' && c.inbox.length > 0) order.push(c);
+      if (c !== undefined && c.state === 'joined' && (c.reports.length > 0 || c.intents.length > 0)) order.push(c);
     }
     for (const c of order) {
-      for (const m of c.inbox) if (m.type === 'moveReport') moves.receive(c.key!, m);
+      for (const m of c.reports) moves.receive(c.key!, m);
+      c.reports = [];
     }
     for (const c of order) {
-      const inbox = c.inbox;
-      c.inbox = [];
-      c.inboxIntents = 0;
+      const inbox = c.intents;
+      c.intents = [];
       for (const m of inbox) {
-        if (m.type === 'moveReport') continue;
         if (!intents.receive(c.key!, m)) {
           this.kick(c, 'protocol_error', `more than ${INTENT_QUEUE_LIMIT} intents queued`);
           break;
@@ -257,6 +301,10 @@ export class NetServer {
     }
     moves.beforeTick(this.roomOpenValue);
     intents.beforeTick();
+    for (const key of intents.kicks()) {
+      const c = this.byKey.get(key);
+      if (c !== undefined && c.state === 'joined' && !c.local) this.kick(c, 'kicked', 'the host removed you from the room');
+    }
   }
 
   /** After Replicator.endTick(): kick the clients it found too slow. */
@@ -279,7 +327,17 @@ export class NetServer {
 
   private onMessage(c: Connection, channel: Channel, bytes: Uint8Array): void {
     if (c.state === 'gone') return;
-    c.lastHeard = this.o.now();
+    const now = this.o.now();
+    c.lastHeard = now;
+    if (!c.local) {
+      c.budget = Math.min(CLIENT_BURST_BYTES, c.budget + ((now - c.refilled) * CLIENT_RATE_BYTES) / 1000) - bytes.length - MESSAGE_COST_BYTES;
+      c.refilled = now;
+      if (c.budget < 0) {
+        if (c.state === 'hello') this.refuse(c, 'bad_hello', 'too many bytes');
+        else this.kick(c, 'protocol_error', `more than ${CLIENT_RATE_BYTES} bytes a second`);
+        return;
+      }
+    }
     if (c.state === 'hello') {
       this.handshake(c, channel, bytes);
       return;
@@ -296,17 +354,25 @@ export class NetServer {
         this.kick(c, 'protocol_error', 'a second Hello');
         return;
       case 'ping':
+        // One Pong per PONG_INTERVAL_MS at most (the client pings once a second; by the clock, so
+        // Pongs go on while the simulation is paused): a flood of Pings within the byte budget
+        // would otherwise fill its own channel with Pongs the host page must hold.
+        if (now - c.pongAt < PONG_INTERVAL_MS) return;
+        c.pongAt = now;
+        c.rttMs = Math.min(m.rttMs, MAX_REPORTED_RTT_MS);
         this.send(c, { type: 'pong', clientMs: m.clientMs, tick: this.sim.ticks });
         return;
       case 'bye':
         this.end(c);
         return;
       case 'moveReport':
-        c.inbox.push(m);
+        // The movement queue keeps the newest QUEUE_LIMIT anyway (moves.ts): so does the inbox.
+        if (c.reports.length >= QUEUE_LIMIT) c.reports.shift();
+        c.reports.push(m);
         return;
       default:
-        c.inbox.push(m);
-        if (++c.inboxIntents > INTENT_QUEUE_LIMIT) this.kick(c, 'protocol_error', `more than ${INTENT_QUEUE_LIMIT} intents queued`);
+        c.intents.push(m);
+        if (c.intents.length > INTENT_QUEUE_LIMIT) this.kick(c, 'protocol_error', `more than ${INTENT_QUEUE_LIMIT} intents queued`);
     }
   }
 
@@ -352,6 +418,26 @@ export class NetServer {
   }
 
   // ------------------------------------------------------------------ joining and leaving
+
+  /**
+   * Whether an accepted connection may join now: the host's always; a guest's while its identity
+   * joined fewer than JOINS_PER_KEY_PER_MINUTE times in the last minute (a client reconnecting in
+   * a loop costs the server a leave, a join and a whole resynchronisation each time). Counts the
+   * join.
+   */
+  private mayJoin(c: Connection, now: number): boolean {
+    if (c.local) return true;
+    const since = now - 60_000;
+    for (const [key, times] of this.keyJoins) {
+      while (times.length > 0 && times[0]! <= since) times.shift();
+      if (times.length === 0) this.keyJoins.delete(key);
+    }
+    const mine = this.keyJoins.get(c.key!) ?? [];
+    if (mine.length >= JOINS_PER_KEY_PER_MINUTE) return false;
+    mine.push(now);
+    this.keyJoins.set(c.key!, mine);
+    return true;
+  }
 
   private join(c: Connection): void {
     const key = c.key!;
@@ -411,7 +497,8 @@ export class NetServer {
   private end(c: Connection): void {
     if (c.state === 'gone') return;
     c.state = 'gone';
-    c.inbox = [];
+    c.reports = [];
+    c.intents = [];
     this.live.delete(c);
     c.transport.onMessage = null;
     c.transport.onClose = null;

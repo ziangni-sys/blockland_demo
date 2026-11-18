@@ -76,6 +76,8 @@ export interface SessionDeps {
   onToast: (message: Message, kind: 'info' | 'warn' | 'error') => void;
   /** The connection's status changed (reconnecting, kicked, refused, failed ...). */
   onStatus: (status: NetStatus) => void;
+  /** After each applied batch (the lobby's join and leave toasts read the player table changes). */
+  onBatch?: (batch: TickBatchMsg) => void;
 }
 
 export interface LoadingProgress {
@@ -413,14 +415,15 @@ export class WorldSession {
     return true;
   }
   /**
-   * The pause menu's mode switch (section 10): this player's mode and the world's rules with it,
-   * as single player always did. The new mode shows at once and until the server answered.
+   * The pause menu's mode switch (section 10): this player's mode, and with `withRules` the
+   * world's rules too (single play; online the host sets them on the room screen, DESIGN
+   * 联机时由房主另外设置). The new mode shows at once and until the server answered.
    */
-  requestMode(mode: 'creative' | 'survival'): void {
+  requestMode(mode: 'creative' | 'survival', withRules: boolean): void {
     const it = this.intents;
     if (it === null) return;
     it.hostCommand({ kind: 'setPlayerMode', entityId: 0, mode });
-    it.hostCommand({ kind: 'setRules', rules: worldRulesFor(mode) });
+    if (withRules) it.hostCommand({ kind: 'setRules', rules: worldRulesFor(mode) });
     this.modeRequest = { mode, seq: it.seq };
   }
 
@@ -504,6 +507,7 @@ export class WorldSession {
       if (ev.type === 'toast') this.deps.onToast(ev.message, ev.kind);
       else if (ev.type === 'playerHurt') this.hurtUntil = this.deps.now() + HURT_FLASH_MS;
     }
+    this.deps.onBatch?.(b);
   }
 
   /** A new replica (a new connection), or none: the render state starts over. */

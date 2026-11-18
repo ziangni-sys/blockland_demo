@@ -231,6 +231,14 @@ async function runMode(mode, site) {
   }
   const browser = await chromium.launch(launch);
   const context = await browser.newContext({ viewport: VIEWPORT });
+  // The name is asked once on a page that can go online (package 11); this script plays alone.
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem('playerName', 'Smoke');
+    } catch {
+      // an opaque origin has no storage (and no name screen: it cannot go online)
+    }
+  });
   const page = await context.newPage();
   let listening = true;
   /** Errors a step provokes on purpose (the server failure below). */

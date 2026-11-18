@@ -92,6 +92,27 @@ export const MAX_CLIENT_MESSAGE_BYTES = 2048;
 export const MAX_HELLO_BYTES = 512;
 /** Longest player name, in characters (sections 3, 13). */
 export const MAX_NAME_LENGTH = 24;
+/**
+ * What a guest's connection may send (section 13, package 13): a budget of CLIENT_BURST_BYTES that
+ * refills at CLIENT_RATE_BYTES a second; every message costs its bytes plus MESSAGE_COST_BYTES (the
+ * work of taking it in). A client in play sends about 2.5 KB/s of such cost; one that empties the
+ * budget is kicked (protocol_error). The host's own connection is not limited.
+ */
+export const CLIENT_RATE_BYTES = 16 * 1024;
+export const CLIENT_BURST_BYTES = 128 * 1024;
+export const MESSAGE_COST_BYTES = 16;
+/**
+ * Joins (a new connection taking its player into the world) of one identity per rolling minute
+ * (section 13, package 13). An accepted connection past it waits, unjoined, until the minute
+ * allows it. Other identities are never held by it; the host's own connection is not limited.
+ */
+export const JOINS_PER_KEY_PER_MINUTE = 6;
+/** The server answers a connection's Pings with at most one Pong in this many ms (the client pings once a second; package 13). */
+export const PONG_INTERVAL_MS = 50;
+/** A Ping's rttMs is at most this (ms; a minute): the client caps it, the server clamps it (the host page only shows it; package 13). */
+export const MAX_REPORTED_RTT_MS = 60_000;
+/** SetViewRadius takes effect at most once in this many ticks; the newest value waits (section 13, package 13). */
+export const VIEW_RADIUS_INTERVAL_TICKS = 20;
 /** Reliable-channel retransmission timer of the loopback when LinkConditions.rtoMs is not set (section 2). */
 export const DEFAULT_RTO_MS = 400;
 /**
@@ -313,6 +334,8 @@ export interface PingMsg {
   type: 'ping';
   /** u32 (the client's clock in ms, wrapped). */
   clientMs: number;
+  /** The round trip the client measured, ms (0 before the first Pong); the host page shows it (package 13). */
+  rttMs: number;
 }
 export interface MoveReportMsg extends NetMoveReport {
   type: 'moveReport';

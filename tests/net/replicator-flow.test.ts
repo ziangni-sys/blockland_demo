@@ -125,7 +125,7 @@ describe('must-send and may-defer (package 4)', () => {
     rig.check('full');
   });
 
-  it('a reliable backlog above max(8 KiB, 0.1 s of the send rate) defers; the unreliable backlog stops samples; MAX_BACKLOG for 10 s marks the client too slow', () => {
+  it('a reliable backlog above max(2 KiB, 0.1 s of the send rate) defers; the unreliable backlog, or the reliable one above that line, stops samples; MAX_BACKLOG for 10 s marks the client too slow', () => {
     const rig = flatRig();
     const a = rig.join('a', { viewRadius: 2 });
     rig.join('b', { viewRadius: 2 });
@@ -150,6 +150,18 @@ describe('must-send and may-defer (package 4)', () => {
     expect(a.samples.length).toBe(before);
     a.sink.backlog[UNRELIABLE] = 0;
     walk(3);
+    rig.checkPoses = true;
+    walk(1);
+    rig.check('full');
+    // ... or the batches queue past the line (package 13): the link is over its share already.
+    a.sink.backlog[RELIABLE] = 100_000;
+    before = a.samples.length;
+    rig.checkPoses = false;
+    walk(5);
+    expect(a.samples.length).toBe(before);
+    a.sink.backlog[RELIABLE] = 0;
+    walk(3);
+    expect(a.samples.length).toBeGreaterThan(before);
     rig.checkPoses = true;
     walk(1);
     rig.check('full');
@@ -207,6 +219,42 @@ describe('must-send and may-defer (package 4)', () => {
     expect(sa).toEqual(sb);
     expect(rig.rep.stats('a')!.sectionBytes[SECTION.snapshots]).toBe(rig.rep.stats('b')!.sectionBytes[SECTION.snapshots]);
     rig.check('full');
+  }, 120_000);
+});
+
+describe("the host's own connection (package 13)", () => {
+  it('has no link to protect: new interest goes at SNAPSHOT_BUDGET a tick from the first, and every sample, where a guest with the same empty backlog starts slow', () => {
+    // The host's own client is on a port in the same machine that never reports a backlog: the
+    // line that paces a guest (2 KiB, doubling every tick while the link keeps up) only made the
+    // single-player game load slower (ready 9 -> 12 ticks, whole circle 31 -> 37 at radius 9).
+    const sim = new Simulation({ seed: 7, mode: 'creative', generator: new TerrainGenerator(7), syncChunks: true, rabbits: false, loadRadius: 5, spawn: { x: 8.5, y: 90, z: 8.5 } });
+    const rig = new Rig(sim);
+    rig.sim.join('builder');
+    rig.ctrl('builder').player.flying = true;
+    rig.checkEveryTick = false;
+    rig.tick(40);
+    for (const chunk of sim.world.chunks.values()) sim.world.setCell(chunk.cx * 16 + 3, 100, chunk.cz * 16 + 3, makeCell(B.GLASS));
+    const host = rig.join('host', { viewRadius: 5, host: true });
+    const guest = rig.join('guest', { viewRadius: 5 });
+    rig.ctrl('host').player.flying = true;
+    rig.ctrl('guest').player.flying = true;
+    rig.tick(1);
+    const snapBytes = (c: typeof host): number => c.batches.at(-1)!.batch.snapshots.reduce((n, x) => n + encodeSnapshotPiece(x).bytes.length, 0);
+    expect(snapBytes(host)).toBeGreaterThanOrEqual(SNAPSHOT_BUDGET);
+    expect(snapBytes(guest)).toBeLessThan(SNAPSHOT_BUDGET / 2);
+    rig.tick(40);
+    expect(host.state.ready).toBe(true);
+    // 40 crates falling at once after a quiet second: 40 samples (about 1 KB) in the host's first
+    // tick; the guest's samples start at 512 bytes a tick.
+    rig.tick(20);
+    for (let i = 0; i < 40; i++) sim.entities.spawnTnt(-10 + (i % 8) * 3 + 0.5, 120, -6 + Math.floor(i / 8) * 3 + 0.5, 400);
+    rig.tick(1);
+    host.samples.length = 0;
+    guest.samples.length = 0;
+    rig.tick(1);
+    const sampled = (c: typeof host): number => c.samples.reduce((n, x) => n + x.msg.entities.length, 0);
+    expect(sampled(host)).toBe(40);
+    expect(sampled(guest)).toBeLessThan(25);
   }, 120_000);
 });
 
@@ -382,6 +430,8 @@ describe('deferral rules pinned (package 4)', () => {
     const a = rig.join('a', { viewRadius: 2 });
     rig.tick(10);
     a.sink.backlog[RELIABLE] = 1 << 20;
+    // No samples while the reliable backlog is above the line (package 13): poses lag till it drains.
+    rig.checkPoses = false;
     rig.tick(3);
     // A drop appears; sand loses its support and falls.
     set(sim, 4, T + 3, 4, B.SAND);
@@ -402,6 +452,7 @@ describe('deferral rules pinned (package 4)', () => {
     // The sand left its cell in the same batch.
     expect(b.chunkDeltas.flatMap((d) => d.cells.map(([i]) => i))).toContain(4 | (4 << 4) | ((T + 3) << 8));
     a.sink.backlog[RELIABLE] = 0;
+    rig.checkPoses = true;
     rig.tick(40);
     rig.check('full');
   });

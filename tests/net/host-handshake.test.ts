@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { encodeClientMessage } from '../../src/net/codec';
-import { cleanName, validKey } from '../../src/net/host/netserver';
+import { validKey } from '../../src/net/host/netserver';
+import { cleanName } from '../../src/net/names';
 import { MAX_PLAYERS, MSG, type IntentMessage } from '../../src/net/protocol';
 import { RELIABLE, UNRELIABLE } from '../../src/net/transport';
 import { ByteWriter } from '../../src/save/bytes';
@@ -45,7 +46,7 @@ describe('handshake (package 8)', () => {
   it('bad_hello: a message before Hello, a malformed Hello, Hello on the unreliable channel, bad names and keys', async () => {
     const h = await world();
     const cases: Array<[string, (c: RawClient) => void]> = [
-      ['ping first', (c) => c.send({ type: 'ping', clientMs: 1 })],
+      ['ping first', (c) => c.send({ type: 'ping', clientMs: 1, rttMs: 0 })],
       ['bye first', (c) => c.send({ type: 'bye' })],
       ['intent first', (c) => c.send({ type: 'selectSlot', seq: 1, slot: 0 })],
       ['empty message', (c) => c.transport.send(RELIABLE, new Uint8Array(0))],
@@ -175,7 +176,7 @@ describe('handshake (package 8)', () => {
     h.host.setRoomOpen(true);
     const a = h.addRawClient('a');
     h.run(120);
-    a.send({ type: 'ping', clientMs: 4242 });
+    a.send({ type: 'ping', clientMs: 4242, rttMs: 0 });
     h.run(1);
     expect(a.pongs.at(-1)).toEqual({ type: 'pong', clientMs: 4242, tick: h.sim.ticks });
     const acts: Array<[string, (c: RawClient) => void]> = [
