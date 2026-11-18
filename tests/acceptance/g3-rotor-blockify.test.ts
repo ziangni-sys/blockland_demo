@@ -18,7 +18,7 @@ import { I } from '../../src/blocks/items';
 import { isSolidCell } from '../../src/blocks/registry';
 import { NX, NY, NZ, PX, PY, PZ } from '../../src/core/dirs';
 import { qfromYaw, qmul, vec3 } from '../../src/core/math';
-import type { Simulation } from '../../src/sim/simulation';
+import type { TestWorld } from './world';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import {
   Events,
@@ -78,7 +78,8 @@ const Y10 = T + 4;
 const Z10 = -4;
 
 function windmill10(mode: 'survival' | 'creative') {
-  const sim = flatWorld(mode, { x: 0.5, y: T, z: -7.5 }, 10);
+  const tw = flatWorld(mode, { x: 0.5, y: T, z: -7.5 }, 10);
+  const { sim, me } = tw;
   const w = sim.world;
   const Y = Y10;
   const Z = Z10;
@@ -87,10 +88,10 @@ function windmill10(mode: 'survival' | 'creative') {
   const cells: Cell[] = [[1, Y, Z, B.CANVAS]];
   for (const [dy, dz] of [[1, 0], [2, 0], [3, 0], [-1, 0], [0, 1], [0, 2], [0, -1]] as const) cells.push([1, Y + dy, Z + dz, B.CANVAS]);
   for (const [x, y, z, id] of cells) set(w, x, y, z, id);
-  sim.advance(2);
+  tw.tick(2);
   const log = new Events(sim);
-  const rotor = startByPlayer(sim, 0, Y, Z, NZ);
-  spinUntil(sim, rotor, HALF_PI - 0.3, HALF_PI - 0.2);
+  const rotor = startByPlayer(tw, 0, Y, Z, NZ);
+  spinUntil(tw, rotor, HALF_PI - 0.3, HALF_PI - 0.2);
   set(w, 1, Y, Z + 3, B.STONE);
   set(w, 1, Y - 1, Z + 2, B.STONE);
   set(w, 1, Y, Z + 2, B.SNOW_LAYER);
@@ -99,11 +100,11 @@ function windmill10(mode: 'survival' | 'creative') {
   set(w, 1, Y - 1, Z - 1, B.STONE);
   set(w, 1, Y, Z - 1, B.TORCH);
   set(w, 1, Y + 1, Z, B.WATER);
-  sim.tick();
+  tw.tick();
   const soft = [idAt(w, 1, Y, Z + 2), idAt(w, 1, Y - 1, Z), idAt(w, 1, Y, Z - 1), idAt(w, 1, Y + 1, Z)];
   const angle = rotor.angle;
-  const stopped = sim.soloPlayer.useOn(0, Y, Z, NZ);
-  return { sim, w, rotor, log, cells, angle, stopped, soft };
+  const stopped = me.useOn(0, Y, Z, NZ);
+  return { tw, me, sim, w, rotor, log, cells, angle, stopped, soft };
 }
 
 /** Where the 8 canvas cells must be after a 90-degree snap with the two hard conflicts dropped. */
@@ -122,7 +123,7 @@ function expected10(): string[] {
 
 describe('10. 风车转起来后再方块化：被硬方块占住的格子在生存模式下掉落，软方块被覆盖。', () => {
   it('the windmill turns, and stopping it after ~76° puts it back as blocks snapped to the 90° pose', () => {
-    const { sim, w, rotor, log, cells, angle, stopped } = windmill10('survival');
+    const { tw, me, sim, w, rotor, log, cells, angle, stopped } = windmill10('survival');
     expect(angle).toBeGreaterThan(HALF_PI - 0.31); // it really turned (about a quarter turn)
     expect(stopped).toBe(true);
     expect(rotor.removed).toBe(true);
@@ -135,7 +136,7 @@ describe('10. 风车转起来后再方块化：被硬方块占住的格子在生
   });
 
   it('survival: the cells landing in hard blocks become item drops, the hard blocks stay as they were', () => {
-    const { sim, w, stopped } = windmill10('survival');
+    const { tw, me, sim, w, stopped } = windmill10('survival');
     expect(stopped).toBe(true);
     expect(idAt(w, 1, Y10, Z10 + 3)).toBe(B.STONE);
     expect(idAt(w, 1, Y10 - 2, Z10)).toBe(B.COBBLE);
@@ -146,7 +147,7 @@ describe('10. 风车转起来后再方块化：被硬方块占住的格子在生
   });
 
   it('soft blocks in the way are overwritten; overwritten non-liquid blocks drop in survival (flower, torch), water does not', () => {
-    const { sim, w, stopped, soft } = windmill10('survival');
+    const { tw, me, sim, w, stopped, soft } = windmill10('survival');
     expect(soft).toEqual([B.SNOW_LAYER, B.FLOWER_RED, B.TORCH, B.WATER]); // (scene check: they were in place)
     expect(stopped).toBe(true);
     expect(idAt(w, 1, Y10, Z10 + 2)).toBe(B.CANVAS); // was snow cover
@@ -163,7 +164,7 @@ describe('10. 风车转起来后再方块化：被硬方块占住的格子在生
   });
 
   it('creative: the cells landing in hard blocks just vanish, nothing drops, soft blocks are still overwritten', () => {
-    const { sim, w, rotor, stopped } = windmill10('creative');
+    const { tw, me, sim, w, rotor, stopped } = windmill10('creative');
     expect(stopped).toBe(true);
     expect(rotor.removed).toBe(true);
     expect(cellsIn(w, [B.CANVAS], -2, T, -12, 4, T + 12, 4)).toEqual(expected10());
@@ -184,7 +185,7 @@ describe('10. 风车转起来后再方块化：被硬方块占住的格子在生
  * below), and no arm is longer than that, so whatever quarter turn it stops at, every cell lands
  * in open air.
  */
-function colouredWindmill(sim: Simulation, H: number, len: number): Cell[] {
+function colouredWindmill(sim: TestWorld['sim'], H: number, len: number): Cell[] {
   const w = sim.world;
   fill(w, -1, T, -4, -1, H, -4, B.STONE_BRICKS);
   set(w, 0, H, -4, B.BEARING, facingState(PX));
@@ -202,14 +203,15 @@ function colouredWindmill(sim: Simulation, H: number, len: number): Cell[] {
 describe('11. 挖掉轴承或用 TNT 炸掉轴承，风车就地方块化。', () => {
   it('mining the bearing (survival, holding the attack button): the windmill blockifies in place the tick the bearing breaks', () => {
     const H = T + 4;
-    const sim = flatWorld('survival', { x: 0.5, y: T, z: -0.5 }, 11);
+    const tw = flatWorld('survival', { x: 0.5, y: T, z: -0.5 }, 11);
+    const { sim, me } = tw;
     const cells = colouredWindmill(sim, H, 4);
-    sim.advance(2);
+    tw.tick(2);
     const log = new Events(sim);
-    const rotor = startByPlayer(sim, 0, H, -4, PZ);
-    spinUntil(sim, rotor, 0.2, 0.3);
-    sim.soloPlayer.emptyHand();
-    expect(sim.soloPlayer.mine(0, H, -4, PZ)).toBe(true);
+    const rotor = startByPlayer(tw, 0, H, -4, PZ);
+    spinUntil(tw, rotor, 0.2, 0.3);
+    me.emptyHand();
+    expect(me.mine(0, H, -4, PZ)).toBe(true);
     // The very tick the bearing broke:
     expect(idAt(sim.world, 0, H, -4)).toBe(B.AIR);
     expect(rotor.removed).toBe(true);
@@ -225,14 +227,15 @@ describe('11. 挖掉轴承或用 TNT 炸掉轴承，风车就地方块化。', (
 
   it('mining the bearing in creative (breaks at the first hit): same, the windmill lands in place at its half-turn pose', () => {
     const H = T + 4;
-    const sim = flatWorld('creative', { x: 0.5, y: T, z: -0.5 }, 13);
+    const tw = flatWorld('creative', { x: 0.5, y: T, z: -0.5 }, 13);
+    const { sim, me } = tw;
     const cells = colouredWindmill(sim, H, 4);
-    sim.advance(2);
-    const rotor = startByPlayer(sim, 0, H, -4, PZ);
-    spinUntil(sim, rotor, Math.PI - 0.25, Math.PI - 0.15);
+    tw.tick(2);
+    const rotor = startByPlayer(tw, 0, H, -4, PZ);
+    spinUntil(tw, rotor, Math.PI - 0.25, Math.PI - 0.15);
     const t0 = sim.ticks;
-    sim.soloPlayer.emptyHand();
-    expect(sim.soloPlayer.mine(0, H, -4, PZ)).toBe(true);
+    me.emptyHand();
+    expect(me.mine(0, H, -4, PZ)).toBe(true);
     expect(sim.ticks - t0).toBe(1); // one hit
     expect(idAt(sim.world, 0, H, -4)).toBe(B.AIR);
     expect(rotor.removed).toBe(true);
@@ -243,22 +246,23 @@ describe('11. 挖掉轴承或用 TNT 炸掉轴承，风车就地方块化。', (
 
   it('blowing the bearing up with a blast crate the player lit: after the blast the surviving blades blockify in place, no rotor keeps turning', () => {
     const H = T + 6;
-    const sim = flatWorld('creative', { x: -3.5, y: T + 7, z: -1.5 }, 12);
-    sim.soloPlayer.player.flying = true;
+    const tw = flatWorld('creative', { x: -3.5, y: T + 7, z: -1.5 }, 12);
+    const { sim, me } = tw;
+    me.setFlying(true);
     const cells = colouredWindmill(sim, H, 6);
-    sim.advance(2);
+    tw.tick(2);
     const log = new Events(sim);
-    const rotor = startByPlayer(sim, 0, H, -4, PZ);
-    sim.advance(10);
+    const rotor = startByPlayer(tw, 0, H, -4, PZ);
+    tw.tick(10);
     // A blast crate on top of the post, diagonally above / behind the bearing; lit with an empty hand.
-    sim.soloPlayer.hold(B.TNT);
-    expect(sim.soloPlayer.useOn(-1, H, -4, PY)).toBe(true);
+    me.hold(B.TNT);
+    expect(me.useOn(-1, H, -4, PY)).toBe(true);
     expect(idAt(sim.world, -1, H + 1, -4)).toBe(B.TNT);
-    sim.soloPlayer.emptyHand();
-    expect(sim.soloPlayer.useOn(-1, H + 1, -4, PY)).toBe(true);
+    me.emptyHand();
+    expect(me.useOn(-1, H + 1, -4, PY)).toBe(true);
     expect(primedCrates(sim).length).toBe(1);
     expect(rotor.removed).toBe(false); // lighting the crate did nothing to the windmill yet
-    tickUntilExplosion(sim, log);
+    tickUntilExplosion(tw, log);
 
     expect(idAt(sim.world, 0, H, -4)).toBe(B.AIR); // the blast took the bearing
     expect(rotor.removed).toBe(true);
@@ -288,7 +292,7 @@ describe('11. 挖掉轴承或用 TNT 炸掉轴承，风车就地方块化。', (
       expect(placed).toContain(key(...turnedAboutX(k, 1, H, -4, x, y, z), id));
     }
     // Nothing left turning in the air: a while later still no rotor, and the blocks have not moved.
-    sim.advance(40);
+    tw.tick(40);
     expect(sim.structures.rotors().length).toBe(0);
     expect(cellsIn(sim.world, CLOTH, -2, T - 1, -14, 4, H + 9, 6)).toEqual(placed);
   });
@@ -319,7 +323,8 @@ const HY12 = SEA + 4;
 const HZ12 = OZ12 + 2;
 
 function shipWindmill12(move: 'north' | 'turn' = 'north') {
-  const sim = seaWorld('survival', { x: 3.5, y: SEA, z: OZ12 + 3.5 }, 12);
+  const tw = seaWorld('survival', { x: 3.5, y: SEA, z: OZ12 + 3.5 }, 12);
+  const { sim, me } = tw;
   const w = sim.world;
   if (move === 'north') fill(w, -3, 20, -8, 7, 37, -2, B.STONE); // the cliff
   else fill(w, -12, 20, 4, -2, 37, 17, B.STONE);
@@ -334,38 +339,38 @@ function shipWindmill12(move: 'north' | 'turn' = 'north') {
   for (let i = 1; i <= 3; i++) cells.push([2, HY12, HZ12 - i, B.CANVAS]);
   for (const [x, y, z, id] of cells) set(w, x, y, z, id);
   sim.worldGlue.add(2, HY12, HZ12, NY);
-  sim.advance(2);
+  tw.tick(2);
 
   // Assemble from the deck, let go of the wheel.
-  sim.soloPlayer.teleport(3.5, SEA, OZ12 + 3.5);
-  sim.advance(3);
-  if (!sim.soloPlayer.useOn(2, SEA, OZ12 + 4) || !sim.soloPlayer.useOn(2, SEA, OZ12 + 4)) throw new Error('cannot click the helm');
+  me.teleport(3.5, SEA, OZ12 + 3.5);
+  tw.tick(3);
+  if (!me.useOn(2, SEA, OZ12 + 4) || !me.useOn(2, SEA, OZ12 + 4)) throw new Error('cannot click the helm');
   const ships = sim.structures.ships();
   if (ships.length !== 1) throw new Error('no ship');
   const ship = ships[0]!;
-  sim.soloPlayer.use();
-  sim.tick();
-  sim.advance(20);
+  me.use();
+  tw.tick();
+  tw.tick(20);
   const onDeck = (): void => {
     const q = ship.grid.toWorld(vec3(3.5, SEA + 0.05, OZ12 + 3.5));
-    sim.soloPlayer.teleport(q.x, q.y, q.z);
-    sim.advance(5);
+    me.teleport(q.x, q.y, q.z);
+    tw.tick(5);
   };
   onDeck();
-  const rotor = startByPlayer(sim, 2, SEA + 3, HZ12, PZ, ship.id);
-  sim.advance(5);
+  const rotor = startByPlayer(tw, 2, SEA + 3, HZ12, PZ, ship.id);
+  tw.tick(5);
 
   // "Sail" next to the cliff: pose changed by hand, then let it settle.
   const p = ship.grid.position;
   if (move === 'north') ship.grid.setPoseImmediate(vec3(p.x, p.y, p.z - 8), ship.grid.rotation);
   else ship.grid.setPoseImmediate(vec3(p.x, p.y, p.z), qmul(qfromYaw(HALF_PI), ship.grid.rotation));
   sim.dynamics.wake(ship);
-  sim.advance(3);
+  tw.tick(3);
   onDeck();
 
-  spinUntil(sim, rotor, HALF_PI - 0.3, HALF_PI - 0.2);
-  const stopped = sim.soloPlayer.useOn(2, SEA + 3, HZ12, PZ, ship.id);
-  return { sim, w, ship, rotor, cells, stopped };
+  spinUntil(tw, rotor, HALF_PI - 0.3, HALF_PI - 0.2);
+  const stopped = me.useOn(2, SEA + 3, HZ12, PZ, ship.id);
+  return { tw, me, sim, w, ship, rotor, cells, stopped };
 }
 
 /** The canvas cells of the ship (local) after the 90° snap, the three cells in the rock dropped. */
@@ -387,14 +392,14 @@ function expected12(): string[] {
 }
 
 /** Is the centre of local cell (x,y,z) of the ship inside a hard WORLD block? */
-function inWorldRock(sim: Simulation, ship: Ship, x: number, y: number, z: number): boolean {
+function inWorldRock(sim: TestWorld['sim'], ship: Ship, x: number, y: number, z: number): boolean {
   const c = ship.grid.toWorld(vec3(x + 0.5, y + 0.5, z + 0.5));
   return isSolidCell(sim.world.getCell(Math.floor(c.x), Math.floor(c.y), Math.floor(c.z)));
 }
 
 describe('12. 船上的风车停在岩石里时，落在岩石里的那几格掉落，船不会被弹飞。', () => {
   it('the cells whose snapped place is inside the world rock become drops (survival), not ship blocks', () => {
-    const { sim, ship, rotor, stopped } = shipWindmill12();
+    const { tw, me, sim, ship, rotor, stopped } = shipWindmill12();
     expect(stopped).toBe(true);
     expect(rotor.removed).toBe(true);
     // (scene check) the three outer cells of the east arm, turned north, are inside the cliff
@@ -404,7 +409,7 @@ describe('12. 船上的风车停在岩石里时，落在岩石里的那几格掉
   });
 
   it('the other cells land in the ship grid at the snapped pose (nothing goes into the world)', () => {
-    const { w, ship, rotor, stopped } = shipWindmill12();
+    const { tw, me, w, ship, rotor, stopped } = shipWindmill12();
     expect(stopped).toBe(true);
     expect(rotor.removed).toBe(true);
     expect(ship.children.length).toBe(0);
@@ -413,14 +418,14 @@ describe('12. 船上的风车停在岩石里时，落在岩石里的那几格掉
   });
 
   it('the ship is not launched: no ship cell ends up in rock, and it stays put over the next 3 seconds', () => {
-    const { sim, ship, stopped } = shipWindmill12();
+    const { tw, me, sim, ship, stopped } = shipWindmill12();
     expect(stopped).toBe(true);
     const inRock: string[] = [];
     ship.grid.forEachCell((x, y, z) => {
       if (inWorldRock(sim, ship, x, y, z)) inRock.push(`${x},${y},${z}`);
     });
     expect(inRock).toEqual([]);
-    const m = watchShip(sim, ship, 60);
+    const m = watchShip(tw, ship, 60);
     expect(m.maxMove).toBeLessThan(0.05);
     expect(m.maxSpeed).toBeLessThan(0.25);
     expect(m.maxSpin).toBeLessThan(0.25);
@@ -428,7 +433,7 @@ describe('12. 船上的风车停在岩石里时，落在岩石里的那几格掉
   });
 
   it('the same with a ship that has turned 90°: the rock test follows the ship\'s real pose', () => {
-    const { sim, w, ship, rotor, stopped } = shipWindmill12('turn');
+    const { tw, me, sim, w, ship, rotor, stopped } = shipWindmill12('turn');
     expect(stopped).toBe(true);
     expect(rotor.removed).toBe(true);
     for (const z of [4, 5, 6]) expect(inWorldRock(sim, ship, 2, HY12, z)).toBe(true); // (scene check)
@@ -436,7 +441,7 @@ describe('12. 船上的风车停在岩石里时，落在岩石里的那几格掉
     expect(dropped(sim, B.CANVAS)).toBe(3);
     expect(gridCells(ship.grid, [B.CANVAS])).toEqual(expected12());
     expect(cellsIn(w, [B.CANVAS], -8, SEA - 2, 0, 12, 40, 20)).toEqual([]);
-    const m = watchShip(sim, ship, 60);
+    const m = watchShip(tw, ship, 60);
     expect(m.maxMove).toBeLessThan(0.05);
     expect(m.maxSpeed).toBeLessThan(0.25);
   });
@@ -460,8 +465,9 @@ describe('12. 船上的风车停在岩石里时，落在岩石里的那几格掉
 const HY13 = SEA + 4;
 
 function shipWindmill13() {
-  const sim = seaWorld('creative', { x: 3.5, y: SEA + 1, z: 8.5 }, 13);
-  sim.soloPlayer.player.flying = true;
+  const tw = seaWorld('creative', { x: 3.5, y: SEA + 1, z: 8.5 }, 13);
+  const { sim, me } = tw;
+  me.setFlying(true);
   const w = sim.world;
   fill(w, 0, SEA - 1, 0, 6, SEA - 1, 6, B.PLANKS_OAK);
   set(w, 3, SEA, 6, B.HELM, facingState(NZ));
@@ -478,39 +484,39 @@ function shipWindmill13() {
   }
   for (const [x, y, z, id] of cells) set(w, x, y, z, id);
   sim.worldGlue.add(3, HY13, 3, NY);
-  sim.advance(2);
+  tw.tick(2);
 
-  if (!sim.soloPlayer.useOn(3, SEA, 6) || !sim.soloPlayer.useOn(3, SEA, 6)) throw new Error('cannot click the helm');
+  if (!me.useOn(3, SEA, 6) || !me.useOn(3, SEA, 6)) throw new Error('cannot click the helm');
   const ship = sim.structures.ships()[0]!;
   if (ship === undefined) throw new Error('no ship');
-  sim.soloPlayer.use(); // let go of the wheel
-  sim.tick();
-  sim.advance(20);
+  me.use(); // let go of the wheel
+  tw.tick();
+  tw.tick(20);
   const fly = (x: number, y: number, z: number): void => {
     const q = ship.grid.toWorld(vec3(x, y, z));
-    sim.soloPlayer.teleport(q.x, q.y, q.z);
-    sim.soloPlayer.player.flying = true;
-    sim.tick();
+    me.teleport(q.x, q.y, q.z);
+    me.setFlying(true);
+    tw.tick();
   };
   // Hovering west of the post, head below the blades' plane.
   fly(0.5, SEA + 2, 1.5);
-  sim.soloPlayer.hold(B.TNT);
-  if (!sim.soloPlayer.useOn(2, SEA + 2, 2, PY, ship.id)) throw new Error('cannot place the crate');
+  me.hold(B.TNT);
+  if (!me.useOn(2, SEA + 2, 2, PY, ship.id)) throw new Error('cannot place the crate');
   const placedCrate = idAt(ship.grid, 2, SEA + 3, 2);
-  sim.soloPlayer.emptyHand();
-  if (!sim.soloPlayer.useOn(2, SEA + 3, 2, NX, ship.id)) throw new Error('cannot light the crate');
+  me.emptyHand();
+  if (!me.useOn(2, SEA + 3, 2, NX, ship.id)) throw new Error('cannot light the crate');
   const lit = primedCrates(sim).length;
-  sim.advance(10);
-  const rotor = startByPlayer(sim, 3, SEA + 3, 3, NX, ship.id);
+  tw.tick(10);
+  const rotor = startByPlayer(tw, 3, SEA + 3, 3, NX, ship.id);
   fly(-9.5, SEA + 2, 3.5); // out of the way
   const log = new Events(sim);
-  const blast = tickUntilExplosion(sim, log);
-  return { sim, w, ship, rotor, cells, blast, placedCrate, lit, log };
+  const blast = tickUntilExplosion(tw, log);
+  return { tw, me, sim, w, ship, rotor, cells, blast, placedCrate, lit, log };
 }
 
 describe('13. 船上的轴承被炸：轴心和爆炸半径内的帆布被炸掉，其余落回船上。整条小船被炸光时，风车剩下的部分落回（空）船上。', () => {
   it('a blast at the bearing of a ship windmill destroys the bearing, the hub and the sails within the blast radius', () => {
-    const { ship, rotor, cells, blast, placedCrate, lit } = shipWindmill13();
+    const { tw, me, ship, rotor, cells, blast, placedCrate, lit } = shipWindmill13();
     expect(placedCrate).toBe(B.TNT);
     expect(lit).toBe(1);
     expect(idAt(ship.grid, 3, SEA + 3, 3)).toBe(B.AIR); // the bearing was blown up
@@ -531,7 +537,7 @@ describe('13. 船上的轴承被炸：轴心和爆炸半径内的帆布被炸掉
   });
 
   it('the rest of the windmill falls back onto the ship grid at the snapped pose: nothing in the world, no rotor left', () => {
-    const { sim, w, ship, rotor, cells, blast } = shipWindmill13();
+    const { tw, me, sim, w, ship, rotor, cells, blast } = shipWindmill13();
     expect(rotor.removed).toBe(true);
     expect(sim.structures.rotors().length).toBe(0);
     expect(ship.children.length).toBe(0);
@@ -564,7 +570,8 @@ describe('13. 船上的轴承被炸：轴心和爆炸半径内的帆布被炸掉
    * away.
    */
   function smallShip() {
-    const sim = flatWorld('creative', { x: 2.5, y: T, z: 2.5 }, 31);
+    const tw = flatWorld('creative', { x: 2.5, y: T, z: 2.5 }, 31);
+    const { sim, me } = tw;
     const w = sim.world;
     set(w, 0, T, 0, B.PLANKS_OAK);
     set(w, 1, T, 0, B.PLANKS_OAK);
@@ -574,29 +581,29 @@ describe('13. 船上的轴承被炸：轴心和爆炸半径内的帆布被炸掉
     for (let y = T + 2; y <= T + 9; y++) mast.push([1, y, 0, B.CANVAS]);
     for (const [x, y, z, id] of mast) set(w, x, y, z, id);
     sim.worldGlue.add(1, T + 2, 0, NY);
-    sim.advance(2);
-    if (!sim.soloPlayer.useOn(0, T + 1, 0) || !sim.soloPlayer.useOn(0, T + 1, 0)) throw new Error('cannot click the helm');
+    tw.tick(2);
+    if (!me.useOn(0, T + 1, 0) || !me.useOn(0, T + 1, 0)) throw new Error('cannot click the helm');
     const ship = sim.structures.ships()[0]!;
     if (ship === undefined) throw new Error('no ship');
-    sim.soloPlayer.use(); // let go of the wheel
-    sim.tick();
-    sim.soloPlayer.teleport(2.5, T, 2.5);
-    sim.advance(5);
-    const rotor = startByPlayer(sim, 1, T + 1, 0, PZ, ship.id);
-    sim.advance(10);
-    sim.soloPlayer.hold(B.TNT);
-    if (!sim.soloPlayer.useOn(1, T - 1, 1, PY)) throw new Error('cannot place the crate');
-    sim.soloPlayer.emptyHand();
-    if (!sim.soloPlayer.useOn(1, T, 1, PY)) throw new Error('cannot light the crate');
+    me.use(); // let go of the wheel
+    tw.tick();
+    me.teleport(2.5, T, 2.5);
+    tw.tick(5);
+    const rotor = startByPlayer(tw, 1, T + 1, 0, PZ, ship.id);
+    tw.tick(10);
+    me.hold(B.TNT);
+    if (!me.useOn(1, T - 1, 1, PY)) throw new Error('cannot place the crate');
+    me.emptyHand();
+    if (!me.useOn(1, T, 1, PY)) throw new Error('cannot light the crate');
     const lit = primedCrates(sim).length;
-    sim.soloPlayer.teleport(30.5, T, 30.5);
+    me.teleport(30.5, T, 30.5);
     const log = new Events(sim);
-    tickUntilExplosion(sim, log);
-    return { sim, w, ship, rotor, mast, lit, log };
+    tickUntilExplosion(tw, log);
+    return { tw, me, sim, w, ship, rotor, mast, lit, log };
   }
 
   it('a small ship blown away entirely: what is left of its windmill ends up in the (otherwise empty) ship', () => {
-    const { ship, rotor, mast, lit } = smallShip();
+    const { tw, me, ship, rotor, mast, lit } = smallShip();
     expect(lit).toBe(1);
     expect(rotor.removed).toBe(true);
     expect(ship.removed).toBe(false);
@@ -610,13 +617,13 @@ describe('13. 船上的轴承被炸：轴心和爆炸半径内的帆布被炸掉
   });
 
   it('... with no orphan rotor, nothing lost into the world, and the ship goes on being simulated', () => {
-    const { sim, w, ship, rotor } = smallShip();
+    const { tw, me, sim, w, ship, rotor } = smallShip();
     const survivors = gridCells(rotor.grid);
     expect(sim.structures.rotors().length).toBe(0);
     expect(ship.children.length).toBe(0);
     expect(sim.structures.ships()).toContain(ship);
     expect(cellsIn(w, [B.CANVAS], -6, 0, -6, 8, T + 12, 8)).toEqual([]);
-    sim.advance(40);
+    tw.tick(40);
     expect(ship.removed).toBe(false);
     expect(sim.structures.ships()).toContain(ship);
     expect(gridCells(ship.grid)).toEqual(survivors);
@@ -639,58 +646,60 @@ describe('13. 船上的轴承被炸：轴心和爆炸半径内的帆布被炸掉
  * already touch cannot be glued), and (when `start`) starts the windmill on the world.
  */
 function gluedRaftWindmill(start = true) {
-  const sim = seaWorld('creative', { x: 4.5, y: SEA + 2, z: -0.5 }, 15);
-  sim.soloPlayer.player.flying = true;
+  const tw = seaWorld('creative', { x: 4.5, y: SEA + 2, z: -0.5 }, 15);
+  const { sim, me } = tw;
+  me.setFlying(true);
   const w = sim.world;
   const by = SEA + 3;
   fill(w, 0, SEA - 1, 0, 4, SEA - 1, 4, B.PLANKS_OAK);
   set(w, 2, SEA, 4, B.HELM, facingState(NZ));
   fill(w, 2, SEA, 2, 2, by, 2, B.PLANKS_OAK); // post
   set(w, 2, by, 1, B.BEARING, facingState(NZ)); // mounted on the post's north face
-  sim.advance(2);
-  sim.soloPlayer.hold(I.GLUE);
-  if (!sim.soloPlayer.useOn(2, by, 1, NZ)) throw new Error('cannot glue'); // the bearing's front face
-  sim.soloPlayer.hold(B.CANVAS);
-  sim.soloPlayer.player.input.sneak = true; // with a block in hand, sneak + right-click on a bearing places
-  if (!sim.soloPlayer.useOn(2, by, 1, NZ)) throw new Error('cannot place the hub'); // the hub, against it
-  sim.soloPlayer.player.input.sneak = false;
+  tw.tick(2);
+  me.hold(I.GLUE);
+  if (!me.useOn(2, by, 1, NZ)) throw new Error('cannot glue'); // the bearing's front face
+  me.hold(B.CANVAS);
+  me.input.sneak = true; // with a block in hand, sneak + right-click on a bearing places
+  if (!me.useOn(2, by, 1, NZ)) throw new Error('cannot place the hub'); // the hub, against it
+  me.input.sneak = false;
   if ((w.getCell(2, by, 0) & ID_MASK) !== B.CANVAS) throw new Error('no hub');
   if (!sim.worldGlue.has(2, by, 0, PZ)) throw new Error('no glue');
   const windmill: Cell[] = [[2, by, 0, B.CANVAS]];
   for (const [dx, dy] of [[0, 1], [0, 2], [0, -1], [-1, 0], [-2, 0]] as const) windmill.push([2 + dx, by + dy, 0, B.CANVAS]);
   for (const [x, y, z, id] of windmill) set(w, x, y, z, id);
-  sim.advance(2);
-  sim.soloPlayer.emptyHand();
-  const rotor = start ? startByPlayer(sim, 2, by, 1, PX) : (null as unknown as Rotor);
-  return { sim, w, by, windmill, rotor };
+  tw.tick(2);
+  me.emptyHand();
+  const rotor = start ? startByPlayer(tw, 2, by, 1, PX) : (null as unknown as Rotor);
+  return { tw, me, sim, w, by, windmill, rotor };
 }
 
 describe('14. 轴心和轴承之间的胶，在风车启动再停下之后仍然在。', () => {
   it('glue the hub to the bearing, start the windmill, let it turn half a turn, stop it: the glue is there again', () => {
-    const sim = flatWorld('creative', { x: 2.5, y: T, z: -1.5 }, 14);
+    const tw = flatWorld('creative', { x: 2.5, y: T, z: -1.5 }, 14);
+    const { sim, me } = tw;
     const w = sim.world;
     const Y = T + 4;
     fill(w, -1, T, -4, -1, Y, -4, B.STONE_BRICKS);
     set(w, 0, Y, -4, B.BEARING, facingState(PX));
-    sim.advance(2);
+    tw.tick(2);
     const log = new Events(sim);
     // Glue: right-click the bearing's front face with the glue in hand, then put the hub on it.
-    sim.soloPlayer.hold(I.GLUE);
-    expect(sim.soloPlayer.useOn(0, Y, -4, PX)).toBe(true);
+    me.hold(I.GLUE);
+    expect(me.useOn(0, Y, -4, PX)).toBe(true);
     expect(log.toastKeys()).toContain('toast.glue.added');
-    sim.soloPlayer.hold(B.CANVAS);
-    sim.soloPlayer.player.input.sneak = true; // with a block in hand, sneak + right-click on a bearing places
-    expect(sim.soloPlayer.useOn(0, Y, -4, PX)).toBe(true);
-    sim.soloPlayer.player.input.sneak = false;
+    me.hold(B.CANVAS);
+    me.input.sneak = true; // with a block in hand, sneak + right-click on a bearing places
+    expect(me.useOn(0, Y, -4, PX)).toBe(true);
+    me.input.sneak = false;
     expect(idAt(w, 1, Y, -4)).toBe(B.CANVAS); // hub
     expect(sim.worldGlue.has(1, Y, -4, NX)).toBe(true);
     for (const [dy, dz] of [[1, 0], [2, 0], [-1, 0], [0, -1], [0, -2]] as const) set(w, 1, Y + dy, -4 + dz, B.CANVAS);
-    sim.advance(2);
+    tw.tick(2);
 
-    sim.soloPlayer.emptyHand();
-    const rotor = startByPlayer(sim, 0, Y, -4, PZ);
-    spinUntil(sim, rotor, Math.PI - 0.25, Math.PI - 0.15);
-    expect(sim.soloPlayer.useOn(0, Y, -4, PZ)).toBe(true);
+    me.emptyHand();
+    const rotor = startByPlayer(tw, 0, Y, -4, PZ);
+    spinUntil(tw, rotor, Math.PI - 0.25, Math.PI - 0.15);
+    expect(me.useOn(0, Y, -4, PZ)).toBe(true);
     expect(rotor.removed).toBe(true);
     expect(idAt(w, 1, Y, -4)).toBe(B.CANVAS); // the hub is back in front of the bearing
     expect(sim.worldGlue.has(1, Y, -4, NX)).toBe(true);
@@ -698,22 +707,22 @@ describe('14. 轴心和轴承之间的胶，在风车启动再停下之后仍然
   });
 
   it('... so a windmill stopped on a raft is taken along when the raft is assembled into a ship', () => {
-    const { sim, w, by, windmill, rotor } = gluedRaftWindmill();
-    sim.soloPlayer.emptyHand();
-    spinUntil(sim, rotor, Math.PI - 0.25, Math.PI - 0.15);
+    const { tw, me, sim, w, by, windmill, rotor } = gluedRaftWindmill();
+    me.emptyHand();
+    spinUntil(tw, rotor, Math.PI - 0.25, Math.PI - 0.15);
     // Stop it from above the bearing (the turned arms now hide its east face).
-    sim.soloPlayer.teleport(4.5, by + 0.5, 2.5);
-    sim.soloPlayer.player.flying = true;
-    expect(sim.soloPlayer.useOn(2, by, 1, PY)).toBe(true);
+    me.teleport(4.5, by + 0.5, 2.5);
+    me.setFlying(true);
+    expect(me.useOn(2, by, 1, PY)).toBe(true);
     expect(rotor.removed).toBe(true);
     expect(sim.worldGlue.has(2, by, 0, PZ)).toBe(true);
 
     // Assemble the raft at its helm.
-    sim.soloPlayer.teleport(2.5, SEA + 1, 6.5);
-    sim.soloPlayer.player.flying = true;
-    sim.tick();
-    expect(sim.soloPlayer.useOn(2, SEA, 4)).toBe(true);
-    expect(sim.soloPlayer.useOn(2, SEA, 4)).toBe(true);
+    me.teleport(2.5, SEA + 1, 6.5);
+    me.setFlying(true);
+    tw.tick();
+    expect(me.useOn(2, SEA, 4)).toBe(true);
+    expect(me.useOn(2, SEA, 4)).toBe(true);
     const ship = sim.structures.ships()[0];
     expect(ship).toBeDefined();
     expect(gridCells(ship!.grid, [B.CANVAS]).length).toBe(windmill.length);
@@ -722,36 +731,36 @@ describe('14. 轴心和轴承之间的胶，在风车启动再停下之后仍然
   });
 
   it('also when the windmill is started on a ship, the ship docks turned by 90° while it spins, and it is stopped on the world', () => {
-    const { sim, w, by, windmill } = gluedRaftWindmill(false);
-    sim.soloPlayer.emptyHand();
-    sim.soloPlayer.teleport(2.5, SEA + 1, 6.5);
-    sim.soloPlayer.player.flying = true;
-    sim.tick();
-    expect(sim.soloPlayer.useOn(2, SEA, 4)).toBe(true);
-    expect(sim.soloPlayer.useOn(2, SEA, 4)).toBe(true);
+    const { tw, me, sim, w, by, windmill } = gluedRaftWindmill(false);
+    me.emptyHand();
+    me.teleport(2.5, SEA + 1, 6.5);
+    me.setFlying(true);
+    tw.tick();
+    expect(me.useOn(2, SEA, 4)).toBe(true);
+    expect(me.useOn(2, SEA, 4)).toBe(true);
     const ship = sim.structures.ships()[0]!;
     expect(gridCells(ship.grid, [B.CANVAS]).length).toBe(windmill.length); // the glue took it along
-    sim.soloPlayer.use(); // let go of the wheel
-    sim.tick();
-    sim.advance(20);
+    me.use(); // let go of the wheel
+    tw.tick();
+    tw.tick(20);
     const fly = (x: number, y: number, z: number): void => {
       const q = ship.grid.toWorld(vec3(x, y, z));
-      sim.soloPlayer.teleport(q.x, q.y, q.z);
-      sim.soloPlayer.player.flying = true;
-      sim.tick();
+      me.teleport(q.x, q.y, q.z);
+      me.setFlying(true);
+      tw.tick();
     };
     fly(4.5, by - 1, -0.5);
-    const rotor = startByPlayer(sim, 2, by, 1, PX, ship.id);
-    sim.advance(10);
+    const rotor = startByPlayer(tw, 2, by, 1, PX, ship.id);
+    tw.tick(10);
     // The ship turns 90° to the left (pose set by hand), then the player docks it: sneak + right-click
     // on the helm with an empty hand. The windmill keeps turning, now on the world.
     ship.grid.setPoseImmediate(ship.grid.position, qmul(qfromYaw(HALF_PI), ship.grid.rotation));
     sim.dynamics.wake(ship);
-    sim.advance(20);
+    tw.tick(20);
     fly(2.5, SEA + 1, 6.5);
-    sim.soloPlayer.player.input.sneak = true;
-    expect(sim.soloPlayer.useOn(2, SEA, 4, undefined, ship.id)).toBe(true);
-    sim.soloPlayer.player.input.sneak = false;
+    me.input.sneak = true;
+    expect(me.useOn(2, SEA, 4, undefined, ship.id)).toBe(true);
+    me.input.sneak = false;
     expect(ship.removed).toBe(true);
     expect(rotor.removed).toBe(false);
     expect(rotor.parent).toBeNull();
@@ -759,11 +768,11 @@ describe('14. 轴心和轴承之间的胶，在风车启动再停下之后仍然
     const [bx, byy, bz] = [rotor.bearingX, rotor.bearingY, rotor.bearingZ];
     expect(idAt(w, bx, byy, bz)).toBe(B.BEARING);
     expect(stateFacing(cellState(w.getCell(bx, byy, bz)))).toBe(NX);
-    spinUntil(sim, rotor, 1.2, 1.3);
-    sim.soloPlayer.teleport(bx + 2.5, byy + 0.5, bz + 2.5);
-    sim.soloPlayer.player.flying = true;
-    sim.tick();
-    expect(sim.soloPlayer.useOn(bx, byy, bz)).toBe(true);
+    spinUntil(tw, rotor, 1.2, 1.3);
+    me.teleport(bx + 2.5, byy + 0.5, bz + 2.5);
+    me.setFlying(true);
+    tw.tick();
+    expect(me.useOn(bx, byy, bz)).toBe(true);
     expect(rotor.removed).toBe(true);
     expect(idAt(w, bx - 1, byy, bz)).toBe(B.CANVAS);
     expect(sim.worldGlue.has(bx, byy, bz, NX)).toBe(true);
@@ -777,7 +786,8 @@ describe('14. 轴心和轴承之间的胶，在风车启动再停下之后仍然
 
 describe('10 与胶：风车停在地形里时，叶片不会和挡住它的地形粘在一起（结构体移动不会产生新的胶连接）。', () => {
   it('two blade cells glued together; after a half turn the outer one lands in a stone and drops: the inner one is not glued to the stone, and the restarted windmill leaves the stone in the world', () => {
-    const sim = flatWorld('creative', { x: 2.5, y: T, z: -1.5 }, 16);
+    const tw = flatWorld('creative', { x: 2.5, y: T, z: -1.5 }, 16);
+    const { sim, me } = tw;
     const w = sim.world;
     const Y = T + 4;
     const Z = -4;
@@ -785,31 +795,31 @@ describe('10 与胶：风车停在地形里时，叶片不会和挡住它的地�
     fill(w, -1, T, Z, -1, Y, Z, B.STONE_BRICKS);
     set(w, 0, Y, Z, B.BEARING, facingState(PX));
     for (const dy of [0, 1, 2, -1]) set(w, 1, Y + dy, Z, B.CANVAS);
-    sim.advance(2);
+    tw.tick(2);
     // The player glues the top of the up arm and puts a third canvas on it: two glued blade cells.
-    sim.soloPlayer.teleport(3.5, Y + 2, Z + 0.5);
-    sim.soloPlayer.player.flying = true;
-    sim.tick();
-    sim.soloPlayer.hold(I.GLUE);
-    expect(sim.soloPlayer.useOn(1, Y + 2, Z, PY)).toBe(true);
-    sim.soloPlayer.hold(B.CANVAS);
-    expect(sim.soloPlayer.useOn(1, Y + 2, Z, PY)).toBe(true);
+    me.teleport(3.5, Y + 2, Z + 0.5);
+    me.setFlying(true);
+    tw.tick();
+    me.hold(I.GLUE);
+    expect(me.useOn(1, Y + 2, Z, PY)).toBe(true);
+    me.hold(B.CANVAS);
+    expect(me.useOn(1, Y + 2, Z, PY)).toBe(true);
     expect(idAt(w, 1, Y + 3, Z)).toBe(B.CANVAS);
     expect(sim.worldGlue.has(1, Y + 2, Z, PY)).toBe(true);
-    sim.soloPlayer.teleport(2.5, T, -1.5);
-    sim.soloPlayer.player.flying = false;
-    sim.advance(2);
-    sim.soloPlayer.emptyHand();
+    me.teleport(2.5, T, -1.5);
+    me.setFlying(false);
+    tw.tick(2);
+    me.emptyHand();
     sim.rules.dropsEnabled = true; // so the cell that lands in the stone shows up as a drop (a world rule)
 
-    const rotor = startByPlayer(sim, 0, Y, Z, PZ);
+    const rotor = startByPlayer(tw, 0, Y, Z, PZ);
     expect(rotor.grid.count).toBe(5);
     expect(rotor.glue.has(1, Y + 2, Z, PY)).toBe(true);
-    spinUntil(sim, rotor, Math.PI - 0.25, Math.PI - 0.15);
+    spinUntil(tw, rotor, Math.PI - 0.25, Math.PI - 0.15);
     // A half turn about +X puts the up arm at (1, Y-1..Y-3): its tip lands in this stone.
     set(w, 1, Y - 3, Z, B.STONE);
-    sim.tick();
-    expect(sim.soloPlayer.useOn(0, Y, Z, PZ)).toBe(true);
+    tw.tick();
+    expect(me.useOn(0, Y, Z, PZ)).toBe(true);
     expect(rotor.removed).toBe(true);
     expect(idAt(w, 1, Y - 2, Z)).toBe(B.CANVAS);
     expect(idAt(w, 1, Y - 3, Z)).toBe(B.STONE);
@@ -817,7 +827,7 @@ describe('10 与胶：风车停在地形里时，叶片不会和挡住它的地�
     expect(sim.worldGlue.has(1, Y - 2, Z, NY)).toBe(false); // blade and stone are not joined
     expect(sim.worldGlue.size).toBe(0);
 
-    const again = startByPlayer(sim, 0, Y, Z, PZ);
+    const again = startByPlayer(tw, 0, Y, Z, PZ);
     expect(again.grid.count).toBe(4); // hub, two blade cells of the old up arm, the old down arm
     expect(gridCells(again.grid, [B.STONE])).toEqual([]);
     expect(idAt(w, 1, Y - 3, Z)).toBe(B.STONE);

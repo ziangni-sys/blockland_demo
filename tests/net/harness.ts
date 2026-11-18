@@ -38,12 +38,19 @@
  * ship pose, rotor angle and entity position of the last HISTORY_TICKS ticks, for checks of what
  * a client shows at renderTick.
  *
+ * LOCKSTEP (HarnessOptions.lockstep; scenario 30, tests/acceptance/world.ts). The server's own
+ * clock never fires; step() is one tick for everybody: every client's frame (its prediction runs
+ * one client tick and reports), delivery, one server tick, delivery, every client applies. The
+ * clients' clocks are LockstepClocks (renderTick = the newest batch, rotorTick one ahead) and their
+ * view rays start at the predicted body; run(), runUntil() and ticks() step.
+ *
  * Everything except the transport, the timers and the chunk source is product code.
  */
 import { expect } from 'vitest';
 import { vec3, type Quat, type Vec3 } from '../../src/core/math';
 import type { ReplicaState } from '../../src/net/client/apply';
 import type { ChunkSource } from '../../src/net/client/chunks';
+import { ServerClock } from '../../src/net/client/clock';
 import { NetClient, type NetStatus } from '../../src/net/client/netclient';
 import { emptyHeldInput, OwnPlayer, type AdoptedCorrection, type HeldInput } from '../../src/net/client/predict';
 import { ClientIntents, type ViewRay } from '../../src/net/client/intents';
@@ -53,7 +60,7 @@ import type { Inventory } from '../../src/entities/inventory';
 import type { ClientReplica } from '../../src/net/client/replica';
 import { decodeServerMessage, encodeClientMessage } from '../../src/net/codec';
 import type { CreateOptions, HostToPage } from '../../src/net/host/control';
-import { defaultSinks, ServerHost, type HostClock, type ServerSinks } from '../../src/net/host/host';
+import { defaultSinks, ServerHost, TICK_MS, type HostClock, type ServerSinks } from '../../src/net/host/host';
 import { IntentQueue, type IntentStats } from '../../src/net/server/intents';
 import { createLoopbackPair, LoopbackNet, type LinkConditions } from '../../src/net/loopback';
 import {
@@ -133,6 +140,39 @@ function generatorSource(gen: ChunkGenerator, net: LoopbackNet, delayMs: number,
   };
 }
 
+// ====================================================================== lockstep
+
+/**
+ * The clock of a client stepped in lockstep with the server (NetHarness.step, docs/NETCODE.md
+ * section 16, scenario 30): when the client has applied the batch of tick T, the server is at T
+ * and the next report is applied at T + 1. So arrivalTick = T + 1 with D = 1: renderTick = T (the
+ * newest applied batch), and rotorTick = T + 1 (rotorLead 0): client tick k runs right before
+ * server tick k, with the ships where the server had them at k - 1 and the rotors where tick k
+ * puts them. One step, one client tick, one report, one server tick.
+ */
+export class LockstepClock extends ServerClock {
+  private newest = -1;
+  override reset(): void {
+    super.reset();
+    this.newest = -1;
+  }
+  override frame(_now: number, newestApplied: number): void {
+    this.newest = newestApplied;
+  }
+  override get D(): number {
+    return 1;
+  }
+  override get rotorLead(): number {
+    return 0;
+  }
+  override get renderTick(): number {
+    return this.newest >= 0 ? this.newest : -Infinity;
+  }
+  override get rotorTick(): number {
+    return this.newest + 1;
+  }
+}
+
 // ====================================================================== the clients
 
 /** How a HeadlessClient runs the harness while it waits for the server (NetHarness.runUntil). */
@@ -204,6 +244,12 @@ export class HeadlessClient {
   intents: ClientIntents | null = null;
   /** A third-person camera: its position and direction for the eyes and the look (null = first person, the eye ray). */
   camera: ((eye: Vec3, dir: Vec3) => { origin: Vec3; dir: Vec3 }) | null = null;
+  /**
+   * Where the eyes of the view ray are: 'shown', the picture (OwnPlayer.displayPos, as a page has
+   * it), or 'body', the predicted body as it is now (a lockstep client: between two steps that is
+   * where the server has the player when it carries out the next tick's actions).
+   */
+  eyes: 'shown' | 'body' = 'shown';
   /** Every intent sent, over every connection. */
   readonly sentIntents: ClientMessage[] = [];
   /** Set by the harness: runs it while useOn, mine and the like wait for the server. */
@@ -302,10 +348,19 @@ export class HeadlessClient {
     this.onFrame?.(now);
   }
 
-  /** The view ray now: the eyes as shown, the held look; from the camera when one is set. */
+  /**
+   * Apply what arrived (NetClient.frame: batches, samples, the clock, the poses) without a client
+   * tick or an Aim: the end of a lockstep step (NetHarness.step).
+   */
+  applyNow(now: number): void {
+    if (this.crashed || this.net.hidden) return;
+    this.net.frame(now);
+  }
+
+  /** The view ray now: the eyes (see `eyes`), the held look; from the camera when one is set. */
   view(): ViewRay {
     const own = this.requireOwn();
-    const eye = own.displayPos(this.lastFrameAt);
+    const eye = this.eyes === 'body' ? vec3(own.player.pos.x, own.player.pos.y, own.player.pos.z) : own.displayPos(this.lastFrameAt);
     eye.y += own.player.eyeHeight;
     const dir = lookDir(this.input.yaw, this.input.pitch);
     if (this.camera === null) return { eye, origin: eye, dir };
@@ -666,6 +721,15 @@ export interface HarnessOptions {
   storage?: SaveStorage;
   /** Keep the server's poses of the last HISTORY_TICKS ticks (history). */
   history?: boolean;
+  /** Starter items for first joins (default true). */
+  starterItems?: boolean;
+  /**
+   * Lockstep (scenario 30, section 16): the server's own clock never fires; step() runs one client
+   * frame for every client, delivers, runs one server tick, delivers, and lets the clients apply.
+   * Clients get no timed frames or heartbeats, a LockstepClock and the eyes of the body (give them
+   * the default INSTANT links). run(), runUntil() and ticks() step.
+   */
+  lockstep?: boolean;
 }
 
 /** A client's link: the conditions of each direction (default INSTANT). */
@@ -856,18 +920,23 @@ export class NetHarness {
   private readonly tracked = new Map<HeadlessClient, Tracked>();
   private hooked: Simulation | null = null;
   private clientSeq = 0;
+  /** See HarnessOptions.lockstep. */
+  readonly lockstep: boolean;
 
   constructor(opts: HarnessOptions = {}) {
     this.clock = new VirtualClock(this.net);
     const storage = opts.storage ?? new MemoryStorage();
     this.storage = storage;
     this.keepHistory = opts.history ?? false;
+    this.lockstep = opts.lockstep ?? false;
+    if (this.lockstep) this.clock.freeze();
     this.host = new ServerHost({
       clock: this.clock,
       openStorage: () => Promise.resolve({ storage, persistent: true }),
       report: (m) => this.reports.push(m),
       chunkBudget: { columns: opts.chunkColumns ?? 8 },
       rabbits: opts.rabbits ?? false,
+      starterItems: opts.starterItems ?? true,
       sinks: (sim, replicator) => {
         const s = (opts.sinks ?? defaultSinks)(sim, replicator);
         this.sinks = s;
@@ -912,6 +981,12 @@ export class NetHarness {
     this.hook();
   }
 
+  /** Open a simulation built by the test (ServerHost.serve): `generator` describes sim.generator. */
+  serve(sim: Simulation, generator: GeneratorSpec = sim.generator.spec(), meta: WorldMeta = testMeta()): void {
+    this.host.serve(sim, generator, meta);
+    this.hook();
+  }
+
   /**
    * Let pending promise chains (saves, control messages) run to the end: microtasks only, no timer
    * and no virtual time passes.
@@ -950,10 +1025,17 @@ export class NetHarness {
         name: opts.name ?? key,
         viewRadius: opts.viewRadius ?? 2,
         ...(opts.build !== undefined ? { build: opts.build } : {}),
+        ...(this.lockstep ? { clock: () => new LockstepClock() } : {}),
       });
     });
     this.clients.push(c);
     c.driver = this;
+    if (this.lockstep) {
+      // Frames come from step(); a lockstep client sends no Ping (nothing measures the round trip).
+      c.eyes = 'body';
+      if (opts.start ?? true) c.net.start();
+      return c;
+    }
     // Frames and heartbeats with a phase of their own.
     const phase = ((this.clientSeq++ * 7.3) % FRAME_MS) + 0.1;
     const frame = (at: number): void => {
@@ -1037,22 +1119,56 @@ export class NetHarness {
 
   // ------------------------------------------------------------------ time
 
-  /** Advance virtual time by `ms` (a server held by quiesce() runs on). */
+  /** Advance virtual time by `ms` (a server held by quiesce() runs on). Lockstep: the steps of `ms`. */
   run(ms: number): void {
+    if (this.lockstep) {
+      for (let i = Math.round(ms / TICK_MS); i > 0; i--) this.step();
+      return;
+    }
     this.clock.thaw();
     this.net.advanceBy(ms);
   }
 
-  /** Advance until `cond` holds (checked every `stepMs`), at most `maxMs` (a server held by quiesce() runs on). */
+  /**
+   * Advance until `cond` holds (checked every `stepMs`), at most `maxMs` (a server held by quiesce()
+   * runs on). Lockstep: step until it holds, at most the steps of `maxMs`.
+   */
   runUntil(cond: () => boolean, maxMs = 10_000, stepMs = 10): void {
+    if (this.lockstep) {
+      for (let i = Math.ceil(maxMs / TICK_MS); !cond(); i--) {
+        if (i <= 0) throw new Error(`condition not reached within ${maxMs} ms`);
+        this.step();
+      }
+      return;
+    }
     this.clock.thaw();
     this.advanceUntil(cond, maxMs, stepMs);
   }
 
-  /** Run until the server has run `n` more ticks (1 ms steps). */
+  /** Run until the server has run `n` more ticks (1 ms steps; lockstep: n steps). */
   ticks(n = 1): void {
+    if (this.lockstep) {
+      for (let i = 0; i < n; i++) this.step();
+      return;
+    }
     const t = this.sim.ticks + n;
     this.runUntil(() => this.sim.ticks >= t, Math.max(5000, n * 200), 1);
+  }
+
+  /**
+   * One lockstep step (HarnessOptions.lockstep): TICK_MS of virtual time pass; every client runs a
+   * frame (what it holds, its prediction, its reports and intents); what they sent arrives; the
+   * server runs one tick; its batches and samples arrive; every client applies them.
+   */
+  step(): void {
+    if (!this.lockstep) throw new Error('step() needs a lockstep harness');
+    const now = this.net.now + TICK_MS;
+    this.net.advanceTo(now);
+    for (const c of this.clients) c.frame(now);
+    this.net.advanceTo(now);
+    this.host.tickOnce();
+    this.net.advanceTo(now);
+    for (const c of this.clients) c.applyNow(now);
   }
 
   private advanceUntil(cond: () => boolean, maxMs: number, stepMs: number): void {

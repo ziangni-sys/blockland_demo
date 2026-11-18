@@ -115,6 +115,8 @@ export interface ServerHostOptions {
   sinks?: (sim: Simulation, replicator: Replicator) => ServerSinks;
   /** Ambient rabbits (default true; tests that count entities turn them off). */
   rabbits?: boolean;
+  /** Starter items for identities joining a world for the first time (default true; tests that compare inventories turn them off). */
+  starterItems?: boolean;
 }
 
 /** The packages behind NetServer of a world: the movement reports (package 6, net/server/moves.ts) and the intents (package 7, net/server/intents.ts). */
@@ -258,7 +260,7 @@ export class ServerHost {
     const spec = options.generator ?? { kind: 'terrain', seed: meta.seedHash >>> 0 };
     const sim = this.newSimulation(meta, spec);
     if (options.exampleShip ?? true) placeExampleShip(sim);
-    this.start(sim, spec, meta);
+    this.serve(sim, spec, meta);
     this.reportReady(opened);
     void this.save();
   }
@@ -267,28 +269,11 @@ export class ServerHost {
   async load(worldId: string): Promise<void> {
     this.mayOpen();
     const opened = await this.openStorage();
-    const storage = opened.storage;
-    const meta = await storage.getMeta(worldId);
-    if (meta === null) throw new Error(`world "${worldId}" does not exist`);
-    if (isNewerSave(meta)) throw new Error(`world "${worldId}" was saved by a newer version`);
-    if (isOlderSave(meta)) throw new Error(`world "${worldId}" was saved by an older version`);
-    const keys = await storage.listChunkKeys(worldId);
-    const data = keys.length > 0 ? await storage.getChunks(worldId, keys) : [];
-    const bundle: SaveBundle = { chunks: [], blobs: [] };
-    keys.forEach((k, i) => {
-      const bytes = data[i];
-      if (bytes) bundle.chunks.push([k, bytes]);
-    });
-    for (const name of SAVE_BLOBS) {
-      const b = await storage.getBlob(worldId, name);
-      if (b) bundle.blobs.push([name, b]);
-    }
-    const gen = await storage.getBlob(worldId, GENERATOR_BLOB);
-    const spec = gen === null ? ({ kind: 'terrain', seed: meta.seedHash >>> 0 } as const) : decodeGeneratorBlob(gen);
+    const { meta, bundle, generator } = await readSave(opened.storage, worldId);
     this.mayOpen();
-    const sim = this.newSimulation(meta, spec);
+    const sim = this.newSimulation(meta, generator);
     importSave(sim, bundle);
-    this.start(sim, spec, meta);
+    this.serve(sim, generator, meta);
     this.reportReady(opened);
   }
 
@@ -389,7 +374,15 @@ export class ServerHost {
     return new Simulation({ seed: meta.seedHash >>> 0, mode: meta.mode, generator: generatorFromSpec(spec), rabbits: this.o.rabbits ?? true });
   }
 
-  private start(sim: Simulation, generator: GeneratorSpec, meta: WorldMeta): void {
+  /**
+   * Open `sim` as this host's world: create and load end here. Called directly by code that built
+   * the simulation itself (tests/acceptance/world.ts sets a world up exactly like its direct runs:
+   * spawn, load radius, chunks generated inside the tick); then nothing else happens: no example
+   * ship, no `ready` report, no first save. `generator` must describe sim.generator (clients
+   * generate pristine columns from it).
+   */
+  serve(sim: Simulation, generator: GeneratorSpec, meta: WorldMeta): void {
+    this.mayOpen();
     const replicator = new Replicator(sim);
     const sinks = (this.o.sinks ?? defaultSinks)(sim, replicator);
     const net = new NetServer({
@@ -399,7 +392,9 @@ export class ServerHost {
       moves: sinks.moves,
       intents: sinks.intents,
       now: () => this.clock.now(),
-      onFirstJoin: (ctrl) => giveStarterItems(ctrl),
+      onFirstJoin: (ctrl) => {
+        if (this.o.starterItems ?? true) giveStarterItems(ctrl);
+      },
       onAccept: () => this.firstAccept(),
     });
     replicator.tps = TPS;
@@ -531,8 +526,7 @@ export class ServerHost {
       const { storage } = await this.openStorage();
       const sim = w.sim;
       const meta: WorldMeta = { ...w.meta, mode: sim.rules.defaultMode, lastPlayed: Math.floor(this.clock.epochMs()), time: sim.world.time, version: SAVE_VERSION };
-      const bundle = exportSave(sim);
-      bundle.blobs.push([GENERATOR_BLOB, encodeGeneratorBlob(w.generator)]);
+      const bundle = saveBundle(sim, w.generator);
       await storage.putAll(meta.id, meta, bundle.chunks, bundle.blobs);
       w.meta = meta;
       this.o.report({ type: 'saved', ok: true, code: null });
@@ -542,6 +536,39 @@ export class ServerHost {
       return false;
     }
   }
+}
+
+/** What a save of `sim` writes (section 12): exportSave's bundle plus the 'generator' blob. */
+export function saveBundle(sim: Simulation, generator: GeneratorSpec): SaveBundle {
+  const bundle = exportSave(sim);
+  bundle.blobs.push([GENERATOR_BLOB, encodeGeneratorBlob(generator)]);
+  return bundle;
+}
+
+/**
+ * A saved world read back from `storage`: its meta, the bundle importSave takes (the chunks and
+ * the SAVE_BLOBS) and its generator (the 'generator' blob; without one, the terrain of
+ * meta.seedHash). Throws when the world does not exist or was saved by another version.
+ */
+export async function readSave(storage: SaveStorage, worldId: string): Promise<{ meta: WorldMeta; bundle: SaveBundle; generator: GeneratorSpec }> {
+  const meta = await storage.getMeta(worldId);
+  if (meta === null) throw new Error(`world "${worldId}" does not exist`);
+  if (isNewerSave(meta)) throw new Error(`world "${worldId}" was saved by a newer version`);
+  if (isOlderSave(meta)) throw new Error(`world "${worldId}" was saved by an older version`);
+  const keys = await storage.listChunkKeys(worldId);
+  const data = keys.length > 0 ? await storage.getChunks(worldId, keys) : [];
+  const bundle: SaveBundle = { chunks: [], blobs: [] };
+  keys.forEach((k, i) => {
+    const bytes = data[i];
+    if (bytes) bundle.chunks.push([k, bytes]);
+  });
+  for (const name of SAVE_BLOBS) {
+    const b = await storage.getBlob(worldId, name);
+    if (b) bundle.blobs.push([name, b]);
+  }
+  const gen = await storage.getBlob(worldId, GENERATOR_BLOB);
+  const generator: GeneratorSpec = gen === null ? { kind: 'terrain', seed: meta.seedHash >>> 0 } : decodeGeneratorBlob(gen);
+  return { meta, bundle, generator };
 }
 
 function encodeGeneratorBlob(spec: GeneratorSpec): Uint8Array {

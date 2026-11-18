@@ -14,8 +14,11 @@
  * Both bases are poses THIS CACHE remembered, not the grid's own prevPosition / prevRotation:
  * riders then follow exactly the motion that happened between two entity ticks even if some
  * structure skipped snapshotPose() (a sleeping ship), entity ticks were skipped, or a pose was
- * nudged with setPoseImmediate(). A structure seen for the first time uses its pose at the
- * start of the tick (renderPose(0)).
+ * nudged with setPoseImmediate(). A structure seen for the first time during a tick uses its pose
+ * at the start of the tick (renderPose(0)); one first seen BETWEEN ticks (rebuild(.., 'now'): a
+ * correction raised before the first tick after a load) uses its pose now, the end of the last
+ * tick: renderPose(0) is then the start of a tick that already ended, and the next tick would
+ * measure two ticks of motion as one (twice the carrier's velocity).
  *
  * Pose convention (StructureGrid.renderPose): world = p + rotate(q, local - pivot), with p / q
  * the composed WORLD pose (parents included). The current pose is renderPose(1). The cache reads
@@ -302,7 +305,7 @@ export class StructureCache {
    * (get() checks the generation), arrays are written by index (V8 releases an array's storage
    * on length = 0, and the next push allocates a new one).
    */
-  rebuild(structures: readonly BodyStructure[]): void {
+  rebuild(structures: readonly BodyStructure[], firstSeen: 'tickStart' | 'now' = 'tickStart'): void {
     const recs = this.recs;
     const gen = ++this.generation;
     let used = 0;
@@ -331,7 +334,7 @@ export class StructureCache {
       let snap = this.last.get(r.id);
       if (snap === undefined) {
         snap = new PoseSnap();
-        readWorldPose(s.grid, 0, snap.carry.p, snap.carry.q, this.poseChain, this.poseRel, this.poseQ);
+        readWorldPose(s.grid, firstSeen === 'now' ? 1 : 0, snap.carry.p, snap.carry.q, this.poseChain, this.poseRel, this.poseQ);
         copy3(snap.carry.pivot, r.pivot);
         copy3(snap.vel.p, snap.carry.p);
         copy4(snap.vel.q, snap.carry.q);
