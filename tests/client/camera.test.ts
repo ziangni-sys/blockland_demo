@@ -103,6 +103,7 @@ function sceneOf(sim: Simulation): CameraScene & EntityScene {
     world: sim.world,
     structures: () => sim.structures.all().filter((s) => !s.removed) as unknown as ReturnType<CameraScene['structures']>,
     entities: () => [],
+    state: { structures: new Map() } as unknown as EntityScene['state'],
   };
 }
 
@@ -1049,7 +1050,7 @@ describe('ViewBuilder third person', () => {
     const eyeOf = (): Vec3 => vec3(p.pos.x, p.pos.y + p.eyeHeight, p.pos.z);
 
     v.updateCamera(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 70, 0.05, 'first');
-    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0).some((e) => e.id === p.id)).toBe(false);
+    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0, 0).some((e) => e.id === p.id)).toBe(false);
 
     const cam = v.updateCamera(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 70, 0.05, 'back');
     const cell = w.getCell(Math.floor(cam.x), Math.floor(cam.y), Math.floor(cam.z));
@@ -1059,7 +1060,7 @@ describe('ViewBuilder third person', () => {
     // Over the right shoulder (yaw 0: the right is +X), aimed at the point 5 ahead of the eye.
     expect(cam.x).toBeCloseTo(p.pos.x + SHOULDER_OFFSET, 9);
     expect(centreRayMiss(cam, convergence(eyeOf(), p.yaw, p.pitch))).toBeLessThan(1e-6);
-    const self = v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0).find((e) => e.id === p.id);
+    const self = v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0, 0).find((e) => e.id === p.id);
     expect(self).toBeDefined();
     expect(self!.kind).toBe('player');
     expect(self!.yaw).toBe(p.yaw);
@@ -1070,7 +1071,7 @@ describe('ViewBuilder third person', () => {
     const front = v.updateCamera(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 70, 0.05, 'front');
     expect(front.z).toBeCloseTo(p.pos.z - THIRD_PERSON_DISTANCE * Math.cos(p.pitch), 9);
     expect(Math.cos(front.yaw - p.yaw)).toBeCloseTo(-1, 9);
-    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0).some((e) => e.id === p.id)).toBe(true);
+    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0, 0).some((e) => e.id === p.id)).toBe(true);
 
     // Back against the wall: the camera stays beside the head, out of the model's way.
     sim.soloPlayer.teleport(0.5, FLAT_TOP, 1.5);
@@ -1080,7 +1081,7 @@ describe('ViewBuilder third person', () => {
     expect(c2.z).toBeLessThanOrEqual(2 - CAMERA_CLEARANCE);
     expect(nearestBlock(sim, c2)).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
     expect(selfModelGap(c2.x, c2.y, c2.z, eyeOf(), p.yaw, p.eyeHeight)).toBeGreaterThanOrEqual(SELF_HIDE_CLEARANCE);
-    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0).some((e) => e.id === p.id)).toBe(true);
+    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0, 0).some((e) => e.id === p.id)).toBe(true);
 
     // In a corner (a wall on the right too): the camera is pulled in to the head (same
     // frame), the model is left out.
@@ -1089,7 +1090,7 @@ describe('ViewBuilder third person', () => {
     expect(c3.x).toBeLessThanOrEqual(1 - CAMERA_CLEARANCE);
     expect(nearestBlock(sim, c3)).toBeGreaterThanOrEqual(CAMERA_CLEARANCE);
     expect(selfModelGap(c3.x, c3.y, c3.z, eyeOf(), p.yaw, p.eyeHeight)).toBeLessThan(SELF_HIDE_CLEARANCE);
-    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0).some((e) => e.id === p.id)).toBe(false);
+    expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0, 0).some((e) => e.id === p.id)).toBe(false);
   });
 
   it('the local player is hidden exactly when the camera is nearer than SELF_HIDE_CLEARANCE to its model box', () => {
@@ -1117,7 +1118,7 @@ describe('ViewBuilder third person', () => {
       expect(gap, `d ${d}`).toBeCloseTo(Math.min(SHOULDER_OFFSET, d - PIVOT_CLEARANCE) - SELF_BOX_HALF, 5);
       expect(cam.z - e.z).toBeCloseTo(0.5 - CAMERA_CLEARANCE, 5);
       expect(Math.hypot(cam.x - e.x, cam.z - e.z), `d ${d}`).toBeGreaterThan(0.6);
-      expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0).some((x) => x.id === p.id), `d ${d}`).toBe(shown);
+      expect(v.updateEntities(sceneOf(sim), shownOf(sim, p.yaw, p.pitch), 0, 0).some((x) => x.id === p.id), `d ${d}`).toBe(shown);
       v.updateCamera(sceneOf(sim), shownOf(sim, 0, 0), 70, 1 / 60, 'first'); // fresh easing for the next case
     }
   });
@@ -1187,7 +1188,7 @@ describe('ViewBuilder third person', () => {
       const shown = shownOf(sim, p.yaw, 0);
       const pos = shown.feet;
       const cam = v.updateCamera(sceneOf(sim), shown, 70, 0.05, 'front');
-      const self = v.updateEntities(sceneOf(sim), shown, 0).find((e) => e.id === p.id)!;
+      const self = v.updateEntities(sceneOf(sim), shown, 0, 0).find((e) => e.id === p.id)!;
       expect(self.x).toBeCloseTo(pos.x, 12);
       expect(self.y).toBeCloseTo(pos.y, 12);
       expect(self.z).toBeCloseTo(pos.z, 12);

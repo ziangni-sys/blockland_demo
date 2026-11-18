@@ -18,10 +18,9 @@ interface Internals {
   width: number;
   height: number;
   pixelRatio: number;
-  structures: Map<number, { group: THREE.Group; prevMatrix: Float64Array; hasPrev: boolean; hasPose: boolean }>;
-  structureList: { group: THREE.Group; prevMatrix: Float64Array; hasPrev: boolean; hasPose: boolean }[];
+  structures: Map<number, { group: THREE.Group; hasPose: boolean }>;
+  structureList: { group: THREE.Group; hasPose: boolean }[];
   pendingPoses: Map<number, StructurePose>;
-  selfMotion(x: number, y: number, z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void;
   endFrame(): void;
   primeUploads(): void;
   releaseUploaded(): void;
@@ -107,7 +106,7 @@ describe('lifecycle', () => {
     be.setStructureMesh(9, 0, 0, 0, mesh());
     be.setStructurePose(9, pose(0, 0, 0));
     be.setStructureDryVolume(9, { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, mask: new Uint8Array([1]) });
-    be.setEntities([{ id: 1, kind: 'rabbit', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 }]);
+    be.setEntities([{ id: 1, kind: 'rabbit', x: 0, y: 0, z: 0, yaw: 0, vx: 0, vy: 0, vz: 0, payload: 0, flash: 0, sky: 15, block: 0, headYaw: 0, headPitch: 0, held: 0, posture: 'stand', label: null }]);
     be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0 }, breakProgress: 0.5, preview: [], conflicts: [], glue: [] });
     be.render();
     be.dispose(); // twice is fine
@@ -202,56 +201,6 @@ describe('floating render origin (review: float32 precision far from the world o
     i.overlayRoot.updateMatrixWorld(true);
     const p = new THREE.Vector3().setFromMatrixPosition(outline.matrixWorld);
     expect(p.toArray()).toEqual([far + 1001 - i.origin.x, 59, 1]);
-  });
-});
-
-describe('entity carrier compensation (review: carried rabbits hopped in place)', () => {
-  /** A 10 x 1 x 6 deck spanning local [0,10] x [0,1] x [0,6]. */
-  function deck(): MeshData {
-    const g = quad(1);
-    g.positions.set([0, 1, 0, 10, 1, 0, 10, 1, 6, 0, 1, 6]);
-    return { opaque: g, cutout: null, translucent: null };
-  }
-
-  it('a passenger standing on a moving, turning ship has no self motion; one walking on it does', () => {
-    const be = readyBackend();
-    be.setStructureMesh(1, 0, 0, 0, deck());
-    const p0 = pose(100, 47, 50, 0.3, [5, 0, 3]);
-    be.setStructurePose(1, p0);
-    endFrame(be);
-    // Next frame: the ship moved 0.4 blocks and turned a little.
-    const p1 = pose(100.4, 47.02, 50.1, 0.33, [5, 0, 3]);
-    be.setStructurePose(1, p1);
-    const toWorld = (p: StructurePose, lx: number, ly: number, lz: number): THREE.Vector3 => {
-      const m = new THREE.Matrix4();
-      const q = new THREE.Quaternion(p.qx, p.qy, p.qz, p.qw);
-      m.compose(new THREE.Vector3(p.px, p.py, p.pz), q, new THREE.Vector3(1, 1, 1));
-      return new THREE.Vector3(lx - p.pivotX, ly - p.pivotY, lz - p.pivotZ).applyMatrix4(m);
-    };
-    const out = { x: 0, y: 0, z: 0 };
-    // Standing at local (8, 1, 2) both frames.
-    const a = toWorld(p0, 8, 1, 2);
-    const b = toWorld(p1, 8, 1, 2);
-    internals(be).selfMotion(b.x, b.y, b.z, b.x - a.x, b.y - a.y, b.z - a.z, out);
-    expect(Math.hypot(out.x, out.y, out.z)).toBeLessThan(1e-9);
-    // Walking 0.2 blocks along local +x on the deck.
-    const c = toWorld(p1, 8.2, 1, 2);
-    internals(be).selfMotion(c.x, c.y, c.z, c.x - a.x, c.y - a.y, c.z - a.z, out);
-    expect(Math.hypot(out.x, out.y, out.z)).toBeCloseTo(0.2, 6);
-  });
-
-  it('entities away from every structure keep their raw motion; one standing on the shore stays still', () => {
-    const be = readyBackend();
-    be.setStructureMesh(1, 0, 0, 0, deck());
-    be.setStructurePose(1, pose(100, 47, 50));
-    endFrame(be);
-    be.setStructurePose(1, pose(100.5, 47, 50));
-    const out = { x: 0, y: 0, z: 0 };
-    internals(be).selfMotion(0, 60, 0, 0.1, 0, 0.05, out);
-    expect(out).toEqual({ x: 0.1, y: 0, z: 0.05 });
-    // Right next to the ship (inside its padded bounds) but not moving: no motion invented.
-    internals(be).selfMotion(99.6, 48, 52, 0, 0, 0, out);
-    expect(out).toEqual({ x: 0, y: 0, z: 0 });
   });
 });
 
