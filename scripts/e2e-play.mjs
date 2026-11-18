@@ -151,11 +151,35 @@ async function session(build, renderer) {
     await page.screenshot({ path: file });
     log(`screenshot ${what}`);
   };
-  const waitFor = async (what, fn, arg, timeout = 30_000) => {
+  const waitFor = async (what, fn, arg, timeout = 60_000) => {
     try {
       await page.waitForFunction(fn, arg, { timeout, polling: 200 });
     } catch {
       throw new StepError(`timed out waiting for ${what}`);
+    }
+  };
+  /**
+   * Hold `keys` until `cond()` (polled in Node) holds, then let go; a StepError naming `what` after
+   * `timeout`. The software renderers of a busy container can draw one frame a second, so nothing
+   * here waits a fixed time for something to happen.
+   */
+  const holdUntil = async (keys, cond, what, timeout = 60_000, pollMs = 150) => {
+    for (const k of keys) await page.keyboard.down(k);
+    const end = Date.now() + timeout;
+    let ok = false;
+    try {
+      while (!(ok = await cond()) && Date.now() < end) await page.waitForTimeout(pollMs);
+    } finally {
+      for (const k of keys) await page.keyboard.up(k);
+    }
+    if (!ok) throw new StepError(`timed out holding ${keys.join('+')} for ${what}`);
+  };
+  /** Poll `cond()` (in Node) until it holds; a StepError naming `what` after `timeout`. */
+  const until = async (cond, what, timeout = 60_000, pollMs = 250) => {
+    const end = Date.now() + timeout;
+    while (!(await cond())) {
+      if (Date.now() >= end) throw new StepError(`timed out waiting for ${what}`);
+      await page.waitForTimeout(pollMs);
     }
   };
   const center = { x: VIEWPORT.width / 2, y: VIEWPORT.height / 2 };
@@ -240,20 +264,19 @@ async function session(build, renderer) {
     // ---- walk, jump, swim
     const p0 = st.player;
     await G(() => window.__blocklands.game.debug.look(0, -0.1));
-    await page.keyboard.down('KeyW');
-    await page.waitForTimeout(1500);
-    await page.keyboard.up('KeyW');
-    await frames(3);
-    const p1 = (await state()).player;
-    check(Math.hypot(p1.x - p0.x, p1.z - p0.z) > 1, 'did not walk');
+    let p1 = p0;
+    await holdUntil(['KeyW'], async () => {
+      p1 = (await state()).player;
+      return Math.hypot(p1.x - p0.x, p1.z - p0.z) > 1;
+    }, 'walking');
     log(`walked ${Math.hypot(p1.x - p0.x, p1.z - p0.z).toFixed(1)} blocks`);
-    await page.keyboard.down('Space');
+    await frames(3);
+    p1 = (await state()).player;
     let topY = p1.y;
-    for (let i = 0; i < 8; i++) {
-      await page.waitForTimeout(100);
+    await holdUntil(['Space'], async () => {
       topY = Math.max(topY, (await state()).player.y);
-    }
-    await page.keyboard.up('Space');
+      return topY > p1.y + 0.5;
+    }, `a jump (rose ${(topY - p1.y).toFixed(2)})`, 10_000, 50);
     check(topY > p1.y + 0.5, `did not jump (rose ${(topY - p1.y).toFixed(2)})`);
     log(`jumped ${(topY - p1.y).toFixed(2)} blocks`);
     await shot('walked-jumped');
@@ -282,16 +305,13 @@ async function session(build, renderer) {
     // swim: into the water beside the boat
     const water = along(4, 5);
     await teleport(water.x + 0.5, 46, water.z + 0.5);
-    await page.waitForTimeout(600);
-    st = await state();
-    check(st.player.wet > 0, 'not in the water');
+    await until(async () => (await state()).player.wet > 0, 'the player in the water', 20_000);
     await shot('under-water');
     const sunk = (await state()).player.y;
-    await page.keyboard.down('Space');
-    await page.waitForTimeout(2000);
-    await page.keyboard.up('Space');
-    st = await state();
-    check(st.player.wet > 0 && st.player.y > sunk + 1, `did not swim up (y ${sunk.toFixed(2)} -> ${st.player.y.toFixed(2)})`);
+    await holdUntil(['Space'], async () => {
+      st = await state();
+      return st.player.wet > 0 && st.player.y > sunk + 1;
+    }, 'swimming up');
     log(`swam up from y ${sunk.toFixed(2)} to ${st.player.y.toFixed(2)}`);
     await shot('swimming');
 
@@ -307,7 +327,7 @@ async function session(build, renderer) {
       const above = { x: t.x, y: t.y + 1, z: t.z };
       await click('right');
       try {
-        await waitFor('a placed block', (c) => (window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) === 10, above, 10_000);
+        await waitFor('a placed block', (c) => (window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) === 10, above, 30_000);
         placed = above;
         break;
       } catch {
@@ -401,18 +421,21 @@ async function session(build, renderer) {
       return 2 * Math.atan2(q.y, q.w);
     }, ship.id);
     const h0 = await heading();
+    const shipNow = async () => (await state()).structures.find((s) => s.id === ship.id);
     await page.keyboard.down('KeyW');
-    await page.waitForTimeout(3000);
+    let s1 = ship;
+    await until(async () => {
+      s1 = await shipNow();
+      return Math.hypot(s1.x - ship.x, s1.z - ship.z) > 2;
+    }, 'the boat to sail');
     st = await state();
-    const s1 = st.structures.find((s) => s.id === ship.id);
-    check(Math.hypot(s1.x - ship.x, s1.z - ship.z) > 2, 'the boat did not sail');
     check(st.helm && st.helm.throttle > 0.3, 'the helm shows no throttle');
     await shot('sailing');
-    await page.keyboard.down('KeyA');
-    await page.waitForTimeout(2500);
-    await page.keyboard.up('KeyA');
-    const turned = Math.abs(await heading() - h0);
-    check(turned > 0.1, `the boat did not turn (${turned.toFixed(2)} rad)`);
+    let turned = 0;
+    await holdUntil(['KeyA'], async () => {
+      turned = Math.abs((await heading()) - h0);
+      return turned > 0.3;
+    }, 'the boat to turn');
     log(`sailed ${Math.hypot(s1.x - ship.x, s1.z - ship.z).toFixed(1)} blocks, turned ${turned.toFixed(2)} rad`);
     // third-person views while sailing
     await page.keyboard.press('F5');
@@ -434,10 +457,19 @@ async function session(build, renderer) {
     await waitFor('play', () => window.__blocklands.game.screen === 'none');
     await page.waitForTimeout(1200);
     await page.mouse.click(center.x, center.y);
-    // take the wheel again, then dock (sneak + right-click while steering)
-    await page.waitForTimeout(500);
+    // take the wheel again once the boat has coasted to a stop (nobody steers it: the throttle went
+    // to 0), then dock (sneak + right-click while steering)
+    let last = await shipNow();
+    await until(async () => {
+      const now = await shipNow();
+      const moved = Math.hypot(now.x - last.x, now.z - last.z);
+      last = now;
+      return moved < 0.02;
+    }, 'the boat to coast to a stop', 90_000, 1000);
     const helmLocal = { x: boat.helm.x, y: boat.helm.y, z: boat.helm.z };
-    if (!(await aimAny(helmLocal, ship.id))) {
+    let aimed = false;
+    for (let i = 0; i < 3 && !aimed; i++) aimed = await aimAny(helmLocal, ship.id);
+    if (!aimed) {
       const dump = await G(([c, id]) => {
         const g = window.__blocklands.game;
         const r = g.session.replica;
@@ -453,7 +485,7 @@ async function session(build, renderer) {
     await page.keyboard.down('ShiftLeft');
     await page.waitForTimeout(300);
     await click('right');
-    await waitFor('the boat docked', () => !window.__blocklands.game.debug.state().structures.some((s) => s.kind === 'ship'), undefined, 15_000);
+    await waitFor('the boat docked', () => !window.__blocklands.game.debug.state().structures.some((s) => s.kind === 'ship'), undefined, 60_000);
     await page.keyboard.up('ShiftLeft');
     const helmAt = await G(() => {
       const d = window.__blocklands.game.debug;
@@ -508,13 +540,13 @@ async function session(build, renderer) {
     await waitFor('landing hurt', () => {
       const p = window.__blocklands.game.debug.state().player;
       return p.health !== null && p.health < 20;
-    }, undefined, 20_000);
+    }, undefined, 60_000);
     st = await state();
     check(!st.player.dead, 'a 7-block fall killed the player');
     log(`fall damage: health ${st.player.health}`);
     await shot('fall-damage');
     await teleport(land.x, land.y + 60, land.z);
-    await waitFor('the death screen', () => window.__blocklands.game.screen === 'death', undefined, 30_000);
+    await waitFor('the death screen', () => window.__blocklands.game.screen === 'death', undefined, 60_000);
     await shot('dead');
     await page.click('.bl-screen[data-screen="death"] .bl-btn--primary');
     await playing();
