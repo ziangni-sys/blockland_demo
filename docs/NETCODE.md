@@ -409,7 +409,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
   - 新世界创建后立刻存一次；
   - 关服 `shutdown { save: true }`：只有存成功才关，失败就报告并继续运行（LESSONS“保存失败仍然退出，进度丢失”）。
 - 存什么：和现在一样的 `SaveBundle`——改过的区块，`sim`、`ticks`、`glue`、`structures`、`entities`、`players` 几个 blob（名字表 `SAVE_BLOBS` 在 `sim/persist.ts`），另加 `generator` blob（版本号 + `GeneratorSpec`）；没有 `generator` 的存档是 `meta.seedHash` 的地形世界（现在 `game.ts` 写的就是这种）。`players` 里是这个世界见过的每个玩家的记录，按 PlayerKey：在线的按存档时的状态，离开的按离开时的状态。客人不需要提前登记，第一次加入就有记录。
-- 存储不能持久时（IndexedDB 打不开，退回内存）Worker 照样存、照样报 `saved { ok: true }`，但 `ready` 里说明 `persistent: false` 和原因，页面照 M1 提示玩家。新世界在存储打开之后才报 `ready`。
+- 存储不能持久时（IndexedDB 打不开，退回页面的存储，沙箱里是内存，见第 18 节工作包 9）Worker 照样存、照样报 `saved { ok: true }`，但 `ready` 里说明 `persistent: false` 和原因，页面照 M1 提示玩家。新世界在存储打开之后才报 `ready`。
 - 新世界的示例风车船（`placeExampleShip`）和开局物品由 `ServerHost` 放，不再由 `game.ts` 放。
 - `WorldMeta.mode` 改存世界规则的默认模式（世界列表显示用）。
 - 客人永远收不到：任何人的 PlayerKey；别人的记录（背包、生命、出生点）；存档本身；随机数状态；待处理的方块 tick；兴趣外改过的区块；别人手上在做的事（挖掘进度、预览、涂胶进度）。客人在自己的浏览器里只存 PlayerKey 和名字（localStorage），不存世界。
@@ -631,7 +631,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 **服务器一个 tick**（`ServerHost.tickOnce()`）：`netServer.beforeTick()`（超时；离开和顶替；握手通过的加入；然后按玩家实体 id、到达顺序把排队的上报全部交给 `moves.receive`，再把排队的意图全部交给 `intents.receive`，然后 `moves.beforeTick()`、`intents.beforeTick()`）→ `sim.tick()` → `replicator.endTick()` → `netServer.afterTick()`（踢掉太慢的客户端）。上报和意图在到达时只排队，过滤是 `moves.ts`、`intents.ts` 的事。两次 tick 之间：处理到达的消息（只排队，`Ping` 立刻回）、按时间预算生成区块（`sim.chunks.wanted()` + `loadColumn`，和现在 `ChunkStreamer` 喂 `provide()` 一样在 tick 之外做，`syncChunks` 只留给测试）。
 
-**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players }`（变了才发，每秒最多一次）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。
+**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players }`（变了才发，每秒最多一次）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。Worker 自己打不开 IndexedDB 时存到页面的存储里（`host/pagestorage.ts`，第 18 节工作包 9）：Worker → 页面 `storage { id, call }`（`call` 是 `open`，或者宿主用到的存储调用 `getMeta`、`listChunkKeys`、`getChunks`、`getBlob`、`putAll`），页面 → Worker `storageResult { id, ok, value }` 或 `storageResult { id, ok: false, code, message }`（`code` 是 `SaveStorageError` 的 code，别的错误为 null）。回答不是命令，不排在等它的命令（比如正在读档的 `load`）后面。
 
 **无头联机测试的组装**（`tests/net/harness.ts`，一个进程里）
 
@@ -811,7 +811,10 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **页面怎么启动自己的服务器**（第 1、15 节）：`client/server.ts` 的 `LocalServer` 依次试三种方式：blob URL 的模块 Worker；data: URL 的模块 Worker（不透明来源的沙箱拒绝前一种）；主线程上的同一个 Worker 入口（`net/host/worker.ts startServerWorker`，接在一个 `MessageChannel` 上，中间仍是宿主控制消息和字节）。一种方式构造失败、在第一条回答之前报错、或者 20 秒没有回答，就终止它，把同一条命令（`create` 或 `load`）交给下一种。主线程的那份代码在普通构建里是单独的 chunk，和 Worker 的 chunk 一样第一次用到时才载入。一个 `LocalServer` 只开一个世界，关服之后下一个世界另起一个。
 - **世界列表和删除**（第 12 节）：页面自己打开同一个数据库，只读世界列表和元数据、删除世界。主菜单出现时没有服务器在跑，所以删除不会和 Worker 的写入冲突。读档之前页面先看元数据（`client/saves.ts checkWorld`）：世界不存在、由更新或更旧的版本保存，各给自己的提示，不启动服务器。新世界在服务器第一次存档成功后出现在列表里。
 - **页面的存储不能持久时**（沙箱、IndexedDB 打不开）：提示照 M1，来自服务器 `ready` 里的 `persistent: false` 和原因；读世界列表用的页面存储另外提示一次。
-- **暂停**（第 4 节）：单机里暂停菜单、从它打开的设置和死亡界面暂停世界，同 M1；背包界面不暂停。页面隐藏时：正在玩就打开暂停菜单（同 M1），在别的界面就让服务器存一次档。宿主拒绝暂停（`error { what: 'pause' }`，房间开着）时客户端也不停。工作包 11 开放房间之后，隐藏页面不能再暂停（DESIGN“联机的世界不暂停”）。恢复之后 1.5 秒内不显示卡顿提示（第一个包还在路上）。
+- **Worker 打不开 IndexedDB 时存到页面的存储里**（第 12、15 节）：服务器 Worker 跟着世界走（每个世界一个 `LocalServer`，关服就终止），它自己的内存存储会让世界在“保存并退出”时一起消失。所以 Worker 先试 IndexedDB，打不开就经宿主控制消息 `storage` / `storageResult` 用启动它的页面的存储（`host/pagestorage.ts`；主线程上的退路也一样）。`ready` 的 `persistent` 和原因由页面的存储决定。沙箱里页面的存储是内存：世界保存并退出后仍在列表里，可以再打开，直到页面关掉，同 M1。
+- **暂停**（第 4 节）：单机里暂停菜单、从它打开的设置和死亡界面暂停世界，同 M1；背包界面不暂停。页面隐藏时：正在玩就打开暂停菜单（同 M1），在别的界面就让服务器存一次档。宿主拒绝暂停（`error { what: 'pause' }`，房间开着）时客户端也不停。工作包 11 开放房间之后，隐藏页面不能再暂停（DESIGN“联机的世界不暂停”）。
+- **卡顿提示只给客人**（第 4 节，场景 37）：房主自己的连接（`Welcome.isHost`）不显示。单机里服务器就在这个页面，“房主的页面可能在后台”不可能成立，世界慢下来（比如主线程上的退路在慢机器上不到 15 TPS）玩家自己看得见。客人的卡顿提示显示在交互提示下面的第二行，不顶替交互提示（掌舵、涂胶进度、组装确认）。
+- **服务器出错**（Worker 报错事件，或者 `error { what: 'tick' }`）：世界停住。正在玩时客户端和服务器都暂停，打开暂停菜单，菜单说明世界已经停住，不能继续，只能“保存并退出”（服务器也许还能存档；存不了就照“保存失败”的规则）或“不保存退出”。还在加载时直接关服（能存就先存），回到主菜单并提示原因。
 - **远距离校正之后的加载界面**（第 3、9 节）：`OwnPlayer.reloading` 在新位置的就绪区插进副本时结束。服务器在校正的同一个包里订阅新位置，单机里这些列常常在采纳校正的那个客户端 tick 之前就生成完了，`reloading` 当场结束。所以页面不只看 `reloading`：采纳了一条要重新加载的校正，就回到加载界面，同样等中间 5×5 列网格化完，否则会有几帧看不到新位置的地形。重新加载的就绪区按当前的订阅半径算（设置里改过渲染距离也一样）。加载界面下世界照常运行（M1 里加载时模拟停住），身体由服务器托着。
 - **设置里的渲染距离**：发 `SetViewRadius(渲染距离 + 1)`，同时改 `NetClient.viewRadius`（重连时的 `Hello` 和就绪区用它）。
 - **显示的模式和死亡**：暂停菜单切模式后，在服务器确认那两条房主命令（意图确认号）之前就显示新模式；发出 `Respawn` 之后、确认之前不再弹出死亡界面。

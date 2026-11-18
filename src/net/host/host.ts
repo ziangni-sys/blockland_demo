@@ -88,12 +88,17 @@ export interface HostClock {
  */
 export type TransportOpener = () => Transport;
 
+/** The calls a host makes on its storage (save/storage.ts SaveStorage): reading a world, writing a save. */
+export type WorldStore = Pick<SaveStorage, 'getMeta' | 'listChunkKeys' | 'getChunks' | 'getBlob' | 'putAll'>;
+
 /**
  * Where a host saves. `persistent` = it outlives the page (IndexedDB); a memory storage loses the
  * world when the page closes, `reason` says why it is one (save/idb.ts openBestStorage's code:
  * 'unavailable', 'timeout', 'blocked', 'newer-version' ...). The page warns the player (ready).
+ * The page's server Worker saves into its own IndexedDB, else into the page's storage
+ * (pagestorage.ts).
  */
-export type HostStorage = { storage: SaveStorage; persistent: true } | { storage: SaveStorage; persistent: false; reason: string };
+export type HostStorage = { storage: WorldStore; persistent: true } | { storage: WorldStore; persistent: false; reason: string };
 
 /** How much chunk generation happens after each tick: milliseconds of the clock, or a number of columns (tests). */
 export type ChunkBudget = { ms: number } | { columns: number };
@@ -567,7 +572,7 @@ export function saveBundle(sim: Simulation, generator: GeneratorSpec): SaveBundl
  * the SAVE_BLOBS) and its generator (the 'generator' blob; without one, the terrain of
  * meta.seedHash). Throws when the world does not exist or was saved by another version.
  */
-export async function readSave(storage: SaveStorage, worldId: string): Promise<{ meta: WorldMeta; bundle: SaveBundle; generator: GeneratorSpec }> {
+export async function readSave(storage: WorldStore, worldId: string): Promise<{ meta: WorldMeta; bundle: SaveBundle; generator: GeneratorSpec }> {
   const meta = await storage.getMeta(worldId);
   if (meta === null) throw new Error(`world "${worldId}" does not exist`);
   if (isNewerSave(meta)) throw new Error(`world "${worldId}" was saved by a newer version`);

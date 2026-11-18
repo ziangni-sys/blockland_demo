@@ -32,6 +32,7 @@ export interface UiInputs {
   air: number;
   maxAir: number;
   hint: string | null;
+  notice: string | null;
   toasts: readonly Toast[];
   debug: string[] | null;
   helm: HelmView | null;
@@ -42,6 +43,8 @@ export interface UiInputs {
   dragLook: boolean;
   /** The last "Save & quit" failed: offer "Quit without saving". Omitted = false. */
   quitUnsaved?: boolean;
+  /** The world's server failed: the pause screen says so. Omitted = false. */
+  worldStopped?: boolean;
   renderer: string;
   version: string;
 }
@@ -133,6 +136,7 @@ export class UiStateBuilder {
       prev.air === x.air &&
       prev.maxAir === x.maxAir &&
       prev.hint === x.hint &&
+      prev.notice === x.notice &&
       prev.toasts === x.toasts &&
       debugEqual(prev.debug, x.debug) &&
       helmEqual(prev.helm, x.helm) &&
@@ -142,6 +146,7 @@ export class UiStateBuilder {
       prev.pointerLocked === x.pointerLocked &&
       prev.dragLook === x.dragLook &&
       prev.quitUnsaved === (x.quitUnsaved === true) &&
+      prev.worldStopped === (x.worldStopped === true) &&
       prev.renderer === x.renderer &&
       prev.version === x.version
     ) {
@@ -161,6 +166,7 @@ export class UiStateBuilder {
       air: x.air,
       maxAir: x.maxAir,
       hint: x.hint,
+      notice: x.notice,
       toasts: x.toasts as Toast[],
       debug: prev !== null && debugEqual(prev.debug, x.debug) ? prev.debug : x.debug,
       helm: prev !== null && helmEqual(prev.helm, x.helm) ? prev.helm : x.helm,
@@ -170,6 +176,7 @@ export class UiStateBuilder {
       pointerLocked: x.pointerLocked,
       dragLook: x.dragLook,
       quitUnsaved: x.quitUnsaved === true,
+      worldStopped: x.worldStopped === true,
       renderer: x.renderer,
       version: x.version,
     };

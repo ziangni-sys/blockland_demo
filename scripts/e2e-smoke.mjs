@@ -15,15 +15,18 @@
 //  - normal:    the normal static site (dist/, served as files), WebGL2;
 //  - sandboxed: the artifact inside <iframe sandbox="allow-scripts"> (an opaque origin: module
 //               workers from blob URLs are refused, so the server Worker starts from a data: URL;
-//               no IndexedDB, so the world lives in memory and the game must say it cannot save).
+//               no IndexedDB, so the world lives in the page's memory storage and the game must say
+//               it cannot save; it can still be reopened while the page is open).
 // With a URL (e.g. the dev server) it runs the webgl and webgpu scenarios on that page.
 //
 // Scenario: create a creative world from the main menu with a fixed seed, wait for the loading
 // screen to go, check the replica's columns and meshes, the renderer API and how the server runs
 // (a Worker; a data: URL Worker in the sandbox), walk, place + break a block, place a second one,
 // open + close the inventory, pause (the server stops ticking) + resume, save & quit, load the world
-// again and check the second block is still there (when the storage persists). Any console error,
-// page error or failed request fails the run. Screenshots of every stage go to --out (default: a
+// again and check the second block is still there (in IndexedDB; in the sandbox, in the page's
+// memory storage), then make the server Worker fail and check the world stops behind the pause
+// screen and "Quit without saving" leaves it. Any other console error, page error or failed
+// request fails the run. Screenshots of every stage go to --out (default: a
 // fresh temp directory, printed at the end).
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
@@ -230,15 +233,18 @@ async function runMode(mode, site) {
   const context = await browser.newContext({ viewport: VIEWPORT });
   const page = await context.newPage();
   let listening = true;
+  /** Errors a step provokes on purpose (the server failure below). */
+  let expectedErrors = null;
   page.on('console', (m) => {
     if (!listening || m.type() !== 'error') return;
     // The sandbox has no allow-pointer-lock on purpose: Chromium reports the refused lock itself,
     // and the game switches to drag-to-look (checked below).
     if (sandboxed && /^Blocked pointer lock .* sandboxed/.test(m.text())) return;
+    if (expectedErrors?.test(m.text())) return;
     problems.push(`console error: ${m.text()}`);
   });
   page.on('pageerror', (e) => {
-    if (listening) problems.push(`page error: ${e.message}`);
+    if (listening && !expectedErrors?.test(e.message)) problems.push(`page error: ${e.message}`);
   });
   page.on('requestfailed', (r) => {
     if (listening && !r.url().startsWith('data:') && !r.url().startsWith('blob:')) problems.push(`request failed: ${r.url()}`);
@@ -464,32 +470,72 @@ async function runMode(mode, site) {
     await frame.click('.bl-screen[data-screen="pause"] .bl-btn--danger');
     await waitFor('the main menu after saving', () => window.__blocklands.game.screen === 'mainMenu', undefined, 60_000);
     check((await state()).workers.server === '—', 'the server is still running after save & quit');
-    if (persistent) {
-      await waitFor('the saved world in the list', (id) => !!document.querySelector(`.bl-world[data-id="${id}"]`), worldId);
-      await shot('09-menu-after-quit');
-      // ---- load it again
-      await frame.click(`.bl-world[data-id="${worldId}"] [data-act="play"]`);
-      await waitFor(
-        'the world to load again',
-        () => {
-          const s = window.__blocklands.game.debug.state();
-          return s.sessionState === 'ready' && s.screen === 'none';
-        },
-        undefined,
-        LOAD_TIMEOUT,
-      );
-      await waitFor('the block area to load', (c) => window.__blocklands.game.debug.cell(c.x, c.y, c.z) !== -1, kept);
-      const keptId = await cellId(kept);
-      check(keptId === PLANKS, `the placed block did not persist (cell ${keptId})`);
-      reloaded = 'block persisted';
-      log(`reloaded: ${reloaded}`);
-      await aimAt(kept);
-      await settle();
-      await shot('10-reloaded');
+    // The world stays in the list in both cases: in IndexedDB, or (sandboxed, no IndexedDB) in the
+    // page's memory storage, where its server saved it, until the page closes.
+    await waitFor('the saved world in the list', (id) => !!document.querySelector(`.bl-world[data-id="${id}"]`), worldId);
+    await shot('09-menu-after-quit');
+    // ---- load it again
+    await frame.click(`.bl-world[data-id="${worldId}"] [data-act="play"]`);
+    await waitFor(
+      'the world to load again',
+      () => {
+        const s = window.__blocklands.game.debug.state();
+        return s.sessionState === 'ready' && s.screen === 'none';
+      },
+      undefined,
+      LOAD_TIMEOUT,
+    );
+    check((await state()).worldPersistent === persistent, `the reloaded world's storage is not ${persistent ? 'IndexedDB' : 'memory'}`);
+    await waitFor('the block area to load', (c) => window.__blocklands.game.debug.cell(c.x, c.y, c.z) !== -1, kept);
+    const keptId = await cellId(kept);
+    check(keptId === PLANKS, `the placed block was not kept (cell ${keptId})`);
+    reloaded = persistent ? 'block persisted' : 'block kept in memory storage for this page';
+    log(`reloaded: ${reloaded}`);
+    await aimAt(kept);
+    await settle();
+    await shot('10-reloaded');
+
+    // ---- the server fails (an uncaught error in its Worker): the world stops behind the pause
+    // screen, which says so and cannot resume; "Quit without saving" closes the world.
+    let serverWorker = null;
+    for (const w of page.workers()) {
+      try {
+        if ((await w.evaluate(() => self.name)) === 'blocklands-server') serverWorker = w;
+      } catch {
+        // a worker that is gone or cannot be evaluated
+      }
+    }
+    if (serverWorker === null) {
+      log('the server Worker cannot be reached from the test here: server-failure step skipped');
     } else {
-      await shot('09-menu-after-quit');
-      reloaded = 'memory storage: the world went with its server';
-      log(reloaded);
+      expectedErrors = /injected server failure|the game server stopped/;
+      await serverWorker.evaluate(() => {
+        setTimeout(() => {
+          throw new Error('e2e: injected server failure');
+        }, 0);
+      });
+      await waitFor('the stopped world on the pause screen', () => {
+        const s = window.__blocklands.game.debug.state();
+        return s.screen === 'pause' && s.stopped === true;
+      });
+      // The UI follows the game state at its next frame.
+      const said = await frame
+        .waitForSelector('.bl-screen[data-screen="pause"] .bl-pause-stopped', { state: 'visible', timeout: STEP_TIMEOUT })
+        .then(() => true, () => false);
+      check(said, 'the pause screen does not say that the world stopped');
+      check(!(await frame.isVisible('.bl-screen[data-screen="pause"] .bl-btn--primary')), 'a stopped world still offers Resume');
+      await page.waitForTimeout(400);
+      await settle();
+      const stoppedAt = (await state()).worldTime;
+      await page.waitForTimeout(800);
+      await settle();
+      check((await state()).worldTime === stoppedAt, 'the stopped world kept ticking');
+      await shot('11-server-failed');
+      await frame.click('.bl-screen[data-screen="pause"] .bl-pause-unsaved button');
+      await waitFor('the main menu after quitting the stopped world', () => window.__blocklands.game.screen === 'mainMenu');
+      check((await state()).workers.server === '—', 'the failed server is still there after quitting');
+      expectedErrors = null;
+      log('server failure: the world stopped on the pause screen, quit without saving went back to the menu');
     }
 
     st = await state();

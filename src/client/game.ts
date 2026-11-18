@@ -14,7 +14,9 @@
  * host's own connection (client/session.ts WorldSession). Everything the player does goes out as
  * intents, everything shown comes from the replica. The server saves (the first save of a new
  * world, every 30 s of running world, on the pause menu's `save`, on `shutdown`); the page only
- * reads the world list from the same database and deletes worlds (client/saves.ts).
+ * reads the world list from the same database and deletes worlds (client/saves.ts). Where the
+ * server cannot open IndexedDB (the sandboxed single-file build), it saves into the page's storage
+ * (a memory storage there), so the world outlives its server until the page closes, as in M1.
  *
  * PAUSE (single player, section 4). The pause menu (and the settings opened from it, and the death
  * screen, as in M1) pause the world: the client holds first (NetClient.setPaused), then the server
@@ -24,6 +26,15 @@
  * SAVE & QUIT. `shutdown { save: true }`: the server closes only once the world is written. When
  * the save fails it runs on: the world stays open, the pause / death screen says so and offers
  * "Quit without saving" (LESSONS 保存失败仍然退出).
+ *
+ * THE SERVER FAILS (it crashed, or its simulation threw and it halted). A world in play stops:
+ * client and server hold, and the pause screen says the world stopped, cannot resume, and offers
+ * "Save & quit" (the server may still write it) and "Quit without saving". A world still loading
+ * closes (saved when possible) and the menu comes back.
+ *
+ * STALL HINT (section 4, scenario 37) is for guests: the page shows it, under the context hint,
+ * only when its connection is not the host's. On the host's own connection the server is this
+ * page, so "the host's page may be in the background" cannot be true.
  *
  * The player's identity is the browser's stored random key (client/identity.ts; `?slot=` picks
  * another). The player's mode, the time of day, teleport and give (debug helpers) are host
@@ -98,8 +109,6 @@ const SERVER_FIRST_REPLY_MS = 20_000;
 const SHUTDOWN_SAVE_MS = 60_000;
 /** The network client's heartbeat (Ping, reconnection): a timer, so it runs while the page is hidden. */
 const HEARTBEAT_MS = 1000;
-/** No stall hint this soon after the world resumed (the first batch is on its way). */
-const RESUME_QUIET_MS = 1500;
 /** The traffic rates of the debug overlay are measured over this long. */
 const TRAFFIC_WINDOW_MS = 1000;
 
@@ -192,7 +201,8 @@ export class Game implements InputHost {
   private quitting = false;
   /** The page paused the world (single player). */
   private worldPaused = false;
-  private resumedAt = -Infinity;
+  /** The open world's server failed: the world stopped for good (see the file comment). */
+  private worldStopped = false;
   private envTime = 0;
   private lastRender = -Infinity;
   private renderDirty = true;
@@ -491,6 +501,7 @@ export class Game implements InputHost {
         if (m.what === 'tick') {
           console.error('[blocklands] the world stopped', m.message);
           this.toast(clientText(lang, 'server.stopped', { msg: m.message.split('\n')[0] ?? '' }), 'error');
+          this.stopWorld(server);
           break;
         }
         this.faults.report(`server ${m.what}`, new Error(m.message));
@@ -560,7 +571,6 @@ export class Game implements InputHost {
     } else {
       server.post({ type: 'pause', paused: false });
       s.setPaused(false);
-      this.resumedAt = this.win.performance.now();
     }
   }
 
@@ -585,7 +595,7 @@ export class Game implements InputHost {
   }
 
   private resume(): void {
-    if (this.screen !== 'pause' || !this.inWorld()) return;
+    if (this.screen !== 'pause' || !this.inWorld() || this.worldStopped) return;
     this.pauseWorld(false);
     this.setScreen('none');
     this.binder.requestLock();
@@ -705,7 +715,7 @@ export class Game implements InputHost {
     try {
       this.showLoading('loading.graphics', 0);
       if (!(await this.graphicsReady())) return this.backToMenu();
-      await (this.storageReady ?? this.openStorage());
+      const storage = await (this.storageReady ?? this.openStorage());
       this.showLoading('loading.server', 0.02);
       let seedText = typeof opts.seed === 'string' ? opts.seed.trim().slice(0, 64) : '';
       // An empty seed gets a random one, written as text so the world list shows a seed that
@@ -717,7 +727,7 @@ export class Game implements InputHost {
       const meta = newWorldMeta(makeWorldId(Date.now(), Math.random), name.slice(0, 64), seedText, seed, mode, Date.now());
       // The server makes the terrain world of the seed, places the example windmill boat, saves
       // the world once and gives this player the starter items when it joins.
-      if (!(await this.openWorld({ type: 'create', meta, options: {} }))) this.backToMenu();
+      if (!(await this.openWorld({ type: 'create', meta, options: {} }, storage))) this.backToMenu();
     } catch (e) {
       this.faults.report('new world', e);
       this.backToMenu();
@@ -750,7 +760,7 @@ export class Game implements InputHost {
         return this.backToMenu();
       }
       this.showLoading('loading.server', 0.04);
-      if (!(await this.openWorld({ type: 'load', worldId: id }))) this.backToMenu();
+      if (!(await this.openWorld({ type: 'load', worldId: id }, storage))) this.backToMenu();
     } catch (e) {
       this.faults.report('load world', e);
       this.backToMenu();
@@ -772,11 +782,14 @@ export class Game implements InputHost {
   /**
    * Start a game server for the world `command` names and connect to it. False (the server is
    * gone again, the player was told why) when it could not be started or could not open the world.
+   * `storage` is the page's: the server's too when it cannot open IndexedDB itself, so a world kept
+   * in memory stays in the world list after its server is gone.
    */
-  private async openWorld(command: OpenCommand): Promise<boolean> {
+  private async openWorld(command: OpenCommand, storage: SaveStorage): Promise<boolean> {
     const lang = this.settings.language;
     const server: LocalServer = new LocalServer({
       ways: this.serverWays(),
+      pageStorage: { storage, persistent: this.storagePersistent, reason: this.storageReason },
       firstReplyTimeoutMs: SERVER_FIRST_REPLY_MS,
       setTimer: (fn, ms) => this.win.setTimeout(fn, ms),
       clearTimer: (h) => this.win.clearTimeout(h as number),
@@ -785,6 +798,7 @@ export class Game implements InputHost {
         if (server !== this.server) return;
         console.error('[blocklands] the game server stopped');
         this.toast(clientText(this.settings.language, 'server.crashed'), 'error');
+        this.stopWorld(server);
       },
     });
     let first: HostToPage;
@@ -858,12 +872,38 @@ export class Game implements InputHost {
     if (msg === null) return;
     console.error(`[blocklands] ${msg}`);
     this.toast(msg, 'error');
+    this.closeWorld();
+  }
+
+  /** Close the open world without asking: its server saves (when it can) and closes before it goes. */
+  private closeWorld(): void {
     const server = this.server;
     this.quitting = true;
-    // The server itself is fine: let it save and close before it goes.
     if (server) void this.shutdownServer(server, !this.saveBlocked).finally(() => server.terminate());
     this.server = null;
     this.leaveWorld();
+  }
+
+  /**
+   * The open world's server failed (it crashed, or its simulation threw and it halted). A world
+   * in play stops behind the pause screen, which says so (see the file comment); one still
+   * loading closes.
+   */
+  private stopWorld(server: LocalServer): void {
+    const s = this.session;
+    if (server !== this.server || s === null || this.quitting || this.worldStopped) return;
+    if (s.state !== 'ready') {
+      this.closeWorld();
+      return;
+    }
+    this.worldStopped = true;
+    if (this.screen === 'inventory') this.closeInventory(false);
+    // Settings opened from the pause menu return to it.
+    if (this.screen !== 'settings') {
+      this.binder.exitLock();
+      this.setScreen('pause');
+    }
+    this.pauseWorld(true);
   }
 
   private backToMenu(): void {
@@ -911,9 +951,9 @@ export class Game implements InputHost {
     this.toast(clientText(this.settings.language, 'save.quitFailed'), 'error');
   }
 
-  /** The explicit choice offered after a failed "Save & quit": close the world unsaved. */
+  /** The explicit choice offered after a failed "Save & quit" and in a stopped world: close the world unsaved. */
   quitWithoutSaving(): void {
-    if (!this.session || this.busy || !this.quitUnsaved) return;
+    if (!this.session || this.busy || (!this.quitUnsaved && !this.worldStopped)) return;
     if (this.screen !== 'pause' && this.screen !== 'death') return;
     this.quitting = true;
     this.server?.post({ type: 'shutdown', save: false });
@@ -938,6 +978,7 @@ export class Game implements InputHost {
     this.saveBlocked = false;
     this.quitting = false;
     this.worldPaused = false;
+    this.worldStopped = false;
     this.serverTps = null;
     this.genPool?.cancelAll();
     this.meshPool?.cancelAll();
@@ -1111,19 +1152,18 @@ export class Game implements InputHost {
       const inWorld = s !== null && s.state === 'ready';
       const vitals = inWorld ? (s.replica?.ownState.vitals ?? null) : null;
       let hint: string | null = null;
+      let notice: string | null = null;
       if (inWorld && this.screen === 'none') {
-        const stall = this.worldPaused || now - this.resumedAt < RESUME_QUIET_MS ? null : s.net.stall(now);
-        if (stall !== null) {
-          hint = clientText(this.settings.language, stall === 'host' ? 'net.hostStalled' : 'net.linkUnstable');
-        } else {
-          const msg = s.replica?.ownState.view.hint ?? null;
-          if (msg !== this.hintMsg || this.settings.language !== this.hintLang) {
-            this.hintMsg = msg;
-            this.hintLang = this.settings.language;
-            this.hintText = msg ? formatMessage(this.settings.language, msg) : null;
-          }
-          hint = this.hintText;
+        const msg = s.replica?.ownState.view.hint ?? null;
+        if (msg !== this.hintMsg || this.settings.language !== this.hintLang) {
+          this.hintMsg = msg;
+          this.hintLang = this.settings.language;
+          this.hintText = msg ? formatMessage(this.settings.language, msg) : null;
         }
+        hint = this.hintText;
+        // The stall hint is a guest's (see the file comment), under the context hint.
+        const stall = s.net.welcome?.isHost === false ? s.net.stall(now) : null;
+        if (stall !== null) notice = clientText(this.settings.language, stall === 'host' ? 'net.hostStalled' : 'net.linkUnstable');
       }
       if (this.settings.showDebug && inWorld) {
         if (now - this.debugAt >= 250) {
@@ -1144,6 +1184,7 @@ export class Game implements InputHost {
         air: vitals ? vitals.air : 300,
         maxAir: vitals ? vitals.maxAir : 300,
         hint,
+        notice,
         toasts: this.toasts.list,
         debug: this.debugLines,
         helm: inWorld && this.screen === 'none' ? s.helm() : null,
@@ -1153,6 +1194,7 @@ export class Game implements InputHost {
         pointerLocked: this.binder.dragLook ? this.binder.engaged : this.binder.locked,
         dragLook: this.binder.dragLook,
         quitUnsaved: this.quitUnsaved,
+        worldStopped: this.worldStopped,
         renderer: this.backendInfo ? (this.backendInfo.api === 'webgpu' ? 'WebGPU' : 'WebGL2') : this.backendError ? '—' : '…',
         version: this.version,
       });
@@ -1227,7 +1269,7 @@ export class Game implements InputHost {
       serverTps: r?.state.tps ?? this.serverTps,
       serverTickMs: st.serverTickMs,
       serverTickMaxMs: st.serverTickMaxMs,
-      storage: this.worldPersistent ? 'IndexedDB' : `memory (${this.storageReason || 'worker'})`,
+      storage: this.worldPersistent ? 'IndexedDB' : `memory (${this.storageReason})`,
       workers: `${workers.terrain} / ${workers.mesh}`,
       faults: this.faults.recent,
     });
@@ -1255,6 +1297,7 @@ export class Game implements InputHost {
         dragLook: this.binder.dragLook,
         viewMode: this.viewMode,
         paused: this.worldPaused,
+        stopped: this.worldStopped,
         chunks: r ? r.world.chunks.size : 0,
         sectionsMeshed: s?.mesher?.meshedCount ?? 0,
         sectionsDrawn: this.backend.stats().sections,

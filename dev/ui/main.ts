@@ -3,7 +3,8 @@
  *
  * URL parameters (all optional):
  *   screen=none|mainMenu|loading|pause|inventory|settings|death   lang=zh|en   mode=creative|survival
- *   helm=1  air=<0..300>  health=<0..20>  hint=<text|1>  toasts=<n>  debug=1  locked=1  drag=1
+ *   helm=1  air=<0..300>  health=<0..20>  hint=<text|1>  notice=<text|1>  toasts=<n>  debug=1  locked=1  drag=1
+ *   stopped=1 (the world's server failed: the pause screen says so)
  *   worlds=<n>  icons=placeholder  panel=1  cursor=<itemId>  from=pause|mainMenu  progress=<0..1>
  *   animate=1 (helm / debug values change every frame, like a running game)
  *   clamp=1   (the fake client caps FOV at 100, to test that the UI shows what the client kept)
@@ -73,6 +74,7 @@ function initialState(): UiState {
   for (let i = 0; i < toastCount; i++) toasts.push({ id: i + 1, text: samples[i % samples.length]![0], kind: samples[i % samples.length]![1] });
   const lang = params.get('lang') === 'en' ? 'en' : 'zh';
   const hintParam = params.get('hint');
+  const noticeParam = params.get('notice');
   const cursorItem = params.has('cursor') ? Number(params.get('cursor')) : -1;
   return {
     screen: (params.get('screen') as Screen | null) ?? 'none',
@@ -88,6 +90,15 @@ function initialState(): UiState {
     air: num('air', 300),
     maxAir: 300,
     hint: hintParam === null ? null : hintParam === '1' ? (lang === 'en' ? 'Right-click again to assemble (42 blocks)' : '再次右键确认组装（42 格）') : hintParam,
+    notice:
+      noticeParam === null
+        ? null
+        : noticeParam === '1'
+          ? lang === 'en'
+            ? 'The host’s server is being slowed down (its page may be in the background)'
+            : '房主的服务器运行受限（页面可能在后台）'
+          : noticeParam,
+    worldStopped: flag('stopped'),
     toasts,
     debug: flag('debug') ? debugLines(0) : null,
     helm: flag('helm') ? { throttle: 0.62, rudder: -0.35, speed: 4.26, sails: 12 } : null,
@@ -366,6 +377,8 @@ addButton('air-', () => set({ air: Math.max(0, state.air - 60) }));
 addButton('air+', () => set({ air: state.maxAir }));
 addButton('toast', () => toast(['世界已保存', '找不到可组装的方块', '停靠失败'][toastSeq % 3]!, (['info', 'warn', 'error'] as const)[toastSeq % 3]));
 addButton('hint', () => set({ hint: state.hint ? null : '再次右键确认组装（42 格）' }));
+addButton('notice', () => set({ notice: state.notice ? null : '房主的服务器运行受限（页面可能在后台）' }));
+addButton('stopped', () => set({ worldStopped: !state.worldStopped }));
 addButton('lock', () => set({ pointerLocked: !state.pointerLocked }));
 addButton('drag', () => set({ dragLook: !state.dragLook }));
 panel.appendChild(logEl);

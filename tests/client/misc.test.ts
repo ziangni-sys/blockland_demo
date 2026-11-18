@@ -98,6 +98,7 @@ function inputs(inv: Inventory | null, over: Partial<UiInputs> = {}): UiInputs {
     air: 300,
     maxAir: 300,
     hint: null,
+    notice: null,
     toasts: [],
     debug: null,
     helm: null,
