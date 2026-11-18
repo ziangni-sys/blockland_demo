@@ -1,7 +1,9 @@
 /**
- * Structure rendering: keeps one backend structure per live Structure, remeshes it when its
- * grid.version changes, writes its interpolated pose every frame, and uploads ship dry
- * volumes (water clipped inside hulls) when the hull analysis changes.
+ * Structure rendering: keeps one backend structure per structure of the client's replica,
+ * remeshes it when its grid.version changes, writes its display pose every frame (the pose the
+ * NetClient frame left on its grid: ships at renderTick, rotors at rotorTick, nested ones composed
+ * through their parent), and uploads ship dry volumes (water clipped inside hulls) when the hull
+ * analysis the replica derives changes.
  *
  * Small structures are meshed synchronously (a freshly assembled raft then appears in the
  * same frame its blocks leave the world); big ones go to the mesh worker pool.
@@ -11,7 +13,7 @@ import { Mesher } from '../mesh/mesher';
 import { snapshotStructure } from '../mesh/snapshot';
 import type { MeshData, MeshRequest, MeshResponse } from '../mesh/types';
 import type { RenderBackend, StructurePose } from '../render/backend';
-import type { Simulation } from '../sim/simulation';
+import type { ClientReplica } from '../net/client/replica';
 import { dryMask, type HullInfo } from '../structures/hull';
 import { Ship, type Structure } from '../structures/structure';
 import type { World } from '../voxel/world';
@@ -59,16 +61,15 @@ export class StructureRenderer {
   }
 
   /**
-   * True when every live structure of the simulation has had a mesh installed (or settled as
-   * empty / failed) at least once. A record exists before its mesh does: a big ship meshed in
-   * the worker pool is invisible until the job returns, so loading must wait for this, not for
-   * the record count.
+   * True when every structure of the replica has had a mesh installed (or settled as empty /
+   * failed) at least once. A record exists before its mesh does: a big ship meshed in the worker
+   * pool is invisible until the job returns, so loading must wait for this, not for the record
+   * count.
    */
-  allMeshed(sim: Simulation): boolean {
-    const list = sim.structures.all();
+  allMeshed(replica: ClientReplica): boolean {
+    const list = replica.structures();
     for (let i = 0; i < list.length; i++) {
       const s = list[i]!;
-      if (s.removed) continue;
       const rec = this.recs.get(s.id);
       if (!rec || rec.shownVersion < 0) return false;
     }
@@ -76,16 +77,15 @@ export class StructureRenderer {
   }
 
   /**
-   * Bring the backend in line with the simulation's structures and write every pose for the
-   * blend factor `alpha`. `dt` (seconds) drives light smoothing.
+   * Bring the backend in line with the replica's structures and write every display pose. `dt`
+   * (seconds) drives light smoothing.
    */
-  update(sim: Simulation, alpha: number, dt: number): void {
+  update(replica: ClientReplica, dt: number): void {
     if (this.disposed) return;
     const stamp = ++this.stamp;
-    const list = sim.structures.all();
+    const list = replica.structures();
     for (let i = 0; i < list.length; i++) {
       const s = list[i]!;
-      if (s.removed) continue;
       let rec = this.recs.get(s.id);
       if (!rec) {
         rec = { id: s.id, shownVersion: -1, jobVersion: -1, hull: null, hullVersion: -1, hullFloats: false, sky: 15, block: 0, lightInit: false, seen: 0 };
@@ -94,7 +94,7 @@ export class StructureRenderer {
       rec.seen = stamp;
       try {
         if (s.grid.version !== rec.shownVersion && rec.jobVersion < 0) this.remesh(s, rec);
-        this.writePose(sim.world, s, rec, alpha, dt);
+        this.writePose(replica.world, s, rec, dt);
         if (s instanceof Ship) this.updateDry(s, rec);
       } catch (e) {
         this.onError('structure rendering', e);
@@ -176,9 +176,11 @@ export class StructureRenderer {
     this.backend.setStructureMesh(id, ox, oy, oz, data);
   }
 
-  private writePose(world: World, s: Structure, rec: Rec, alpha: number, dt: number): void {
+  private writePose(world: World, s: Structure, rec: Rec, dt: number): void {
     const g = s.grid;
-    g.renderPose(alpha, this.pos, this.rot);
+    // The display pose (the replica sets position and rotation without a blend: renderPose(1)
+    // composes it with the parent's).
+    g.renderPose(1, this.pos, this.rot);
     const p = this.pose;
     p.px = this.pos.x;
     p.py = this.pos.y;

@@ -631,7 +631,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 **服务器一个 tick**（`ServerHost.tickOnce()`）：`netServer.beforeTick()`（超时；离开和顶替；握手通过的加入；然后按玩家实体 id、到达顺序把排队的上报全部交给 `moves.receive`，再把排队的意图全部交给 `intents.receive`，然后 `moves.beforeTick()`、`intents.beforeTick()`）→ `sim.tick()` → `replicator.endTick()` → `netServer.afterTick()`（踢掉太慢的客户端）。上报和意图在到达时只排队，过滤是 `moves.ts`、`intents.ts` 的事。两次 tick 之间：处理到达的消息（只排队，`Ping` 立刻回）、按时间预算生成区块（`sim.chunks.wanted()` + `loadColumn`，和现在 `ChunkStreamer` 喂 `provide()` 一样在 tick 之外做，`syncChunks` 只留给测试）。
 
-**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players }`（变了才发，每秒最多一次）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。
+**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players }`（变了才发，每秒最多一次）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。
 
 **无头联机测试的组装**（`tests/net/harness.ts`，一个进程里）
 
@@ -805,6 +805,20 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **第一次在两个 tick 之间看到的结构体**（`entities/structs.ts`）：在 tick 之间提出校正时（读档后第一个 tick 之前加入），实体的结构体缓存第一次看到的结构体以它现在的位姿为速度基准（`rebuild(.., 'now')`），不用 `renderPose(0)`：那是已经结束的那个 tick 开头的位姿，下一个 tick 会把两个 tick 的运动当成一个，停在甲板上的人拿到两倍的船速。
 - **`ServerHost.serve`**：create 和 load 最后都调它；测试自己建好 Simulation 时直接调它（不放示例船、不报 `ready`、不先存一次）。存档的打包和读回抽成 `host.ts` 的 `saveBundle`（`exportSave` + `generator` 块）和 `readSave`（`ServerHost.load` 读存储的那部分），验收测试的存档往返在两种模式下都用它们。
 - **场景 30 不覆盖的**：锁步、零延迟下客户端永远不会瞄准过时的格子（SYNC 先让它收到变化），所以“目标格换了，意图按无目标执行”（第 18 节工作包 7）只由 `tests/net` 的单元和端到端测试覆盖，验收测试的联机模式发现不了服务器漏掉这项检查。第 16 节“LESSONS 里联机可能带回来的坑”第一行要求的 g5 携带场景在 150 ms + 5% 丢包下再跑一遍，工作包 9 没有做（`TestWorld` 只有锁步的联机模式，延迟下等待和 tick 数都要另定）；150 ms 的携带覆盖目前只有 `tests/net/e2e-own-*` 的场景（甲板、码头起跳、从甲板跳进水里、场景 31、32）。
+
+### 工作包 9（浏览器游戏改接）
+
+- **页面怎么启动自己的服务器**（第 1、15 节）：`client/server.ts` 的 `LocalServer` 依次试三种方式：blob URL 的模块 Worker；data: URL 的模块 Worker（不透明来源的沙箱拒绝前一种）；主线程上的同一个 Worker 入口（`net/host/worker.ts startServerWorker`，接在一个 `MessageChannel` 上，中间仍是宿主控制消息和字节）。一种方式构造失败、在第一条回答之前报错、或者 20 秒没有回答，就终止它，把同一条命令（`create` 或 `load`）交给下一种。主线程的那份代码在普通构建里是单独的 chunk，和 Worker 的 chunk 一样第一次用到时才载入。一个 `LocalServer` 只开一个世界，关服之后下一个世界另起一个。
+- **世界列表和删除**（第 12 节）：页面自己打开同一个数据库，只读世界列表和元数据、删除世界。主菜单出现时没有服务器在跑，所以删除不会和 Worker 的写入冲突。读档之前页面先看元数据（`client/saves.ts checkWorld`）：世界不存在、由更新或更旧的版本保存，各给自己的提示，不启动服务器。新世界在服务器第一次存档成功后出现在列表里。
+- **页面的存储不能持久时**（沙箱、IndexedDB 打不开）：提示照 M1，来自服务器 `ready` 里的 `persistent: false` 和原因；读世界列表用的页面存储另外提示一次。
+- **暂停**（第 4 节）：单机里暂停菜单、从它打开的设置和死亡界面暂停世界，同 M1；背包界面不暂停。页面隐藏时：正在玩就打开暂停菜单（同 M1），在别的界面就让服务器存一次档。宿主拒绝暂停（`error { what: 'pause' }`，房间开着）时客户端也不停。工作包 11 开放房间之后，隐藏页面不能再暂停（DESIGN“联机的世界不暂停”）。恢复之后 1.5 秒内不显示卡顿提示（第一个包还在路上）。
+- **远距离校正之后的加载界面**（第 3、9 节）：`OwnPlayer.reloading` 在新位置的就绪区插进副本时结束。服务器在校正的同一个包里订阅新位置，单机里这些列常常在采纳校正的那个客户端 tick 之前就生成完了，`reloading` 当场结束。所以页面不只看 `reloading`：采纳了一条要重新加载的校正，就回到加载界面，同样等中间 5×5 列网格化完，否则会有几帧看不到新位置的地形。重新加载的就绪区按当前的订阅半径算（设置里改过渲染距离也一样）。加载界面下世界照常运行（M1 里加载时模拟停住），身体由服务器托着。
+- **设置里的渲染距离**：发 `SetViewRadius(渲染距离 + 1)`，同时改 `NetClient.viewRadius`（重连时的 `Hello` 和就绪区用它）。
+- **显示的模式和死亡**：暂停菜单切模式后，在服务器确认那两条房主命令（意图确认号）之前就显示新模式；发出 `Respawn` 之后、确认之前不再弹出死亡界面。
+- **连接结束**：单机里 `Kick`、`Refuse` 或协议错误只会来自 bug。页面显示原因，让服务器存档关服，回到主菜单。
+- **调试面板**（F3）加一行网络（连接状态、往返时间、插值延迟 D、`rotorLead`、每秒收发字节，页面在自己的传输外面包一层计数）和一行服务器（运行方式、全局区的 TPS、`tickTime` 的 tick 耗时）。
+- **名字**：工作包 11 之前 `Hello` 里的名字固定是 `Player`。
+- **服务器没有光照**（第 15 节工作包 9）：服务器的区块共用一份没人写的光照数组（天空光 15、方块光 0，和 `World` 在没有光照数据处报告的一样），每列省 32 KB。
 
 ## 附：有意不做的，以及什么时候需要
 

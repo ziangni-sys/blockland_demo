@@ -6,7 +6,6 @@ import { UiStateBuilder, type UiInputs } from '../../src/client/uistate';
 import { Inventory } from '../../src/entities/inventory';
 import { DEFAULT_SETTINGS } from '../../src/ui/model';
 import { B } from '../../src/blocks/defs';
-import { soloSim } from '../solo';
 
 describe('ToastList', () => {
   it('adds, expires and keeps the list identity until something changes', () => {
@@ -198,17 +197,13 @@ describe('debug overlay text', () => {
     expect(worldClock(23999)).toBe('05:59');
   });
 
-  it('lists the player, the world and recent faults', async () => {
+  it('lists the player, the world, the network and recent faults', async () => {
     const { debugLines } = await import('../../src/client/debug');
-    const { FlatGenerator } = await import('../../src/worldgen/generator');
-    const sim = soloSim({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, loadRadius: 1 });
-    sim.tick();
-    const lines = debugLines(sim, sim.soloPlayer, {
+    const lines = debugLines({
       version: '9.9.9',
       rendererDetail: 'WebGL2 test',
       fps: 60,
       frameMs: 1,
-      tickMs: 0.5,
       workMs: 0.2,
       renderMs: 2,
       yaw: 0,
@@ -219,16 +214,42 @@ describe('debug overlay text', () => {
       sectionsMeshed: 8,
       meshQueued: 2,
       meshJobs: 1,
-      chunksInFlight: 0,
-      chunksWaiting: 0,
-      provideMs: 0.4,
+      player: { x: 0.5, y: 35, z: 0.5, flying: false, carrierId: 7 },
+      mode: 'creative',
+      columns: 49,
+      generating: 3,
+      chunksInFlight: 2,
+      chunksWaiting: 1,
+      deliverMs: 0.4,
+      structures: 2,
+      ships: 1,
+      rotors: 1,
+      entities: 5,
+      target: { gridId: 7, x: 1, y: 2, z: 3, face: 2, sub: 0, cell: 10 },
+      dayTime: 0,
+      serverTick: 99,
+      netStatus: 'ready',
+      rttMs: 1,
+      delayTicks: 1.4,
+      rotorLead: 2.3,
+      inBytesPerSec: 4096,
+      outBytesPerSec: 2048,
+      server: 'worker',
+      serverTps: 20,
+      serverTickMs: 0.5,
+      serverTickMaxMs: 1.5,
       storage: 'IndexedDB',
       workers: 'running / running',
       faults: [{ what: 'meshing', message: 'boom', count: 3 }],
     });
     expect(lines[0]).toBe('Blocklands 9.9.9 · WebGL2 test');
     expect(lines.some((l) => l.startsWith('xyz 0.50 / 35.00 / 0.50'))).toBe(true);
-    expect(lines.some((l) => l.includes('facing north'))).toBe(true);
+    expect(lines.some((l) => l.includes('facing north') && l.includes('on #7'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('columns 49 (3 generating)'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('structures 2 (1 ships, 1 rotors) · entities 5'))).toBe(true);
+    expect(lines.some((l) => l === 'target #7 1 2 3 face 2')).toBe(true);
+    expect(lines.some((l) => l.startsWith('net ready · rtt 1 ms · delay 1.40 ticks') && l.includes('in 4.0 KB/s'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('server worker · 20.0 TPS · tick 0.50 ms'))).toBe(true);
     expect(lines[lines.length - 1]).toBe('! meshing: boom ×3');
   });
 });

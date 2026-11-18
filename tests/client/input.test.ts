@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { emptyInput } from '../../src/entities/input';
+import { emptyHeldInput } from '../../src/net/client/predict';
 import {
   clampPitch,
   DRAG_THRESHOLD_PX,
@@ -18,10 +18,11 @@ import {
 
 const look = { sensitivity: 1, invertY: false };
 
+/** The held input as the page writes it for the prediction. */
 function written(s: InputState, playing = true) {
-  const inp = emptyInput();
-  s.writeTo(inp, playing);
-  return inp;
+  const held = emptyHeldInput();
+  s.writeHeld(held, playing);
+  return held;
 }
 
 describe('InputState keyboard', () => {
@@ -61,9 +62,9 @@ describe('InputState keyboard', () => {
     expect(i.jump).toBe(true);
     s.keyUp('Space');
     s.keyDown('Space', false, 200);
-    const j = emptyInput();
-    j.jumpPresses = 1; // not consumed yet by the simulation
-    s.writeTo(j, true);
+    const j = emptyHeldInput();
+    j.jumpPresses = 1; // not taken yet by the prediction (no client tick since)
+    s.writeHeld(j, true);
     expect(j.jumpPresses).toBe(2);
     // pending presses are handed over once
     expect(written(s).jumpPresses).toBe(0);
@@ -102,12 +103,14 @@ describe('InputState keyboard', () => {
     expect(written(s).sprint).toBe(false);
   });
 
-  it('digits select hotbar slots; E / Esc / F3 are commands, auto-repeat ignored', () => {
+  it('digits select hotbar slots (reported once); E / Esc / F3 are commands, auto-repeat ignored', () => {
     const s = new InputState();
     expect(s.keyDown('Digit5', false, 0)).toBe('none');
     expect(s.slot).toBe(4);
     s.keyDown('Numpad9', false, 0);
     expect(s.slot).toBe(8);
+    expect(s.takeSlotChange()).toBe(8);
+    expect(s.takeSlotChange()).toBe(-1);
     expect(s.keyDown('KeyE', false, 0)).toBe('toggleInventory');
     expect(s.keyDown('KeyE', true, 0)).toBe('none');
     expect(s.keyDown('Escape', false, 0)).toBe('escape');
@@ -117,22 +120,21 @@ describe('InputState keyboard', () => {
     expect(slotForKey('KeyQ')).toBe(-1);
   });
 
-  it('F counts one off-hand swap per non-repeated press, handed to the simulation as a command (not while a screen is open)', () => {
+  it('F is one off-hand swap event per non-repeated press, taken once (dropped while a screen is open)', () => {
     const s = new InputState();
     expect(SWAP_KEY).toBe('KeyF');
     expect(s.keyDown('KeyF', false, 0)).toBe('none');
     s.keyDown('KeyF', true, 10); // auto-repeat
     s.keyUp('KeyF');
     s.keyDown('KeyF', false, 20);
-    const i = written(s);
-    expect(i.swapPresses).toBe(2);
-    expect(written(s).swapPresses).toBe(0); // moved into the input once
+    expect(s.takeEvents(true)).toEqual(['swap', 'swap']);
+    expect(s.takeEvents(true)).toEqual([]); // taken once
     s.keyDown('KeyF', false, 30);
-    expect(written(s, false).swapPresses).toBe(0); // a screen is open: dropped
-    expect(written(s).swapPresses).toBe(0);
+    expect(s.takeEvents(false)).toEqual([]); // a screen is open: dropped
+    expect(s.takeEvents(true)).toEqual([]);
     s.keyDown('KeyF', false, 40);
     s.releaseAll();
-    expect(written(s).swapPresses).toBe(0);
+    expect(s.takeEvents(true)).toEqual([]);
   });
 
   it('knows which keys are game keys', () => {
@@ -140,7 +142,7 @@ describe('InputState keyboard', () => {
     for (const k of ['KeyQ', 'Tab', 'F6', 'KeyR']) expect(isGameKey(k)).toBe(false);
   });
 
-  it('releaseAll lets go of keys, buttons and pending presses', () => {
+  it('releaseAll lets go of keys, buttons and pending presses (the page releases the buttons the server still holds)', () => {
     const s = new InputState();
     s.keyDown('KeyW', false, 0);
     s.keyDown('Space', false, 0);
@@ -149,33 +151,33 @@ describe('InputState keyboard', () => {
     const i = written(s);
     expect(i.forward).toBe(0);
     expect(i.jump).toBe(false);
-    expect(i.attack).toBe(false);
-    expect(i.attackPresses).toBe(0);
+    expect(s.attackHeld).toBe(false);
+    expect(s.takeEvents(true)).toEqual([]);
     expect(i.jumpPresses).toBe(0);
   });
 });
 
 describe('InputState mouse', () => {
-  it('buttons are held and counted; clicks only count', () => {
+  it('buttons are held, and every press and release is an event in order; a click is a press and its release', () => {
     const s = new InputState();
     s.buttonDown(0);
     s.buttonDown(2);
-    let i = written(s);
-    expect(i.attack && i.use).toBe(true);
-    expect(i.attackPresses).toBe(1);
-    expect(i.usePresses).toBe(1);
+    expect(s.attackHeld && s.useHeld).toBe(true);
+    expect(s.takeEvents(true)).toEqual(['attackDown', 'useDown']);
     s.buttonUp(0);
-    i = written(s);
-    expect(i.attack).toBe(false);
-    expect(i.use).toBe(true);
-    expect(i.attackPresses).toBe(0);
+    expect(s.attackHeld).toBe(false);
+    expect(s.useHeld).toBe(true);
+    expect(s.takeEvents(true)).toEqual(['attackUp']);
+    s.buttonUp(0); // not held: no event
     s.buttonUp(2);
     s.click(2);
-    i = written(s);
-    expect(i.use).toBe(false);
-    expect(i.usePresses).toBe(1);
-    s.buttonDown(1); // middle button: ignored
-    expect(written(s).attack).toBe(false);
+    s.click(0);
+    expect(s.useHeld).toBe(false);
+    expect(s.takeEvents(true)).toEqual(['useUp', 'useDown', 'useUp', 'attackDown', 'attackUp']);
+    expect(s.buttonDown(1)).toBe('pickBlock'); // middle button: a command, never held
+    expect(s.click(1)).toBe('pickBlock');
+    expect(s.takeEvents(true)).toEqual([]);
+    expect(s.attackHeld).toBe(false);
   });
 
   it('mouse right turns right (yaw decreases), mouse down looks down', () => {
@@ -244,40 +246,54 @@ describe('InputState mouse', () => {
     expect(s.slot).toBe(4);
   });
 
-  it('addYaw turns with a carrier', () => {
-    const s = new InputState();
-    s.setLook(3.1, 0.2);
-    s.addYaw(0.1);
-    expect(s.yaw).toBeCloseTo(3.2 - 2 * Math.PI);
-    expect(s.pitch).toBeCloseTo(0.2);
-  });
 });
 
-describe('InputState.writeTo', () => {
-  it('zeroes movement, buttons and presses when not playing but keeps look and slot', () => {
+describe('InputState.writeHeld and takeEvents', () => {
+  it('zero the keys and drop the presses when not playing but keep the look and the slot', () => {
     const s = new InputState();
     s.keyDown('KeyW', false, 0);
     s.keyDown('Space', false, 0);
     s.buttonDown(0);
     s.setLook(1, -0.5);
     s.selectSlot(3);
-    const inp = emptyInput();
-    inp.attackPresses = 2;
-    s.writeTo(inp, false);
-    expect(inp.forward).toBe(0);
-    expect(inp.jump).toBe(false);
-    expect(inp.attack).toBe(false);
-    expect(inp.attackPresses).toBe(0);
-    expect(inp.jumpPresses).toBe(0);
-    expect(inp.yaw).toBeCloseTo(1);
-    expect(inp.pitch).toBeCloseTo(-0.5);
-    expect(inp.slot).toBe(3);
-    // presses made while a screen was open are dropped, held state resumes
+    const held = emptyHeldInput();
+    s.writeHeld(held, false);
+    expect(held.forward).toBe(0);
+    expect(held.jump).toBe(false);
+    expect(held.jumpPresses).toBe(0);
+    expect(held.yaw).toBeCloseTo(1);
+    expect(held.pitch).toBeCloseTo(-0.5);
+    expect(s.takeEvents(false)).toEqual([]); // the press made while a screen was open is dropped
+    expect(s.takeSlotChange()).toBe(3); // a hotbar choice still counts (the hotbar of the inventory screen)
+    // held state resumes
     const j = written(s, true);
     expect(j.forward).toBe(1);
     expect(j.jumpPresses).toBe(0);
-    expect(j.attackPresses).toBe(0);
-    expect(j.attack).toBe(true);
+    expect(s.attackHeld).toBe(true);
+    expect(s.takeEvents(true)).toEqual([]);
+  });
+
+  it('followSlot follows the inventory as shown, unless the player chose a slot not taken yet', () => {
+    const s = new InputState();
+    s.followSlot(5);
+    expect(s.slot).toBe(5);
+    expect(s.takeSlotChange()).toBe(-1);
+    s.selectSlot(2);
+    s.followSlot(5); // the server's answer to an older choice: the new choice wins
+    expect(s.slot).toBe(2);
+    expect(s.takeSlotChange()).toBe(2);
+    s.followSlot(7);
+    expect(s.slot).toBe(7);
+  });
+
+  it('writes the look, the keys and the sneak key the Use intent carries', () => {
+    const s = new InputState();
+    s.setLook(-0.25, 0.75);
+    s.keyDown('ShiftLeft', false, 0);
+    s.keyDown('KeyD', false, 0);
+    const h = written(s);
+    expect(h).toMatchObject({ yaw: -0.25, pitch: 0.75, sneak: true, strafe: 1, forward: 0, sprint: false });
+    expect(s.sneaking).toBe(true);
   });
 
   it('selectSlot rejects bad indices', () => {

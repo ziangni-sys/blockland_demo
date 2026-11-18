@@ -18,7 +18,8 @@
  * own batch. The measured TPS = ticks run in the last 2000 ms of wall time (counting the ticks of
  * the present wake-up; over the tick slots since the clock started while that is shorter), at
  * most TPS (timer lateness would otherwise show 20.5), given to the Replicator (the globals) when
- * it changed, at most once a second of wall time.
+ * it changed, at most once a second of wall time. The page gets `status` (TPS, players) when it
+ * changed, at most once a second, and `tickTime` (how long the ticks took) once a second.
  * The clock of a new or loaded world starts at the first accepted Hello, so the host's own client
  * joins a loaded world before its first tick (scenario 36: still at the wheel, on the deck).
  * Pause (single player) stops it; it is refused while the room is open, and opening the room
@@ -166,6 +167,8 @@ export class ServerHost {
   /** The TPS last given to the Replicator, and when. */
   private tpsReported = { at: -Infinity, tps: TPS };
   private lastStatus = { at: -Infinity, tps: -1, players: -1 };
+  /** Tick durations since the last tickTime report: count, total and longest ms, and when it went. */
+  private tickCost = { at: -Infinity, n: 0, totalMs: 0, maxMs: 0 };
   private sinceSave = 0;
 
   // ---- saving
@@ -471,7 +474,9 @@ export class ServerHost {
     this.measure(now, n);
     try {
       for (let i = 0; i < n; i++) {
+        const t0 = this.clock.now();
         this.tickOnce();
+        this.noteTickCost(this.clock.now() - t0);
         if (this.halted || this.pausedValue || this.closed) break;
         this.generateChunks();
       }
@@ -508,7 +513,19 @@ export class ServerHost {
     }
   }
 
+  private noteTickCost(ms: number): void {
+    const t = this.tickCost;
+    t.n++;
+    t.totalMs += ms;
+    if (ms > t.maxMs) t.maxMs = ms;
+  }
+
   private reportStatus(now: number): void {
+    const t = this.tickCost;
+    if (t.n > 0 && now - t.at >= STATUS_INTERVAL_MS) {
+      this.o.report({ type: 'tickTime', meanMs: t.totalMs / t.n, maxMs: t.maxMs });
+      this.tickCost = { at: now, n: 0, totalMs: 0, maxMs: 0 };
+    }
     const s = this.lastStatus;
     const players = this.open().net.playerCount;
     if (now - s.at < STATUS_INTERVAL_MS || (s.tps === this.tpsValue && s.players === players)) return;
