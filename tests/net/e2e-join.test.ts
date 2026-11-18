@@ -7,11 +7,11 @@
  * (cells, glue, structures, rotor angles to 1e-9; tests/net/digest.ts), and at every frame each
  * ship at renderTick is where the server had it at that tick, within the wire's quantisation
  * (on lossy links: unless the samples around renderTick were lost, then within the ship's motion
- * over the gap). After quiesce() everything is equal, poses included.
+ * over the gap). Once the boat has stopped and after quiesce() everything is equal, poses included.
  */
 import { describe, expect, it } from 'vitest';
 import { NetHarness, testMeta } from './harness';
-import { dam, exampleBoat, island, launchBoat, LINKS, lossOf, SEA, spinningWindmill, watchShipPoses } from './e2e-scenes';
+import { dam, exampleBoat, island, launchBoat, LINKS, lossOf, SEA, spinningWindmill, untilShipsRest, watchShipPoses } from './e2e-scenes';
 
 describe.each(LINKS)('joining an existing world over $name (end to end)', ({ make }) => {
   it('a broken dam, a sailing windmill boat and a spinning windmill: digests every tick from ready, ship poses at renderTick', async () => {
@@ -70,6 +70,7 @@ describe.each(LINKS)('joining an existing world over $name (end to end)', ({ mak
     }
     bot.player.input.forward = 0;
     bot.player.input.strafe = 0;
+    untilShipsRest(h);
     h.quiesce();
     expect(h.compareNow(g)).toEqual([]);
     expect(h.compareNow(host)).toEqual([]);

@@ -2,7 +2,8 @@
  * End to end, the page's states (NETCODE sections 4 and 5):
  *  - a guest whose page is hidden for a while (no frames): NetClient applies every batch in the
  *    message handler, nothing piles up, Pings go on (no stall hint, no timeout); when the page
- *    returns, frames pick up where the replica is and ships are shown where the server had them;
+ *    returns, frames pick up where the replica is and ships are shown where the server had them
+ *    (on each of the three links of e2e-scenes.ts);
  *  - single-player pause (one local client, the room closed): the page pauses its client, then
  *    the server; for a minute nothing moves on either side (server ticks, ships, rotors, entities
  *    as shown); resuming the server, then the client, everything moves on and stays equal.
@@ -10,8 +11,8 @@
 import { describe, expect, it } from 'vitest';
 import { vec3, type Quat, type Vec3 } from '../../src/core/math';
 import { Rotor, Ship } from '../../src/structures/structure';
-import { link, NetHarness, testMeta, type HeadlessClient } from './harness';
-import { exampleBoat, island, launchBoat, SEA, SEA_TOP, spinningWindmill, watchShipPoses } from './e2e-scenes';
+import { NetHarness, testMeta, type HeadlessClient } from './harness';
+import { exampleBoat, island, launchBoat, LINKS, lossOf, SEA, SEA_TOP, spinningWindmill, untilShipsRest, watchShipPoses } from './e2e-scenes';
 
 /** What a client shows now: every structure's display pose and every entity at renderTick. */
 function shown(c: HeadlessClient): string {
@@ -24,7 +25,7 @@ function shown(c: HeadlessClient): string {
   return out.join('\n');
 }
 
-describe('page states end to end', () => {
+describe.each(LINKS)('a hidden page end to end over $name', ({ make }) => {
   it('a guest\'s page hidden for 30 s while a boat sails: batches applied as they arrive, then frames resume', async () => {
     const h = new NetHarness({ history: true, rabbits: true });
     await h.create(testMeta(), { generator: SEA, exampleShip: false });
@@ -37,7 +38,9 @@ describe('page states end to end', () => {
     bot.player.input.forward = 1;
     bot.player.input.strafe = 0.5;
     await h.host.control({ type: 'openRoom' });
-    const g = h.addClient('guest', { up: link(75, 20, 0.05, 21), down: link(75, 20, 0.05, 22) }, { viewRadius: 4 });
+    const conds = make(21);
+    const lossy = lossOf(conds) > 0.1;
+    const g = h.addClient('guest', conds, { viewRadius: 4 });
     h.track(g);
     h.runUntil(() => g.ready, 20_000);
     h.run(2000);
@@ -70,14 +73,19 @@ describe('page states end to end', () => {
     h.run(5000);
     expect(g.frames).toBeGreaterThan(frames + 300);
     expect(poses.frames).toBeGreaterThan(250);
-    expect(poses.exact / poses.frames).toBeGreaterThan(0.8);
+    // As in e2e-join: lost samples hold the ship at the one before (section 7).
+    expect(poses.exact / poses.frames).toBeGreaterThan(lossy ? 0.5 : 0.8);
     expect(g.mismatches.slice(0, 5)).toEqual([]);
     expect(g.checked).toBeGreaterThan(700);
     bot.player.input.forward = 0;
     bot.player.input.strafe = 0;
+    untilShipsRest(h);
     h.quiesce();
     expect(h.compareNow(g)).toEqual([]);
   }, 120_000);
+});
+
+describe('single-player pause end to end', () => {
 
   it('single-player pause: the client, then the server; nothing moves on either side for a minute; resume', async () => {
     const h = new NetHarness({ rabbits: true });

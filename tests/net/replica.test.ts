@@ -193,6 +193,32 @@ describe('ClientReplica sample rings (package 5)', () => {
     near(shipAt(r, 1, 31), { x: 4, y: 40, z: 0 });
   });
 
+  it('a spawn record is a rest: a still ship or entity that enters interest holds until the tick before its next sample', () => {
+    const r = replica();
+    r.applyBatch(
+      batch(10, (b) => {
+        b.structureSpawns.push(shipRecord(1, { x: 0, y: 40, z: 0 }));
+        b.entitySpawns.push({ id: 7, kind: 'item', carrierId: 0, pos: { x: 50, y: 40, z: 0 }, yaw: 0, item: 5, count: 1 });
+      }),
+    );
+    for (let t = 11; t <= 39; t++) r.applyBatch(batch(t));
+    // Pushed in tick 40, after lying still since it entered interest at 10.
+    r.applySamples(samples(40, 0, [[1, { x: 1, y: 40, z: 0 }, IDENTITY]], [{ id: 7, kind: 'item', carrierId: 0, pos: { x: 51, y: 40, z: 0 }, yaw: 0, look: null }]));
+    r.applyBatch(batch(40));
+    for (const t of [10, 25, 39]) {
+      near(shipAt(r, 1, t), { x: 0, y: 40, z: 0 });
+      near(r.entities(t).find((e) => e.id === 7)!.pos, { x: 50, y: 40, z: 0 });
+    }
+    near(shipAt(r, 1, 39.5), { x: 0.5, y: 40, z: 0 });
+    near(r.entities(39.5).find((e) => e.id === 7)!.pos, { x: 50.5, y: 40, z: 0 });
+    // Moving from the start: the next sample is at 41, so the lerp spans 40..41 as before.
+    r.applyBatch(batch(41, (b) => b.structureSpawns.push(shipRecord(2, { x: 0, y: 60, z: 0 }))));
+    r.applySamples(samples(42, 1, [[2, { x: 2, y: 60, z: 0 }, IDENTITY]]));
+    r.applyBatch(batch(42));
+    near(shipAt(r, 2, 41), { x: 0, y: 60, z: 0 });
+    near(shipAt(r, 2, 41.5), { x: 1, y: 60, z: 0 });
+  });
+
   it('samples of an unknown id wait for its spawn, which drops those not later than its tick; they expire after SAMPLE_BUFFER_TICKS', () => {
     const r = replica();
     r.applyBatch(batch(1));
@@ -213,8 +239,9 @@ describe('ClientReplica sample rings (package 5)', () => {
     r.applyBatch(batch(12));
     near(shipAt(r, 1, 12), { x: 112, y: 40, z: 0 });
     expect(r.sampleCounts()).toEqual({ ships: 2, entities: 2, pendingShips: 0, pendingEntities: 0 });
-    const rabbit = r.entities(10.5).find((e) => e.id === 7)!;
-    near(rabbit.pos, { x: 20 + (212 - 20) / 4, y: 40, z: 0 });
+    // The spawn record is a rest: no sample at 11 means the rabbit stood still until 11.
+    near(r.entities(10.5).find((e) => e.id === 7)!.pos, { x: 20, y: 40, z: 0 });
+    near(r.entities(11.5).find((e) => e.id === 7)!.pos, { x: 20 + (212 - 20) / 2, y: 40, z: 0 });
     // Late samples of an id that left (despawned) wait, then expire.
     r.applyBatch(batch(13, (b) => b.entityDespawns.push(7)));
     r.applySamples(samples(13, 20, [], [rabbitSample(7, 0, { x: 0, y: 40, z: 0 })]));

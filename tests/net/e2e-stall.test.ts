@@ -5,16 +5,17 @@
  * the replicas stay equal to the server through the bursts, and everything recovers when the host
  * runs normally again. Then a guest's own link goes silent while the host is fine: that guest
  * shows "connection unstable" (no batches, no Pongs), the others nothing; when the link comes
- * back the reliable messages that waited arrive in order and the hint clears.
+ * back the reliable messages that waited arrive in order and the hint clears. The guest is on
+ * each of the three links of e2e-scenes.ts (LINKS) in turn.
  */
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { MAX_CATCHUP_TICKS } from '../../src/net/protocol';
 import { link, NetHarness, testMeta, type HeadlessClient } from './harness';
-import { exampleBoat, launchBoat, SEA, SEA_TOP } from './e2e-scenes';
+import { exampleBoat, launchBoat, LINKS, lossOf, SEA, SEA_TOP, untilShipsRest } from './e2e-scenes';
 
-describe('stalls end to end', () => {
+describe.each(LINKS)('stalls end to end, the guest on $name', ({ make }) => {
   it('a throttled host (one wake-up a second), then a guest whose link goes silent', async () => {
     const h = new NetHarness({ history: true });
     await h.create(testMeta(), { generator: SEA, exampleShip: false });
@@ -33,8 +34,10 @@ describe('stalls end to end', () => {
     bot.player.input.forward = 1;
     bot.player.input.strafe = 0.4;
     await h.host.control({ type: 'openRoom' });
-    const up = link(75, 20, 0.05, 11);
-    const down = link(75, 20, 0.05, 12);
+    const conds = make(11);
+    const up = conds.up ?? link(0, 0, 0, 11);
+    const down = conds.down ?? link(0, 0, 0, 12);
+    const loss = lossOf(conds);
     const g = h.addClient('guest', { up, down }, { viewRadius: 4 });
     const other = h.addClient('other', { up: link(40, 5, 0, 13), down: link(40, 5, 0, 14) }, { viewRadius: 3 });
     const clients: HeadlessClient[] = [host, g, other];
@@ -78,6 +81,7 @@ describe('stalls end to end', () => {
 
     // The guest's link goes silent both ways (the host is fine): only it shows "link".
     down.loss = 1;
+    const rto = [down.rtoMs, up.rtoMs];
     down.rtoMs = 1e9;
     up.loss = 1;
     up.rtoMs = 1e9;
@@ -90,8 +94,9 @@ describe('stalls end to end', () => {
     expect(other.net.stall(h.net.now)).toBeNull();
     const stuckAt = g.state!.tick;
     // It comes back: what waited arrives in order, the hint clears, nothing reconnected.
-    down.loss = 0.05;
-    up.loss = 0.05;
+    down.loss = loss;
+    up.loss = loss;
+    [down.rtoMs, up.rtoMs] = rto;
     h.runUntil(() => g.net.stall(h.net.now) === null && g.state!.tick > stuckAt + 100, 10_000);
     expect(g.net.connectionCount).toBe(1);
     for (let i = 1; i < g.applied.length; i++) expect(g.applied[i]).toBe(g.applied[i - 1]! + 1);
@@ -103,6 +108,7 @@ describe('stalls end to end', () => {
     bot.player.input.forward = 0;
     bot.player.input.strafe = 0;
     h.onTick = null;
+    untilShipsRest(h);
     h.quiesce();
     for (const c of clients) expect(h.compareNow(c), c.key).toEqual([]);
   }, 180_000);

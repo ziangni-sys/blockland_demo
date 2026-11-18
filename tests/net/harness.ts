@@ -26,9 +26,11 @@
  * Replicator gave that client (Replicator.clientView), narrowed to the columns that changed in
  * the tick or entered / left the client's set; right after the client has applied the batch of
  * that tick (NetClient.onBatch), its replica is compared over the same columns, without the ones
- * still generating there, and any difference is kept in client.mismatches. Poses are left out of
- * these per-tick checks: NetClient applies every batch of a frame before the samples of the frame
- * (section 5), so at a batch the latest poses may be a tick old or already a tick ahead.
+ * still generating there, and any difference is kept in client.mismatches. Poses (entity carriers
+ * included: a moving entity changes carrier in a sample) are left out of these per-tick checks:
+ * NetClient applies every batch of a frame before the samples of the frame (section 5), so at a
+ * batch the latest poses may be a tick old or already a tick ahead. Every frame also checks that
+ * renderTick is not past the newest applied batch (section 4), into client.mismatches too.
  * compareNow(client) compares everything, poses included (call it when the client has applied
  * the server's last tick, e.g. after quiesce()). With `history` on, the harness also keeps every
  * ship pose, rotor angle and entity position of the last HISTORY_TICKS ticks, for checks of what
@@ -217,6 +219,12 @@ export class HeadlessClient {
     if (this.crashed || this.net.hidden) return;
     this.net.frame(now);
     this.frames++;
+    // Section 4: renderTick = min(arrivalTick - D, newest applied batch), at every frame.
+    const clock = this.net.clock;
+    const r = this.net.replica;
+    if (clock !== null && r !== null && clock.renderTick > r.state.tick) {
+      this.mismatches.push(`frame at ${now}: renderTick ${clock.renderTick} beyond the newest applied batch ${r.state.tick}`);
+    }
     this.onFrame?.(now);
   }
 
@@ -482,6 +490,7 @@ export class NetHarness {
   /** Called after every server tick (after the harness's own records). */
   onTick: (() => void) | null = null;
   private readonly keepHistory: boolean;
+  /** Every link not yet closed on either end. */
   private readonly links: Link[] = [];
   /** The link each client dialled last. */
   private readonly current = new Map<HeadlessClient | RawClient, Link>();
@@ -536,10 +545,12 @@ export class NetHarness {
     this.hook();
   }
 
-  /** Let pending promises (saves, control messages) settle. */
+  /**
+   * Let pending promise chains (saves, control messages) run to the end: microtasks only, no timer
+   * and no virtual time passes.
+   */
   async settle(): Promise<void> {
-    for (let i = 0; i < 20; i++) await Promise.resolve();
-    await new Promise((r) => setTimeout(r, 0));
+    for (let i = 0; i < 100; i++) await Promise.resolve();
   }
 
   private hook(): void {
@@ -614,6 +625,8 @@ export class NetHarness {
       server: new CountedEnd(pair.server),
       maxDelayMs: Math.max(conds.up.latencyMs + conds.up.jitterMs, conds.down.latencyMs + conds.down.jitterMs),
     };
+    // Links that closed carry nothing any more (inFlight() reads 0): drop them.
+    for (let i = this.links.length - 1; i >= 0; i--) if (!this.links[i]!.client.open || !this.links[i]!.server.open) this.links.splice(i, 1);
     this.links.push(l);
     return l;
   }
