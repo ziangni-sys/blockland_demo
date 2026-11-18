@@ -81,6 +81,11 @@
  * SEAT. A seated player's body is the server's: it follows the seat and is pushed off it on the
  * server whatever the drive mode. From a seated client's reports only the stick axes (helm), the
  * sneak key (docking) and the look are used.
+ *
+ * ACCEPTED REPORTS. The last REPORT_HISTORY accepted reports are remembered as the server took them
+ * (ClientDrive.recordAccepted, at acceptance): carrier, feet and velocity relative to the carrier;
+ * a seated player's are its seat's. The intents find their eyes there (NETCODE section 10, check 2):
+ * only a report the server accepted, never one it merely received, refused or dropped.
  */
 import { TICK_DT } from '../core/constants';
 import { qrotate, qrotateInv, vec3, type AABB, type Vec3 } from '../core/math';
@@ -97,6 +102,7 @@ import {
   REPORT_CARRIER_REACH,
   REPORT_CREDIT_TICKS,
   REPORT_HARD_TOLERANCE,
+  REPORT_HISTORY,
   REPORT_LAG_LIMIT,
   REPORT_MAX_LAG,
   REPORT_PATH_STEP,
@@ -217,6 +223,27 @@ export function reportLag(tick: number, viewTick: number): number {
 /** Ticks of structure motion the checks remember (the largest lag, REPORT_LAG_LIMIT). */
 const SPEED_MEMORY_TICKS = Math.ceil(REPORT_LAG_LIMIT / TICK_DT);
 
+/** An accepted report as the server took it (see ACCEPTED REPORTS). */
+export interface AcceptedReport {
+  readonly seq: number;
+  /** The epoch it was accepted in. */
+  readonly epoch: number;
+  /** 0 = the world; pos and vel are local to that structure otherwise. */
+  readonly carrierId: number;
+  /** Feet. */
+  readonly pos: Vec3;
+  /** Velocity relative to the carrier, in its local axes (blocks per second). */
+  readonly vel: Vec3;
+}
+
+interface AcceptedSlot {
+  seq: number;
+  epoch: number;
+  carrierId: number;
+  readonly pos: Vec3;
+  readonly vel: Vec3;
+}
+
 function emptyCorrection(): Correction {
   return { epoch: 0, cause: '', carrierId: 0, pos: vec3(), vel: vec3(), yaw: 0, pitch: 0, onGround: false, flying: false, seatShipId: 0, seat: vec3() };
 }
@@ -331,6 +358,46 @@ export class ClientDrive {
   readonly pushDir: Vec3 = vec3();
   /** ... remembered for this many more ticks (the client's copy may still be moving that way). */
   pushDirTicks = 0;
+
+  /** The last REPORT_HISTORY accepted reports (see ACCEPTED REPORTS): a ring, `acceptedAt` the newest, `acceptedCount` filled. */
+  private readonly acceptedRing: AcceptedSlot[] = Array.from({ length: REPORT_HISTORY }, () => ({ seq: 0, epoch: 0, carrierId: 0, pos: vec3(), vel: vec3() }));
+  private acceptedAt = REPORT_HISTORY - 1;
+  private acceptedCount = 0;
+
+  /** Remember the report `seq`, accepted in the present epoch, as the server took it (EntityManager, at acceptance). */
+  recordAccepted(seq: number, carrierId: number, pos: Readonly<Vec3>, vel: Readonly<Vec3>): void {
+    this.acceptedAt = (this.acceptedAt + 1) % REPORT_HISTORY;
+    const r = this.acceptedRing[this.acceptedAt]!;
+    r.seq = seq;
+    r.epoch = this.epoch;
+    r.carrierId = carrierId;
+    r.pos.x = pos.x;
+    r.pos.y = pos.y;
+    r.pos.z = pos.z;
+    r.vel.x = vel.x;
+    r.vel.y = vel.y;
+    r.vel.z = vel.z;
+    if (this.acceptedCount < REPORT_HISTORY) this.acceptedCount++;
+  }
+
+  /** The accepted report `seq` if it is of the present epoch and still remembered, else null. Valid until the next recordAccepted. */
+  acceptedReport(seq: number): AcceptedReport | null {
+    const ring = this.acceptedRing;
+    // Newest first: seqs fall and epochs never rise going back.
+    for (let k = 0, i = this.acceptedAt; k < this.acceptedCount; k++, i = i === 0 ? ring.length - 1 : i - 1) {
+      const r = ring[i]!;
+      if (r.epoch !== this.epoch || r.seq < seq) return null;
+      if (r.seq === seq) return r;
+    }
+    return null;
+  }
+
+  /** The newest accepted report of the present epoch, or null (none accepted since the last correction). Valid until the next recordAccepted. */
+  lastAccepted(): AcceptedReport | null {
+    if (this.acceptedCount === 0) return null;
+    const r = this.acceptedRing[this.acceptedAt]!;
+    return r.epoch === this.epoch ? r : null;
+  }
 
   /** A correction was raised and not yet taken. */
   pending = false;

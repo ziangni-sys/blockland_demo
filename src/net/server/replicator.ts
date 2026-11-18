@@ -84,8 +84,6 @@ import {
   type EntitySample,
   type EntityUpdate,
   type Globals,
-  type GluingView,
-  type MiningView,
   type NetCorrection,
   type NetInventory,
   type NetVitals,
@@ -1345,29 +1343,23 @@ export class Replicator {
     return any ? out : null;
   }
 
-  /**
-   * The server-only parts of the interaction view (section 9). Until package 7 gives the view
-   * its own `mining` / `gluing` fields they are derived from what it publishes now: the target
-   * cell with breakProgress (mining) or glueProgress (gluing, on the target's face).
-   */
+  /** The server-only parts of the interaction view (section 9), each only when it changed. */
   private viewUpdate(c: Client, v: InteractionView): ViewUpdate | null {
     const sent = c.view;
     const out: ViewUpdate = {};
     let any = false;
-    const t = v.target;
-    const mining: MiningView | null = t !== null && v.breakProgress > 0 ? { gridId: t.gridId, x: t.x, y: t.y, z: t.z, sub: 0, progress: v.breakProgress } : null;
-    const miningKey = mining === null ? '' : `${mining.gridId},${mining.x},${mining.y},${mining.z},${Math.round(mining.progress * 255)}`;
+    const m = v.mining;
+    const miningKey = m === null ? '' : `${m.gridId},${m.x},${m.y},${m.z},${m.sub},${Math.round(m.progress * 255)}`;
     if (miningKey !== sent.mining) {
       sent.mining = miningKey;
-      out.mining = mining;
+      out.mining = m === null ? null : { gridId: m.gridId, x: m.x, y: m.y, z: m.z, sub: m.sub, progress: m.progress };
       any = true;
     }
-    const gluing: GluingView | null =
-      t !== null && v.glueProgress > 0 ? { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face, sub: 0, progress: v.glueProgress } : null;
-    const gluingKey = gluing === null ? '' : `${gluing.gridId},${gluing.x},${gluing.y},${gluing.z},${gluing.face},${Math.round(gluing.progress * 255)}`;
+    const g = v.gluing;
+    const gluingKey = g === null ? '' : `${g.gridId},${g.x},${g.y},${g.z},${g.face},${g.sub},${Math.round(g.progress * 255)}`;
     if (gluingKey !== sent.gluing) {
       sent.gluing = gluingKey;
-      out.gluing = gluing;
+      out.gluing = g === null ? null : { gridId: g.gridId, x: g.x, y: g.y, z: g.z, face: g.face, sub: g.sub, progress: g.progress };
       any = true;
     }
     const cells = v.preview?.cells ?? null;

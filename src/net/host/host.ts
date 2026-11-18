@@ -48,6 +48,7 @@ import { giveStarterItems } from '../../sim/starter';
 import { generatorFromSpec, type GeneratorSpec } from '../../worldgen/generator';
 import { readGeneratorSpec, writeGeneratorSpec } from '../codec';
 import { AUTOSAVE_TICKS, MAX_CATCHUP_TICKS } from '../protocol';
+import { IntentQueue } from '../server/intents';
 import { MoveQueue } from '../server/moves';
 import { Replicator } from '../server/replicator';
 import type { Transport } from '../transport';
@@ -116,15 +117,10 @@ export interface ServerHostOptions {
   rabbits?: boolean;
 }
 
-/**
- * The packages behind NetServer of a world: the movement reports (package 6, net/server/moves.ts);
- * intents are dropped until package 7 provides its sink.
- */
-export function defaultSinks(sim: Simulation): ServerSinks {
-  return {
-    moves: new MoveQueue(sim),
-    intents: { join() {}, leave() {}, receive: () => true, beforeTick() {}, intentAck: () => null },
-  };
+/** The packages behind NetServer of a world: the movement reports (package 6, net/server/moves.ts) and the intents (package 7, net/server/intents.ts). */
+export function defaultSinks(sim: Simulation, replicator: Replicator): ServerSinks {
+  const moves = new MoveQueue(sim);
+  return { moves, intents: new IntentQueue(sim, moves, replicator) };
 }
 
 /** A world that is open on this host. */

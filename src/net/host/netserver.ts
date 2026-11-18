@@ -84,7 +84,7 @@ import { RELIABLE, UNRELIABLE, type Channel, type Transport } from '../transport
 export interface MoveSink {
   /** `key` joined the simulation (client-driven) for a new connection. */
   join(key: PlayerKey): void;
-  /** `key` is about to leave the simulation (its queue and history go). */
+  /** `key` is about to leave the simulation (its queue goes). */
   leave(key: PlayerKey): void;
   /** A movement report that arrived on key's current connection. */
   receive(key: PlayerKey, report: NetMoveReport): void;

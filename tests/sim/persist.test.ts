@@ -155,13 +155,13 @@ describe('save / load', () => {
     sim.soloPlayer.player.input.use = true;
     click(sim);
     sim.advance(5);
-    expect(sim.soloPlayer.view.glueProgress).toBeGreaterThan(0); // a timed glue operation is running
+    expect(sim.soloPlayer.view.gluing!.progress).toBeGreaterThan(0); // a timed glue operation is running
     const sim2 = loadSolo(flatOpts({ mode: 'survival', spawn: { x: 0.5, y: T, z: 0.5 } }), exportSave(sim));
-    expect(sim2.soloPlayer.view.glueProgress).toBe(0);
+    expect(sim2.soloPlayer.view.gluing).toBeNull();
     sim2.soloPlayer.player.input.use = true; // still holding the button: nothing resumes
     sim2.soloPlayer.lookAtCell(0, T + 1, -2, PZ);
     sim2.advance(60);
-    expect(sim2.soloPlayer.view.glueProgress).toBe(0);
+    expect(sim2.soloPlayer.view.gluing).toBeNull();
     expect(sim2.worldGlue.size).toBe(0);
     expect(sim2.soloPlayer.player.inventory.selectedStack()).toEqual({ item: I.GLUE, count: 5 });
   });

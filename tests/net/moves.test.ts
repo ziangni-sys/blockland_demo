@@ -1,14 +1,15 @@
 /**
  * The server's queue of movement reports (src/net/server/moves.ts, NETCODE section 8): order by
  * seq, stale epochs skipped without using the tick's turn, catching up, the overflow, the
- * history package 7 reads, the move ack, the view lag, and the steering timeout (section 3).
+ * accepted reports package 7 reads, the move ack, the view lag, and the steering timeout (section 3).
  */
 import { describe, expect, it } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { NZ } from '../../src/core/dirs';
 import { emptyReport, type MoveReport } from '../../src/entities/drive';
-import { MOVE_HISTORY, STEER_TIMEOUT_TICKS } from '../../src/net/protocol';
+import { REPORT_HISTORY } from '../../src/entities/constants';
+import { STEER_TIMEOUT_TICKS } from '../../src/net/protocol';
 import { MoveQueue, QUEUE_LIMIT } from '../../src/net/server/moves';
 import type { PlayerControl } from '../../src/sim/players';
 import { Simulation } from '../../src/sim/simulation';
@@ -101,22 +102,59 @@ describe('the movement report queue (package 6)', () => {
     expect(a.player.remote!.rejected).toBe(0);
   });
 
-  it('the history keeps the last MOVE_HISTORY reports received (seq, carrier, feet, sneaking); report(seq) falls back to the newest', () => {
+  it('accepted(seq) and newest() give the reports package 2 accepted in the present epoch, the last REPORT_HISTORY: never one merely received, refused or from before a correction', () => {
     const { sim, q, a } = world();
     const e = a.player.remote!.epoch;
-    for (let s = 1; s <= MOVE_HISTORY + 5; s++) {
-      const r = report(s, e, 0.5, sim);
-      r.sneaking = s % 2 === 0;
-      r.pos.z = s;
+    const n = REPORT_HISTORY + 5;
+    for (let s = 1; s <= n; s++) {
+      const r = report(s, e, 0.5 + s * 0.01, sim);
+      r.vel.x = s % 2 === 0 ? 0.2 : 0;
       q.receive('a', r);
+      // Received, still waiting: not package 7's eyes yet.
+      expect(q.accepted('a', s)).toBeNull();
+      tick(sim, q);
     }
-    const h = q.history('a');
-    expect(h.length).toBe(MOVE_HISTORY);
-    expect(h[0]!.seq).toBe(6);
-    expect(h[h.length - 1]!.seq).toBe(MOVE_HISTORY + 5);
-    expect(q.report('a', 10)).toEqual({ seq: 10, carrierId: 0, pos: { x: 0.5, y: TOP, z: 10 }, sneaking: true });
-    expect(q.report('a', 2)!.seq).toBe(MOVE_HISTORY + 5);
-    expect(q.report('b', 2)).toBeNull();
+    expect(q.accepted('a', 10)).toEqual({ seq: 10, epoch: e, carrierId: 0, pos: { x: 0.6, y: TOP, z: 0.5 }, vel: { x: 0.2, y: 0, z: 0 } });
+    expect(q.accepted('a', n - REPORT_HISTORY + 1)!.seq).toBe(n - REPORT_HISTORY + 1);
+    expect(q.accepted('a', n - REPORT_HISTORY)).toBeNull(); // forgotten
+    expect(q.newest('a')!.seq).toBe(n);
+    expect(q.accepted('b', 10)).toBeNull();
+    expect(q.newest('b')).toBeNull();
+    // A forged report far away: received, then refused by package 2 (a correction, epoch e + 1).
+    const forged = report(n + 1, e, 20.5, sim);
+    q.receive('a', forged);
+    tick(sim, q);
+    expect(a.player.remote!.rejected).toBe(1);
+    expect(a.player.remote!.epoch).toBe(e + 1);
+    expect(q.accepted('a', n + 1)).toBeNull();
+    // Everything accepted before the correction is of an older epoch now: the server holds the player.
+    expect(q.accepted('a', n)).toBeNull();
+    expect(q.newest('a')).toBeNull();
+    // A report of a stale epoch that is never handed over, then one of the present epoch.
+    q.receive('a', report(n + 2, e, 0.5 + n * 0.01, sim));
+    q.receive('a', report(n + 3, e + 1, 0.5 + n * 0.01, sim));
+    tick(sim, q);
+    expect(q.accepted('a', n + 2)).toBeNull();
+    expect(q.accepted('a', n + 3)).toMatchObject({ seq: n + 3, epoch: e + 1 });
+    expect(q.newest('a')!.seq).toBe(n + 3);
+  });
+
+  it('a seated helmsman\'s accepted reports are its seat, wherever they claim the feet are', () => {
+    const { sim, q, a } = world();
+    for (let x = 3; x <= 6; x++) for (let z = 3; z <= 6; z++) sim.world.setCell(x, TOP, z, makeCell(B.PLANKS_OAK));
+    sim.world.setCell(4, TOP + 1, 4, makeCell(B.HELM, facingState(NZ)));
+    const res = sim.structures.assembleShip(4, TOP + 1, 4);
+    if (!res.ok) throw new Error(res.reason);
+    const ship = res.structure;
+    expect(sim.entities.startSteering(a.player, ship, 4, TOP + 1, 4)).toBe(true);
+    a.takeCorrection();
+    const r = report(1, a.player.remote!.epoch, 30.5, sim); // the feet 30 blocks away: only the axes and the look count
+    r.vel.x = 7;
+    q.receive('a', r);
+    tick(sim, q);
+    expect(a.player.remote!.lastSeq).toBe(1);
+    const seat = a.player.seat;
+    expect(q.accepted('a', 1)).toEqual({ seq: 1, epoch: a.player.remote!.epoch, carrierId: ship.id, pos: { x: seat.x, y: seat.y, z: seat.z }, vel: { x: 0, y: 0, z: 0 } });
   });
 
   it('the view lag is the present tick minus the viewTick of the last accepted report', () => {

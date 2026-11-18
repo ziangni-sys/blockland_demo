@@ -35,69 +35,57 @@
  * from the helm therefore takes sneak + right-click with an EMPTY hand (glue and buckets are handled before the helm);
  * from the wheel (steering) sneak + right-click docks whatever is in hand.
  *
- * TWO RAYS. The use ray (outline, right-click, glue) depends on the held item (useRayOf). It is
- * the bucket ray while a bucket is held: it stops at liquid sources, except world liquid
- * displaced by a ship's hull (the water the renderer cuts out of a floating hold) — DESIGN
- * 结构体里没有液体: a bucket never reaches world water inside or behind a structure. It is the
- * glue ray while glue is held: it passes through soft blocks (torches, plants, snow cover), which
- * can carry no glue, and stops at the first HARD block, so every glued face the client draws as
- * exposed (DESIGN 强力胶: 露出的胶面) can be clicked from its open side. The mining ray is always the
- * plain ray: a left-click with a bucket in hand digs the block under the water, one with glue in
- * hand breaks the torch in front of the block like any other.
+ * TWO RAYS (sim/rays.ts). The use ray (outline, right-click, glue) depends on the held item
+ * (rayKindOf): the bucket ray while a bucket is held (liquid sources count, except world liquid a
+ * hull displaces), the glue ray while glue is held (through soft blocks to the first HARD block),
+ * else the plain ray. The mining ray is always the plain ray: a left-click with a bucket in hand
+ * digs the block under the water, one with glue in hand breaks the torch in front of the block
+ * like any other.
  *
- * STALE HITS. Both rays are cast before the right-click runs. The right-click may remove what
+ * CLAIMED AIM (docs/NETCODE.md section 10). A server-driven player's hands cast both rays from its
+ * eyes. A client-driven player's client chooses its targets itself and claims them
+ * (PlayerControl.claimAim, from net/server/intents.ts, which checks them first: the cell the client
+ * saw, the reach); its hands use the claimed use and mining targets instead of casting rays — for
+ * the actions, the view and pick block. A claimed target stands while its grid exists and its cell
+ * still has the id the client saw; otherwise it is no target. So two players acting on the same
+ * cell in one tick never act on what the first left behind as if they had seen it: the second
+ * player's block for the face the first just built on is refused (the cell is taken), its click on
+ * a block the first just mined finds nothing.
+ *
+ * STALE HITS. Both targets are read before the right-click runs. The right-click may remove what
  * they hit (docking turns the ship into world blocks, a crate is lit), so they are checked again
  * before the left-click and the glue operation use them: a hit on a structure that is gone, or
- * on a cell that is no longer targetable, is dropped for this tick.
+ * on a cell that is no longer targetable (claimed: no longer the id the client saw), is dropped
+ * for this tick.
  *
  * All state is on the instances; nothing here is saved (a timed glue operation, previews and
  * mining progress do not survive a reload or a rejoin by design).
  */
-import {
-  AIR,
-  ID_MASK,
-  axisState,
-  cellState,
-  facingState,
-  isLiquidSource,
-  layersState,
-  liquidState,
-  makeCell,
-  stateLayers,
-} from '../blocks/cell';
+import { AIR, ID_MASK, axisState, cellState, facingState, isLiquidSource, layersState, liquidState, makeCell, stateLayers } from '../blocks/cell';
 import { B } from '../blocks/defs';
-import { I, isBlockItem, type ItemStack } from '../blocks/items';
+import { I, isBlockItem } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID, type BlockDef } from '../blocks/registry';
 import { TICK_DT, WORLD_HEIGHT } from '../core/constants';
-import { DIR_X, DIR_Y, DIR_Z, NX, NY, NZ, PX, PY, PZ, dirAxis, nearestDir, type Dir } from '../core/dirs';
+import { DIR_X, DIR_Y, DIR_Z, dirAxis, nearestDir, type Dir } from '../core/dirs';
 import { aabb, clamp, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
 import { Player } from '../entities/entity';
 import type { EntityEvent } from '../entities/host';
-import { maxStackOf } from '../entities/inventory';
+import { pickBlockInto, pickBlockItem } from '../entities/inventory';
 import { axisValue, finiteAngle } from '../entities/input';
 import { boxCellsWith } from '../structures/collect';
-import { analyzeHull, isDryCell, type HullInfo } from '../structures/hull';
+import { analyzeHull, type HullInfo } from '../structures/hull';
 import { canGlue, canJoinStructure, sticksWithoutGlue } from '../structures/stick';
 import { Ship, type Structure } from '../structures/structure';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
-import {
-  placementCell,
-  raycastGrid,
-  raycastGrids,
-  targetable,
-  targetableOrLiquidSource,
-  type CellPredicate,
-  type GridHit,
-} from '../voxel/raycast';
+import { placementCell, targetable, type CellPredicate, type GridHit } from '../voxel/raycast';
 import { CONTACT_EPS, boxOverlapsSolid } from '../voxel/shape';
 import type { StructureGrid } from '../voxel/sgrid';
 import { spawnBlockDrop } from './drops';
 import { failMessage, msg, type MessageKey } from './messages';
+import { castRay, displacedByHull, isBucket, lookDir, rayKindOf, rayPredicate, type RayKind, type RayScene, type RayShip } from './rays';
 import type { Simulation } from './simulation';
-import { emptyView, type InteractionView, type Message, type PlayerKey } from './view';
+import { emptyView, type AimTarget, type InteractionView, type Message, type PlayerKey } from './view';
 
-/** Reach of the player's hands, in blocks from the eye. */
-export const REACH = 5;
 /** Creative mode: while the attack button stays held, one more block breaks every this many ticks. */
 export const CREATIVE_BREAK_INTERVAL = 5;
 /** Survival mode: pause after a block broke while the button stays held. */
@@ -115,16 +103,6 @@ export const GRID_OVERLAP_TOLERANCE = 0.1;
 
 /** Cell value the overlap probe reports for its one cell (any HARD block). */
 const PROBE_CELL = makeCell(B.STONE);
-/**
- * Spacing (blocks) of the points at which the bucket ray tests whether the world liquid it
- * crosses is displaced by a hull. Hull cells are a block wide, so a sliver of visible water
- * thinner than this is the most that can be missed.
- */
-const HULL_SAMPLE = 1 / 16;
-/** Hidden liquid cells the bucket ray may skip; a REACH-long ray crosses far fewer cells. */
-const MAX_HIDDEN_SKIPS = 32;
-/** The bucket ray resumes this far past the exit of a hidden liquid cell. */
-const SKIP_EPS = 1e-7;
 
 /**
  * A VoxelGrid view of ONE hard cell of another grid: same transform, nothing else in it.
@@ -230,23 +208,12 @@ interface GlueOp {
   progress: number;
 }
 
-function isBucket(item: number): boolean {
-  return item === I.BUCKET || item === I.BUCKET_WATER || item === I.BUCKET_LAVA;
+function copyTarget(t: AimTarget | null): AimTarget | null {
+  return t === null ? null : { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face, cell: t.cell };
 }
 
-/** Which use ray the held item casts (see TWO RAYS in the header). */
-type UseRay = 'plain' | 'bucket' | 'glue';
-
-function useRayOf(item: number): UseRay {
-  return isBucket(item) ? 'bucket' : item === I.GLUE ? 'glue' : 'plain';
-}
-
-/** The glue ray's cells: targetable and HARD (soft blocks carry no glue and are passed through). */
-const glueTargetable: CellPredicate = (cell) => targetable(cell) && SOLID[cell & ID_MASK] === 1;
-
-/** What a hit of the use ray `ray` must still be after the right-click (STALE HITS). */
-function usePredicate(ray: UseRay): CellPredicate {
-  return ray === 'bucket' ? targetableOrLiquidSource : ray === 'glue' ? glueTargetable : targetable;
+function targetOf(h: GridHit | null): AimTarget | null {
+  return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face, cell: h.cell };
 }
 
 function isAirOrLiquid(cell: number): boolean {
@@ -283,6 +250,10 @@ export class Hands {
   private mineHit: GridHit | null = null;
   private lastSlot = -1;
 
+  // ---- the claimed aim of a client-driven player (CLAIMED AIM in the header)
+  private claimUse: AimTarget | null = null;
+  private claimMine: AimTarget | null = null;
+
   // ---- mining
   private mineGrid: VoxelGrid | null = null;
   private mineX = 0;
@@ -308,12 +279,6 @@ export class Hands {
   private readonly eye: Vec3 = vec3();
   private readonly dir: Vec3 = vec3();
   private readonly tmp: Vec3 = vec3();
-  // bucket ray scratch
-  private readonly rayFrom: Vec3 = vec3();
-  private readonly sample: Vec3 = vec3();
-  private readonly sampleLocal: Vec3 = vec3();
-  private exitT = 0;
-  private exitFace: Dir = PX;
 
   constructor(
     private readonly sim: Simulation,
@@ -352,65 +317,75 @@ export class Hands {
   // ================================================================== queries
 
   /**
-   * The cell the player is looking at right now (reach REACH) with the use ray of the held
-   * item — what a right-click would act on and what the outline shows.
+   * The cell the player is looking at right now (within sim/rays.ts REACH) with the use ray of the held
+   * item — what a right-click would act on and what the outline shows (a client-driven player:
+   * its claimed use target).
    */
   raycast(): GridHit | null {
     const p = this.player;
-    return this.castRay(p, useRayOf(this.heldItem(p)));
+    return this.claimed(p) ? this.resolve(this.claimUse) : this.castRay(p, rayKindOf(this.heldItem(p)));
   }
 
-  /** The cell a left-click would mine right now (never a liquid, whatever is held). */
+  /** The cell a left-click would mine right now (never a liquid, whatever is held; a client-driven player: its claimed mining target). */
   raycastMining(): GridHit | null {
-    return this.castRay(this.player, 'plain');
+    const p = this.player;
+    return this.claimed(p) ? this.resolve(this.claimMine) : this.castRay(p, 'plain');
+  }
+
+  // ================================================================== claimed aim
+
+  /**
+   * The targets a client-driven player's client claims (CLAIMED AIM in the header): its use ray's
+   * and its mining ray's, already checked by the caller (net/server/intents.ts). Copied; they stand
+   * until the next claim. Ignored by a server-driven player's hands, which cast their own rays.
+   */
+  claimAim(use: AimTarget | null, mine: AimTarget | null): void {
+    this.claimUse = copyTarget(use);
+    this.claimMine = copyTarget(mine);
+  }
+
+  /** Claim the use target alone (a right-click carries its own: it holds from its tick on). */
+  claimUseTarget(t: AimTarget | null): void {
+    this.claimUse = copyTarget(t);
+  }
+
+  /** Claim the mining target alone (a left-click carries its own). */
+  claimMineTarget(t: AimTarget | null): void {
+    this.claimMine = copyTarget(t);
+  }
+
+  /**
+   * Scripted control of a client-driven player (PlayerControl.lookAt): claim what its client would
+   * claim looking where the player looks now — both rays cast from its eyes.
+   */
+  claimLook(): void {
+    const p = this.player;
+    this.claimUse = targetOf(this.castRay(p, rayKindOf(this.heldItem(p))));
+    this.claimMine = targetOf(this.castRay(p, 'plain'));
   }
 
   // ================================================================== pick block
 
   /**
-   * Pick block (middle click): put the block the player looks at in hand. The target is the use
-   * ray's cell (what the outline shows), on the world or a structure; air, liquids and the
-   * unloaded sentinel pick nothing. The item is the block itself (block id == item id), never
-   * its mining drop.
+   * Pick block (middle click; DESIGN 选取方块, entities/inventory.ts pickBlockInto): put the block
+   * the player looks at in hand. The target is `target` when given (a client's PickBlock intent),
+   * else the use ray's cell (what the outline shows; a client-driven player: its claimed use
+   * target), on the world or a structure; air, liquids and the unloaded sentinel pick nothing. The
+   * item is the block itself (block id == item id), never its mining drop.
    *
-   *  - Already in the hotbar: that slot is selected (the selected slot first, if it holds it).
-   *  - Creative, not in the hotbar: a full stack goes into the selected slot when it is empty,
-   *    else into the first empty hotbar slot (selected), else it replaces the selected slot.
-   *  - Survival, only in the backpack: that stack swaps places with the selected hotbar slot.
-   *    No items are ever created; with none at all nothing happens (false).
-   *
-   * The selection is written to input.slot too, which the next tick applies (applyLook): the
-   * caller that drives input.slot (the client) must adopt inventory.selected afterwards.
-   * Runs between ticks with the look of the last tick, so it acts on what the outline shows.
-   * Returns true when the block is in hand afterwards.
+   * The selection is written to input.slot too, which the next tick applies (applyLook): a caller
+   * that drives input.slot itself must adopt inventory.selected afterwards. Runs between ticks
+   * with the look of the last tick, so it acts on what the outline shows. Returns true when the
+   * block is in hand afterwards.
    */
-  pickBlock(): boolean {
+  pickBlock(target?: AimTarget): boolean {
     const p = this.player;
     if (p.dead || p.removed) return false;
-    const h = this.castRay(p, useRayOf(this.heldItem(p)));
+    const h = target !== undefined ? this.resolve(target) : this.raycast();
     if (h === null) return false;
-    const id = h.cell & ID_MASK;
-    if (id === AIR || id === B.UNLOADED || LIQUID[id] !== 0 || !isBlockItem(id)) return false;
-    const inv = p.inventory;
-    const holds = (s: ItemStack | null | undefined): boolean => s != null && s.count > 0 && s.item === id;
-    const empty = (s: ItemStack | null | undefined): boolean => s == null || s.count <= 0;
-    let slot = holds(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(holds);
-    if (slot < 0) {
-      if (p.mode === 'creative') {
-        slot = empty(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(empty);
-        if (slot < 0) slot = inv.selected;
-        inv.hotbar[slot] = { item: id, count: maxStackOf(id) };
-      } else {
-        const j = inv.main.findIndex(holds);
-        if (j < 0) return false;
-        slot = inv.selected;
-        const cur = inv.hotbar[slot] ?? null;
-        inv.hotbar[slot] = inv.main[j]!;
-        inv.main[j] = empty(cur) ? null : cur;
-      }
-    }
-    inv.selected = slot;
-    p.input.slot = slot;
+    const item = pickBlockItem(h.cell);
+    if (item < 0 || !pickBlockInto(p.inventory, item, p.mode === 'creative')) return false;
+    p.input.slot = p.inventory.selected;
     return true;
   }
 
@@ -447,15 +422,26 @@ export class Hands {
     if (held !== I.GLUE) this.glueOp = null;
     this.validate();
     this.steer(p);
-    const ray = useRayOf(held);
-    this.hit = this.castRay(p, ray);
-    this.mineHit = ray !== 'plain' ? this.castRay(p, 'plain') : this.hit;
+    const ray = rayKindOf(held);
+    const claimed = this.claimed(p);
+    if (claimed) {
+      this.hit = this.resolve(this.claimUse);
+      this.mineHit = this.resolve(this.claimMine);
+    } else {
+      this.hit = this.castRay(p, ray);
+      this.mineHit = ray !== 'plain' ? this.castRay(p, 'plain') : this.hit;
+    }
     this.previewLifetime();
     if (usePressed) {
       this.onUse(p, held);
       // See STALE HITS in the header.
-      this.hit = this.recheck(this.hit, usePredicate(ray));
-      this.mineHit = ray !== 'plain' ? this.recheck(this.mineHit, targetable) : this.hit;
+      if (claimed) {
+        this.hit = this.resolve(this.claimUse);
+        this.mineHit = this.resolve(this.claimMine);
+      } else {
+        this.hit = this.recheck(this.hit, rayPredicate(ray));
+        this.mineHit = ray !== 'plain' ? this.recheck(this.mineHit, targetable) : this.hit;
+      }
     }
     this.updateGlueOp(p);
     this.updateMining(p, attackPressed);
@@ -473,27 +459,29 @@ export class Hands {
     const p = this.player;
     if (p.dead || p.removed) return v;
     const held = this.heldItem(p);
-    const ray = useRayOf(held);
-    // Cast again: structures and the player moved since the actions ran, and the outline and
-    // hint must match what is on screen now.
-    const h = this.castRay(p, ray);
+    const ray = rayKindOf(held);
+    // Again: structures and the player moved since the actions ran, and the outline and hint
+    // must match what is on screen now.
+    const h = this.raycast();
     this.validate();
     // The outline shows what a right-click would act on — except while the player digs with a
     // bucket or glue in hand, when it follows the block being dug (under the water, the torch in
     // front of a block) so the cracks show.
     let shown = h;
     if (ray !== 'plain' && this.mineGrid !== null) {
-      const m = this.castRay(p, 'plain');
+      const m = this.raycastMining();
       if (m !== null && this.isMineCell(m)) shown = m;
     }
-    if (shown !== null) {
-      v.target = { gridId: shown.grid.gridId, x: shown.x, y: shown.y, z: shown.z, face: shown.face };
-      if (this.isMineCell(shown)) v.breakProgress = clamp(this.mineProgress, 0, 1);
+    if (shown !== null) v.target = { gridId: shown.grid.gridId, x: shown.x, y: shown.y, z: shown.z, face: shown.face };
+    const mg = this.mineGrid;
+    if (mg !== null && this.mineProgress > 0 && this.isLive(mg)) {
+      v.mining = { gridId: mg.gridId, x: this.mineX, y: this.mineY, z: this.mineZ, sub: 0, progress: clamp(this.mineProgress, 0, 1) };
     }
     const pv = this.preview;
     if (pv !== null) v.preview = { gridId: pv.grid.gridId, kind: pv.kind, cells: pv.cells };
     if (sim.world.time < this.conflictsUntil) v.conflicts = this.conflicts;
-    v.glueProgress = this.glueProgress();
+    const op = this.glueOp;
+    if (op !== null) v.gluing = { gridId: op.grid.gridId, x: op.x, y: op.y, z: op.z, face: op.face, sub: 0, progress: this.glueProgress() };
     v.hint = this.hintFor(p, h, held);
     return v;
   }
@@ -516,145 +504,29 @@ export class Hands {
     return s !== null && s.count > 0 ? s.item : -1;
   }
 
-  private castRay(p: Player, ray: UseRay): GridHit | null {
-    const eye = p.eyePos(this.eye);
-    const cp = Math.cos(p.pitch);
-    const d = this.dir;
-    d.x = -Math.sin(p.yaw) * cp;
-    d.y = Math.sin(p.pitch);
-    d.z = -Math.cos(p.yaw) * cp;
-    if (ray === 'bucket') return this.bucketRay(eye, d);
-    return raycastGrids(this.sim.grids(), eye, d, REACH, ray === 'glue' ? glueTargetable : targetable);
+  /** Does this player's client claim its aim (client-driven: CLAIMED AIM in the header)? */
+  private claimed(p: Player): boolean {
+    return this.sim.entities.driveOf(p) === 'client';
   }
 
   /**
-   * The bucket's ray: the nearest structure block, world block or world liquid SOURCE within
-   * REACH — where world liquid displaced by a ship's hull (inside one of its HARD cells or its
-   * dry hold; LESSONS 船舱里冒出水面: that water is never deleted, only hidden) does not count:
-   * the ray goes on through it, to the hull or to whatever lies beyond. Where a structure block
-   * and world liquid start at the same distance, the structure wins. World blocks keep the tie
-   * rule of raycastGrids (the world first).
+   * A claimed target as a hit: while its grid exists and its cell has the id the client saw (any
+   * state: the action reads the cell as it is now); else no target.
    */
-  private bucketRay(eye: Vec3, dir: Vec3): GridHit | null {
-    const sim = this.sim;
-    // Structures hold no liquid: for them the bucket ray is the plain ray.
-    let best: GridHit | null = null;
-    let limit = REACH;
-    const structures = sim.structures.all();
-    for (let i = 0; i < structures.length; i++) {
-      const h = raycastGrid(structures[i]!.grid, eye, dir, limit, targetable);
-      if (h !== null && (best === null || h.dist < best.dist)) {
-        best = h;
-        limit = h.dist;
-      }
-    }
-    const world = sim.world;
-    const o = this.rayFrom;
-    let from = 0;
-    for (let skips = 0; skips <= MAX_HIDDEN_SKIPS; skips++) {
-      o.x = eye.x + dir.x * from;
-      o.y = eye.y + dir.y * from;
-      o.z = eye.z + dir.z * from;
-      const w = raycastGrid(world, o, dir, limit - from, targetableOrLiquidSource);
-      if (w === null) return best;
-      if (from > 0) {
-        if (w.dist === 0) {
-          // Resumed inside this cell right behind the skipped one: it was entered through the
-          // face the ray left the skipped cell by (raycastGrid cannot know that from inside).
-          w.face = this.exitFace;
-          w.dist = this.exitT;
-        } else {
-          w.dist += from;
-        }
-        w.point.x = eye.x + dir.x * w.dist;
-        w.point.y = eye.y + dir.y * w.dist;
-        w.point.z = eye.z + dir.z * w.dist;
-      }
-      if (LIQUID[w.cell & ID_MASK] === 0) return w;
-      this.cellExit(eye, dir, w.x, w.y, w.z, w.dist);
-      const exit = this.exitT;
-      const end = best !== null && best.dist < exit ? best.dist : exit;
-      if (this.liquidVisible(eye, dir, w.dist, end)) return w;
-      if (exit >= limit) return best;
-      from = exit + SKIP_EPS;
-    }
-    return best;
+  private resolve(t: AimTarget | null): GridHit | null {
+    if (t === null) return null;
+    const grid = this.sim.structures.gridById(t.gridId);
+    if (grid === undefined) return null;
+    const cell = grid.getCell(t.x, t.y, t.z);
+    const id = cell & ID_MASK;
+    if (id !== (t.cell & ID_MASK) || id === AIR || id === B.UNLOADED) return null;
+    const point = vec3(t.x + 0.5, t.y + 0.5, t.z + 0.5);
+    grid.toWorld(point, point);
+    return { grid, x: t.x, y: t.y, z: t.z, face: t.face, cell, dist: 0, point };
   }
 
-  /** exitT / exitFace = where the ray leaves world cell (x,y,z) (entered at `entry`), and the next cell's entry face. */
-  private cellExit(eye: Vec3, dir: Vec3, x: number, y: number, z: number, entry: number): void {
-    let t = Infinity;
-    let face: Dir = PX;
-    let slope = -1;
-    // On an exact edge or corner exit, the steepest of the tied axes names the face (as raycastGrid does).
-    if (dir.x !== 0) {
-      const tx = ((dir.x > 0 ? x + 1 : x) - eye.x) / dir.x;
-      if (tx < t || (tx === t && Math.abs(dir.x) > slope)) {
-        t = tx;
-        face = dir.x > 0 ? NX : PX;
-        slope = Math.abs(dir.x);
-      }
-    }
-    if (dir.y !== 0) {
-      const ty = ((dir.y > 0 ? y + 1 : y) - eye.y) / dir.y;
-      if (ty < t || (ty === t && Math.abs(dir.y) > slope)) {
-        t = ty;
-        face = dir.y > 0 ? NY : PY;
-        slope = Math.abs(dir.y);
-      }
-    }
-    if (dir.z !== 0) {
-      const tz = ((dir.z > 0 ? z + 1 : z) - eye.z) / dir.z;
-      if (tz < t || (tz === t && Math.abs(dir.z) > slope)) {
-        t = tz;
-        face = dir.z > 0 ? NZ : PZ;
-      }
-    }
-    this.exitT = t > entry ? t : entry;
-    this.exitFace = face;
-  }
-
-  /** Is the world liquid on the ray between t0 and t1 visible somewhere, i.e. not all displaced by hulls? */
-  private liquidVisible(eye: Vec3, dir: Vec3, t0: number, t1: number): boolean {
-    if (!(t1 > t0)) return false; // a structure starts where the liquid does
-    const ships = this.sim.structures.ships();
-    if (ships.length === 0) return true;
-    const n = Math.max(1, Math.ceil((t1 - t0) / HULL_SAMPLE));
-    const step = (t1 - t0) / n;
-    const p = this.sample;
-    for (let i = 0; i < n; i++) {
-      const t = t0 + (i + 0.5) * step;
-      p.x = eye.x + dir.x * t;
-      p.y = eye.y + dir.y * t;
-      p.z = eye.z + dir.z * t;
-      if (!this.displacedByHull(p)) return true;
-    }
-    return false;
-  }
-
-  /**
-   * Is the world point inside a HARD cell or a dry cell of a ship (where the hull keeps world
-   * liquid out)? The same rule as for bodies (entities/fluids) and blast rays (explosion).
-   */
-  private displacedByHull(p: Vec3): boolean {
-    const ships = this.sim.structures.ships();
-    const l = this.sampleLocal;
-    for (let i = 0; i < ships.length; i++) {
-      const ship = ships[i]!;
-      const g = ship.grid;
-      const b = g.cellBounds();
-      if (b === null) continue;
-      g.toLocal(p, l);
-      const x = Math.floor(l.x);
-      const y = Math.floor(l.y);
-      const z = Math.floor(l.z);
-      // Dry cells lie inside the hull's box, so nothing outside it is displaced.
-      if (x < b.minX || y < b.minY || z < b.minZ || x >= b.maxX || y >= b.maxY || z >= b.maxZ) continue;
-      if (SOLID[g.getCell(x, y, z) & ID_MASK] === 1) return true;
-      const hull = this.system.hullOf(ship);
-      if (hull !== null && isDryCell(hull, x, y, z)) return true;
-    }
-    return false;
+  private castRay(p: Player, ray: RayKind): GridHit | null {
+    return castRay(this.system.rayScene(), p.eyePos(this.eye), lookDir(p.yaw, p.pitch, this.dir), ray);
   }
 
   /** The world, or the grid of a structure that is still live. */
@@ -985,8 +857,12 @@ export class Hands {
     if (grid.isWorld && (y < 0 || y >= WORLD_HEIGHT || !sim.world.isLoaded(x, z))) return;
     const cur = grid.getCell(x, y, z);
     const curId = cur & ID_MASK;
-    // Structures never hold liquid, so "replaceable" means air or soft cover there.
-    if (REPLACEABLE[curId] !== 1) return;
+    // Structures never hold liquid, so "replaceable" means air or soft cover there. A cell that is
+    // taken (another player built there in this tick: CLAIMED AIM) refuses the block.
+    if (REPLACEABLE[curId] !== 1) {
+      if (curId !== B.UNLOADED) this.toastKey('toast.place.occupied', 'warn');
+      return;
+    }
     let cell: number;
     if (item === B.SNOW_LAYER && curId === B.SNOW_LAYER) {
       // Snow cover stacks; eight layers make a packed snow block.
@@ -1179,7 +1055,7 @@ export class Hands {
     c.x = x + 0.5;
     c.y = y + 0.5;
     c.z = z + 0.5;
-    if (this.displacedByHull(c)) {
+    if (displacedByHull(this.system.rayScene().ships, c)) {
       this.toastKey('toast.bucket.structure', 'warn');
       return;
     }
@@ -1459,8 +1335,29 @@ export class Interaction {
    * Shared by all hands: the hull is the same for everyone.
    */
   private readonly hulls = new WeakMap<Ship, HullInfo | null>();
+  /** The ships of the rays (RayShip, the hull read when a ray needs it), for the ship list they were made from. */
+  private rayShips: readonly RayShip[] = [];
+  private rayShipsOf: readonly Ship[] | null = null;
 
   constructor(private readonly sim: Simulation) {}
+
+  /** What the rays look at now (sim/rays.ts): every grid, and every ship with its hull analysis (read lazily). */
+  rayScene(): RayScene {
+    const ships = this.sim.structures.ships();
+    if (ships !== this.rayShipsOf) {
+      this.rayShipsOf = ships;
+      this.rayShips = ships.map((s) => {
+        const system = this;
+        return {
+          grid: s.grid,
+          get hull(): HullInfo | null {
+            return system.hullOf(s);
+          },
+        };
+      });
+    }
+    return { grids: this.sim.grids(), ships: this.rayShips };
+  }
 
   /** Tick step 1: every joined player acts, in ascending entity id order. */
   tick(): void {
@@ -1483,10 +1380,17 @@ export class Interaction {
     for (let i = 0; i < online.length; i++) online[i]!.hands.onWorldChange(x, y, z, oldCell, newCell, flags);
   }
 
-  /** Death drops everything that player's hands were doing (the wheel is released by the entities module). */
+  /**
+   * Death drops everything that player's hands were doing (the wheel is released by the entities
+   * module) and lets go of both buttons: a client's release may come only after the respawn, and a
+   * held button must not go on mining then (NETCODE section 10).
+   */
   onEntityEvent(ev: EntityEvent): void {
     if (ev.type !== 'death' || !(ev.entity instanceof Player)) return;
-    this.sim.players.controlOf(ev.entity)?.hands.reset();
+    const c = this.sim.players.controlOf(ev.entity);
+    if (c === undefined) return;
+    c.hands.reset();
+    c.releaseButtons();
   }
 
   /** Forget every pending action of every player (loading a save). */

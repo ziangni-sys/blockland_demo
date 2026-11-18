@@ -108,10 +108,8 @@ describe('joining (package 8)', () => {
     fill(sim, 0, DECK, 0, 4, DECK, 5, B.PLANKS_OAK);
     sim.world.setCell(2, SEA_TOP, 4, makeCell(B.HELM, facingState(NZ)));
     h.run(500);
-    ctrl.emptyHand();
-    expect(ctrl.aimAt(2, SEA_TOP, 4, PZ, 0)).toBe(true);
-    ctrl.use();
-    h.ticks(); // preview
+    a.emptyHand();
+    expect(a.useOn(2, SEA_TOP, 4, PZ)).toBe(true); // preview
     expect(ctrl.view.preview?.kind).toBe('ship');
     await h.host.control({ type: 'openRoom' });
     const box: Box = [-40, 0, -40, 40, 60, 40];
@@ -132,9 +130,9 @@ describe('joining (package 8)', () => {
     watch(b);
     h.run(1); // b's Hello arrives (accepted, joins at the next tick)
     expect(h.host.netServer.connections().find((c) => c.key === 'b')?.state).toBe('accepted');
-    expect(ctrl.aimAt(2, SEA_TOP, 4, PZ, 0)).toBe(true);
-    ctrl.use();
-    h.ticks(); // b joins, the raft assembles
+    expect(a.aimAt(2, SEA_TOP, 4, PZ)).toBe(true);
+    a.use();
+    h.ticks(); // b joins, the raft assembles (the click arrives at once on the instant link)
     const ship = sim.structures.ships()[0];
     expect(ship).toBeInstanceOf(Ship);
     const tick = sim.ticks;

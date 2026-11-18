@@ -319,6 +319,8 @@ export const REPORT_SUPPORT_REACH = 0.1;
 export const REPORT_STALL_TICKS = 10;
 /** Reports a player may have waiting for the next tick; older ones are dropped (net/server/moves.ts hands it at most two a tick). */
 export const REPORT_QUEUE_LIMIT = 16;
+/** Accepted reports remembered per client-driven player, as the server took them: where the intents find their eyes (drive.ts ACCEPTED REPORTS, NETCODE section 10). */
+export const REPORT_HISTORY = 40;
 /**
  * Penetration (blocks) of the reported body into hard cells of the world or of its carrier that is
  * tolerated: the body box is world-aligned, so a body standing against a wall of a deck that turned

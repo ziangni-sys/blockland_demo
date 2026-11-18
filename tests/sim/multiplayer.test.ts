@@ -199,8 +199,8 @@ describe('per-player hands', () => {
       ticks++;
       if (idAt(sim.world, 0, T - 1, -2) === B.TURF) {
         // Both crack at the same pace, each on its own block.
-        expect(a.view.breakProgress).toBeGreaterThan(0);
-        expect(b.view.breakProgress).toBe(a.view.breakProgress);
+        expect(a.view.mining!.progress).toBeGreaterThan(0);
+        expect(b.view.mining!.progress).toBe(a.view.mining!.progress);
         expect(a.view.target).toMatchObject({ x: 0, z: -2 });
         expect(b.view.target).toMatchObject({ x: 8, z: -2 });
       }

@@ -245,7 +245,7 @@ describe('ViewBuilder', () => {
     sim.soloPlayer.hands.view = {
       ...sim.soloPlayer.view,
       target: { gridId: 0, x: 1, y: 34, z: 1, face: 2 },
-      breakProgress: 2,
+      mining: { gridId: 0, x: 1, y: 34, z: 1, sub: 0, progress: 2 },
       preview: { gridId: 0, kind: 'ship', cells: Int32Array.from([1, 34, 1, 2, 34, 1]) },
       conflicts: [{ x: 5, y: 6, z: 7 }],
     };

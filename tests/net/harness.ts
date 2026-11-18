@@ -10,8 +10,9 @@
  * synchronous or answering after `genDelayMs` (an event on the net's queue, like a worker pool). The harness gives every
  * client frames (every 16.7 ms of virtual time, each client with its own phase) and a heartbeat
  * every second (a page's timer: it goes on while the page is hidden). From its ready on, a
- * HeadlessClient moves its own player with OwnPlayer (package 6) from its held input, as a person
- * at the keys would; package 7 adds the intents (see its comment).
+ * HeadlessClient moves its own player with OwnPlayer (package 6) from its held input, and acts with
+ * intents (package 7: ClientIntents, its targets chosen on the replica every frame), as a person at
+ * the keys and the mouse would.
  * addRawClient() gives a RawClient for the tests that must misbehave in ways NetClient never does
  * (raw bytes, messages before Hello, silence, a connection that reports late); it only sends what
  * its test tells it to and keeps what it receives, decoded.
@@ -40,21 +41,29 @@
  * Everything except the transport, the timers and the chunk source is product code.
  */
 import { expect } from 'vitest';
-import type { Quat, Vec3 } from '../../src/core/math';
+import { vec3, type Quat, type Vec3 } from '../../src/core/math';
 import type { ReplicaState } from '../../src/net/client/apply';
 import type { ChunkSource } from '../../src/net/client/chunks';
 import { NetClient, type NetStatus } from '../../src/net/client/netclient';
 import { emptyHeldInput, OwnPlayer, type AdoptedCorrection, type HeldInput } from '../../src/net/client/predict';
+import { ClientIntents, type ViewRay } from '../../src/net/client/intents';
+import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../../src/core/dirs';
+import { lookDir } from '../../src/sim/rays';
+import type { Inventory } from '../../src/entities/inventory';
 import type { ClientReplica } from '../../src/net/client/replica';
 import { decodeServerMessage, encodeClientMessage } from '../../src/net/codec';
 import type { CreateOptions, HostToPage } from '../../src/net/host/control';
-import { ServerHost, type HostClock, type ServerSinks } from '../../src/net/host/host';
+import { defaultSinks, ServerHost, type HostClock, type ServerSinks } from '../../src/net/host/host';
+import { IntentQueue, type IntentStats } from '../../src/net/server/intents';
 import { createLoopbackPair, LoopbackNet, type LinkConditions } from '../../src/net/loopback';
 import {
   BUILD_ID,
   MESSAGE_CHANNEL,
   type ClientMessage,
+  type HostCommand,
+  type InventoryArea,
   type KickMsg,
+  type Target,
   type NetCorrection,
   type NetMoveReport,
   type PongMsg,
@@ -126,6 +135,11 @@ function generatorSource(gen: ChunkGenerator, net: LoopbackNet, delayMs: number,
 
 // ====================================================================== the clients
 
+/** How a HeadlessClient runs the harness while it waits for the server (NetHarness.runUntil). */
+export interface ClientDriver {
+  runUntil(cond: () => boolean, maxMs?: number, stepMs?: number): void;
+}
+
 /**
  * A real client (section 15): NetClient and its ClientReplica on a loopback link (see the file
  * comment). The harness calls frame() and heartbeat(); a test reads the replica and drives the
@@ -135,9 +149,19 @@ function generatorSource(gen: ChunkGenerator, net: LoopbackNet, delayMs: number,
  * the prediction (package 6): an OwnPlayer per connection on the replica, moving the player from
  * the held `input` (forward, strafe, jump, sneak, sprint, look; jumpPresses for a double tap),
  * its reports through NetClient.sendMoveReport; corrections reach it through onBatch, which this
- * class owns (it calls onApplied for track()). `silent` stops the prediction and the reports (a
- * page that froze), stopInput() lets go of the keys. Package 7 adds the intents (NetClient.send)
- * and the scripted controls named like PlayerControl's (aimAt, use, attack, hold, mine ...).
+ * class owns (it calls onApplied for track()). Then the intents (package 7): a ClientIntents per
+ * connection chooses the targets on the replica along the view ray (the eyes as shown and the held
+ * look; `camera` gives a third-person camera), sends Aim when they change, and predicts the
+ * inventory. `silent` stops the prediction, the reports and the aims (a page that froze),
+ * stopInput() lets go of the keys and the buttons.
+ *
+ * SCRIPTED CONTROL, named like PlayerControl's: lookAt / lookAtCell / aimAt (the held look),
+ * use / attack (a click: press and release), pressUse / releaseUse / pressAttack / releaseAttack
+ * (held buttons), swapHands, selectSlot, hold / emptyHand (selecting, or the creative palette),
+ * pickBlock, invClick, creativePick, dropCursor, closeInventory, releaseHelm, respawn,
+ * setViewRadius, host commands (teleport, setMode, give, setDayTime, setRules); useOn and mine run
+ * the harness until the server answered (the client applied the batch acknowledging the intent;
+ * mine: until the client sees the block gone), as a person waits to see the result.
  */
 export class HeadlessClient {
   readonly net: NetClient;
@@ -176,6 +200,17 @@ export class HeadlessClient {
   onStep: ((seq: number) => void) | null = null;
   /** Called with every report as it is sent (the prediction's state is own.player). */
   onReport: ((r: NetMoveReport, own: OwnPlayer) => void) | null = null;
+  /** The intents of the current connection (null before its ready). */
+  intents: ClientIntents | null = null;
+  /** A third-person camera: its position and direction for the eyes and the look (null = first person, the eye ray). */
+  camera: ((eye: Vec3, dir: Vec3) => { origin: Vec3; dir: Vec3 }) | null = null;
+  /** Every intent sent, over every connection. */
+  readonly sentIntents: ClientMessage[] = [];
+  /** Set by the harness: runs it while useOn, mine and the like wait for the server. */
+  driver: ClientDriver | null = null;
+  /** Called at every frame before the targets are chosen (a scripted aim kept on a cell). */
+  private aimHold: (() => void) | null = null;
+  private lastFrameAt = 0;
 
   constructor(
     readonly key: PlayerKey,
@@ -193,6 +228,7 @@ export class HeadlessClient {
       this.applied.push(b.tick);
       if (b.private?.correction !== undefined) this.corrections.push({ tick: b.tick, c: b.private.correction });
       if (this.own !== null && this.own.replica === this.net.replica) this.own.onBatch(b);
+      if (this.intents !== null && this.intents.replica === this.net.replica) this.intents.onBatch();
       this.onApplied?.(b.tick);
       this.onBatch?.(b);
     };
@@ -245,8 +281,10 @@ export class HeadlessClient {
     if (clock !== null && r !== null && clock.renderTick > r.state.tick) {
       this.mismatches.push(`frame at ${now}: renderTick ${clock.renderTick} beyond the newest applied batch ${r.state.tick}`);
     }
-    // The prediction (package 6): from the connection's ready on, unless paused or silent.
+    // The prediction (package 6) and the intents (package 7): from the connection's ready on, unless paused or silent.
     if (this.own !== null && this.own.replica !== r) this.own = null;
+    if (this.intents !== null && this.intents.replica !== r) this.intents = null;
+    this.lastFrameAt = now;
     if (this.net.status === 'ready' && r !== null && clock !== null && !this.net.paused && !this.silent) {
       this.own ??= new OwnPlayer(r, this.input, (rep) => this.report(rep), {
         viewRadius: this.net.viewRadius,
@@ -254,8 +292,40 @@ export class HeadlessClient {
         onCorrection: (c) => this.adopted.push(c),
       });
       this.own.frame(now, clock);
+      this.intents ??= new ClientIntents(r, (m) => {
+        this.sentIntents.push(m);
+        this.net.send(m);
+      });
+      this.aimHold?.();
+      this.intents.update(this.view(), this.own.tick, this.own.lastSeq);
     }
     this.onFrame?.(now);
+  }
+
+  /** The view ray now: the eyes as shown, the held look; from the camera when one is set. */
+  view(): ViewRay {
+    const own = this.requireOwn();
+    const eye = own.displayPos(this.lastFrameAt);
+    eye.y += own.player.eyeHeight;
+    const dir = lookDir(this.input.yaw, this.input.pitch);
+    if (this.camera === null) return { eye, origin: eye, dir };
+    const cam = this.camera(eye, dir);
+    return { eye, origin: cam.origin, dir: cam.dir };
+  }
+
+  private requireOwn(): OwnPlayer {
+    if (this.own === null) throw new Error(`${this.key}: no prediction yet`);
+    return this.own;
+  }
+
+  private requireIntents(): ClientIntents {
+    if (this.intents === null) throw new Error(`${this.key}: no intents yet (not ready)`);
+    return this.intents;
+  }
+
+  private runUntil(cond: () => boolean, maxMs = 30_000): void {
+    if (this.driver === null) throw new Error(`${this.key}: no driver`);
+    this.driver.runUntil(cond, maxMs, 1);
   }
 
   private report(r: NetMoveReport): void {
@@ -263,18 +333,232 @@ export class HeadlessClient {
     this.net.sendMoveReport(r);
   }
 
-  /** Point the held look at a world point (from the predicted eyes). */
+  /** Point the held look at a world point (from the eyes as shown). */
   lookAt(x: number, y: number, z: number): void {
-    const p = this.own?.player;
-    if (p === undefined) throw new Error(`${this.key}: no prediction yet`);
-    const dx = x - p.pos.x;
-    const dy = y - (p.pos.y + p.eyeHeight);
-    const dz = z - p.pos.z;
+    const e = this.view().eye;
+    const dx = x - e.x;
+    const dy = y - e.y;
+    const dz = z - e.z;
     const h = Math.hypot(dx, dz);
     if (h > 1e-12) this.input.yaw = Math.atan2(-dx, -dz);
     this.input.pitch = Math.atan2(dy, h);
   }
 
+  // ------------------------------------------------------------------ scripted control (package 7; see the class comment)
+
+  /** The inventory as shown (the server's with the unacknowledged actions replayed). */
+  get inventory(): Inventory {
+    const inv = this.requireIntents().shownInventory;
+    if (inv === null) throw new Error(`${this.key}: no inventory yet`);
+    return inv;
+  }
+
+  /** The use target (what the outline shows) and the mining target, as of the last frame. */
+  get target(): Target | null {
+    return this.requireIntents().useTarget;
+  }
+  get mineTarget(): Target | null {
+    return this.requireIntents().mineTarget;
+  }
+
+  /**
+   * Point the held look at a cell of a grid of the replica (0 = the world), as shown: at the centre
+   * of `face` when given (slightly inside it), else at the cell centre. False when the replica has no such grid.
+   */
+  lookAtCell(x: number, y: number, z: number, face?: Dir, gridId = 0): boolean {
+    const r = this.replica;
+    const g = r === null ? undefined : gridId === 0 ? r.world : r.state.structures.get(gridId)?.structure.grid;
+    if (g === undefined) return false;
+    const p = vec3(x + 0.5, y + 0.5, z + 0.5);
+    if (face !== undefined) {
+      p.x += DIR_X[face]! * 0.45;
+      p.y += DIR_Y[face]! * 0.45;
+      p.z += DIR_Z[face]! * 0.45;
+    }
+    g.toWorld(p, p);
+    this.lookAt(p.x, p.y, p.z);
+    return true;
+  }
+
+  /** lookAtCell, then the targets now: true when the use target (`mining`: the mining target) is exactly that cell (and face). */
+  aimAt(x: number, y: number, z: number, face?: Dir, gridId = 0, mining = false): boolean {
+    if (!this.lookAtCell(x, y, z, face, gridId)) return false;
+    const own = this.requireOwn();
+    const it = this.requireIntents();
+    it.update(this.view(), own.tick, own.lastSeq);
+    const t = mining ? it.mineTarget : it.useTarget;
+    return t !== null && t.gridId === gridId && t.x === x && t.y === y && t.z === z && (face === undefined || t.face === face);
+  }
+
+  /** Keep aiming at a cell at every frame (a carrier may turn the player); null stops. */
+  holdAim(cell: { x: number; y: number; z: number; face?: Dir; gridId?: number } | null): void {
+    this.aimHold = cell === null ? null : () => void this.lookAtCell(cell.x, cell.y, cell.z, cell.face, cell.gridId ?? 0);
+  }
+
+  /** A right-click: press and release (sneak: the held sneak key unless given). */
+  use(sneak = this.input.sneak): void {
+    this.pressUse(sneak);
+    this.releaseUse();
+  }
+  pressUse(sneak = this.input.sneak): void {
+    this.requireIntents().pressUse(sneak, this.requireOwn().lastSeq);
+  }
+  releaseUse(): void {
+    this.requireIntents().releaseUse();
+  }
+  /** A left-click: press and release. */
+  attack(): void {
+    this.pressAttack();
+    this.releaseAttack();
+  }
+  pressAttack(): void {
+    this.requireIntents().pressAttack(this.requireOwn().lastSeq);
+  }
+  releaseAttack(): void {
+    this.requireIntents().releaseAttack();
+  }
+  swapHands(): void {
+    this.requireIntents().swapHands();
+  }
+  selectSlot(slot: number): void {
+    this.requireIntents().selectSlot(slot);
+  }
+  /** Pick block on the use target; false (nothing sent) without one. */
+  pickBlock(): boolean {
+    return this.requireIntents().pickBlock(this.requireOwn().lastSeq);
+  }
+  invClick(area: InventoryArea, index: number, button: 0 | 2 = 0, shift = false): void {
+    this.requireIntents().invClick(area, index, button, shift);
+  }
+  creativePick(item: number, shift = false): void {
+    this.requireIntents().creativePick(item, shift);
+  }
+  dropCursor(): void {
+    this.requireIntents().dropCursor();
+  }
+  closeInventory(): void {
+    this.requireIntents().closeInventory();
+  }
+  releaseHelm(): void {
+    this.requireIntents().releaseHelm();
+  }
+  respawn(): void {
+    this.requireIntents().respawn();
+  }
+  /** The subscription radius (and NetClient's, for the next Hello and the ready zone of a reload). */
+  setViewRadius(r: number): void {
+    this.requireIntents().setViewRadius(r);
+    this.net.viewRadius = r;
+  }
+  hostCommand(c: HostCommand): void {
+    this.requireIntents().hostCommand(c);
+  }
+
+  /** Hold `item`: select a hotbar slot that has it (as shown); in creative, take a stack from the palette first. Throws when it cannot. */
+  hold(item: number): void {
+    let slot = this.inventory.hotbar.findIndex((s) => s !== null && s.item === item && s.count > 0);
+    if (slot < 0 && this.mode === 'creative') {
+      this.creativePick(item, true);
+      slot = this.inventory.hotbar.findIndex((s) => s !== null && s.item === item && s.count > 0);
+    }
+    if (slot < 0) throw new Error(`${this.key}: no ${item} in the hotbar`);
+    if (slot !== this.inventory.selected) this.selectSlot(slot);
+  }
+
+  /** Hold nothing: select the first empty hotbar slot (as shown); with a full hotbar, shift-click the selected stack into the backpack. */
+  emptyHand(): void {
+    const slot = this.inventory.hotbar.findIndex((s) => s === null || s.count <= 0);
+    if (slot < 0) {
+      this.invClick('hotbar', this.inventory.selected, 0, true);
+      if (this.inventory.selectedStack() !== null) throw new Error(`${this.key}: no room to empty the hand`);
+      return;
+    }
+    if (slot !== this.inventory.selected) this.selectSlot(slot);
+  }
+
+  /** The player's mode as the server last said. */
+  get mode(): 'creative' | 'survival' {
+    const st = this.state!;
+    return st.private.vitals?.mode ?? st.rules.defaultMode;
+  }
+
+  /** Run the harness until the client has applied the batch of the server's present tick (it sees what the server has now). */
+  catchUp(tick: number, maxMs = 30_000): void {
+    this.runUntil(() => (this.state?.tick ?? -1) >= tick, maxMs);
+  }
+
+  /** Run the harness until the server processed every intent sent and the client applied that batch. */
+  waitAck(maxMs = 30_000): void {
+    const it = this.requireIntents();
+    this.runUntil(() => it.settled, maxMs);
+  }
+
+  /**
+   * Run until the server has the look the player has now (a movement report sent after it was
+   * accepted: moveAck). What a click does can depend on the look (a helm faces where the player
+   * looks), and the look reaches the server with the movement reports, not with the click: a person
+   * turns, then clicks. Nothing to wait for while the body is frozen (no reports).
+   */
+  waitLook(): void {
+    const own = this.requireOwn();
+    const seq = own.lastSeq + 1;
+    const r = this.replica!;
+    this.runUntil(() => this.own !== own || own.player.dead || (r.state.private.moveAck ?? 0) >= seq);
+  }
+
+  /**
+   * Aim at a cell, let the server learn the look (waitLook), and right-click it; then wait for the
+   * server's answer. False (nothing clicked) when the cell cannot be aimed at.
+   */
+  useOn(x: number, y: number, z: number, face?: Dir, gridId = 0): boolean {
+    if (!this.aimAt(x, y, z, face, gridId)) return false;
+    this.waitLook();
+    if (!this.aimAt(x, y, z, face, gridId)) return false;
+    this.use();
+    this.waitAck();
+    return true;
+  }
+
+  /**
+   * Aim at a cell and hold the left button (keeping the aim at every frame) until the client sees
+   * the cell change, at most `maxMs`; then let go. False when it cannot be aimed at or did not break.
+   */
+  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxMs = 30_000): boolean {
+    if (!this.aimAt(x, y, z, face, gridId, true)) return false;
+    const grid = (): VoxelGridLike | undefined => (gridId === 0 ? this.replica?.world : this.replica?.state.structures.get(gridId)?.structure.grid);
+    const before = grid()?.getCell(x, y, z);
+    this.holdAim({ x, y, z, face, gridId });
+    this.pressAttack();
+    try {
+      this.runUntil(() => grid()?.getCell(x, y, z) !== before, maxMs);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.holdAim(null);
+      if (this.intents?.attackHeld) this.releaseAttack();
+    }
+  }
+
+  /** Host command (the host's connection only): teleport to a world point; waits until the client adopted the correction. */
+  teleport(x: number, y: number, z: number): void {
+    const own = this.requireOwn();
+    const epoch = own.epoch;
+    this.hostCommand({ kind: 'teleport', x, y, z });
+    this.runUntil(() => this.own !== null && this.own.epoch > epoch && !this.own.reloading);
+  }
+
+  /** Host command: this player's mode; waits for the server's answer. */
+  setMode(mode: 'creative' | 'survival'): void {
+    this.hostCommand({ kind: 'setPlayerMode', entityId: 0, mode });
+    this.waitAck();
+  }
+
+  /** Host command: items into this player's inventory; waits for the server's answer. */
+  give(item: number, count: number): void {
+    this.hostCommand({ kind: 'give', item, count });
+    this.waitAck();
+  }
   /** Causes of the corrections applied in batches after server tick `tick` that pass `pick`. */
   correctionsSince(tick: number, pick: (cause: string) => boolean = () => true): string[] {
     return this.corrections.filter((x) => x.tick > tick && pick(x.c.cause)).map((x) => x.c.cause);
@@ -285,7 +569,7 @@ export class HeadlessClient {
     if (!this.crashed) this.net.heartbeat(now);
   }
 
-  /** Let go of the held keys (the look stays) and drop scripted actions (package 7 adds those; quiesce()). */
+  /** Let go of the held keys and buttons (the look stays) and drop a kept aim (quiesce()). */
   stopInput(): void {
     const i = this.input;
     i.forward = 0;
@@ -294,6 +578,12 @@ export class HeadlessClient {
     i.sneak = false;
     i.sprint = false;
     i.jumpPresses = 0;
+    this.aimHold = null;
+    const it = this.intents;
+    if (it !== null && this.net.status === 'ready') {
+      if (it.useHeld) it.releaseUse();
+      if (it.attackHeld) it.releaseAttack();
+    }
   }
 
   /** Quit properly: Bye, then close. */
@@ -358,6 +648,11 @@ export class RawClient {
     this.transport.close('dropped');
     this.ended = true;
   }
+}
+
+/** What mine() reads of a grid of the replica. */
+interface VoxelGridLike {
+  getCell(x: number, y: number, z: number): number;
 }
 
 // ====================================================================== the harness
@@ -549,6 +844,8 @@ export class NetHarness {
   readonly history = new Map<number, TickRecord>();
   /** Called after every server tick (after the harness's own records). */
   onTick: (() => void) | null = null;
+  /** The movement and intent packages of the open world (the default ones unless HarnessOptions.sinks). */
+  sinks: ServerSinks | null = null;
   private readonly keepHistory: boolean;
   /** Every link not yet closed on either end. */
   private readonly links: Link[] = [];
@@ -571,13 +868,23 @@ export class NetHarness {
       report: (m) => this.reports.push(m),
       chunkBudget: { columns: opts.chunkColumns ?? 8 },
       rabbits: opts.rabbits ?? false,
-      ...(opts.sinks !== undefined ? { sinks: opts.sinks } : {}),
+      sinks: (sim, replicator) => {
+        const s = (opts.sinks ?? defaultSinks)(sim, replicator);
+        this.sinks = s;
+        return s;
+      },
     });
     this.host.onTick = () => this.afterTick();
   }
 
   get sim(): Simulation {
     return this.host.sim;
+  }
+
+  /** What the server's intents did for `key` (default sinks only), or null. */
+  intentStats(key: PlayerKey): Readonly<IntentStats> | null {
+    const i = this.sinks?.intents;
+    return i instanceof IntentQueue ? i.stats(key) : null;
   }
 
   /** The digest context of the open world (pristine hashes from its generator). */
@@ -646,6 +953,7 @@ export class NetHarness {
       });
     });
     this.clients.push(c);
+    c.driver = this;
     // Frames and heartbeats with a phase of their own.
     const phase = ((this.clientSeq++ * 7.3) % FRAME_MS) + 0.1;
     const frame = (at: number): void => {

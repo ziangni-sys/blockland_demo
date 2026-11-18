@@ -328,7 +328,10 @@ export class ViewBuilder {
     } else {
       o.target = null;
     }
-    o.breakProgress = v.target ? Math.max(0, Math.min(1, v.breakProgress)) : 0;
+    // Cracks only on the target itself (the cell being mined is the server's; the outline the player's).
+    const m = v.mining;
+    const t = v.target;
+    o.breakProgress = t !== null && m !== null && m.gridId === t.gridId && m.x === t.x && m.y === t.y && m.z === t.z ? Math.max(0, Math.min(1, m.progress)) : 0;
     const pv = v.preview;
     const pvCells = pv ? pv.cells : null;
     const pvGrid = pv ? pv.gridId : -1;

@@ -833,6 +833,8 @@ export class EntityManager {
       d.viewTick = rep.viewTick;
       d.lag = reportLag(this.host.world.time, rep.viewTick);
       d.accepted++;
+      // As the server took it: the body is in the seat, whatever the report says.
+      d.recordAccepted(rep.seq, p.steeringShipId, p.seat, ORIGIN);
       inp.forward = axisValue(rep.forward);
       inp.strafe = axisValue(rep.strafe);
       inp.sneak = rep.sneak === true;
@@ -958,6 +960,7 @@ export class EntityManager {
       inp.strafe = axisValue(rep.strafe);
       inp.sneak = rep.sneak === true;
       this.followReference(p, d);
+      d.recordAccepted(rep.seq, d.carrierId, d.pos, d.vel);
       if (unseen) y0 = p.pos.y;
       // Vitals where the report puts the body; the fall on the reported track (a fall that ends
       // on a moving deck counts from where it began: both ends at the server's present poses).

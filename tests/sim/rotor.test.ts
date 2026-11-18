@@ -82,7 +82,7 @@ describe('bearing: preview, start, stop', () => {
     click(sim);
     expect(log.toastKeys()).toContain('toast.glue.spinning');
     expect(rotor.glue.size).toBe(glueBefore);
-    expect(sim.soloPlayer.view.glueProgress).toBe(0);
+    expect(sim.soloPlayer.view.gluing).toBeNull();
 
     // Right-click the bearing again: stop, the windmill turns back into blocks.
     sim.soloPlayer.hold(B.STONE);

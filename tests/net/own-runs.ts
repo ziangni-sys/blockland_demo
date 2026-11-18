@@ -12,7 +12,7 @@ import { facingState, makeCell } from '../../src/blocks/cell';
 import { NY } from '../../src/core/dirs';
 import { vec3, type Vec3 } from '../../src/core/math';
 import { boxOverlapsSolid } from '../../src/voxel/shape';
-import { fill, useOn } from './e2e-scenes';
+import { clickOn, fill } from './e2e-scenes';
 import type { ClientLink } from './harness';
 import {
   assemble,
@@ -281,7 +281,8 @@ export async function deathRespawn(link: ClientLink): Promise<SceneResult> {
   const body = copy(p.pos);
   r.h.run(1000);
   const heldDead = dist(p.pos, body);
-  r.ctrl.respawn();
+  r.c.respawn();
+  r.c.waitAck();
   const spawn = copy(p.pos);
   r.h.run(1500);
   r.c.input.forward = 0;
@@ -468,9 +469,9 @@ export async function steer(link: ClientLink): Promise<SceneResult> {
   const helm = buildRaft(r.sim, { x0: OX, z0: 0, x1: OX + 6, z1: 6, y: S - 1, gunwale: true, helm: { x: OX + 3, z: 2 } });
   r.teleport(OX + 3.5, S, 4.5, 1000);
   r.mark();
-  r.ctrl.emptyHand();
-  useOn(r.h, r.ctrl, helm.x, helm.y, helm.z);
-  useOn(r.h, r.ctrl, helm.x, helm.y, helm.z);
+  r.c.emptyHand();
+  clickOn(r.c, helm.x, helm.y, helm.z);
+  clickOn(r.c, helm.x, helm.y, helm.z);
   const p = r.ctrl.player;
   const ship = r.sim.structures.ships()[0]!;
   const seated = p.steeringShipId === ship.id;
@@ -485,7 +486,7 @@ export async function steer(link: ClientLink): Promise<SceneResult> {
   const rudder = ship.rudder;
   r.c.input.forward = 0;
   r.c.input.strafe = 0;
-  r.ctrl.releaseHelm();
+  r.c.releaseHelm();
   r.h.run(1000);
   return result(r, { seated, throttle, rudder, sailed: hdist(ship.grid.position, start), turned: Math.abs(wrap(headingOf(ship.grid.rotation) - yaw0)), aboard: p.carrierId === ship.id });
 }
@@ -525,9 +526,9 @@ export async function pushedOff(link: ClientLink): Promise<SceneResult> {
   r.teleport(OX + 3.5, S, 3.5, 1000);
   startRotor(r.sim, OX + 3, S + 3, 4);
   r.mark();
-  r.ctrl.emptyHand();
-  useOn(r.h, r.ctrl, helm.x, helm.y, helm.z);
-  useOn(r.h, r.ctrl, helm.x, helm.y, helm.z);
+  r.c.emptyHand();
+  clickOn(r.c, helm.x, helm.y, helm.z);
+  clickOn(r.c, helm.x, helm.y, helm.z);
   const p = r.ctrl.player;
   const seated = p.steeringShipId !== 0;
   r.h.runUntil(() => p.steeringShipId === 0, 20_000, 5);

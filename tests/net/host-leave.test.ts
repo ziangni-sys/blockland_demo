@@ -9,6 +9,7 @@ import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { NZ, PZ } from '../../src/core/dirs';
 import { defaultSinks, type ServerSinks } from '../../src/net/host/host';
+import type { Replicator } from '../../src/net/server/replicator';
 import { createLoopbackPair } from '../../src/net/loopback';
 import { CONNECTION_TIMEOUT_MS, MAX_BACKLOG, type IntentMessage, type NetMoveReport } from '../../src/net/protocol';
 import type { Channel, Transport } from '../../src/net/transport';
@@ -17,7 +18,7 @@ import type { PlayerKey } from '../../src/sim/view';
 import { Ship } from '../../src/structures/structure';
 import { INSTANT, NetHarness, RawClient } from './harness';
 
-async function room(sinks?: (sim: Simulation) => ServerSinks): Promise<NetHarness> {
+async function room(sinks?: (sim: Simulation, replicator: Replicator) => ServerSinks): Promise<NetHarness> {
   const h = new NetHarness(sinks !== undefined ? { sinks } : {});
   await h.create();
   h.host.setRoomOpen(true);
@@ -104,13 +105,8 @@ describe('leaving (package 8)', () => {
     sim.world.setCell(1, 5, 1, makeCell(B.HELM, facingState(NZ)));
     ctrl.teleport(1.5, 5, 3.5);
     h.run(200);
-    ctrl.emptyHand();
-    for (let i = 0; i < 2; i++) {
-      expect(ctrl.aimAt(1, 5, 1, PZ, 0)).toBe(true);
-      ctrl.use();
-      const t = sim.ticks;
-      h.runUntil(() => sim.ticks > t, 1000, 1);
-    }
+    g.emptyHand();
+    for (let i = 0; i < 2; i++) expect(g.useOn(1, 5, 1, PZ)).toBe(true);
     const ship = sim.structures.ships()[0] as Ship;
     expect(ship.helmsmanId).toBe(ctrl.entityId);
     ship.throttle = 1;
@@ -207,8 +203,8 @@ describe('leaving (package 8)', () => {
     const calls: string[] = [];
     let moveAck: number | null = null;
     let intentAck: number | null = null;
-    const h = await room((sim) => {
-      const s = defaultSinks(sim);
+    const h = await room((sim, replicator) => {
+      const s = defaultSinks(sim, replicator);
       s.moves = {
         join: (k) => calls.push(`moves.join ${k}`),
         leave: (k) => calls.push(`moves.leave ${k}`),

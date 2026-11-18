@@ -52,13 +52,8 @@ async function savedWorld(): Promise<{ storage: MemoryStorage; shipId: number; a
   sim.world.setCell(1, 6, 1, makeCell(B.HELM, facingState(NZ)));
   ctrl.teleport(1.5, 6, 3.5);
   h.run(200);
-  ctrl.emptyHand();
-  for (let i = 0; i < 2; i++) {
-    expect(ctrl.aimAt(1, 6, 1, PZ, 0)).toBe(true);
-    ctrl.use();
-    const t = sim.ticks;
-    h.runUntil(() => sim.ticks > t, 1000, 1);
-  }
+  a.emptyHand();
+  for (let i = 0; i < 2; i++) expect(a.useOn(1, 6, 1, PZ)).toBe(true);
   const ship = sim.structures.ships()[0] as Ship;
   expect(ship.helmsmanId).toBe(ctrl.entityId);
   h.run(200);
