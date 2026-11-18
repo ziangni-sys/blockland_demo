@@ -13,16 +13,14 @@ import { CHUNK_VOLUME } from '../../src/core/constants';
 import { ClientChunks, type ChunkSource } from '../../src/net/client/chunks';
 import { ClientReplica } from '../../src/net/client/replica';
 import { decodeServerMessage, encodeServerMessage } from '../../src/net/codec';
-import { LoopbackNet } from '../../src/net/loopback';
 import { emptyTickBatch, type TickBatchMsg } from '../../src/net/protocol';
 import { RELIABLE } from '../../src/net/transport';
 import { LightEngine } from '../../src/light/engine';
-import { Simulation } from '../../src/sim/simulation';
 import { Chunk } from '../../src/voxel/chunk';
 import { World } from '../../src/voxel/world';
-import { FlatGenerator, TerrainGenerator } from '../../src/worldgen/generator';
+import { FlatGenerator } from '../../src/worldgen/generator';
 import { compareReplica, replicaDigest, serverDigest } from './digest';
-import { DelayedSource, link, ShimServer, ShimWorld } from './shim';
+import { link, NetHarness, testMeta } from './harness';
 
 const gen = new FlatGenerator();
 const STONE = makeCell(B.STONE);
@@ -213,17 +211,18 @@ describe('light on the replica (package 5)', () => {
 });
 
 describe('a slow ChunkSource through a whole connection (package 5)', () => {
-  it('join and jump away and back with 200 ms generation: deltas queue, stale generations are dropped, the replica ends equal', () => {
-    const sim = new Simulation({ seed: 3, mode: 'creative', generator: new TerrainGenerator(3), syncChunks: true, rabbits: false, loadRadius: 3 });
-    const w = new ShimWorld(new ShimServer(new LoopbackNet(), sim));
-    const a = w.add({ key: 'a', viewRadius: 3, genDelayMs: 200, up: link(20, 5, 0, 3), down: link(20, 5, 0, 4) });
-    w.runUntil(() => a.net.status === 'ready');
-    a.checkEveryBatch = false; // columns may still be generating (absent on the client) at their batch
+  it('join and jump away and back with 200 ms generation: deltas queue, stale generations are dropped, the replica ends equal', async () => {
+    const h = new NetHarness();
+    await h.create(testMeta(), { generator: { kind: 'terrain', seed: 3 }, exampleShip: false });
+    const sim = h.sim;
+    const a = h.addClient('a', { up: link(20, 5, 0, 3), down: link(20, 5, 0, 4) }, { local: true, viewRadius: 3, genDelayMs: 200 });
+    h.track(a); // columns still generating at their batch are left out of the per-tick checks
+    h.runUntil(() => a.ready);
     const ctrl = sim.players.get('a')!;
     const p0 = { ...ctrl.player.pos };
     // Edits near the player, every tick for a while (some land in columns that are generating).
     let k = 0;
-    w.onTick = () => {
+    h.onTick = () => {
       if (k > 400) return;
       const x = Math.floor(ctrl.player.pos.x) + ((k * 7) % 40) - 20;
       const z = Math.floor(ctrl.player.pos.z) + ((k * 13) % 40) - 20;
@@ -232,21 +231,22 @@ describe('a slow ChunkSource through a whole connection (package 5)', () => {
     };
     // Away (unsubscribes behind, pristine columns ahead) and back while generations are in flight.
     ctrl.teleport(p0.x + 6 * 16, p0.y + 30, p0.z);
-    w.run(100);
+    h.run(100);
     ctrl.teleport(p0.x, p0.y + 30, p0.z);
-    w.run(100);
+    h.run(100);
     ctrl.teleport(p0.x + 6 * 16, p0.y + 30, p0.z);
-    w.run(4000);
+    h.run(4000);
     ctrl.teleport(p0.x, p0.y + 30, p0.z);
-    w.run(6000);
-    const src = a.source as DelayedSource;
+    h.run(6000);
     const r = a.replica!;
     expect(r.chunks.generating).toBe(0);
     expect(r.chunks.staleResults).toBeGreaterThan(0);
-    expect(src.requests).toBeGreaterThan(40);
+    expect(a.generation.requests).toBeGreaterThan(40);
+    expect(a.checked).toBeGreaterThan(200);
+    expect(a.mismatches).toEqual([]);
     // Every column the client holds equals the server's, and the light is the full recomputation.
-    const view = w.server.rep.clientView('a')!;
-    const d = serverDigest(w.server.ctx, sim, { columns: view.columns, structures: [], entities: [] });
+    const view = h.host.replicator.clientView('a')!;
+    const d = serverDigest(h.digestContext, sim, { columns: view.columns, structures: [], entities: [] });
     expect(compareReplica(d, replicaDigest(r.state), { poses: false }).filter((x) => !x.startsWith('entity'))).toEqual([]);
     expectLightEqual(r);
   }, 60_000);

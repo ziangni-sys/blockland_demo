@@ -8,6 +8,7 @@
  *  - heartbeat(now) from a timer about once a second, also while the page is hidden (Ping,
  *    reconnect attempts, the stall hint);
  *  - setHidden(true / false) when the page is hidden or shown;
+ *  - setPaused(true / false) around a single-player pause (section 4);
  *  - send(message) / sendMoveReport(report) for intents and movement reports (packages 6, 7);
  *  - leave() when the player quits.
  *
@@ -133,6 +134,7 @@ export class NetClient {
   private statusValue: NetStatus = 'idle';
   private conn: Connection | null = null;
   private hiddenValue = false;
+  private pausedValue = false;
   /** An openTransport call is under way. */
   private opening = false;
   private lastOpenAttempt = -Infinity;
@@ -182,6 +184,10 @@ export class NetClient {
     return this.hiddenValue;
   }
 
+  get paused(): boolean {
+    return this.pausedValue;
+  }
+
   /** Transports opened so far (1 + reconnections). */
   get connectionCount(): number {
     return this.connections;
@@ -223,10 +229,17 @@ export class NetClient {
     this.applyWaiting(c);
     if (this.conn !== c || c.replica === null) return;
     const r = c.replica;
+    if (this.pausedValue) {
+      // The clock holds and nothing is re-posed: what is shown stays still.
+      r.refreshHulls();
+      r.updateLight();
+      return;
+    }
     c.clock.frame(now, r.state.tick);
     r.refreshHulls();
     r.updateLight();
-    if (c.clock.isSynced) r.setPoses(c.clock.renderTick, c.clock.rotorTick);
+    // Nothing is posed before the first batch is applied (renderTick is -Infinity until then).
+    if (r.state.tick >= 0) r.setPoses(c.clock.renderTick, c.clock.rotorTick);
     this.checkReady(c);
   }
 
@@ -266,9 +279,17 @@ export class NetClient {
     this.sendOn(c, { type: 'moveReport', ...r });
   }
 
-  /** The page's pause ended (section 4): start the clock over. */
-  resetClock(): void {
-    this.conn?.clock.reset();
+  /**
+   * Single-player pause (section 4): the page pauses the client before it pauses the server, and
+   * resumes it after the server. While paused, frames still apply what arrives (the batches of the
+   * server's last ticks) but the clock holds and nothing is re-posed, so nothing moves on screen
+   * (rotors would otherwise go on spinning to rotorTick). Resuming starts the clock over: the
+   * server's ticks resume after a gap of wall time the clock must not take for lag.
+   */
+  setPaused(paused: boolean): void {
+    if (paused === this.pausedValue) return;
+    this.pausedValue = paused;
+    if (!paused) this.conn?.clock.reset();
   }
 
   /** Quit: Bye, then close (section 3). */

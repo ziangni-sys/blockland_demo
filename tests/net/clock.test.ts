@@ -10,10 +10,12 @@
 import { describe, expect, it } from 'vitest';
 import { Rng } from '../../src/core/rng';
 import { lossTicks, ServerClock } from '../../src/net/client/clock';
-import { LoopbackNet } from '../../src/net/loopback';
-import { Simulation } from '../../src/sim/simulation';
-import { FlatGenerator } from '../../src/worldgen/generator';
-import { link, ShimServer, ShimWorld } from './shim';
+import { droppingSinks } from '../../src/net/host/host';
+import type { MoveSink } from '../../src/net/host/netserver';
+import type { NetMoveReport } from '../../src/net/protocol';
+import type { Simulation } from '../../src/sim/simulation';
+import type { PlayerKey } from '../../src/sim/view';
+import { link, NetHarness } from './harness';
 
 interface Arrival {
   at: number;
@@ -226,24 +228,72 @@ describe('ServerClock (package 5)', () => {
   });
 });
 
+/**
+ * Package 6's report queue as far as rotorLead can tell: at the start of each tick the newest report
+ * that arrived before it is taken (moveAck), and the tick that takes it is remembered.
+ */
+class ReportAcker implements MoveSink {
+  /** Seq -> the tick that took it (one client). */
+  readonly takenAt = new Map<number, number>();
+  private readonly newest = new Map<PlayerKey, number>();
+  private readonly taken = new Map<PlayerKey, number>();
+  private readonly acked = new Map<PlayerKey, number | null>();
+  constructor(private readonly sim: Simulation) {}
+  join(): void {}
+  leave(key: PlayerKey): void {
+    this.newest.delete(key);
+    this.taken.delete(key);
+    this.acked.delete(key);
+  }
+  receive(key: PlayerKey, r: NetMoveReport): void {
+    if (r.seq > (this.newest.get(key) ?? -1)) this.newest.set(key, r.seq);
+  }
+  beforeTick(): void {
+    for (const [key, seq] of this.newest) {
+      const take = seq > (this.taken.get(key) ?? -1);
+      this.acked.set(key, take ? seq : null);
+      if (!take) continue;
+      this.taken.set(key, seq);
+      this.takenAt.set(seq, this.sim.ticks + 1);
+    }
+  }
+  moveAck(key: PlayerKey): number | null {
+    return this.acked.get(key) ?? null;
+  }
+}
+
 describe('ServerClock on a real connection (package 5)', () => {
-  function world(): ShimWorld {
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, rabbits: true, loadRadius: 3, spawn: { x: 0.5, y: 35, z: 0.5 } });
-    return new ShimWorld(new ShimServer(new LoopbackNet(), sim));
+  async function world(acker?: (a: ReportAcker) => void): Promise<NetHarness> {
+    const h = new NetHarness({
+      rabbits: true,
+      ...(acker !== undefined
+        ? {
+            sinks: (sim: Simulation) => {
+              const moves = new ReportAcker(sim);
+              acker(moves);
+              return { moves, intents: droppingSinks().intents };
+            },
+          }
+        : {}),
+    });
+    await h.create();
+    h.host.setRoomOpen(true);
+    return h;
   }
 
-  it('reliable retransmissions stall the batches while samples keep coming: renderTick never passes the newest applied batch', () => {
-    const w = world();
+  it('reliable retransmissions stall the batches while samples keep coming: renderTick never passes the newest applied batch', async () => {
+    const h = await world();
     // Something moving all the time: a bot walking in circles (samples every tick).
-    const bot = w.server.sim.join('bot');
+    const bot = h.sim.join('bot');
     bot.player.input.forward = 1;
     let turn = 0;
-    w.onTick = () => {
+    h.onTick = () => {
       bot.player.input.yaw += 0.05;
       turn++;
     };
-    const a = w.add({ key: 'a', viewRadius: 3, up: link(60, 10, 0, 5), down: link(60, 10, 0.08, 6, { rtoMs: 700 }) });
-    w.runUntil(() => a.net.status === 'ready');
+    const a = h.addClient('a', { up: link(60, 10, 0, 5), down: link(60, 10, 0.08, 6, { rtoMs: 700 }) }, { viewRadius: 3 });
+    h.track(a);
+    h.runUntil(() => a.ready);
     const s = { frames: 0, capped: 0, over: 0, aheadSamples: 0, back: 0 };
     let last = -Infinity;
     a.onFrame = (now) => {
@@ -254,43 +304,43 @@ describe('ServerClock on a real connection (package 5)', () => {
       if (clock.renderTick < last) s.back++;
       last = clock.renderTick;
       if (clock.arrivalTick(now) - clock.D > r.state.tick + 0.5) s.capped++;
-      const bot = r.state.entities.get(w.server.sim.players.get('bot')!.entityId);
-      if (bot !== undefined && bot.poseTick > r.state.tick) s.aheadSamples++;
+      const e = r.state.entities.get(bot.entityId);
+      if (e !== undefined && e.poseTick > r.state.tick) s.aheadSamples++;
     };
-    w.run(30_000);
+    h.run(30_000);
     expect(turn).toBeGreaterThan(500);
     expect(s.over).toBe(0);
     expect(s.back).toBe(0);
     // The stalls happened: frames where the timeline was ahead of the applied batches, samples newer than them.
     expect(s.capped).toBeGreaterThan(20);
     expect(s.aheadSamples).toBeGreaterThan(20);
-    a.expectClean();
+    expect(a.mismatches).toEqual([]);
   }, 60_000);
 
-  it('rotorLead follows the move ack: rotorTick at sending equals the tick the server takes the report', () => {
-    const w = world();
-    const a = w.add({ key: 'a', viewRadius: 2, up: link(75, 10, 0, 7), down: link(75, 10, 0, 8) });
-    w.runUntil(() => a.net.status === 'ready');
+  it('rotorLead follows the move ack: rotorTick at sending equals the tick the server takes the report', async () => {
+    let acker: ReportAcker | null = null;
+    const h = await world((m) => (acker = m));
+    const up = link(75, 10, 0, 7);
+    const a = h.addClient('a', { up, down: link(75, 10, 0, 8) });
+    h.runUntil(() => a.ready);
     // A movement report every 50 ms (package 6's client tick); remember rotorTick at each.
     let seq = 0;
     const sentAt = new Map<number, number>();
-    let next = w.net.now;
-    const prevFrame = a.onFrame;
+    let next = h.net.now;
     a.onFrame = (now) => {
-      prevFrame?.(now);
       if (now < next) return;
       next += 50;
       const clock = a.net.clock!;
       sentAt.set(seq, clock.rotorTick);
-      a.net.sendMoveReport({ seq, epoch: 1, viewTick: Math.floor(clock.renderTick), carrierId: 0, pos: { x: 0.5, y: 35, z: 0.5 }, vel: { x: 0, y: 0, z: 0 }, yaw: 0, pitch: 0, onGround: true, sneaking: false, sprinting: false, flying: false, forward: 0, strafe: 0, sneak: false, landings: 0 });
+      a.net.sendMoveReport({ seq, epoch: 1, viewTick: Math.floor(clock.renderTick), carrierId: 0, pos: { x: 0.5, y: 5, z: 0.5 }, vel: { x: 0, y: 0, z: 0 }, yaw: 0, pitch: 0, onGround: true, sneaking: false, sprinting: false, flying: false, forward: 0, strafe: 0, sneak: false, landings: 0 });
       seq++;
     };
     const before = a.net.clock!.rotorLead;
-    w.run(10_000);
+    h.run(10_000);
     const clock = a.net.clock!;
-    const conn = w.server.live('a')!;
+    const takenAt = acker!.takenAt;
     const errs: number[] = [];
-    for (const [s, tick] of conn.acceptedAt) if (s > seq - 100 && sentAt.has(s)) errs.push(sentAt.get(s)! - tick);
+    for (const [s, tick] of takenAt) if (s > seq - 100 && sentAt.has(s)) errs.push(sentAt.get(s)! - tick);
     expect(errs.length).toBeGreaterThan(50);
     const mean = errs.reduce((x, y) => x + y, 0) / errs.length;
     expect(Math.abs(mean)).toBeLessThan(0.6);
@@ -298,10 +348,10 @@ describe('ServerClock on a real connection (package 5)', () => {
     // Measured, not the default rtt * TPS / 1000 + 1.5.
     expect(Math.abs(clock.rotorLead - before)).toBeGreaterThan(0.3);
     // The uplink gets slower by 200 ms: the lead follows within a few seconds.
-    a.links.up.latencyMs = 275;
-    w.run(8000);
+    up.latencyMs = 275;
+    h.run(8000);
     const errs2: number[] = [];
-    for (const [s, tick] of conn.acceptedAt) if (s > seq - 60 && sentAt.has(s)) errs2.push(sentAt.get(s)! - tick);
+    for (const [s, tick] of takenAt) if (s > seq - 60 && sentAt.has(s)) errs2.push(sentAt.get(s)! - tick);
     const mean2 = errs2.reduce((x, y) => x + y, 0) / errs2.length;
     expect(Math.abs(mean2)).toBeLessThan(0.6);
   }, 60_000);

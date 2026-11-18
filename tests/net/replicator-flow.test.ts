@@ -312,7 +312,9 @@ describe('private state and globals (package 4)', () => {
     expect(g.tps).toBe(19.4);
     rig.rep.tps = 12;
     rig.tick();
-    expect(a.batches.at(-1)!.batch.globals?.tps).toBeUndefined(); // at most once a second
+    expect(a.batches.at(-1)!.batch.globals?.tps).toBe(12); // every change (ServerHost gives one at most once a second)
+    rig.tick();
+    expect(a.batches.at(-1)!.batch.globals?.tps).toBeUndefined();
     rig.tick(19);
     expect(a.state.tps).toBe(12);
     expect(a.state.rules.defaultMode).toBe('survival');

@@ -5,6 +5,10 @@
  *  - FlatGenerator:    horizontal layers, for tests.
  *  - VoidGenerator:    all air, for tests.
  *
+ * Each generator describes itself as a GeneratorSpec (spec()), plain data that goes over the
+ * network (a client builds pristine chunks itself, docs/NETCODE.md section 3) and into a save;
+ * generatorFromSpec() is the inverse.
+ *
  * generate(cx, cz) is a pure function of (seed, cx, cz): chunks are generated alone, with no
  * access to neighbours, in any order, by any instance, and come out identical. Instances
  * keep only scratch buffers (never read before being overwritten) and a memoised spawn.
@@ -41,6 +45,16 @@ import {
 import { ColumnRegion, createColumnSample, REGION_MARGIN, REGION_SIZE, TerrainSampler } from './terrain';
 import { findTrees, stampTrees, TREE_REACH, TreeList } from './trees';
 
+/**
+ * What a generator is, as plain data (NETCODE section 14 GeneratorSpec): the same spec always
+ * builds a generator whose output is identical bit for bit. Flat layers are bottom-up runs of
+ * one cell value (a block id with its state bits).
+ */
+export type GeneratorSpec =
+  | { kind: 'terrain'; seed: number }
+  | { kind: 'flat'; seed: number; layers: Array<{ cell: number; thickness: number }> }
+  | { kind: 'void'; seed: number };
+
 /** A source of chunk columns. */
 export interface ChunkGenerator {
   readonly seed: number;
@@ -48,6 +62,23 @@ export interface ChunkGenerator {
   generate(cx: number, cz: number): Uint16Array;
   /** Feet position for a new player (x, z at a cell centre). */
   spawnPoint(): { x: number; y: number; z: number };
+  /** This generator as data: generatorFromSpec(g.spec()) generates exactly what g does. */
+  spec(): GeneratorSpec;
+}
+
+/** The generator a spec describes (the inverse of ChunkGenerator.spec()). */
+export function generatorFromSpec(spec: GeneratorSpec): ChunkGenerator {
+  switch (spec.kind) {
+    case 'terrain':
+      return new TerrainGenerator(spec.seed);
+    case 'flat':
+      return new FlatGenerator(
+        spec.layers.map((l) => ({ id: l.cell, thickness: l.thickness })),
+        spec.seed,
+      );
+    case 'void':
+      return new VoidGenerator(spec.seed);
+  }
 }
 
 /** A spawn position (feet). */
@@ -201,6 +232,10 @@ export class TerrainGenerator implements ChunkGenerator {
   /** Biome label of the column at (x, z). */
   biomeAt(x: number, z: number): Biome {
     return biomeName(this.sampler.sample(Math.floor(x), Math.floor(z), this.point).biome);
+  }
+
+  spec(): GeneratorSpec {
+    return { kind: 'terrain', seed: this.seed };
   }
 
   spawnPoint(): SpawnPoint {
@@ -462,6 +497,17 @@ export class FlatGenerator implements ChunkGenerator {
   spawnPoint(): SpawnPoint {
     return { x: 0.5, y: this.column.length, z: 0.5 };
   }
+
+  /** The layers as they really are: runs of equal cells (capped at WORLD_HEIGHT, empty layers gone). */
+  spec(): GeneratorSpec {
+    const layers: Array<{ cell: number; thickness: number }> = [];
+    for (const cell of this.column) {
+      const last = layers[layers.length - 1];
+      if (last !== undefined && last.cell === cell) last.thickness++;
+      else layers.push({ cell, thickness: 1 });
+    }
+    return { kind: 'flat', seed: this.seed, layers };
+  }
 }
 
 /** All air. */
@@ -475,5 +521,8 @@ export class VoidGenerator implements ChunkGenerator {
   }
   spawnPoint(): SpawnPoint {
     return { x: 0.5, y: SEA_LEVEL + 16, z: 0.5 };
+  }
+  spec(): GeneratorSpec {
+    return { kind: 'void', seed: this.seed };
   }
 }

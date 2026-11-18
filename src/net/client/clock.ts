@@ -25,7 +25,8 @@
  *    count: head-of-line blocking delays them in bursts); lossTicks = ceil(log 0.01 / log p) - 1
  *    for a Samples loss rate p > 1%, from the gaps in their seq numbers.
  *  - renderTick = min(arrivalTick - D, the newest applied batch's tick), never decreasing within a
- *    connection: ships, entities and the time of day are shown at it.
+ *    connection, -Infinity until the first batch is applied: ships, entities and the time of day
+ *    are shown at it.
  *  - rotorTick = arrivalTick + rotorLead: where the rotors are shown and predicted. rotorLead is
  *    measured: arrivalTick is remembered for the last 64 movement reports sent; when a batch's
  *    moveAck changes to s, the sample is that batch's tick minus the arrivalTick when s was sent.
@@ -177,8 +178,12 @@ export class ServerClock {
     const leadTarget = this.leadSample ?? (this.rttValue ?? 0) * TICKS_PER_MS + LEAD_DEFAULT_EXTRA;
     this.leadValue = this.leadValue === null ? leadTarget : step(this.leadValue, leadTarget, PER_FRAME_STEP, LEAD_JUMP_TICKS);
     const arrival = this.arrivalTick(now);
-    const render = newestApplied >= 0 ? Math.min(arrival - this.dValue, newestApplied) : arrival - this.dValue;
-    if (render > this.renderValue) this.renderValue = render;
+    // Before the first applied batch renderTick does not move: it would run ahead uncapped (a lost
+    // first batch, Samples arriving) and, never decreasing, stay beyond the batches applied later.
+    if (newestApplied >= 0) {
+      const render = Math.min(arrival - this.dValue, newestApplied);
+      if (render > this.renderValue) this.renderValue = render;
+    }
     this.rotorValue = arrival + this.leadValue;
   }
 
@@ -233,7 +238,7 @@ export class ServerClock {
     return this.dValue;
   }
 
-  /** Where ships, entities and the time of day are shown (as of the last frame). */
+  /** Where ships, entities and the time of day are shown (as of the last frame; -Infinity before the first applied batch). */
   get renderTick(): number {
     return this.renderValue;
   }

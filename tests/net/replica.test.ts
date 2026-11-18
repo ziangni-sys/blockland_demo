@@ -18,7 +18,7 @@ import { advanceRotor } from '../../src/structures/rotor';
 import { Rotor } from '../../src/structures/structure';
 import { World } from '../../src/voxel/world';
 import { FlatGenerator } from '../../src/worldgen/generator';
-import { syncSource } from './shim';
+import { syncSource } from './harness';
 
 const STONE = makeCell(B.STONE);
 const WOOL = makeCell(B.STONE);
@@ -147,9 +147,50 @@ describe('ClientReplica sample rings (package 5)', () => {
     r.applyBatch(batch(13, (b) => b.structureRests.push({ id: 1, pose: { pos: { x: 100.8, y: 10, z: 0 }, rot: IDENTITY } })));
     for (let t = 14; t < 60; t++) r.applyBatch(batch(t));
     expect(r.helm(1)!.speed).toBe(0);
-    // Moving again: the speed comes back from the samples.
+    // Moving again: the speed comes back from the samples (the ship lay still at the rest's pose until tick 59).
     r.applySamples(samples(60, 2, [[1, { x: 101.3, y: 10, z: 0 }, IDENTITY]]));
-    expect(Math.abs(r.helm(1)!.speed - 0.5 / (47 * TICK_DT))).toBeLessThan(2 / 512 / (47 * TICK_DT));
+    expect(Math.abs(r.helm(1)!.speed - 0.5 / TICK_DT)).toBeLessThan(2 / 512 / TICK_DT);
+  });
+
+  it('after a rest the motion starts in the tick before the next sample, not stretched over the pause (ships and entities)', () => {
+    const r = replica();
+    r.applyBatch(
+      batch(10, (b) => {
+        b.structureSpawns.push(shipRecord(1, { x: 0, y: 40, z: 0 }));
+        b.entitySpawns.push({ id: 7, kind: 'rabbit', carrierId: 0, pos: { x: 50, y: 40, z: 0 }, yaw: 0 });
+      }),
+    );
+    r.applySamples(samples(11, 0, [[1, { x: 1, y: 40, z: 0 }, IDENTITY]], [rabbitSample(7, 0, { x: 51, y: 40, z: 0 }, 0.5)]));
+    // Both stop in tick 12: the final poses come in the batch (rest / final state).
+    r.applyBatch(batch(11));
+    r.applyBatch(
+      batch(12, (b) => {
+        b.structureRests.push({ id: 1, pose: { pos: { x: 2, y: 40, z: 0 }, rot: IDENTITY } });
+        b.entityUpdates.push({ id: 7, final: { kind: 'rabbit', carrierId: 0, pos: { x: 52, y: 40, z: 0 }, yaw: 1, look: null } });
+      }),
+    );
+    for (let t = 13; t <= 30; t++) r.applyBatch(batch(t));
+    // They move again in tick 30 (the rabbit turns): nothing moved in ticks 12..29.
+    r.applySamples(samples(30, 1, [[1, { x: 3, y: 40, z: 0 }, yawQ(0.2)]], [rabbitSample(7, 0, { x: 53, y: 40, z: 0 }, 2)]));
+    const v = (tick: number): { pos: Vec3; yaw: number } => {
+      r.setPoses(tick, tick);
+      const e = r.entities(tick).find((x) => x.id === 7)!;
+      return { pos: e.pos, yaw: e.yaw };
+    };
+    near(shipAt(r, 1, 12), { x: 2, y: 40, z: 0 });
+    near(shipAt(r, 1, 20), { x: 2, y: 40, z: 0 });
+    near(shipAt(r, 1, 29), { x: 2, y: 40, z: 0 });
+    near(shipAt(r, 1, 29.5), { x: 2.5, y: 40, z: 0 });
+    near(shipAt(r, 1, 30), { x: 3, y: 40, z: 0 });
+    near(v(20).pos, { x: 52, y: 40, z: 0 });
+    expect(v(20).yaw).toBeCloseTo(1, 3);
+    expect(v(29).yaw).toBeCloseTo(1, 3);
+    near(v(29.5).pos, { x: 52.5, y: 40, z: 0 });
+    expect(v(29.5).yaw).toBeCloseTo(1.5, 3);
+    // Without a rest (a lost sample, not a pause) the lerp still spans the gap.
+    r.applySamples(samples(32, 2, [[1, { x: 5, y: 40, z: 0 }, yawQ(0.2)]]));
+    for (let t = 31; t <= 32; t++) r.applyBatch(batch(t));
+    near(shipAt(r, 1, 31), { x: 4, y: 40, z: 0 });
   });
 
   it('samples of an unknown id wait for its spawn, which drops those not later than its tick; they expire after SAMPLE_BUFFER_TICKS', () => {

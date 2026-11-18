@@ -8,6 +8,9 @@
  *    of the batches (spawn records, rests, final states: samples of the batch's tick, section 5)
  *    and by the Samples messages; samples of ids the replica does not know yet wait up to
  *    SAMPLE_BUFFER_TICKS for their spawn, which drops the ones not later than its tick (section 7);
+ *    a rest (a spawn record's pose, or the final pose of structureRests or entityUpdates) holds
+ *    until the tick before the next sample, where the interpolation to it starts (the server sends
+ *    a sample only when a pose changes, so its state did not change in between; section 5);
  *  - the pivot conversion of a ship's ring (samples older than the batch carrying the new pivot,
  *    or a resend with another pivot, are moved to it; older ones arriving later are dropped; a
  *    sample later than the newest applied batch is never an end of the interpolation, since its
@@ -68,7 +71,7 @@ interface ShipSample {
   tick: number;
   readonly pos: Vec3;
   readonly rot: Quat;
-  /** The final pose of a structureRests entry (the ship stopped: its speed reads 0). */
+  /** A spawn record's pose or the final pose of a structureRests entry: unchanged until the next sample (its speed reads 0). */
   readonly rest: boolean;
 }
 
@@ -79,6 +82,8 @@ interface EntitySample {
   readonly pos: Vec3;
   yaw: number;
   look: PlayerLook | null;
+  /** A spawn record's state or the final state of an entityUpdates entry: unchanged until the next sample. */
+  readonly rest: boolean;
 }
 
 interface ShipRing {
@@ -330,7 +335,8 @@ export class ClientReplica {
       } else {
         this.repivot(ring, oldPivots.get(rec.id)!, rec.pivot, T);
       }
-      pushRing(ring.samples, { tick: T, pos: { ...rec.position }, rot: { ...rec.rotation }, rest: false }, T);
+      // A spawn record's pose is a rest too: samples go only when a pose changes (section 5).
+      pushRing(ring.samples, { tick: T, pos: { ...rec.position }, rot: { ...rec.rotation }, rest: true }, T);
     }
     for (const d of b.structureDeltas) {
       if (d.pivot === undefined) continue;
@@ -348,10 +354,10 @@ export class ClientReplica {
         if (s.carrierId === 0 || st.structures.has(s.carrierId)) pushRing(ring, s, T);
       });
       const look = rec.kind === 'player' ? { pitch: rec.pitch, flags: { ...rec.flags } } : null;
-      pushRing(ring, { tick: T, carrierId: rec.carrierId, pos: { ...rec.pos }, yaw: rec.yaw, look }, T);
+      pushRing(ring, { tick: T, carrierId: rec.carrierId, pos: { ...rec.pos }, yaw: rec.yaw, look, rest: true }, T);
     }
     for (const u of b.entityUpdates) {
-      if (u.final !== undefined) pushRing(this.entityRings.get(u.id)!, entitySample(T, u.final), T);
+      if (u.final !== undefined) pushRing(this.entityRings.get(u.id)!, entitySample(T, u.final, true), T);
     }
     this.noteTick(T);
   }
@@ -368,7 +374,7 @@ export class ClientReplica {
       else if (T >= ring.pivotTick) pushRing(ring.samples, sample, st.tick);
     }
     for (const s of m.entities) {
-      const sample = entitySample(T, s);
+      const sample = entitySample(T, s, false);
       const ring = this.entityRings.get(s.id);
       if (ring === undefined) pushPending(this.pendingEntities, s.id, sample);
       else if (s.carrierId === 0 || st.structures.has(s.carrierId)) pushRing(ring, sample, st.tick);
@@ -468,8 +474,8 @@ export class ClientReplica {
 
   /**
    * The helm readings of a ship (section 7): throttle and rudder from its fields, the sails of its
-   * rotors, the horizontal speed between its two newest samples (0 when the newest is the final
-   * pose of a rest: a sample lost just before it would otherwise leave a speed). Null for an
+   * rotors, the horizontal speed between its two newest samples (0 when the newest is a rest:
+   * a sample lost just before it would otherwise leave a speed). Null for an
    * unknown id or a rotor.
    */
   helm(shipId: number): HelmView | null {
@@ -484,7 +490,7 @@ export class ClientReplica {
     if (n >= 2 && !samples[n - 1]!.rest) {
       const a = samples[n - 2]!;
       const b = samples[n - 1]!;
-      speed = Math.hypot(b.pos.x - a.pos.x, b.pos.z - a.pos.z) / ((b.tick - a.tick) * TICK_DT);
+      speed = Math.hypot(b.pos.x - a.pos.x, b.pos.z - a.pos.z) / ((b.tick - interpolationStart(a, b.tick)) * TICK_DT);
     }
     return { throttle: ship.throttle, rudder: ship.rudder, speed, sails };
   }
@@ -547,17 +553,18 @@ export class ClientReplica {
     }
     const a = s[i]!;
     const b = s[i + 1];
-    if (b === undefined || b.tick > applied || tick <= a.tick) {
+    const start = b === undefined ? a.tick : interpolationStart(a, b.tick);
+    if (b === undefined || b.tick > applied || tick <= start) {
       vcopy(outPos, a.pos);
       qcopy(outRot, a.rot);
       return;
     }
-    const f = (tick - a.tick) / (b.tick - a.tick);
+    const f = (tick - start) / (b.tick - start);
     outPos.x = a.pos.x + (b.pos.x - a.pos.x) * f;
     outPos.y = a.pos.y + (b.pos.y - a.pos.y) * f;
     outPos.z = a.pos.z + (b.pos.z - a.pos.z) * f;
     qslerp(a.rot, b.rot, f, outRot);
-    const dt = (b.tick - a.tick) * TICK_DT;
+    const dt = (b.tick - start) * TICK_DT;
     outVel.x = (b.pos.x - a.pos.x) / dt;
     outVel.y = (b.pos.y - a.pos.y) / dt;
     outVel.z = (b.pos.z - a.pos.z) / dt;
@@ -624,20 +631,21 @@ export class ClientReplica {
     const a = ring[Math.max(0, i)]!;
     const b = i >= 0 ? ring[i + 1] : undefined;
     const rotorTick = this.shownRotor;
-    if (b === undefined || tick <= a.tick) {
+    const start = b === undefined ? a.tick : interpolationStart(a, b.tick);
+    if (b === undefined || tick <= start) {
       const yaw = this.sampleToWorld(a, tick, rotorTick, out);
       return { yaw, carrierId: a.carrierId, look: a.look };
     }
-    const f = (tick - a.tick) / (b.tick - a.tick);
+    const f = (tick - start) / (b.tick - start);
     const look = a.look !== null && b.look !== null ? { pitch: a.look.pitch + (b.look.pitch - a.look.pitch) * f, flags: a.look.flags } : a.look;
     if (a.carrierId === b.carrierId) {
       const local = vec3(a.pos.x + (b.pos.x - a.pos.x) * f, a.pos.y + (b.pos.y - a.pos.y) * f, a.pos.z + (b.pos.z - a.pos.z) * f);
       const yaw = lerpAngle(a.yaw, b.yaw, f);
-      const yawWorld = this.sampleToWorld({ tick, carrierId: a.carrierId, pos: local, yaw, look }, tick, rotorTick, out);
+      const yawWorld = this.sampleToWorld({ tick, carrierId: a.carrierId, pos: local, yaw, look, rest: false }, tick, rotorTick, out);
       return { yaw: yawWorld, carrierId: a.carrierId, look };
     }
     const wb = vec3();
-    const ya = this.sampleToWorld(a, a.tick, a.tick, out);
+    const ya = this.sampleToWorld(a, start, start, out);
     const yb = this.sampleToWorld(b, b.tick, b.tick, wb);
     out.x += (wb.x - out.x) * f;
     out.y += (wb.y - out.y) * f;
@@ -694,7 +702,7 @@ export class ClientReplica {
       pos.z = rel.z + pivot.z;
       yaw -= headingOf(q);
     }
-    return { tick, carrierId: parentId, pos, yaw: wrapAngle(yaw), look: smp.look };
+    return { tick, carrierId: parentId, pos, yaw: wrapAngle(yaw), look: smp.look, rest: smp.rest };
   }
 
   /** Move a ship's ring samples older than `tick` from `oldPivot` to `newPivot` (section 7). */
@@ -742,8 +750,19 @@ function depth(s: Ship | Rotor): number {
   return s.parent === null ? 0 : 1;
 }
 
-function entitySample(tick: number, m: EntityMotion): EntitySample {
-  return { tick, carrierId: m.carrierId, pos: { ...m.pos }, yaw: m.yaw, look: m.look === null ? null : { pitch: m.look.pitch, flags: { ...m.look.flags } as PlayerFlags } };
+function entitySample(tick: number, m: EntityMotion, rest: boolean): EntitySample {
+  return { tick, carrierId: m.carrierId, pos: { ...m.pos }, yaw: m.yaw, look: m.look === null ? null : { pitch: m.look.pitch, flags: { ...m.look.flags } as PlayerFlags }, rest };
+}
+
+/**
+ * Where the interpolation from sample `a` to the next sample (at `nextTick`) starts. A rest (a
+ * spawn record's pose, or the final pose of structureRests or entityUpdates) says the server's state stayed the same from its
+ * tick on, until it changed again in the tick of the next sample: so it holds until the tick
+ * before that one. Lerping from the rest's own tick would start the motion early by the length
+ * of the pause (a ship that lay still for a minute would creep off a minute ahead).
+ */
+function interpolationStart(a: { tick: number; rest: boolean }, nextTick: number): number {
+  return a.rest ? Math.max(a.tick, nextTick - 1) : a.tick;
 }
 
 /** Insert by tick (ascending); a sample of a tick already held replaces it. */

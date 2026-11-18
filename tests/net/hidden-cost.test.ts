@@ -9,38 +9,40 @@ import { B } from '../../src/blocks/defs';
 import type { Dir } from '../../src/core/dirs';
 import { ClientReplica } from '../../src/net/client/replica';
 import { decodeServerMessage, encodeServerMessage } from '../../src/net/codec';
-import { LoopbackNet } from '../../src/net/loopback';
 import { emptyTickBatch, type StructureRecord, type TickBatchMsg } from '../../src/net/protocol';
 import { RELIABLE } from '../../src/net/transport';
 import { BEARING_V, DECK_Y, exampleShipCell, MAST_TOP_Y, placeExampleShip } from '../../src/sim/exampleShip';
-import { Simulation } from '../../src/sim/simulation';
-import { FlatGenerator, TerrainGenerator } from '../../src/worldgen/generator';
-import { compareReplica, replicaDigest, serverDigest } from './digest';
-import { link, ShimServer, ShimWorld, syncSource } from './shim';
+import { TerrainGenerator } from '../../src/worldgen/generator';
+import { link, NetHarness, syncSource, testMeta } from './harness';
 
-const T = 35;
+/** First air above the harness's flat ground. */
+const T = 5;
 
 describe('the hidden page (package 5)', () => {
-  it('no frames for 20 s: every batch is applied as it arrives, nothing piles up, the replica matches when frames resume', () => {
-    const sim = new Simulation({ seed: 4, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, rabbits: false, loadRadius: 3, spawn: { x: 0.5, y: T, z: 0.5 } });
-    const w = new ShimWorld(new ShimServer(new LoopbackNet(), sim));
+  it('no frames for 20 s: every batch is applied as it arrives, nothing piles up, the replica matches when frames resume', async () => {
+    const h = new NetHarness({ history: true });
+    await h.create();
+    const sim = h.sim;
     for (let i = 0; i < 4; i++) sim.entities.spawnRabbit(4.5 + i, T, 6.5);
     const bot = sim.join('bot');
     bot.player.input.forward = 1;
     let k = 0;
-    w.onTick = () => {
+    const edit = (): void => {
       bot.player.input.yaw += 0.04;
       sim.world.setCell(((k * 5) % 30) - 15, T + 3, ((k * 3) % 30) - 15, k % 3 === 0 ? makeCell(B.LAMP) : makeCell(B.STONE));
       k++;
     };
-    const a = w.add({ key: 'a', viewRadius: 3, up: link(30, 10, 0, 1), down: link(30, 10, 0, 2) });
-    w.runUntil(() => a.net.status === 'ready');
-    a.framesOn = false;
-    a.net.setHidden(true);
+    h.onTick = edit;
+    const a = h.addClient('a', { up: link(30, 10, 0, 1), down: link(30, 10, 0, 2) }, { local: true, viewRadius: 3 });
+    h.track(a);
+    h.runUntil(() => a.ready);
+    a.hidden = true;
     const r = a.replica!;
     const framesBefore = a.frames;
+    const checkedBefore = a.checked;
     const worst = { waiting: 0, light: 0, lag: 0, perRing: 0, pending: 0 };
-    const check = (): void => {
+    h.onTick = () => {
+      edit();
       worst.waiting = Math.max(worst.waiting, a.net.waiting);
       worst.light = Math.max(worst.light, r.light.pending);
       worst.lag = Math.max(worst.lag, sim.ticks - r.state.tick);
@@ -48,12 +50,7 @@ describe('the hidden page (package 5)', () => {
       worst.perRing = Math.max(worst.perRing, c.entities / Math.max(1, r.state.entities.size));
       worst.pending = Math.max(worst.pending, c.pendingEntities + c.pendingShips);
     };
-    const prev = w.onTick;
-    w.onTick = () => {
-      prev();
-      check();
-    };
-    w.run(20_000);
+    h.run(20_000);
     expect(a.frames).toBe(framesBefore);
     expect(k).toBeGreaterThan(400);
     expect(worst.waiting).toBe(0);
@@ -61,20 +58,21 @@ describe('the hidden page (package 5)', () => {
     expect(worst.lag).toBeLessThanOrEqual(2);
     expect(worst.perRing).toBeLessThanOrEqual(34);
     expect(worst.pending).toBeLessThan(10);
-    expect(a.batchesChecked).toBeGreaterThan(380);
+    expect(a.checked - checkedBefore).toBeGreaterThan(380);
     // Frames resume.
-    a.net.setHidden(false);
-    a.framesOn = true;
-    w.onTick = prev;
-    w.run(1000);
-    a.expectClean();
-    const view = w.server.rep.clientView('a')!;
-    const d = serverDigest(w.server.ctx, sim, { columns: view.columns, structures: view.structures, entities: view.entities });
-    expect(compareReplica(d, replicaDigest(r.state), { poses: false })).toEqual([]);
+    a.hidden = false;
+    h.onTick = edit;
+    h.run(1000);
+    expect(a.frames).toBeGreaterThan(framesBefore + 50);
+    expect(a.mismatches).toEqual([]);
+    h.onTick = null;
+    h.quiesce();
+    expect(h.compareNow(a, false)).toEqual([]);
     // The bot is shown where the server had it at renderTick.
+    h.run(500);
     const clock = a.net.clock!;
     const v = r.entities(clock.renderTick).find((e) => e.id === bot.entityId)!;
-    const s0 = w.server.history.get(Math.floor(clock.renderTick))!.entities.get(bot.entityId)!;
+    const s0 = h.history.get(Math.floor(clock.renderTick))!.entities.get(bot.entityId)!;
     expect(Math.hypot(v.pos.x - s0.pos.x, v.pos.z - s0.pos.z)).toBeLessThan(0.3);
   }, 60_000);
 });
@@ -92,10 +90,10 @@ function ms(fn: () => void): number {
 }
 
 describe('costs (package 5)', () => {
-  it('frame(now) with nothing new is cheap (radius 9, a windmill boat)', () => {
-    const sim = new Simulation({ seed: 1, mode: 'creative', generator: new TerrainGenerator(1), syncChunks: true, rabbits: false, loadRadius: 4 });
-    const w = new ShimWorld(new ShimServer(new LoopbackNet(), sim));
-    w.server.recordDigests = false;
+  it('frame(now) with nothing new is cheap (radius 9, a windmill boat)', async () => {
+    const w = new NetHarness();
+    await w.create(testMeta(), { generator: { kind: 'terrain', seed: 1 }, exampleShip: false });
+    const sim = w.sim;
     const helm = placeExampleShip(sim)!;
     const bow = stateFacing(cellState(sim.world.getCell(helm.x, helm.y, helm.z))) as Dir;
     const at = (u: number, v: number, y: number): { x: number; y: number; z: number } => exampleShipCell(helm, bow, u, v, y);
@@ -103,8 +101,8 @@ describe('costs (package 5)', () => {
     bot.emptyHand();
     const stand = at(1, BEARING_V, DECK_Y);
     bot.teleport(stand.x + 0.5, DECK_Y, stand.z + 0.5);
-    const a = w.add({ key: 'a', viewRadius: 9 });
-    w.runUntil(() => a.net.status === 'ready', 60_000);
+    const a = w.addClient('a', {}, { local: true, viewRadius: 9 });
+    w.runUntil(() => a.ready, 60_000);
     const bearing = at(0, BEARING_V, MAST_TOP_Y);
     for (let i = 0; i < 2; i++) {
       expect(bot.aimAt(bearing.x, bearing.y, bearing.z, undefined, 0)).toBe(true);
@@ -115,7 +113,7 @@ describe('costs (package 5)', () => {
     const r = a.replica!;
     expect(r.chunks.size).toBeGreaterThan(250);
     expect(r.structures().length).toBe(1);
-    w.ticking = false;
+    w.host.pause(true); // single player: nothing new arrives
     w.run(500);
     expect(a.net.waiting).toBe(0);
     let now = w.net.now;

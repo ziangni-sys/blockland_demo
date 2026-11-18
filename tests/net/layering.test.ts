@@ -1,11 +1,16 @@
 /**
  * Import rules of src/net (docs/NETCODE.md section 15 "依赖方向"), checked by scanning the sources
  * (the same way tests/sim/single-player-guard.test.ts does):
- *  - each directory of src/net may import only what its entry in RULES allows (a later package
- *    adds the entry of its directory: host); a directory without an entry fails;
+ *  - each directory of src/net may import only what its entry in RULES allows; a directory without
+ *    an entry fails;
  *  - the layers below net never import it, and only src/client may (package 9 narrows that);
+ *  - in src/client, only workerfactory.ts imports net/host (the server Worker); other client
+ *    modules may use PortTransport (net/host/port) and the types of the host control messages
+ *    (net/host/control), nothing else of the host;
  *  - no module of src/net has module-level mutable state (LESSONS "临时向量被改写");
- *  - the base modules touch no browser or timer globals.
+ *  - no module touches browser or timer globals, except the two host files that are the host's
+ *    I/O: host/worker.ts (the Worker entry: self, postMessage, timers, clocks) and host/port.ts
+ *    (MessagePort).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix, relative } from 'node:path';
@@ -30,11 +35,12 @@ const NO_DOM_OR_TIME =
   /\b(window|document|navigator|self|globalThis|postMessage|performance|Date|Math\.random|setTimeout|setInterval|clearTimeout|clearInterval|requestAnimationFrame|MessagePort|MessageChannel|Worker|WebSocket|RTC\w+|localStorage|indexedDB|fetch)\b/;
 
 const RULES: Record<string, Rule> = {
-  // net/{protocol, codec, transport, loopback}: core, blocks, save/bytes; types from sim/view.ts
-  // and from package 2's movement report and correction (entities/drive.ts). No DOM.
+  // net/{protocol, codec, transport, loopback}: core, blocks, save/bytes; types from sim/view.ts,
+  // from package 2's movement report and correction (entities/drive.ts) and the GeneratorSpec
+  // (worldgen/generator.ts). No DOM.
   'net': {
     runtime: (t) => t.startsWith('core/') || t.startsWith('blocks/') || t === 'save/bytes' || isNetBase(t),
-    types: (t) => t === 'sim/view' || t === 'entities/drive',
+    types: (t) => t === 'sim/view' || t === 'entities/drive' || t === 'worldgen/generator',
     forbiddenGlobals: NO_DOM_OR_TIME,
   },
   // net/server (package 4 on): sim, structures, entities, voxel and the base modules.
@@ -55,6 +61,21 @@ const RULES: Record<string, Rule> = {
     types: () => false,
     forbiddenGlobals: NO_DOM_OR_TIME,
   },
+  // net/host (package 8): net/server, sim, save, worldgen and the base modules (plus core).
+  'net/host': {
+    runtime: (t) => ['core/', 'sim/', 'save/', 'worldgen/', 'net/server/', 'net/host/'].some((d) => t.startsWith(d)) || isNetBase(t),
+    types: () => false,
+    forbiddenGlobals: NO_DOM_OR_TIME,
+  },
+};
+
+/** Files whose globals rule differs from their directory's: the host's I/O (section 15). */
+const GLOBALS_BY_FILE: Record<string, RegExp | null> = {
+  // The Worker entry owns self, postMessage, the timers and the clocks; never a page's globals.
+  'net/host/worker.ts': /\b(window|document|localStorage|requestAnimationFrame|WebSocket|RTC\w+)\b/,
+  // PortTransport is the one module on the MessagePort API.
+  'net/host/port.ts':
+    /\b(window|document|navigator|self|globalThis|performance|Date|Math\.random|setTimeout|setInterval|clearTimeout|clearInterval|requestAnimationFrame|Worker|WebSocket|RTC\w+|localStorage|indexedDB|fetch)\b/,
 };
 
 /** Directories below net in the dependency order: none of them may import net. */
@@ -131,11 +152,12 @@ function netViolations(file: string, text: string): string[] {
     if (rule.runtime(t) || (imp.typeOnly && rule.types(t))) continue;
     out.push(`${file}: may not import ${imp.typeOnly ? 'types from ' : ''}'${imp.spec}'`);
   }
-  if (rule.forbiddenGlobals !== null) {
+  const forbidden = file in GLOBALS_BY_FILE ? GLOBALS_BY_FILE[file]! : rule.forbiddenGlobals;
+  if (forbidden !== null) {
     codeWithoutStrings(text)
       .split('\n')
       .forEach((line, i) => {
-        const m = rule.forbiddenGlobals!.exec(line);
+        const m = forbidden.exec(line);
         if (m !== null) out.push(`${file}:${i + 1}: uses the global ${m[0]}`);
       });
   }
@@ -163,6 +185,18 @@ function mutableState(file: string, text: string): string[] {
     .forEach((line, i) => {
       if (MUTABLE_STATE.some((re) => re.test(line))) out.push(`${file}:${i + 1}: module-level mutable state: ${line.trim()}`);
     });
+  return out;
+}
+
+/** Violations of the client's narrow access to net/host for one file of src/client (path relative to src, posix). */
+function clientHostViolations(file: string, text: string): string[] {
+  if (file === 'client/workerfactory.ts') return [];
+  const out: string[] = [];
+  for (const imp of imports(text)) {
+    const t = target(file, imp.spec);
+    if (!t.startsWith('net/host/') || t === 'net/host/port' || (t === 'net/host/control' && imp.typeOnly)) continue;
+    out.push(`${file}: may not import ${imp.typeOnly ? 'types from ' : ''}'${imp.spec}' (only workerfactory.ts starts the server)`);
+  }
   return out;
 }
 
@@ -196,6 +230,11 @@ describe('src/net import rules (NETCODE section 15)', () => {
         if (target(file, imp.spec).startsWith('net/')) hits.push(`${file}: imports '${imp.spec}'${BELOW_NET.includes(top) ? ' (a layer below net)' : ''}`);
       }
     }
+    expect(hits).toEqual([]);
+  });
+
+  it('in src/client only workerfactory.ts imports net/host; others may use PortTransport and the control message types', () => {
+    const hits = sources(join(SRC, 'client')).flatMap((f) => clientHostViolations(rel(f), readFileSync(f, 'utf8')));
     expect(hits).toEqual([]);
   });
 
@@ -240,6 +279,19 @@ describe('src/net import rules (NETCODE section 15)', () => {
     expect(netViolations('net/client/x.ts', "import { StructureManager } from '../../structures/assembly';")).toHaveLength(1);
     expect(netViolations('net/client/x.ts', 'setTimeout(() => {}, 1000);')).toHaveLength(1);
     expect(netViolations('net/client/x.ts', 'requestAnimationFrame(frame);')).toHaveLength(1);
+    // net/host may use the server, the simulation, saves and generators; never the client.
+    expect(netViolations('net/host/x.ts', "import { Replicator } from '../server/replicator';\nimport { exportSave } from '../../sim/persist';\nimport { MemoryStorage } from '../../save/storage';")).toHaveLength(0);
+    expect(netViolations('net/host/x.ts', "import { ReplicaState } from '../client/apply';")).toHaveLength(1);
+    expect(netViolations('net/host/x.ts', "import { Game } from '../../client/game';")).toHaveLength(1);
+    expect(netViolations('net/host/x.ts', 'const t = performance.now();\nself.postMessage(1);')).toHaveLength(2);
+    expect(netViolations('net/host/worker.ts', 'const t = performance.now();\nself.postMessage(1);')).toHaveLength(0);
+    expect(netViolations('net/host/worker.ts', 'document.title = "x";')).toHaveLength(1);
+    expect(netViolations('net/host/port.ts', 'port.postMessage(m);\nconst p: MessagePort = q;')).toHaveLength(0);
+    expect(netViolations('net/host/port.ts', 'setTimeout(f, 1);')).toHaveLength(1);
+    expect(clientHostViolations('client/x.ts', "import { PortTransport } from '../net/host/port';\nimport type { HostToPage } from '../net/host/control';")).toHaveLength(0);
+    expect(clientHostViolations('client/x.ts', "import { parsePageToHost } from '../net/host/control';")).toHaveLength(1);
+    expect(clientHostViolations('client/x.ts', "import { ServerHost } from '../net/host/host';\nconst w = import('../net/host/worker?worker&inline');")).toHaveLength(2);
+    expect(clientHostViolations('client/workerfactory.ts', "const w = import('../net/host/worker?worker&inline');")).toHaveLength(0);
     expect(mutableState(base, 'let scratch = 0;\nexport const cache = new Map();\nconst tmp = [];\nconst T = Object.freeze({ a: 1 });\nconst N = 4;')).toHaveLength(3);
     // Factories and static fields; frozen values, Math, arrow functions and static methods pass.
     const state = [

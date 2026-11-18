@@ -1,6 +1,6 @@
 /**
- * Package 5: batch sequences of the real Replicator on a real Simulation, replayed into
- * ClientReplica through NetClient over a loopback link (NETCODE sections 5, 7, 8, 16):
+ * Package 5: batch sequences of the real server (ServerHost through tests/net/harness.ts), applied
+ * to ClientReplica by NetClient over a loopback link (NETCODE sections 5, 7, 8, 16):
  * digests after every applied batch, rotor angles at any tick, the ships' and entities'
  * interpolated poses against the server's history, a pivot change never drawn with the wrong
  * pivot, entities carried by a removed carrier (docking) staying where they are.
@@ -15,18 +15,35 @@ import { B } from '../../src/blocks/defs';
 import type { Dir } from '../../src/core/dirs';
 import { qslerp, quat, vec3, wrapAngle, type Quat, type Vec3 } from '../../src/core/math';
 import { headingOf } from '../../src/entities/structs';
-import { LoopbackNet, type LinkConditions } from '../../src/net/loopback';
+import type { LinkConditions } from '../../src/net/loopback';
+import type { Channel, Transport } from '../../src/net/transport';
 import { BEARING_V, DECK_Y, exampleShipCell, MAST_TOP_Y, placeExampleShip } from '../../src/sim/exampleShip';
 import type { PlayerControl } from '../../src/sim/players';
-import { Simulation } from '../../src/sim/simulation';
+import type { Simulation } from '../../src/sim/simulation';
 import { Rotor, Ship } from '../../src/structures/structure';
-import { TerrainGenerator } from '../../src/worldgen/generator';
 import { NetClient } from '../../src/net/client/netclient';
 import { compareReplica, replicaDigest } from './digest';
-import { link, ReplayTransport, ShimServer, ShimWorld, syncSource, type ShimClient } from './shim';
+import { link, NetHarness, syncSource, testMeta, type HeadlessClient } from './harness';
+
+/** An open Transport that sends nowhere; the test delivers recorded messages with deliver(). */
+class ReplayTransport implements Transport {
+  onMessage: ((channel: Channel, bytes: Uint8Array) => void) | null = null;
+  onClose: ((reason: string) => void) | null = null;
+  open = true;
+  send(): void {}
+  bufferedBytes(): number {
+    return 0;
+  }
+  close(): void {
+    this.open = false;
+  }
+  deliver(channel: Channel, bytes: Uint8Array): void {
+    this.onMessage?.(channel, bytes.slice());
+  }
+}
 
 interface Boat {
-  w: ShimWorld;
+  w: NetHarness;
   sim: Simulation;
   helm: { x: number; y: number; z: number };
   at: (u: number, v: number, y: number) => { x: number; y: number; z: number };
@@ -34,21 +51,21 @@ interface Boat {
   rider: PlayerControl;
 }
 
-/** Run until the server has ticked `n` more times. */
-function ticks(w: ShimWorld, n = 1): void {
-  const target = w.server.sim.ticks + n;
-  while (w.server.sim.ticks < target) w.run(10);
+function ticks(w: NetHarness, n = 1): void {
+  w.ticks(n);
 }
 
-function useOn(w: ShimWorld, ctrl: PlayerControl, x: number, y: number, z: number, gridId = 0): void {
+function useOn(w: NetHarness, ctrl: PlayerControl, x: number, y: number, z: number, gridId = 0): void {
   expect(ctrl.aimAt(x, y, z, undefined, gridId), `${ctrl.key} aims at ${x},${y},${z}`).toBe(true);
   ctrl.use();
   ticks(w);
 }
 
-function boatWorld(): Boat {
-  const sim = new Simulation({ seed: 1, mode: 'creative', generator: new TerrainGenerator(1), syncChunks: true, loadRadius: 4, rabbits: false });
-  const w = new ShimWorld(new ShimServer(new LoopbackNet(), sim));
+async function boatWorld(): Promise<Boat> {
+  const w = new NetHarness({ history: true });
+  await w.create(testMeta(), { generator: { kind: 'terrain', seed: 1 }, exampleShip: false });
+  w.host.setRoomOpen(true);
+  const sim = w.sim;
   const helm = placeExampleShip(sim)!;
   expect(helm).not.toBeNull();
   const bow = stateFacing(cellState(sim.world.getCell(helm.x, helm.y, helm.z))) as Dir;
@@ -85,9 +102,9 @@ function launch(b: Boat): { ship: Ship; rotor: Rotor } {
 }
 
 /** The server's pose of ship `id` at a fractional tick (lerp / slerp of its history). */
-function serverShipPose(w: ShimWorld, id: number, tick: number): { pos: Vec3; rot: Quat } | null {
-  const a = w.server.history.get(Math.floor(tick))?.ships.get(id);
-  const b = w.server.history.get(Math.floor(tick) + 1)?.ships.get(id);
+function serverShipPose(w: NetHarness, id: number, tick: number): { pos: Vec3; rot: Quat } | null {
+  const a = w.history.get(Math.floor(tick))?.ships.get(id);
+  const b = w.history.get(Math.floor(tick) + 1)?.ships.get(id);
   if (a === undefined) return null;
   const f = tick - Math.floor(tick);
   if (b === undefined || f === 0) return { pos: { ...a.pos }, rot: { ...a.rot } };
@@ -107,7 +124,7 @@ function dist(a: Vec3, b: Vec3): number {
 }
 
 /** Watch rotor angles: at every frame, at integer ticks around rotorTick, the replica's equals the server's. */
-function watchRotors(w: ShimWorld, a: ShimClient): { checked: number; worst: number; onShip: number } {
+function watchRotors(w: NetHarness, a: HeadlessClient): { checked: number; worst: number; onShip: number } {
   const stats = { checked: 0, worst: 0, onShip: 0 };
   const prev = a.onFrame;
   a.onFrame = (now) => {
@@ -119,7 +136,7 @@ function watchRotors(w: ShimWorld, a: ShimClient): { checked: number; worst: num
       if (!(rs.structure instanceof Rotor)) continue;
       for (const T of [Math.floor(clock.rotorTick), Math.floor(clock.renderTick), rs.rotorTick + 1]) {
         if (T < rs.rotorTick) continue;
-        const server = w.server.history.get(T)?.rotors.get(rs.structure.id);
+        const server = w.history.get(T)?.rotors.get(rs.structure.id);
         if (server === undefined) continue;
         const d = Math.abs(wrapAngle(r.rotorAngleAt(rs.structure.id, T) - server));
         stats.worst = Math.max(stats.worst, d);
@@ -132,12 +149,14 @@ function watchRotors(w: ShimWorld, a: ShimClient): { checked: number; worst: num
 }
 
 describe('ClientReplica with a real Replicator (package 5)', () => {
-  it('windmill boat over 150 ms / 20 ms jitter / 5% loss: digests every batch, rotor angles exact at every tick, world and ship rotor', () => {
-    const b = boatWorld();
+  it('windmill boat over 150 ms / 20 ms jitter / 5% loss: digests every batch, rotor angles exact at every tick, world and ship rotor', async () => {
+    const b = await boatWorld();
     const { w, sim, bot } = b;
     const lossy: [LinkConditions, LinkConditions] = [link(75, 20, 0.05, 11), link(75, 20, 0.05, 12)];
-    const a = w.add({ key: 'a', viewRadius: 4, up: lossy[0], down: lossy[1] });
-    w.runUntil(() => a.net.status === 'ready');
+    const received: Array<{ channel: Channel; bytes: Uint8Array }> = [];
+    const a = w.addClient('a', { up: lossy[0], down: lossy[1] }, { viewRadius: 4, record: received });
+    w.track(a);
+    w.runUntil(() => a.ready);
     const rot = watchRotors(w, a);
     const { ship, rotor } = launch(b);
     bot.player.input.forward = 1;
@@ -153,8 +172,8 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
     expect(rot.checked).toBeGreaterThan(300);
     expect(rot.onShip).toBeGreaterThan(200);
     expect(rot.worst).toBeLessThan(1e-9);
-    expect(a.batchesChecked).toBeGreaterThan(250);
-    a.expectClean();
+    expect(a.checked).toBeGreaterThan(250);
+    expect(a.mismatches).toEqual([]);
     // D for 150 ms with 20 ms jitter and 5% loss (section 4: about 3 there; here the server ticks exactly every 50 ms).
     const clock = a.net.clock!;
     expect(clock.D).toBeGreaterThan(2);
@@ -166,18 +185,19 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
     const again = new NetClient({ openTransport: (ready) => ready(replay), now: () => w.net.now, chunkSource: () => syncSource(sim.generator), playerKey: 'a', name: 'a', viewRadius: 4, build: 'test' });
     again.start();
     again.setHidden(true);
-    for (const m of a.received) replay.deliver(m.channel, m.bytes);
+    for (const m of received) replay.deliver(m.channel, m.bytes);
     a.net.frame(w.net.now);
     expect(again.status).toBe('ready');
     expect(again.replica!.state.tick).toBe(a.replica!.state.tick);
     expect(compareReplica(replicaDigest(a.replica!.state), replicaDigest(again.replica!.state))).toEqual([]);
   }, 120_000);
 
-  it('lossless with jitter: ship poses at renderTick, riders in the ship frame, a pivot change, and a dock with riders aboard', () => {
-    const b = boatWorld();
+  it('lossless with jitter: ship poses at renderTick, riders in the ship frame, a pivot change, and a dock with riders aboard', async () => {
+    const b = await boatWorld();
     const { w, sim, bot, helm } = b;
-    const a = w.add({ key: 'a', viewRadius: 4, up: link(40, 25, 0, 21), down: link(40, 25, 0, 22) });
-    w.runUntil(() => a.net.status === 'ready');
+    const a = w.addClient('a', { up: link(40, 25, 0, 21), down: link(40, 25, 0, 22) }, { viewRadius: 4 });
+    w.track(a);
+    w.runUntil(() => a.ready);
     const { ship } = launch(b);
     const deck = b.at(1, 6, DECK_Y);
     const item = sim.entities.spawnItem(deck.x + 0.5, DECK_Y + 0.5, deck.z + 0.5, B.STONE, 3);
@@ -198,7 +218,7 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
     const stats = { poseFrames: 0, poseWorst: 0, rotWorst: 0, helmWorst: 0, localChecks: 0, localWorst: 0, straddled: 0 };
     let pivotTick = Infinity;
     const lastView = new Map<number, { pos: Vec3; yaw: number }>();
-    const jumps = { pos: 0, yaw: 0, frames: 0, world: 0 };
+    const jumps = { pos: 0, yaw: 0, frames: 0, world: 0, worldYaw: 0 };
     let trackJumps = false;
     a.onFrame = () => {
       const r = a.replica!;
@@ -224,8 +244,8 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
         // Entities on the deck: their position in the ship's frame against the server's.
         for (const v of r.entities(rt)) {
           if (!watched.includes(v.id)) continue;
-          const s0 = w.server.history.get(Math.floor(rt))?.entities.get(v.id);
-          const s1 = w.server.history.get(Math.floor(rt) + 1)?.entities.get(v.id);
+          const s0 = w.history.get(Math.floor(rt))?.entities.get(v.id);
+          const s1 = w.history.get(Math.floor(rt) + 1)?.entities.get(v.id);
           if (s0 === undefined || s1 === undefined || s0.carrierId !== ship.id || s1.carrierId !== ship.id || v.carrierId !== ship.id) continue;
           const f = rt - Math.floor(rt);
           const want = vec3(s0.local.x + (s1.local.x - s0.local.x) * f, s0.local.y + (s1.local.y - s0.local.y) * f, s0.local.z + (s1.local.z - s0.local.z) * f);
@@ -240,16 +260,18 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
           const last = lastView.get(v.id);
           if (last !== undefined) {
             jumps.pos = Math.max(jumps.pos, dist(last.pos, v.pos));
-            jumps.yaw = Math.max(jumps.yaw, Math.abs(wrapAngle(v.yaw - last.yaw)));
+            // The rabbit's own AI turns it at will (instantly, on the server): only the others must not jump.
+            if (v.id !== rabbit.id) jumps.yaw = Math.max(jumps.yaw, Math.abs(wrapAngle(v.yaw - last.yaw)));
           }
           lastView.set(v.id, { pos: v.pos, yaw: v.yaw });
           // Against the server's world position at renderTick (lerp of its ticks).
-          const s0 = w.server.history.get(Math.floor(rt))?.entities.get(v.id);
-          const s1 = w.server.history.get(Math.floor(rt) + 1)?.entities.get(v.id);
+          const s0 = w.history.get(Math.floor(rt))?.entities.get(v.id);
+          const s1 = w.history.get(Math.floor(rt) + 1)?.entities.get(v.id);
           if (s0 !== undefined && s1 !== undefined) {
             const f = rt - Math.floor(rt);
             const want = vec3(s0.pos.x + (s1.pos.x - s0.pos.x) * f, s0.pos.y + (s1.pos.y - s0.pos.y) * f, s0.pos.z + (s1.pos.z - s0.pos.z) * f);
             jumps.world = Math.max(jumps.world, dist(v.pos, want));
+            jumps.worldYaw = Math.max(jumps.worldYaw, Math.abs(wrapAngle(v.yaw - (s0.yaw + wrapAngle(s1.yaw - s0.yaw) * f))));
           }
         }
       }
@@ -287,7 +309,7 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
     expect(ship.removed).toBe(true);
     ticks(w, 60);
     expect(a.replica!.state.structures.has(ship.id)).toBe(false);
-    a.expectClean();
+    expect(a.mismatches).toEqual([]);
     expect(stats.poseFrames).toBeGreaterThan(800);
     expect(stats.poseWorst).toBeLessThan(2 / 512);
     expect(stats.rotWorst).toBeLessThan(2e-4);
@@ -299,5 +321,6 @@ describe('ClientReplica with a real Replicator (package 5)', () => {
     expect(jumps.pos).toBeLessThan(0.15);
     expect(jumps.yaw).toBeLessThan(0.15);
     expect(jumps.world).toBeLessThan(0.05);
+    expect(jumps.worldYaw).toBeLessThan(0.01);
   }, 120_000);
 });

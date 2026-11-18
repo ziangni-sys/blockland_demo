@@ -1,7 +1,8 @@
 /**
- * Package 5: NetClient's connection life cycle (NETCODE section 3) against the test server shim
- * (tests/net/shim.ts): handshake and join, "ready", Refuse, Kick, replacement, reconnection after a
- * lost transport, Bye, protocol errors, and the stall hint of section 4.
+ * Package 5: NetClient's connection life cycle (NETCODE section 3) against the real server
+ * (ServerHost through tests/net/harness.ts): handshake and join, "ready", Refuse, Kick,
+ * replacement, reconnection after a failed link, Bye, protocol errors, and the stall hint of
+ * section 4. Servers that misbehave (drop every transport, never answer) are bare loopback ends.
  */
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
@@ -9,94 +10,92 @@ import { B } from '../../src/blocks/defs';
 import { CONNECTION_TIMEOUT_MS } from '../../src/net/protocol';
 import { createLoopbackPair, LoopbackNet } from '../../src/net/loopback';
 import { NetClient, RECONNECT_RETRY_MS, type NetStatus } from '../../src/net/client/netclient';
-import { Simulation } from '../../src/sim/simulation';
 import { FlatGenerator } from '../../src/worldgen/generator';
-import { link, ShimServer, ShimWorld, syncSource } from './shim';
+import { link, NetHarness, syncSource } from './harness';
 
-const T = 35;
+/** First air above the harness's flat ground. */
+const T = 5;
 
-function flatWorld(): ShimWorld {
-  const sim = new Simulation({ seed: 1, mode: 'creative', generator: new FlatGenerator(), syncChunks: true, rabbits: false, loadRadius: 3, spawn: { x: 0.5, y: T, z: 0.5 } });
-  return new ShimWorld(new ShimServer(new LoopbackNet(), sim));
-}
-
-function statuses(w: ShimWorld, i: number): NetStatus[] {
-  const out: NetStatus[] = [];
-  w.clients[i]!.net.onStatus = (s) => out.push(s);
-  return out;
+async function flatWorld(): Promise<NetHarness> {
+  const h = new NetHarness();
+  await h.create();
+  h.host.setRoomOpen(true);
+  return h;
 }
 
 describe('NetClient life cycle (package 5)', () => {
-  it('Hello, Welcome, the join batches, ready; the replica matches the server every batch', () => {
-    const w = flatWorld();
-    const a = w.add({ key: 'a', viewRadius: 3, up: link(30, 5, 0, 1), down: link(30, 5, 0, 2) }, false);
-    const seen = statuses(w, 0);
+  it('Hello, Welcome, the join batches, ready; the replica matches the server every batch', async () => {
+    const h = await flatWorld();
+    const a = h.addClient('a', { up: link(30, 5, 0, 1), down: link(30, 5, 0, 2) }, { viewRadius: 3, start: false });
+    h.track(a);
     a.net.start();
-    expect(a.net.status).toBe('connecting');
-    w.runUntil(() => a.net.status === 'ready', 5000);
-    expect(seen).toEqual(['connecting', 'joining', 'ready']);
+    expect(a.status).toBe('connecting');
+    h.runUntil(() => a.ready, 5000);
+    expect(a.statuses).toEqual(['connecting', 'joining', 'ready']);
     const r = a.replica!;
-    expect(r.ownEntityId).toBe(w.server.sim.players.get('a')!.entityId);
+    expect(r.ownEntityId).toBe(h.sim.players.get('a')!.entityId);
     expect(r.state.players.get(r.ownEntityId)?.name).toBe('a');
     // Every column of the circle r = 3 is there once ready (the radius is below the 7 x 7 zone).
     for (let dx = -3; dx <= 3; dx++) for (let dz = -3; dz <= 3; dz++) if (dx * dx + dz * dz <= 12) expect(r.chunks.present(dx, dz), `${dx},${dz}`).toBe(true);
     // Edits replicate.
-    w.server.sim.world.setCell(2, T, 2, makeCell(B.STONE));
-    w.run(500);
+    h.sim.world.setCell(2, T, 2, makeCell(B.STONE));
+    h.run(500);
     expect(r.world.getCell(2, T, 2)).toBe(makeCell(B.STONE));
-    expect(a.batchesChecked).toBeGreaterThan(5);
-    a.expectClean();
-    expect(r.state.tick).toBeGreaterThan(w.server.sim.ticks - 4);
+    expect(a.checked).toBeGreaterThan(5);
+    expect(a.mismatches).toEqual([]);
+    expect(r.state.tick).toBeGreaterThan(h.sim.ticks - 4);
   });
 
-  it('Refuse (build): no reconnection, the reason is kept', () => {
-    const w = flatWorld();
-    const a = w.add({ key: 'a', build: 'other' });
-    w.run(2000);
-    expect(a.net.status).toBe('refused');
-    expect(a.net.refusal?.reason).toBe('build');
+  it('Refuse (build): no reconnection, the reason is kept', async () => {
+    const h = await flatWorld();
+    const a = h.addClient('a', {}, { build: 'other' });
+    h.run(5000);
+    expect(a.status).toBe('refused');
+    expect(a.refusal?.reason).toBe('build');
     expect(a.net.connectionCount).toBe(1);
-    expect(w.server.sim.players.get('a')).toBeUndefined();
+    expect(h.sim.players.get('a')).toBeUndefined();
   });
 
-  it('Kick: no reconnection; a lost transport reconnects and joins again from scratch', () => {
-    const w = flatWorld();
-    const a = w.add({ key: 'a' });
-    w.runUntil(() => a.net.status === 'ready');
+  it('Kick: no reconnection; a failed link reconnects and joins again from scratch', async () => {
+    const h = await flatWorld();
+    const a = h.addClient('a');
+    h.track(a);
+    h.runUntil(() => a.ready);
     const first = a.replica!;
-    const seen = statuses(w, 0);
-    w.server.drop('a');
-    w.run(20);
-    expect(a.net.replica).toBeNull();
-    w.runUntil(() => a.net.status === 'ready');
+    a.statuses.length = 0;
+    h.sever(a);
+    expect(a.replica).toBeNull();
+    h.runUntil(() => a.ready);
     // 'reconnecting' until the new Welcome (the UI shows "connection lost, reconnecting").
-    expect(seen).toEqual(['reconnecting', 'joining', 'ready']);
+    expect(a.statuses).toEqual(['reconnecting', 'joining', 'ready']);
     expect(a.net.connectionCount).toBe(2);
     expect(a.replica).not.toBe(first);
-    w.run(300);
-    a.expectClean();
-    // Now a Kick: the status stays, nothing reconnects.
-    w.server.kick('a', 'kicked');
-    w.run(3000);
-    expect(a.net.status).toBe('kicked');
-    expect(a.net.kick?.reason).toBe('kicked');
+    h.run(300);
+    expect(a.mismatches).toEqual([]);
+    // Now a Kick (a protocol error the server sees: a second Hello): the status stays, nothing reconnects.
+    a.net.send({ type: 'hello', build: 'test', playerKey: 'a', name: 'a', viewRadius: 2 });
+    h.run(3000);
+    expect(a.status).toBe('kicked');
+    expect(a.kick?.reason).toBe('protocol_error');
     expect(a.net.connectionCount).toBe(2);
+    expect(h.sim.players.get('a')).toBeUndefined();
   });
 
-  it('a second page with the same identity replaces the first, which is kicked (replaced) and stays down', () => {
-    const w = flatWorld();
-    const a = w.add({ key: 'a' });
-    w.runUntil(() => a.net.status === 'ready');
-    const entity = w.server.sim.players.get('a')!.entityId;
-    const b = w.add({ key: 'a', phase: 3 });
-    w.runUntil(() => b.net.status === 'ready');
-    w.run(3000);
-    expect(a.net.status).toBe('kicked');
-    expect(a.net.kick?.reason).toBe('replaced');
+  it('a second page with the same identity replaces the first, which is kicked (replaced) and stays down', async () => {
+    const h = await flatWorld();
+    const a = h.addClient('a');
+    h.runUntil(() => a.ready);
+    const entity = h.sim.players.get('a')!.entityId;
+    const b = h.addClient('a');
+    h.track(b);
+    h.runUntil(() => b.ready);
+    h.run(3000);
+    expect(a.status).toBe('kicked');
+    expect(a.kick?.reason).toBe('replaced');
     expect(a.net.connectionCount).toBe(1);
-    expect(b.net.status).toBe('ready');
-    expect(w.server.sim.players.get('a')!.entityId).toBe(entity);
-    b.expectClean();
+    expect(b.status).toBe('ready');
+    expect(h.sim.players.get('a')!.entityId).toBe(entity);
+    expect(b.mismatches).toEqual([]);
   });
 
   /** A NetClient on a bare loopback whose server end does `serve` with each transport; heartbeat every second. */
@@ -157,49 +156,54 @@ describe('NetClient life cycle (package 5)', () => {
     expect(c.nc.status).toBe('reconnecting');
   });
 
-  it('Bye: the server lets the player leave; the client is closed', () => {
-    const w = flatWorld();
-    const a = w.add({ key: 'a', up: link(20), down: link(20) });
-    w.runUntil(() => a.net.status === 'ready');
-    a.net.leave();
-    expect(a.net.status).toBe('closed');
-    w.run(200);
-    expect(w.server.sim.players.get('a')).toBeUndefined();
+  it('Bye: the server lets the player leave; the client is closed', async () => {
+    const h = await flatWorld();
+    const a = h.addClient('a', { up: link(20), down: link(20) });
+    h.runUntil(() => a.ready);
+    a.leave();
+    expect(a.status).toBe('closed');
+    h.run(200);
+    expect(h.sim.players.get('a')).toBeUndefined();
+    expect(h.sim.players.keys()).toContain('a');
     expect(a.net.connectionCount).toBe(1);
   });
 
-  it('a corrupt message ends the connection with the reason; no reconnection, no replica', () => {
-    const w = flatWorld();
-    const a = w.add({ key: 'a' });
-    w.runUntil(() => a.net.status === 'ready');
-    // A truncated TickBatch (tick, then half of the section mask).
-    const conn = w.server.live('a')!;
-    conn.transport.send(0, new Uint8Array([0x85, 0x7f, 0x02]));
-    w.run(100);
-    expect(a.net.status).toBe('failed');
+  it('a corrupt message ends the connection with the reason; no reconnection, no replica; the server sees the close', async () => {
+    const h = await flatWorld();
+    const a = h.addClient('a');
+    h.runUntil(() => a.ready);
+    // A truncated TickBatch (tick, then half of the section mask), from the server end of the link.
+    h.inject(a, 0, new Uint8Array([0x85, 0x7f, 0x02]));
+    h.run(100);
+    expect(a.status).toBe('failed');
     expect(a.net.failure).toMatch(/protocol error/);
-    expect(a.net.replica).toBeNull();
-    w.run(3000);
+    expect(a.replica).toBeNull();
+    h.run(3000);
     expect(a.net.connectionCount).toBe(1);
+    expect(h.sim.players.get('a')).toBeUndefined();
   });
 
-  it('the stall hint: the host sleeping (Pongs still come) is "host", a dead link is "link", then it clears', () => {
-    const w = flatWorld();
-    const a = w.add({ key: 'a', up: link(20), down: link(20) });
-    w.runUntil(() => a.net.status === 'ready');
-    w.run(2000);
-    expect(a.net.stall(w.net.now)).toBeNull();
-    w.ticking = false;
-    w.run(2500);
-    expect(a.net.stall(w.net.now)).toBe('host');
-    w.ticking = true;
-    w.run(500);
-    expect(a.net.stall(w.net.now)).toBeNull();
+  it('the stall hint: the host sleeping (Pongs still come) is "host", a dead link is "link", then it clears', async () => {
+    const h = await flatWorld();
+    const up = link(20);
+    const down = link(20);
+    const a = h.addClient('a', { up, down });
+    h.runUntil(() => a.ready);
+    h.run(2000);
+    expect(a.net.stall(h.net.now)).toBeNull();
+    h.stallServer(2500);
+    expect(a.net.stall(h.net.now)).toBe('host');
+    // Batches come again at once, but the measured TPS (2 s of wall time) is low until the window refills.
+    h.run(500);
+    expect(a.state!.tps).toBeLessThan(15);
+    expect(a.net.stall(h.net.now)).toBe('host');
+    h.runUntil(() => a.net.stall(h.net.now) === null, 3000);
+    expect(a.state!.tps).toBeGreaterThanOrEqual(15);
     // Both directions lose everything: no batch, no Pong.
-    a.links.down.loss = 1;
-    a.links.down.rtoMs = 1e9;
-    a.links.up.loss = 1;
-    w.run(3000);
-    expect(a.net.stall(w.net.now)).toBe('link');
+    down.loss = 1;
+    down.rtoMs = 1e9;
+    up.loss = 1;
+    h.run(3000);
+    expect(a.net.stall(h.net.now)).toBe('link');
   });
 });
