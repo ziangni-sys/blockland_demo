@@ -1,4 +1,8 @@
-/** Pause menu: resume, settings, creative/survival toggle, save & quit, full controls reference. */
+/**
+ * Pause menu: resume, settings, creative/survival toggle, save & quit, full controls reference.
+ * When the world's server failed (worldStopped) it says so under the title and cannot resume or
+ * switch modes; "Quit without saving" is offered beside "Save & quit".
+ */
 import type { UiContext } from '../context';
 import type { GameMode, Screen, UiState } from '../model';
 import { h, setHidden } from '../dom';
@@ -10,15 +14,20 @@ export class PauseView implements ScreenView {
   private readonly panel: HTMLElement;
   private readonly settingsBtn: HTMLButtonElement;
   private readonly modeSeg: Segmented<GameMode>;
-  /** Shown only after a failed "Save & quit": the notice and the explicit unsaved exit. */
+  private readonly resumeBtn: HTMLButtonElement;
+  private readonly modeEl: HTMLElement;
+  /** Shown only in a stopped world. */
+  private readonly stoppedNote: HTMLElement;
+  /** Shown after a failed "Save & quit" (with its notice) and in a stopped world: the explicit unsaved exit. */
   private readonly unsaved: HTMLElement;
+  private readonly saveFailedNote: HTMLElement;
 
   constructor(ctx: UiContext) {
     const d = ctx.doc;
     const a = ctx.actions;
     const titleId = ctx.id('pause');
     const modeLbl = ctx.id('pmode');
-    const resume = button(ctx, { variant: 'primary', icon: ICON_RESUME, label: 'pause.resume', cls: 'bl-btn--wide', onClick: () => a.resume() });
+    this.resumeBtn = button(ctx, { variant: 'primary', icon: ICON_RESUME, label: 'pause.resume', cls: 'bl-btn--wide', onClick: () => a.resume() });
     this.settingsBtn = button(ctx, { icon: ICON_SLIDERS, label: 'pause.settings', cls: 'bl-btn--wide', onClick: () => a.openSettings() });
     this.modeSeg = new Segmented<GameMode>(
       ctx,
@@ -33,14 +42,18 @@ export class PauseView implements ScreenView {
     this.modeSeg.el.setAttribute('aria-labelledby', modeLbl);
     const quit = button(ctx, { variant: 'danger', icon: ICON_SAVE, label: 'pause.saveQuit', cls: 'bl-btn--wide', onClick: () => a.saveAndQuit() });
     const noSave = button(ctx, { variant: 'ghost', icon: ICON_CLOSE, label: 'pause.quitNoSave', cls: 'bl-btn--wide', onClick: () => a.quitWithoutSaving() });
-    this.unsaved = h(d, 'div', 'bl-pause-unsaved', { hidden: true }, [ctx.text(h(d, 'p', 'bl-subtitle', { role: 'alert' }), 'pause.saveFailed'), noSave]);
+    this.saveFailedNote = ctx.text(h(d, 'p', 'bl-subtitle', { role: 'alert' }), 'pause.saveFailed');
+    this.unsaved = h(d, 'div', 'bl-pause-unsaved', { hidden: true }, [this.saveFailedNote, noSave]);
+    this.stoppedNote = ctx.text(h(d, 'p', 'bl-subtitle bl-pause-stopped', { role: 'alert', hidden: true }), 'pause.stopped');
+    this.modeEl = h(d, 'div', 'bl-pause-mode', null, [ctx.text(h(d, 'span', 'bl-subtitle', { id: modeLbl }), 'pause.mode'), this.modeSeg.el]);
 
     this.panel = h(d, 'div', 'bl-panel bl-panel-modal bl-pause-panel', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' }, [
       h(d, 'div', 'bl-pause-main', null, [
         ctx.text(h(d, 'h2', 'bl-panel-title bl-title-lg', { id: titleId }), 'pause.title'),
-        resume,
+        this.stoppedNote,
+        this.resumeBtn,
         this.settingsBtn,
-        h(d, 'div', 'bl-pause-mode', null, [ctx.text(h(d, 'span', 'bl-subtitle', { id: modeLbl }), 'pause.mode'), this.modeSeg.el]),
+        this.modeEl,
         h(d, 'div', 'bl-pause-quit', null, [quit, this.unsaved]),
       ]),
       h(d, 'div', 'bl-pause-ref', null, [ctx.text(h(d, 'h3', 'bl-subtitle'), 'pause.controls'), controlsReference(ctx)]),
@@ -50,7 +63,13 @@ export class PauseView implements ScreenView {
 
   update(s: UiState): void {
     this.modeSeg.set(s.mode);
-    setHidden(this.unsaved, s.quitUnsaved !== true);
+    const stopped = s.worldStopped === true;
+    const failed = s.quitUnsaved === true;
+    setHidden(this.stoppedNote, !stopped);
+    setHidden(this.resumeBtn, stopped);
+    setHidden(this.modeEl, stopped);
+    setHidden(this.saveFailedNote, !failed);
+    setHidden(this.unsaved, !stopped && !failed);
   }
 
   onShow(_s: UiState, from: Screen | null): void {

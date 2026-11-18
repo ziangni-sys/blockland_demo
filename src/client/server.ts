@@ -15,11 +15,17 @@
  *
  * One LocalServer runs one world: a ServerHost that shut down is closed for good, so the page
  * starts a new one for the next world (terminate() the old one).
+ *
+ * THE PAGE'S STORAGE. A server that cannot open IndexedDB itself saves into the page's storage
+ * (net/host/pagestorage.ts): its `storage` calls are carried out on `pageStorage` and answered,
+ * from the first command on, and never reach onReport. So a world kept in memory (the sandboxed
+ * single-file build) lives in the page, outlives its server and stays in the world list.
  */
-import type { CreateOptions, HostToPage, PageToHost } from '../net/host/control';
+import type { CreateOptions, HostToPage, PageToHost, StorageCall, StorageResult } from '../net/host/control';
 import { PortTransport } from '../net/host/port';
 import type { Transport } from '../net/transport';
 import type { WorldMeta } from '../save/codec';
+import { SaveStorageError, type SaveStorage } from '../save/storage';
 import type { WorkerLike } from './workers';
 
 /** How the server runs. */
@@ -34,8 +40,18 @@ export interface ServerWay {
 /** The first command: what the server opens. */
 export type OpenCommand = { type: 'create'; meta: WorldMeta; options: CreateOptions } | { type: 'load'; worldId: string };
 
+/** The page's storage as the server may use it: the storage, and whether it outlives the page (and why not). */
+export interface PageStorageOption {
+  storage: SaveStorage;
+  persistent: boolean;
+  /** save/idb.ts openBestStorage's code when not persistent. */
+  reason: string;
+}
+
 export interface LocalServerOptions {
   ways: readonly ServerWay[];
+  /** The page's storage: the server's when it cannot open IndexedDB itself. */
+  pageStorage: PageStorageOption;
   /** A way whose server answers nothing this long after the first command is given up (ms). */
   firstReplyTimeoutMs: number;
   setTimer(fn: () => void, ms: number): unknown;
@@ -141,6 +157,29 @@ export class LocalServer {
     }
   }
 
+  /** Carry a storage call of the server out on the page's storage and answer it (in call order: SaveStorage keeps it). */
+  private answerStorage(w: WorkerLike, id: number, call: StorageCall): void {
+    void storageCall(this.o.pageStorage, call)
+      .then(
+        (value): StorageResult => ({ type: 'storageResult', id, ok: true, value }),
+        (e: unknown): StorageResult => ({
+          type: 'storageResult',
+          id,
+          ok: false,
+          code: e instanceof SaveStorageError ? e.code : null,
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      )
+      .then((answer) => {
+        if (this.dead) return;
+        try {
+          w.postMessage(answer, []);
+        } catch {
+          // the server is gone
+        }
+      });
+  }
+
   /** Send `command` to a started way: its first report, or null when it failed or stayed silent. */
   private tryWay(w: WorkerLike, command: OpenCommand): Promise<HostToPage | null> {
     return new Promise((resolve) => {
@@ -155,6 +194,10 @@ export class LocalServer {
       const timer = this.o.setTimer(() => settle(null), this.o.firstReplyTimeoutMs);
       w.addEventListener('message', (e) => {
         const msg = e.data as HostToPage;
+        if (msg.type === 'storage') {
+          this.answerStorage(w, msg.id, msg.call);
+          return;
+        }
         if (!answered) {
           answered = true;
           settle(msg);
@@ -180,5 +223,25 @@ export class LocalServer {
         settle(null);
       }
     });
+  }
+}
+
+function storageCall(page: PageStorageOption, call: StorageCall): Promise<unknown> {
+  const s = page.storage;
+  switch (call.op) {
+    case 'open':
+      return Promise.resolve({ persistent: page.persistent, reason: page.persistent ? null : page.reason });
+    case 'getMeta':
+      return s.getMeta(call.worldId);
+    case 'listChunkKeys':
+      return s.listChunkKeys(call.worldId);
+    case 'getChunks':
+      return s.getChunks(call.worldId, call.keys);
+    case 'getBlob':
+      return s.getBlob(call.worldId, call.name);
+    case 'putAll':
+      return s.putAll(call.worldId, call.meta, call.chunks, call.blobs);
+    default:
+      return Promise.reject(new Error(`unknown storage call ${String((call as { op?: unknown }).op)}`));
   }
 }

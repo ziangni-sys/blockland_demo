@@ -248,6 +248,9 @@ export const UI_CSS = String.raw`
   opacity: 0; transition: opacity 0.18s ease, transform 0.18s ease; white-space: normal;
 }
 .bl-hint[data-show="1"] { opacity: 1; transform: translate(-50%, 0); }
+.bl-hint-line { display: block; }
+.bl-hint-notice { font-size: 12px; color: var(--canvas-300); }
+.bl-hint-line:not([hidden]) + .bl-hint-notice { margin-top: 2px; }
 
 .bl-bottom {
   position: absolute; left: 50%; bottom: calc(10px + var(--safe-b)); transform: translateX(-50%);

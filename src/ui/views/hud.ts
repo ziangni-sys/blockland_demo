@@ -1,5 +1,5 @@
 /**
- * In-game HUD: crosshair, context hint, hotbar with the fading item name, the off-hand slot
+ * In-game HUD: crosshair, context hint (with a status notice under it), hotbar with the fading item name, the off-hand slot
  * (left of the hotbar, with its swap key), survival gauges, helm instrument, debug overlay and
  * the click-to-play veil.
  *
@@ -41,6 +41,9 @@ export class Hud {
   private readonly name: TextSlot;
   private readonly nameFlash: Retrigger;
   private readonly hint: TextSlot;
+  private readonly hintLine: HTMLElement;
+  private readonly notice: TextSlot;
+  private readonly noticeLine: HTMLElement;
   private readonly gaugesEl: HTMLElement;
   private readonly vital: VitalGauge;
   private readonly breath: BreathGauge;
@@ -58,6 +61,7 @@ export class Hud {
   private nameLang: string | null = null;
   private survival: boolean | null = null;
   private hintText: string | null | undefined = undefined;
+  private noticeText: string | null | undefined = undefined;
   private veilShown: boolean | null = null;
   private veilDragMode: boolean | null = null;
 
@@ -66,9 +70,14 @@ export class Hud {
     this.debug = new DebugOverlay(d);
     this.debugEl = this.debug.el;
 
+    // One pill, two lines: the context hint, and under it the status notice (never in its place).
     this.hint = new TextSlot(d);
-    this.hintEl = h(d, 'div', 'bl-hint bl-play', { 'data-show': '0', 'aria-live': 'polite' });
-    this.hintEl.appendChild(this.hint.node);
+    this.hintLine = h(d, 'span', 'bl-hint-line');
+    this.hintLine.appendChild(this.hint.node);
+    this.notice = new TextSlot(d);
+    this.noticeLine = h(d, 'span', 'bl-hint-line bl-hint-notice', { hidden: true });
+    this.noticeLine.appendChild(this.notice.node);
+    this.hintEl = h(d, 'div', 'bl-hint bl-play', { 'data-show': '0', 'aria-live': 'polite' }, [this.hintLine, this.noticeLine]);
 
     this.name = new TextSlot(d);
     this.nameEl = h(d, 'div', 'bl-itemname', { 'aria-hidden': 'true' });
@@ -155,11 +164,19 @@ export class Hud {
       this.breath.update(s.air, s.maxAir);
     }
 
-    if (s.hint !== this.hintText) {
+    if (s.hint !== this.hintText || s.notice !== this.noticeText) {
       this.hintText = s.hint;
-      // Keep the old text while fading out so the pill does not collapse mid-fade.
-      if (s.hint) this.hint.set(s.hint);
-      this.hintEl.dataset.show = s.hint ? '1' : '0';
+      this.noticeText = s.notice;
+      const show = !!s.hint || !!s.notice;
+      // While something shows, each line shows only with its text. When neither does, the
+      // lines keep their old text while the pill fades out, so it does not collapse mid-fade.
+      if (show) {
+        if (s.hint) this.hint.set(s.hint);
+        if (s.notice) this.notice.set(s.notice);
+        setHidden(this.hintLine, !s.hint);
+        setHidden(this.noticeLine, !s.notice);
+      }
+      this.hintEl.dataset.show = show ? '1' : '0';
     }
 
     this.helm.update(s.helm);

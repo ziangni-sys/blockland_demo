@@ -289,7 +289,7 @@ describe('src/net import rules (NETCODE section 15)', () => {
     expect(netViolations('net/host/port.ts', 'port.postMessage(m);\nconst p: MessagePort = q;')).toHaveLength(0);
     expect(netViolations('net/host/port.ts', 'setTimeout(f, 1);')).toHaveLength(1);
     expect(clientHostViolations('client/x.ts', "import { PortTransport } from '../net/host/port';\nimport type { HostToPage } from '../net/host/control';")).toHaveLength(0);
-    expect(clientHostViolations('client/x.ts', "import { parsePageToHost } from '../net/host/control';")).toHaveLength(1);
+    expect(clientHostViolations('client/x.ts', "import { parsePageMessage } from '../net/host/control';")).toHaveLength(1);
     expect(clientHostViolations('client/x.ts', "import { ServerHost } from '../net/host/host';\nconst w = import('../net/host/worker?worker&inline');")).toHaveLength(2);
     expect(clientHostViolations('client/workerfactory.ts', "const w = import('../net/host/worker?worker&inline');")).toHaveLength(0);
     expect(mutableState(base, 'let scratch = 0;\nexport const cache = new Map();\nconst tmp = [];\nconst T = Object.freeze({ a: 1 });\nconst N = 4;')).toHaveLength(3);

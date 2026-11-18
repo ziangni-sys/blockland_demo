@@ -10,6 +10,13 @@
  * Host -> page: the world is ready, a save finished, status (measured TPS and players), the time
  * the ticks take (for the page's debug overlay), errors, closed.
  *
+ * THE PAGE'S STORAGE. A server Worker that cannot open IndexedDB itself saves into the storage of
+ * the page that started it (pagestorage.ts), which outlives the Worker: the page starts a new
+ * server for each world, and a world kept in memory stays in the page's world list until the page
+ * closes. The host asks with `storage { id, call }`; the page answers each with
+ * `storageResult { id, ... }` (StorageResult), in the order asked. Answers are not commands: they
+ * never wait behind the command that asked (a load reading the world).
+ *
  * `PageToHost` is generic in what a connection is: a MessagePort on the way into the Worker, a
  * TransportOpener inside (ServerHost.control calls it when it carries the connect out, worker.ts
  * then wraps the port in a PortTransport).
@@ -56,19 +63,57 @@ export type HostToPage =
   /** A command could not be carried out (`what` = the command, or 'tick' when the simulation threw). */
   | { type: 'error'; what: string; message: string }
   /** The server shut down. */
-  | { type: 'closed' };
-
-const TYPES: readonly string[] = Object.freeze(['create', 'load', 'connect', 'pause', 'save', 'openRoom', 'closeRoom', 'shutdown']);
+  | { type: 'closed' }
+  /** A call on the page's storage (see the file comment); answered by a StorageResult with the same id. */
+  | { type: 'storage'; id: number; call: StorageCall };
 
 /**
- * The page's message as a PageToHost, or null when it is not one (wrong type or fields). The
- * port of a connect is passed through unchecked (the caller knows what it expects).
+ * What the host asks of the page's storage: whether it persists (`open`), and the SaveStorage
+ * calls a host makes (save/storage.ts; ServerHost reads a world and writes saves with these).
  */
-export function parsePageToHost(data: unknown): PageToHost<unknown> | null {
+export type StorageCall =
+  | { op: 'open' }
+  | { op: 'getMeta'; worldId: string }
+  | { op: 'listChunkKeys'; worldId: string }
+  | { op: 'getChunks'; worldId: string; keys: number[] }
+  | { op: 'getBlob'; worldId: string; name: string }
+  | {
+      op: 'putAll';
+      worldId: string;
+      meta: WorldMeta;
+      chunks: ReadonlyArray<readonly [number, Uint8Array]>;
+      blobs: ReadonlyArray<readonly [string, Uint8Array]>;
+    };
+
+/** What `open` answers: whether the page's storage outlives the page, and why not (save/idb.ts openBestStorage's code). */
+export interface PageStorageInfo {
+  persistent: boolean;
+  reason: string | null;
+}
+
+/**
+ * The page's answer to a storage call: the call's result, or how it failed (`code`: the
+ * SaveStorageError code, null for any other error).
+ */
+export type StorageResult =
+  | { type: 'storageResult'; id: number; ok: true; value: unknown }
+  | { type: 'storageResult'; id: number; ok: false; code: string | null; message: string };
+
+const TYPES: readonly string[] = Object.freeze(['create', 'load', 'connect', 'pause', 'save', 'openRoom', 'closeRoom', 'shutdown', 'storageResult']);
+
+/**
+ * The page's message as a PageToHost or a StorageResult, or null when it is neither (wrong type
+ * or fields). The port of a connect is passed through unchecked (the caller knows what it
+ * expects), and so is a storage result's value (the caller knows what it asked).
+ */
+export function parsePageMessage(data: unknown): PageToHost<unknown> | StorageResult | null {
   if (data === null || typeof data !== 'object') return null;
   const m = data as Record<string, unknown>;
   if (typeof m.type !== 'string' || !TYPES.includes(m.type)) return null;
   switch (m.type) {
+    case 'storageResult':
+      if (typeof m.id !== 'number' || typeof m.ok !== 'boolean') return null;
+      return m.ok || (typeof m.message === 'string' && (m.code === null || typeof m.code === 'string')) ? (data as StorageResult) : null;
     case 'create':
       return m.meta !== null && typeof m.meta === 'object' && m.options !== null && typeof m.options === 'object' ? (data as PageToHost<unknown>) : null;
     case 'load':

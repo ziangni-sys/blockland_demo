@@ -68,6 +68,10 @@ export const STRINGS = {
   'pause.mode': { zh: '游戏模式', en: 'Game mode' },
   'pause.saveQuit': { zh: '保存并退出', en: 'Save & quit' },
   'pause.saveFailed': { zh: '保存失败，世界仍然打开。', en: 'Saving failed; the world is still open.' },
+  'pause.stopped': {
+    zh: '游戏服务器出错，世界已经停住。可以保存并退出，或者不保存退出。',
+    en: 'The game server failed and the world has stopped. Save & quit, or quit without saving.',
+  },
   'pause.quitNoSave': { zh: '不保存退出', en: 'Quit without saving' },
   'pause.controls': { zh: '操作说明', en: 'Controls reference' },
 

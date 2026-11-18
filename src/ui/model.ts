@@ -98,6 +98,11 @@ export interface UiState {
   maxAir: number;
   /** Context hint shown under the crosshair, e.g. "再次右键确认组装（42 格）". */
   hint: string | null;
+  /**
+   * A status line under the context hint, e.g. a guest's "the host's server is being slowed
+   * down" (docs/NETCODE.md section 4). It never takes the context hint's place.
+   */
+  notice: string | null;
   toasts: Toast[];
   /** Debug overlay lines, or null when hidden. */
   debug: string[] | null;
@@ -116,6 +121,11 @@ export interface UiState {
    * death screens say so and offer "Quit without saving". Omitted = false.
    */
   quitUnsaved?: boolean;
+  /**
+   * The world's server failed and the world stopped: the pause screen says so, cannot resume, and
+   * offers "Save & quit" and "Quit without saving". Omitted = false.
+   */
+  worldStopped?: boolean;
   /** Graphics API line for menus, e.g. "WebGPU" or "WebGL2". */
   renderer: string;
   version: string;
@@ -135,7 +145,7 @@ export interface UiActions {
   deleteWorld(id: string): void;
   resume(): void;
   saveAndQuit(): void;
-  /** Close the world without saving; only offered after a failed "Save & quit" (quitUnsaved). */
+  /** Close the world without saving; only offered after a failed "Save & quit" (quitUnsaved) or in a stopped world (worldStopped). */
   quitWithoutSaving(): void;
   respawn(): void;
   openSettings(): void;
