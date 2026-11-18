@@ -123,6 +123,39 @@ describe('ServerClock (package 5)', () => {
     expect(d).toBeLessThan(5.6);
   });
 
+  it('the first batch lost while Samples arrive: renderTick stays -Infinity until a batch is applied, then never passes the newest', () => {
+    // 200 ms each way; batch 1 is lost and comes back with batches 2..20 after a 1 s retransmission.
+    const arrivals = traffic({ ms: 20_000, latency: 200, jitter: 20, loss: 0.2, seed: 1 }).map((a) => (a.seq === null && a.tick <= 20 ? { ...a, at: Math.max(a.at, 1250) } : a));
+    arrivals.sort((a, b) => a.at - b.at);
+    const clock = new ServerClock();
+    let i = 0;
+    let newest = -1;
+    let last = -Infinity;
+    let syncedBefore = 0;
+    let over = 0;
+    let back = 0;
+    for (let now = 0; now < 20_000; now += 1000 / 60) {
+      while (i < arrivals.length && arrivals[i]!.at <= now) {
+        const a = arrivals[i++]!;
+        clock.arrival(a.tick, a.at, a.seq);
+        if (a.seq === null) newest = Math.max(newest, a.tick);
+      }
+      clock.frame(now, newest);
+      if (newest < 0 && clock.isSynced) {
+        syncedBefore++;
+        expect(clock.renderTick).toBe(-Infinity);
+      }
+      if (clock.renderTick > newest) over++;
+      if (clock.renderTick < last) back++;
+      last = clock.renderTick;
+    }
+    // Samples synced the clock for about a second before the first batch, its timeline well past tick 1.
+    expect(syncedBefore).toBeGreaterThan(40);
+    expect(over).toBe(0);
+    expect(back).toBe(0);
+    expect(clock.renderTick).toBeGreaterThan(390);
+  });
+
   it('a throttled host waking once a second with 5 catch-up ticks: never backwards, renderTick never past the newest batch', () => {
     const clock = new ServerClock();
     const r = drive(clock, traffic({ ms: 30_000, latency: 40, jitter: 10, loss: 0, wakeMs: 1000, burst: 5 }), 30_000);

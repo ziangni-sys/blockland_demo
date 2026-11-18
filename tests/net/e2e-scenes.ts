@@ -151,7 +151,7 @@ export function launchBoat(h: NetHarness, b: Boat, bot: PlayerControl): { ship: 
 }
 
 /** The server's pose of ship `id` at a fractional tick (lerp / slerp of the harness history), with its pivot. */
-function serverShipPose(h: NetHarness, id: number, tick: number): { pos: Vec3; rot: Quat; pivot: Vec3 } | null {
+export function serverShipPose(h: NetHarness, id: number, tick: number): { pos: Vec3; rot: Quat; pivot: Vec3 } | null {
   const a = h.history.get(Math.floor(tick))?.ships.get(id);
   const b = h.history.get(Math.floor(tick) + 1)?.ships.get(id);
   if (a === undefined) return null;
@@ -246,3 +246,22 @@ export function serverPlanks(sim: Simulation, box: Box): number {
 }
 
 export type { Box };
+
+/**
+ * Run until no ship moved in the last server tick (a ship that stops gets its final pose as a
+ * rest in that tick's batch, reliably). Before a full comparison on a lossy link: the newest
+ * sample of a ship still moving may have been lost, and the replica's pose is then older (section 7).
+ */
+export function untilShipsRest(h: NetHarness, maxMs = 60_000): void {
+  const poses = (): string => JSON.stringify(h.sim.structures.ships().map((s) => [s.id, s.grid.position, s.grid.rotation]));
+  let last = poses();
+  let tick = h.sim.ticks;
+  h.runUntil(() => {
+    if (h.sim.ticks === tick) return false;
+    tick = h.sim.ticks;
+    const now = poses();
+    const still = now === last;
+    last = now;
+    return still;
+  }, maxMs, 1);
+}

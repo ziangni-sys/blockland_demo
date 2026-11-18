@@ -4,7 +4,8 @@
  * (every client gets Kick(shutdown) and stays down); a new ServerHost loads the same storage; the
  * host's client and the guest join again. The loaded world equals the saved one (cells, glue,
  * structures with their fields, rotor angles, ship poses), the guest's record (position,
- * inventory) is back, and every replica equals the new server.
+ * inventory) is back, and every replica equals the new server. The guest is on each of the three
+ * links of e2e-scenes.ts in turn.
  */
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
@@ -12,8 +13,8 @@ import { B } from '../../src/blocks/defs';
 import { NY, PX } from '../../src/core/dirs';
 import { chunkKey } from '../../src/voxel/chunk';
 import { compareReplica, DigestContext, serverDigest, type Digest } from './digest';
-import { link, NetHarness, testMeta, type HeadlessClient } from './harness';
-import { exampleBoat, island, launchBoat, SEA, SEA_TOP, spinningWindmill } from './e2e-scenes';
+import { NetHarness, testMeta, type HeadlessClient } from './harness';
+import { exampleBoat, island, launchBoat, LINKS, SEA, SEA_TOP, spinningWindmill } from './e2e-scenes';
 
 /** The server's state over a fixed area and every structure (entities: the players come back by themselves). */
 function worldDigest(h: NetHarness): Digest {
@@ -22,7 +23,7 @@ function worldDigest(h: NetHarness): Digest {
   return serverDigest(new DigestContext(h.sim.generator), h.sim, { columns: cols, structures: h.sim.structures.all().map((s) => s.id), entities: [] });
 }
 
-describe('save, shut down, load, join end to end', () => {
+describe.each(LINKS)('save, shut down, load, join end to end, the guest on $name', ({ make }) => {
   it('the world, glue, structures and the guest\'s record are back; the replicas equal the new server', async () => {
     const h = new NetHarness();
     await h.create(testMeta('saved'), { generator: SEA, exampleShip: false });
@@ -45,7 +46,7 @@ describe('save, shut down, load, join end to end', () => {
     h.ticks(100);
     sim.leave('bot'); // lets go of the wheel (a loaded world has nobody at it until they join)
     await h.host.control({ type: 'openRoom' });
-    const guestLink = { up: link(75, 20, 0.05, 51), down: link(75, 20, 0.05, 52) };
+    const guestLink = make(51);
     const g = h.addClient('guest', guestLink, { name: 'Guest', viewRadius: 4 });
     h.runUntil(() => g.ready, 20_000);
     const gc = sim.players.get('guest')!;

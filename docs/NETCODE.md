@@ -112,7 +112,7 @@ export interface Transport {
   - `jitter` 是最近 2 秒**采样消息**的到达样本相对目标 offset 的平均偏差；没有采样时为 0。可靠包不算：它们被队头阻塞时成批迟到，会把 D 顶到 8。
   - `lossTicks`：采样丢失率 `p` > 1% 时为 `ceil(log 0.01 / log p) − 1`，否则 0（5% 时 1，20% 时 2，使连续丢掉的采样超过 D 的概率不到 1%）。丢失率按采样消息的序号 `seq` 的空缺算（采样只在有东西动时才发，不能按 tick 的空缺算）。
   - D 每帧最多变 0.02。单机（Worker）里 D 约 1.3～1.5；150 ms 往返加 5% 丢包时约 3。
-- **显示时间** `renderTick = min(arrivalTick − D, 最新一个已应用的包的 tick)`：船的位姿、所有实体（包括别的玩家）、昼夜都在这个时间显示。可靠通道卡在重传上时采样还在来，没有这个上限，显示时间会越过还没应用的包：船越过还不知道的 pivot 变化，实体的载体还没生成。昼夜 = `mod(renderTick + dayOffset, DAY_TICKS) / DAY_TICKS`，只用服务器给的时间（LESSONS“天空的昼夜和游戏时间不一致”）。
+- **显示时间** `renderTick = min(arrivalTick − D, 最新一个已应用的包的 tick)`：船的位姿、所有实体（包括别的玩家）、昼夜都在这个时间显示。可靠通道卡在重传上时采样还在来，没有这个上限，显示时间会越过还没应用的包：船越过还不知道的 pivot 变化，实体的载体还没生成。第一个包应用之前 `renderTick` 不动（−∞），也不摆任何位姿：否则第一个包丢了、等重传时采样照样来、时间轴已同步，它会不受上限地往前走，又因为不减小，停在之后应用的包前面。昼夜 = `mod(renderTick + dayOffset, DAY_TICKS) / DAY_TICKS`，只用服务器给的时间（LESSONS“天空的昼夜和游戏时间不一致”）。
 - **转子时间** `rotorTick = arrivalTick + rotorLead`：转子的显示和预测都用它，要等于自己现在发出的移动上报**在服务器上被应用**的那个 tick（那个 tick 的第 3 步把转子推到这个角度，第 5、6 步拿它判推开和挤压）。这样叶片推人时，客户端预测的推开和服务器看到的是同一个角度，服务器不会把还没来得及被推开的人判成挤伤。`rotorLead` 是量出来的，不是算出来的：客户端记下最近 64 条上报发出时的 `arrivalTick`；包里的 `moveAck = s` 变了时，样本 = 包的 tick − 发出 s 时的 `arrivalTick`，它包含单程延迟、等下一个 tick 开始的时间和 `moves.ts` 的排队。`rotorLead` 像 D 一样每帧最多变 0.02，差超过 4 个 tick 时直接跳；第一个样本之前取 `rtt·TPS/1000 + 1.5`。`rotorTick` 本来就超前于收到的包，不受上面那个上限限制。代价见第 17 节第 6 条。
 - **离散的变化**（方块、结构体和实体的出现与消失、背包……）一收到就生效，不等显示时间（第 5 节）。
 - **自己的角色**按客户端自己的固定步长时钟（`FixedStepClock`，20 Hz）预测，显示的是“现在”（第 9 节）。
@@ -151,7 +151,7 @@ export interface Transport {
 
 **客户端怎么应用**：每帧最先做的事，是按顺序把所有已经完整收到的包逐个应用，每个包从头到尾一次应用完（区段按上表顺序）；然后插入收到的采样；然后走客户端的固定步（预测、上报）；最后渲染。所以一个服务器 tick 的全部变化在客户端的同一帧里生效。
 
-- 立刻生效的是格子、胶、生成和移除、字段、私有状态、事件。**位姿**——`structureRests` 的最终位姿、`entityUpdates` 位 0 的最终状态、生成记录里的位姿——作为这个包的 tick 的采样插进采样环，和不可靠的采样一样按 `renderTick` 显示；直接套用的话，停下的船会比它插值中的运动早 D 个 tick 跳到终点。最终位姿是“停住”的采样：服务器从它的 tick 起没变，直到下一条采样的前一个 tick，所以插值从下一条采样的前一个 tick 开始，不从停住的 tick 开始（否则停了一分钟的船会提前一分钟开始慢慢挪，兔子转身会提前好几个 tick 开始转）。
+- 立刻生效的是格子、胶、生成和移除、字段、私有状态、事件。**位姿**——`structureRests` 的最终位姿、`entityUpdates` 位 0 的最终状态、生成记录里的位姿——作为这个包的 tick 的采样插进采样环，和不可靠的采样一样按 `renderTick` 显示；直接套用的话，停下的船会比它插值中的运动早 D 个 tick 跳到终点。最终位姿和生成记录里的位姿都是“停住”的采样：服务器只在位姿变了时发采样，所以从它的 tick 起没变，直到下一条采样的前一个 tick，插值从下一条采样的前一个 tick 开始，不从它自己的 tick 开始（否则停了一分钟的船会提前一分钟开始慢慢挪，兔子转身会提前好几个 tick 开始转；静止时进入兴趣的船或物品，过一会儿才被推动，也会提前最多 D 个 tick 动起来）。在动的东西下一条采样就在下一个 tick，结果不变；只有生成之后紧接着的那条采样丢了时，它在生成记录的位姿上多停一个 tick。
 - 页面隐藏时没有 `requestAnimationFrame`（后台的房主页面、切到后台的客人）：客户端在消息回调里逐个应用完整收到的包（不网格化、不预测），包不会堆起来；回到前台时网格化照常处理脏的 section。
 
 **为什么方块不会重复或消失**
@@ -243,14 +243,14 @@ export interface Transport {
 **位姿流**（不可靠，`Samples`）
 
 - 只有船有位姿流。每个 tick 算出每条船量化后的位姿（`Pos32`×3 + `Rot64`，第 14 节），和上个 tick 的不同就给兴趣内的客户端各发一条采样（约 22 字节）。从“在变”变成“和上个 tick 相同”（睡着、冻结、停住）时，在可靠包的 `structureRests` 里发一次最终位姿，然后停发。睡着和冻结不需要单独的标记。
-- 客户端每条船一个采样环（`SAMPLE_BUFFER_TICKS = 32`），在 `renderTick` 线性插值（旋转用 slerp）。`renderTick` 超过最新的采样就停在最新的（不外推）；早于最早的就用最早的；停住的采样（`structureRests`）见第 5 节，插值从下一条采样的前一个 tick 开始。环保留最新采样之前 32 tick，加窗口起点之前的一条（窗口起点处插值的左端），加不晚于最新已应用包的最新一条（可靠通道卡住、采样还在来时显示的就是它）。还不认识的 id 的采样先存 32 tick，等生成记录（可靠通道慢时采样可能先到）。
+- 客户端每条船一个采样环（`SAMPLE_BUFFER_TICKS = 32`），在 `renderTick` 线性插值（旋转用 slerp）。`renderTick` 超过最新的采样就停在最新的（不外推）；早于最早的就用最早的；停住的采样（`structureRests` 的最终位姿、生成记录的位姿）见第 5 节，插值从下一条采样的前一个 tick 开始。环保留最新采样之前 32 tick，加窗口起点之前的一条（窗口起点处插值的左端），加不晚于最新已应用包的最新一条（可靠通道卡住、采样还在来时显示的就是它）。还不认识的 id 的采样先存 32 tick，等生成记录（可靠通道慢时采样可能先到）。
 - 位置是 pivot 在父空间里的位置（`StructureGrid.position` 的含义），所以客户端必须和服务器用同一个 pivot（见上）。不改成“局部原点的平移”：格子坐标就是组装时的世界坐标，原点可能离船几千格，在那个原点上插值转动会把船甩出去。
 
 **转子**：没有位姿流。客户端从最近一次的转子状态（tick、`angle`、`angularSpeed`、`sails`、`frozen`）出发，用 `advanceRotor` 一个 tick 一个 tick 推到 `rotorTick`，小数部分在相邻两个 tick 的角度之间插值；`frozen` 时不动（`holdRotor`）。最多推到转子状态之后 400 tick（保险：兴趣内的转子每 `ROTOR_RESYNC_TICKS` 重发一次状态）。`advanceRotor` 是确定的，同样的起点、同样的步数得到同样的角度，定期重同步只是保险。转子停下（方块化）就是一次移除加格子增量。
 
 **嵌套**：船上的转子的 `position`、`baseRotation` 在船的局部空间。客户端组合位姿时，船用 `renderTick`，转子的自转用 `rotorTick`（`StructureGrid.renderPose` 本来就按父结构体组合）。一个 tick 里组合两个时间没有问题：转子相对船只有自转。
 
-**掌舵**：`helmsmanId`、`helm`、`forward`、`throttle`、`rudder` 是结构体字段，每个人都有。舵手的油门和方向来自他的移动上报里的输入轴（工作包 2），服务器的 `Hands.steer` 照旧读 `input.forward/strafe`。舵的读数（`HelmView`）客户端自己算：`throttle`、`rudder` 来自字段，帆数 = 子转子的 `sails` 之和，航速 = 最新两条位姿采样的水平速度（位移除以 tick 差；前一条是停住的采样时按一个 tick 算）；最新一条是 `structureRests` 的最终位姿时为 0。所以私有状态里没有舵的读数。
+**掌舵**：`helmsmanId`、`helm`、`forward`、`throttle`、`rudder` 是结构体字段，每个人都有。舵手的油门和方向来自他的移动上报里的输入轴（工作包 2），服务器的 `Hands.steer` 照旧读 `input.forward/strafe`。舵的读数（`HelmView`）客户端自己算：`throttle`、`rudder` 来自字段，帆数 = 子转子的 `sails` 之和，航速 = 最新两条位姿采样的水平速度（位移除以 tick 差；前一条是停住的采样时按一个 tick 算）；最新一条是停住的采样（`structureRests` 的最终位姿或生成记录的位姿）时为 0。所以私有状态里没有舵的读数。
 
 **客户端自己推导**：`analyzeHull`（`grid.version` 变了才算，0.8～2.1 ms）→ 船体信息、干区（渲染时裁掉船舱里的水、自己的游泳和浮力采样、桶的射线）；网格；转子能不能编辑（`angularSpeed ≠ 0`）；舵的读数。
 
@@ -274,7 +274,7 @@ export interface Transport {
 
 **消失** `entityDespawns`：死亡、被捡起、被合并、离开兴趣都一样。
 
-**在载体坐标系里插值**：每个实体一个采样环。相邻两条采样的载体相同 → 在载体局部空间插值，再用载体在 `renderTick`（转子用 `rotorTick`）的位姿变到世界；载体不同 → 各自用它的载体在它自己的 tick 的位姿（转子也用那个 tick）变到世界，再插值。停住的采样（`entityUpdates` 位 0）和船一样，插值从下一条采样的前一个 tick 开始（第 5 节）。这就是 `client/interp.ts` 的 `interpolateCarried` 现在做的事。站在行驶的船上的人，上报和采样都是相对船的，所以在每个人的屏幕上都相对甲板静止（场景 31）。载体被删时缓冲里的采样怎么办见第 7 节“移除”。
+**在载体坐标系里插值**：每个实体一个采样环。相邻两条采样的载体相同 → 在载体局部空间插值，再用载体在 `renderTick`（转子用 `rotorTick`）的位姿变到世界；载体不同 → 各自用它的载体在它自己的 tick 的位姿（转子也用那个 tick）变到世界，再插值。停住的采样（`entityUpdates` 位 0 的最终状态、生成记录里的状态）和船一样，插值从下一条采样的前一个 tick 开始（第 5 节）。这就是 `client/interp.ts` 的 `interpolateCarried` 现在做的事。站在行驶的船上的人，上报和采样都是相对船的，所以在每个人的屏幕上都相对甲板静止（场景 31）。载体被删时缓冲里的采样怎么办见第 7 节“移除”。
 
 **远程玩家的位置来源**：服务器上就是这个玩家最近一次被应用的移动上报（工作包 2）。上报的到达有抖动，一个 tick 收到两条、下个 tick 一条没有，直接用会让别人看到他一顿一顿。所以 `src/net/server/moves.ts` 给每个玩家一个上报队列：
 
@@ -408,8 +408,8 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
   - 宿主控制 `save`（单机打开暂停菜单时，和 M1 一样）；
   - 新世界创建后立刻存一次；
   - 关服 `shutdown { save: true }`：只有存成功才关，失败就报告并继续运行（LESSONS“保存失败仍然退出，进度丢失”）。
-- 存什么：和现在一样的 `SaveBundle`——改过的区块，`sim`、`ticks`、`glue`、`structures`、`entities`、`players` 几个 blob（名字表 `SAVE_BLOBS` 在 `sim/persist.ts`），另加 `generator` blob（版本号 + `GeneratorSpec`）；没有 `generator` 的存档是 `meta.seedHash` 的地形世界（现在 `game.ts` 写的就是这种）。
-- 存储不能持久时（IndexedDB 打不开，退回内存）Worker 照样存、照样报 `saved { ok: true }`，但 `ready` 里说明 `persistent: false` 和原因，页面照 M1 提示玩家。新世界在存储打开之后才报 `ready`。`players` 里是这个世界见过的每个玩家的记录，按 PlayerKey：在线的按存档时的状态，离开的按离开时的状态。客人不需要提前登记，第一次加入就有记录。
+- 存什么：和现在一样的 `SaveBundle`——改过的区块，`sim`、`ticks`、`glue`、`structures`、`entities`、`players` 几个 blob（名字表 `SAVE_BLOBS` 在 `sim/persist.ts`），另加 `generator` blob（版本号 + `GeneratorSpec`）；没有 `generator` 的存档是 `meta.seedHash` 的地形世界（现在 `game.ts` 写的就是这种）。`players` 里是这个世界见过的每个玩家的记录，按 PlayerKey：在线的按存档时的状态，离开的按离开时的状态。客人不需要提前登记，第一次加入就有记录。
+- 存储不能持久时（IndexedDB 打不开，退回内存）Worker 照样存、照样报 `saved { ok: true }`，但 `ready` 里说明 `persistent: false` 和原因，页面照 M1 提示玩家。新世界在存储打开之后才报 `ready`。
 - 新世界的示例风车船（`placeExampleShip`）和开局物品由 `ServerHost` 放，不再由 `game.ts` 放。
 - `WorldMeta.mode` 改存世界规则的默认模式（世界列表显示用）。
 - 客人永远收不到：任何人的 PlayerKey；别人的记录（背包、生命、出生点）；存档本身；随机数状态；待处理的方块 tick；兴趣外改过的区块；别人手上在做的事（挖掘进度、预览、涂胶进度）。客人在自己的浏览器里只存 PlayerKey 和名字（localStorage），不存世界。
@@ -640,7 +640,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - 工作包 6、7 往 `HeadlessClient` 上加：`frame(now)` 先 `NetClient.frame`，然后是预测（副本上的 `OwnPlayer`，经 `NetClient.sendMoveReport` 上报）和意图（`NetClient.send`）；保持的输入（`forward`、`strafe`、`jump`、`sneak`）和与 `PlayerControl` 同名的脚本接口（`lookAtCell`、`aimAt`、`use`、`attack`、`hold`、`mine`……）是这个类的字段和方法，`stopInput()` 松开它们；校正、背包、确认号从 `onBatch` 来。
 - 链路：每条链路数两端发出和收到的可靠消息，`quiesce()` 靠它知道还有没有在途的。客户端的 `conditions` 对象就是回环每次发送时读的那个，改它立刻改当前链路。`sever(c)`：当前链路两端都失败（两端的 `onClose` 都触发，像 ICE 失败）；`crash(c)`：页面死了，从客户端这端关传输、不发 `Bye`，不再有帧和 heartbeat；`inject(c, …)`：从服务器那端直接给客户端发原始字节（出错的服务器）。
 - `run(ms)`、`runUntil(cond)`、`ticks(n)`：推进虚拟时间，服务器每 50 ms 一个 tick，消息在到期时送达。`wakeEveryMs`（后台页面的计时器只在整秒醒）、`timerLateMs`、`stallServer(ms)`。`quiesce()`：停掉输入，跑到没有在途的上行消息再加 10 个 tick；然后停住服务器的时钟，把在途消息全部送达、可见的客户端全部应用（每个副本都在服务器的最后一个 tick）；之后的 `run`/`runUntil` 让时钟继续。
-- `tests/net/digest.ts`：每列格子的 CRC32、胶面集合、结构体（格子、胶、字段、pivot、同一 tick 的位姿）、实体（位置容差）的摘要；`compareReplica(server, client)` 返回不一致的列表。`track(c)`：服务器在每个 tick 后按 `Replicator.clientView` 记下被改过的列和结构体、实体的摘要，客户端应用完同一个 tick 的包（`NetClient.onBatch`）后比较，用来做逐 tick 的一致性检查；还在生成的列两边都不算，位姿不比（`NetClient` 一帧里先应用所有的包再插采样，到某个包时最新的位姿可能早一个 tick 或已经晚一个 tick）。全量比较（`compareNow`，含位姿）在 `quiesce()` 之后做。`history` 选项记下最近 2400 个 tick 的船位姿、转子角度、实体位置，给按 `renderTick` 的显示检查用。
+- `tests/net/digest.ts`：每列格子的 CRC32、胶面集合、结构体（格子、胶、字段、pivot、同一 tick 的位姿）、实体（位置容差）的摘要；`compareReplica(server, client)` 返回不一致的列表。`track(c)`：服务器在每个 tick 后按 `Replicator.clientView` 记下被改过的列和结构体、实体的摘要，客户端应用完同一个 tick 的包（`NetClient.onBatch`）后比较，用来做逐 tick 的一致性检查；还在生成的列两边都不算，位姿（连同实体的载体：动着的实体换载体走采样）不比（`NetClient` 一帧里先应用所有的包再插采样，到某个包时最新的位姿可能早一个 tick 或已经晚一个 tick）。每帧还检查 `renderTick` 不超过最新已应用的包，不对的也记进 `mismatches`。全量比较（`compareNow`，含位姿）在 `quiesce()` 之后做；在丢包的链路上，先等船停住（停下时最终位姿走可靠通道），否则还在动的船的最后一条采样可能丢了。`history` 选项记下最近 2400 个 tick 的船位姿、转子角度、实体位置，给按 `renderTick` 的显示检查用。
 - 除了传输、计时器、区块来源这三样，全部是产品代码。
 
 **工作包 10～14 接在哪里**：10 实现 `Transport`（`WebRtcTransport`）和 `Signaller`，房主页面把数据通道转发到 `connect` 进来的端口，并往端口回报积压（第 2 节）；11 用 `Refuse`/`Kick` 的原因、`Hello` 的名字、全局区的玩家表、`NetClient` 的重连、地址参数 `?slot=` 和宿主控制的 `openRoom`；12 读 `ClientReplica` 里玩家实体的标志、手持物品、掌舵和玩家表的名字；13 调 `SNAPSHOT_BUDGET`、背压的线、D 的公式，用 `Replicator` 的字节统计；14 两个页面（第二个用 `?slot=`）加一个本地信令。
