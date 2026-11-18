@@ -41,7 +41,7 @@ function world(host = true, mode: 'creative' | 'survival' = 'creative'): World {
   a.takeCorrection();
   const moves = new MoveQueue(sim);
   const q = new IntentQueue(sim, moves, new Replicator(sim));
-  moves.join('a');
+  moves.join('a', host);
   q.join('a', host);
   const events: SimEvent[] = [];
   sim.events.on((e) => events.push(e));
@@ -69,7 +69,7 @@ function report(w: World, x: number, z: number, vx = 0, epoch = w.a.player.remot
 /** One server tick as ServerHost runs it. */
 function tick(w: World, n = 1): void {
   for (let i = 0; i < n; i++) {
-    w.moves.beforeTick();
+    w.moves.beforeTick(false);
     w.q.beforeTick();
     w.sim.tick();
   }

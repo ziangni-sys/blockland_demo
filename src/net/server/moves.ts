@@ -29,7 +29,10 @@
  *    report for STEER_TIMEOUT_TICKS ticks lets go of the wheel (cause 'timeout'), so a ship does
  *    not sail on for a page that went to the background or froze. The count starts at the
  *    client's first report: until then it is loading (section 3, ready), and the server holds the
- *    player where it is (a host who joins a loaded world at the wheel keeps it).
+ *    player where it is (a host who joins a loaded world at the wheel keeps it). The host's own
+ *    page is exempt while the room is closed: in single player a page that stalls for a few
+ *    seconds (a long frame, a garbage collection) would otherwise lose the wheel, and a hidden
+ *    page pauses the world anyway. With the room open the rule holds for the host too.
  */
 import { copyReport, emptyReport, type AcceptedReport, type MoveReport } from '../../entities/drive';
 import type { Simulation } from '../../sim/simulation';
@@ -57,6 +60,8 @@ export interface MoveStats {
 }
 
 class PlayerMoves {
+  /** The host's own page (netserver: a local connection). */
+  constructor(readonly local: boolean) {}
   readonly queue: MoveReport[] = [];
   readonly spare: MoveReport[] = [];
   /** Highest seq received. */
@@ -77,8 +82,8 @@ export class MoveQueue {
 
   // ------------------------------------------------------------------ MoveSink
 
-  join(key: PlayerKey): void {
-    this.players.set(key, new PlayerMoves());
+  join(key: PlayerKey, local: boolean): void {
+    this.players.set(key, new PlayerMoves(local));
   }
 
   leave(key: PlayerKey): void {
@@ -98,7 +103,7 @@ export class MoveQueue {
     m.queue.push(copyReport(report, m.spare.pop() ?? emptyReport()));
   }
 
-  beforeTick(): void {
+  beforeTick(roomOpen: boolean): void {
     for (const [key, m] of this.players) {
       const ctrl = this.sim.players.get(key);
       if (ctrl === undefined) continue;
@@ -109,7 +114,8 @@ export class MoveQueue {
       m.heard = false;
       m.ackBefore = d !== null ? d.lastSeq : -Infinity;
       // Section 3: the helmsman's client went quiet.
-      if (d !== null && p.steeringShipId !== 0 && m.silent !== null && m.silent >= STEER_TIMEOUT_TICKS) this.sim.entities.stopSteering(p, 'timeout');
+      const timed = roomOpen || !m.local;
+      if (timed && d !== null && p.steeringShipId !== 0 && m.silent !== null && m.silent >= STEER_TIMEOUT_TICKS) this.sim.entities.stopSteering(p, 'timeout');
       const q = m.queue;
       const epoch = d !== null ? d.epoch : NaN;
       let drop = 0;

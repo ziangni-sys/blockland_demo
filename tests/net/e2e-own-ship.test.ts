@@ -284,6 +284,9 @@ describe('32. docking while another player stands on the deck (150 ms, 20 ms jit
 /** A helmsman (the local client) at the wheel of a raft, throttle 1 from its held key. */
 async function helmsman(seed: number): Promise<{ r: OwnRun; ship: Ship }> {
   const r = await ownWorld(OWN_SEA, 'survival', LINK_150.make(seed));
+  // Scenario 35 is about a room: with the room closed (single player) the host's own page is
+  // exempt from the steering timeout (net/server/moves.ts).
+  await r.h.host.control({ type: 'openRoom' });
   const sim = r.sim;
   const helm = buildRaft(sim, { x0: 10, z0: 0, x1: 16, z1: 8, y: S - 1, gunwale: true, helm: { x: 13, z: 1 } });
   const c = sim.players.get('p')!;

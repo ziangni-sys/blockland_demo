@@ -18,13 +18,13 @@ import { FlatGenerator } from '../../src/worldgen/generator';
 const TOP = 35;
 
 /** A flat world with player 'a', client-driven, standing at (0.5, TOP, 0.5); the queue knows it. */
-function world(): { sim: Simulation; q: MoveQueue; a: PlayerControl } {
+function world(local = false): { sim: Simulation; q: MoveQueue; a: PlayerControl } {
   const sim = new Simulation({ seed: 3, mode: 'survival', generator: new FlatGenerator(), syncChunks: true, loadRadius: 2, rabbits: false });
   const a = sim.join('a');
   a.setDrive('client');
   a.takeCorrection();
   const q = new MoveQueue(sim);
-  q.join('a');
+  q.join('a', local);
   sim.advance(2);
   return { sim, q, a };
 }
@@ -43,8 +43,8 @@ function report(seq: number, epoch: number, x: number, sim: Simulation): MoveRep
 }
 
 /** One server tick as ServerHost runs it: the queue hands over, then the simulation ticks. */
-function tick(sim: Simulation, q: MoveQueue): void {
-  q.beforeTick();
+function tick(sim: Simulation, q: MoveQueue, roomOpen = false): void {
+  q.beforeTick(roomOpen);
   sim.tick();
 }
 
@@ -194,6 +194,33 @@ describe('the movement report queue (package 6)', () => {
     for (let i = 0; i < STEER_TIMEOUT_TICKS - 1; i++) tick(sim, q);
     expect(a.player.steeringShipId).toBe(ship.id);
     tick(sim, q);
+    expect(a.player.steeringShipId).toBe(0);
+    expect(ship.throttle).toBe(0);
+    expect(a.takeCorrection()?.cause).toBe('unseat:timeout');
+  });
+
+  it("the host's own page keeps the wheel through a silence while the room is closed; with the room open it lets go like anyone", () => {
+    const { sim, q, a } = world(true);
+    for (let x = 3; x <= 6; x++) for (let z = 3; z <= 6; z++) sim.world.setCell(x, TOP, z, makeCell(B.PLANKS_OAK));
+    sim.world.setCell(4, TOP + 1, 4, makeCell(B.HELM, facingState(NZ)));
+    const res = sim.structures.assembleShip(4, TOP + 1, 4);
+    if (!res.ok) throw new Error(res.reason);
+    const ship = res.structure;
+    expect(sim.entities.startSteering(a.player, ship, 4, TOP + 1, 4)).toBe(true);
+    a.takeCorrection();
+    const e = a.player.remote!.epoch;
+    for (let s = 1; s <= 5; s++) {
+      const r = report(s, e, 0.5, sim);
+      r.forward = 1;
+      q.receive('a', r);
+      tick(sim, q);
+    }
+    // Single player (room closed): a page that stalls for three times the timeout keeps the wheel.
+    for (let i = 0; i < STEER_TIMEOUT_TICKS * 3; i++) tick(sim, q, false);
+    expect(a.player.steeringShipId).toBe(ship.id);
+    expect(a.takeCorrection()).toBeNull();
+    // The room opens: the silence already counted is enough, the wheel lets go at the next tick.
+    tick(sim, q, true);
     expect(a.player.steeringShipId).toBe(0);
     expect(ship.throttle).toBe(0);
     expect(a.takeCorrection()?.cause).toBe('unseat:timeout');

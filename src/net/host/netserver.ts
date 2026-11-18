@@ -82,14 +82,14 @@ import { RELIABLE, UNRELIABLE, type Channel, type Transport } from '../transport
  * tick (in arrival order, unfiltered), then beforeTick once. moveAck feeds the Replicator.
  */
 export interface MoveSink {
-  /** `key` joined the simulation (client-driven) for a new connection. */
-  join(key: PlayerKey): void;
+  /** `key` joined the simulation (client-driven) for a new connection; `local` marks the host's own page. */
+  join(key: PlayerKey, local: boolean): void;
   /** `key` is about to leave the simulation (its queue goes). */
   leave(key: PlayerKey): void;
   /** A movement report that arrived on key's current connection. */
   receive(key: PlayerKey, report: NetMoveReport): void;
-  /** Start of the tick, after every receive: hand the reports to the simulation. */
-  beforeTick(): void;
+  /** Start of the tick, after every receive: hand the reports to the simulation. `roomOpen`: guests may be in the world. */
+  beforeTick(roomOpen: boolean): void;
   /** Seq of the last report package 2 accepted in this tick for `key`, or null (ClientFeed.moveAck). */
   moveAck(key: PlayerKey): number | null;
 }
@@ -255,7 +255,7 @@ export class NetServer {
         }
       }
     }
-    moves.beforeTick();
+    moves.beforeTick(this.roomOpenValue);
     intents.beforeTick();
   }
 
@@ -382,7 +382,7 @@ export class NetServer {
     });
     c.state = 'joined';
     this.inSim.add(key);
-    this.o.moves.join(key);
+    this.o.moves.join(key, c.local);
     this.o.intents.join(key, c.local);
   }
 
