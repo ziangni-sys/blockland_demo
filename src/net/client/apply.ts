@@ -2,13 +2,20 @@
  * The client's copy of the server state as plain data (docs/NETCODE.md sections 5 to 11), and the
  * pure step that applies one TickBatch to it.
  *
- * ReplicaState holds a voxel World (the subscribed columns), the world glue, the structures (Ship
- * and Rotor data objects whose grids are nested like the server's: a rotor on a ship has the
- * ship's grid as parent) and the entities, each with its latest pose and the tick of that pose,
- * the private state, the player table and the globals. It runs no rules: no StructureManager, no
- * fluids, no block updates, no entity logic, no clock, no light, no sample rings (package 5 adds
- * those on top of it). Cells are written with World.setCell / StructureGrid.setCell, so whatever
- * listens to those grids (the light engine, meshing) sees every change.
+ * ReplicaState holds the subscribed columns (ReplicaColumns: a voxel World and the pristine
+ * columns being generated, chunks.ts), the world glue, the structures (Ship and Rotor data objects
+ * whose grids are nested like the server's: a rotor on a ship has the ship's grid as parent) and
+ * the entities, each with its latest pose and the tick of that pose, the private state, the player
+ * table and the globals. It runs no rules: no StructureManager, no fluids, no block updates, no
+ * entity logic, no clock, no light, no sample rings (replica.ts adds those on top of it). Cells are
+ * written with World.setCell / StructureGrid.setCell, so whatever listens to those grids (the light
+ * engine, meshing) sees every change.
+ *
+ * POSES. The latest pose the server gave a structure is ReplicaStructure.pose (parent space, with
+ * its tick), not the grid's: the grid's position and rotation are the DISPLAY pose, which a spawn
+ * initialises to the record's pose and which replica.ts sets for every frame and client step (the
+ * renderTick of the ships, the rotorTick of the rotors). The grid's pivot is data (it follows the
+ * records and pivot deltas).
  *
  * applyBatch applies the sections in their order (section 5). Poses carried by the batch (spawn
  * records, rests, final entity states) and by Samples (applySamples) become the latest pose when
@@ -32,20 +39,22 @@
  *    grows with the coordinates in the input);
  *  - non-finite pivots, positions, rotations, rotor and helm fields (the codec passes f64 / f32
  *    through as they are).
- * Pristine snapshots are generated synchronously through the PristineSource (package 5 queues
- * them on a ChunkSource instead).
+ * The cells of the chunk sections go to ReplicaColumns (chunks.ts generates pristine columns and
+ * queues the deltas that arrive meanwhile); "the replica has a column" means it is subscribed.
  */
 import { AIR } from '../../blocks/cell';
 import { CHUNK_SIZE, WORLD_HEIGHT } from '../../core/constants';
 import type { Dir } from '../../core/dirs';
-import { qrotate, vec3, wrapAngle, type Quat, type Vec3 } from '../../core/math';
+import { qfromAxisAngle, qmul, qrotate, quat, vec3, wrapAngle, type Quat, type Vec3 } from '../../core/math';
 import { GlueStore } from '../../structures/glue';
+import { axisVector } from '../../structures/rotor';
 import { Rotor, Ship } from '../../structures/structure';
-import { Chunk, chunkKey } from '../../voxel/chunk';
+import { chunkKey } from '../../voxel/chunk';
 import type { StructureGrid } from '../../voxel/sgrid';
-import { World } from '../../voxel/world';
+import type { World } from '../../voxel/world';
 import { MAX_STRUCTURE_BOX_CELLS } from '../protocol';
 import type {
+  Cell,
   EntityKind,
   EntityMotion,
   EntityRecord,
@@ -58,6 +67,7 @@ import type {
   PlayerEntry,
   PlayerHeld,
   PlayerLook,
+  Pose,
   PreviewView,
   PrivateEvent,
   PrivateState,
@@ -75,15 +85,28 @@ export class ReplicaError extends Error {
   override readonly name: string = 'ReplicaError';
 }
 
-/** Builds the cells of a pristine column (the generator named by Welcome's GeneratorSpec). */
-export interface PristineSource {
-  generate(cx: number, cz: number): Uint16Array;
+/**
+ * The subscribed columns and their cells (chunks.ts ClientChunks): applyBatch hands it the cell
+ * parts of the chunk sections, in order, and checks references against has().
+ */
+export interface ReplicaColumns {
+  /** The world the columns are inserted into once their cells are complete. */
+  readonly world: World;
+  /** The column is subscribed (its snapshot applied, perhaps still generating). */
+  has(cx: number, cz: number): boolean;
+  unsubscribe(cx: number, cz: number): void;
+  /** A snapshot replaces the column: 'pristine' or its cells (handed over). */
+  snapshot(cx: number, cz: number, cells: 'pristine' | Uint16Array): void;
+  /** The cells of a delta of a subscribed column: [index, cell], index ascending. */
+  delta(cx: number, cz: number, cells: ReadonlyArray<readonly [number, Cell]>): void;
 }
 
 export interface ReplicaStructure {
-  /** Data only: cells, glue, pose (grid.position / rotation is the latest pose), fields. */
+  /** Data: cells, glue, pivot, fields; the grid's position / rotation are the display pose. */
   readonly structure: Ship | Rotor;
-  /** Tick of the pose held in the grid. */
+  /** The latest pose the server gave (parent space; rotors: the rotation at rotorTick). */
+  readonly pose: Pose;
+  /** Tick of `pose`. */
   poseTick: number;
   /** Tick of the rotor state (angle, angularSpeed, sails, frozen). */
   rotorTick: number;
@@ -134,7 +157,7 @@ export interface ReplicaPrivate {
 }
 
 export class ReplicaState {
-  readonly world = new World();
+  readonly world: World;
   readonly worldGlue = new GlueStore();
   readonly structures = new Map<number, ReplicaStructure>();
   readonly entities = new Map<number, ReplicaEntity>();
@@ -164,7 +187,9 @@ export class ReplicaState {
   ready = false;
   roomOpen = false;
 
-  constructor(readonly source: PristineSource) {}
+  constructor(readonly columns: ReplicaColumns) {
+    this.world = columns.world;
+  }
 }
 
 /** Take the identity, world clock, rules and player table from Welcome (before the first batch). */
@@ -183,21 +208,19 @@ export function applyWelcome(state: ReplicaState, m: WelcomeMsg): void {
 export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
   if (b.tick <= state.tick) throw new ReplicaError(`batch of tick ${b.tick} after tick ${state.tick}`);
   state.tick = b.tick;
-  const world = state.world;
 
+  const cols = state.columns;
   // 0. unsubscribe
   for (const { cx, cz } of b.unsubscribe) {
-    if (world.getChunk(cx, cz) === undefined) throw new ReplicaError(`unsubscribe from column ${cx},${cz} the replica does not have`);
-    world.removeChunk(cx, cz);
+    if (!cols.has(cx, cz)) throw new ReplicaError(`unsubscribe from column ${cx},${cz} the replica does not have`);
+    cols.unsubscribe(cx, cz);
     clearColumnGlue(state.worldGlue, cx, cz);
   }
   // 1. snapshots: replace the column's cells and glue
   const columns = new Set<number>();
   for (const s of b.snapshots) {
     once(columns, chunkKey(s.cx, s.cz), `snapshot of column ${s.cx},${s.cz}`);
-    const cells = s.cells === 'pristine' ? state.source.generate(s.cx, s.cz) : s.cells.slice();
-    world.removeChunk(s.cx, s.cz);
-    world.addChunk(new Chunk(s.cx, s.cz, cells));
+    cols.snapshot(s.cx, s.cz, s.cells === 'pristine' ? 'pristine' : s.cells.slice());
     clearColumnGlue(state.worldGlue, s.cx, s.cz);
     for (const face of s.glue) setColumnGlue(state.worldGlue, s.cx, s.cz, face, true);
   }
@@ -205,10 +228,8 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
   columns.clear();
   for (const d of b.chunkDeltas) {
     once(columns, chunkKey(d.cx, d.cz), `delta of column ${d.cx},${d.cz}`);
-    if (world.getChunk(d.cx, d.cz) === undefined) throw new ReplicaError(`delta for column ${d.cx},${d.cz} the replica does not have`);
-    const x0 = d.cx * CHUNK_SIZE;
-    const z0 = d.cz * CHUNK_SIZE;
-    for (const [i, cell] of d.cells) world.setCell(x0 + (i & 15), i >> 8, z0 + ((i >> 4) & 15), cell);
+    if (!cols.has(d.cx, d.cz)) throw new ReplicaError(`delta for column ${d.cx},${d.cz} the replica does not have`);
+    if (d.cells.length > 0) cols.delta(d.cx, d.cz, d.cells);
     for (const [face, added] of d.glue) setColumnGlue(state.worldGlue, d.cx, d.cz, face, added);
   }
   // 3. structure removals (children before parents; no cascade)
@@ -249,10 +270,11 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
       finiteVec(d.pivot, `pivot of structure ${d.id}`);
       if (rs.poseTick < b.tick) {
         // The held pose used the old pivot: same cells, new reference point.
-        const off = qrotate(g.rotation, vec3(d.pivot.x - g.pivot.x, d.pivot.y - g.pivot.y, d.pivot.z - g.pivot.z));
-        g.position.x += off.x;
-        g.position.y += off.y;
-        g.position.z += off.z;
+        const pose = rs.pose;
+        const off = qrotate(pose.rot, vec3(d.pivot.x - g.pivot.x, d.pivot.y - g.pivot.y, d.pivot.z - g.pivot.z));
+        pose.pos.x += off.x;
+        pose.pos.y += off.y;
+        pose.pos.z += off.z;
       }
       g.pivot.x = d.pivot.x;
       g.pivot.y = d.pivot.y;
@@ -283,6 +305,7 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
         s.sails = d.rotor.sails;
         s.frozen = d.rotor.frozen;
         rs.rotorTick = b.tick;
+        rotorRotation(s, rs.pose.rot);
       }
     }
   }
@@ -292,7 +315,7 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
     once(ids, r.id, `rest of structure ${r.id}`);
     const rs = needStructure(state, r.id);
     if (!(rs.structure instanceof Ship)) throw new ReplicaError(`rest of rotor ${r.id} (only ships have poses)`);
-    setPose(rs.structure.grid, r.pose.pos, r.pose.rot);
+    setPose(rs.pose, r.pose);
     rs.poseTick = b.tick;
   }
   // 7. entity despawns
@@ -353,7 +376,7 @@ export function applySamples(state: ReplicaState, m: SamplesMsg): void {
     if (rs === undefined) continue;
     if (!(rs.structure instanceof Ship)) throw new ReplicaError(`ship sample of rotor ${s.id}`);
     if (m.tick < rs.poseTick) continue;
-    setPose(rs.structure.grid, s.pose.pos, s.pose.rot);
+    setPose(rs.pose, s.pose);
     rs.poseTick = m.tick;
   }
   for (const s of m.entities) {
@@ -478,13 +501,33 @@ function checkDeltaBox(g: StructureGrid, cells: ReadonlyArray<readonly [number, 
   if (!boxFits(maxX - minX + 1, maxY - minY + 1, maxZ - minZ + 1)) throw new ReplicaError(`delta makes structure ${id}'s box larger than ${MAX_STRUCTURE_BOX_CELLS} cells`);
 }
 
-function setPose(g: StructureGrid, pos: Vec3, rot: Quat): void {
-  g.setPoseImmediate(pos, rot);
+function setPose(out: Pose, p: Pose): void {
+  out.pos.x = p.pos.x;
+  out.pos.y = p.pos.y;
+  out.pos.z = p.pos.z;
+  out.rot.x = p.rot.x;
+  out.rot.y = p.rot.y;
+  out.rot.z = p.rot.z;
+  out.rot.w = p.rot.w;
+}
+
+/** A rotor's rotation in its parent at its state's angle: baseRotation * axisAngle(axis, angle). */
+function rotorRotation(r: Rotor, out: Quat): void {
+  qmul(r.baseRotation, qfromAxisAngle(axisVector(r.axis), r.angle), out);
 }
 
 /** Heading of a rotation about +Y (structures/entities: headingOf). */
 function heading(q: Quat): number {
   return wrapAngle(2 * Math.atan2(q.y, q.w));
+}
+
+/** Local point -> parent space with a pose (StructureGrid.toParent with the latest pose). */
+function toParent(pivot: Vec3, pose: Pose, p: Vec3): Vec3 {
+  const out = qrotate(pose.rot, vec3(p.x - pivot.x, p.y - pivot.y, p.z - pivot.z));
+  out.x += pose.pos.x;
+  out.y += pose.pos.y;
+  out.z += pose.pos.z;
+  return out;
 }
 
 /** Remove one listed structure; its rotors that this batch also removes must have come first. */
@@ -495,14 +538,17 @@ function removeStructure(state: ReplicaState, id: number, removing: ReadonlySet<
     if (removing.has(child.id)) throw new ReplicaError(`structure ${id} removed before its rotor ${child.id}`);
   }
   const parentId = s.parent?.id ?? 0;
-  // Carried entities move into the parent's frame at the structure's latest pose.
+  // Carried entities move into the parent's frame at the structure's latest pose; their yaw, kept
+  // relative to the carrier's world heading, becomes relative to the parent's (section 18).
+  const parentRot = parentId !== 0 ? needStructure(state, parentId).pose.rot : quat();
+  const turn = heading(qmul(parentRot, rs.pose.rot)) - heading(parentRot);
   for (const e of state.entities.values()) {
     if (e.carrierId !== id) continue;
-    const p = s.grid.toParent(e.pos);
+    const p = toParent(s.grid.pivot, rs.pose, e.pos);
     e.pos.x = p.x;
     e.pos.y = p.y;
     e.pos.z = p.z;
-    e.yaw = wrapAngle(e.yaw + heading(s.grid.rotation));
+    e.yaw = wrapAngle(e.yaw + turn);
     e.carrierId = parentId;
   }
   detachRotor(s);
@@ -542,7 +588,12 @@ function spawnStructure(state: ReplicaState, rec: StructureRecord, tick: number)
   let rs = state.structures.get(rec.id);
   if (rs !== undefined && rs.structure.kind !== rec.kind) throw new ReplicaError(`structure ${rec.id} changed kind`);
   if (rs === undefined) {
-    rs = { structure: rec.kind === 'ship' ? new Ship(rec.id, parentGrid) : new Rotor(rec.id, parentGrid), poseTick: tick, rotorTick: tick };
+    rs = {
+      structure: rec.kind === 'ship' ? new Ship(rec.id, parentGrid) : new Rotor(rec.id, parentGrid),
+      pose: { pos: vec3(), rot: quat() },
+      poseTick: tick,
+      rotorTick: tick,
+    };
     state.structures.set(rec.id, rs);
   }
   rs.poseTick = tick;
@@ -555,7 +606,8 @@ function spawnStructure(state: ReplicaState, rec: StructureRecord, tick: number)
   g.pivot.x = rec.pivot.x;
   g.pivot.y = rec.pivot.y;
   g.pivot.z = rec.pivot.z;
-  setPose(g, rec.position, rec.rotation);
+  setPose(rs.pose, { pos: rec.position, rot: rec.rotation });
+  g.setPoseImmediate(rec.position, rec.rotation);
   if (s instanceof Rotor && rec.kind === 'rotor') {
     if (s.parent !== parent) {
       detachRotor(s);

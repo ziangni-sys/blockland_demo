@@ -5,11 +5,8 @@
  */
 import { SAVE_VERSION, isNewerSave, isOlderSave, type WorldMeta } from '../save/codec';
 import { SaveStorageError, type SaveStorage } from '../save/storage';
-import type { SaveBundle } from '../sim/persist';
+import { SAVE_BLOBS, type SaveBundle } from '../sim/persist';
 import type { GameMode, WorldSummary } from '../ui/model';
-
-/** Blob names written by exportSave (src/sim/persist.ts). */
-export const SAVE_BLOBS = ['sim', 'ticks', 'glue', 'structures', 'entities', 'players'] as const;
 
 export function toSummary(m: WorldMeta): WorldSummary {
   return { id: m.id, name: m.name, seed: m.seed, mode: m.mode, lastPlayed: m.lastPlayed };

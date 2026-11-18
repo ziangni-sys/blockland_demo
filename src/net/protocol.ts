@@ -11,13 +11,15 @@
  * "Only sent when it changed" fields are optional (`?`): absent means unchanged. Lists of a
  * TickBatch are always present (empty = nothing in that section).
  *
- * Imports: core, blocks, save/bytes, and types from sim/view.ts only (NETCODE section 15).
+ * Imports: core, blocks, save/bytes, and types from sim/view.ts and worldgen/generator.ts only
+ * (NETCODE section 15).
  */
 import { ROTOR_MAX_CELLS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import type { Axis, Dir } from '../core/dirs';
 import type { Quat, Vec3 } from '../core/math';
 import type { ItemStack } from '../blocks/items';
 import type { Message } from '../sim/view';
+import type { GeneratorSpec } from '../worldgen/generator';
 import { RELIABLE, UNRELIABLE, type Channel } from './transport';
 
 // ====================================================================== build identity
@@ -259,11 +261,11 @@ export interface PlayerEntry {
   host: boolean;
 }
 
-/** How a client builds pristine chunks itself (section 3; the generator classes give it). */
-export type GeneratorSpec =
-  | { kind: 'terrain'; seed: number }
-  | { kind: 'flat'; seed: number; layers: Array<{ cell: Cell; thickness: number }> }
-  | { kind: 'void'; seed: number };
+/**
+ * How a client builds pristine chunks itself (section 3). Defined with the generators
+ * (worldgen/generator.ts: ChunkGenerator.spec(), generatorFromSpec()).
+ */
+export type { GeneratorSpec };
 
 // ====================================================================== movement (package 2 on the wire)
 
@@ -473,6 +475,12 @@ export type ClientMessage =
   | RespawnMsg
   | SetViewRadiusMsg
   | HostCommandMsg;
+
+/**
+ * The messages that go to the intents (package 7, net/server/intents.ts): everything a client
+ * sends after Hello except Bye, Ping and movement reports.
+ */
+export type IntentMessage = Exclude<ClientMessage, HelloMsg | ByeMsg | PingMsg | MoveReportMsg>;
 
 // ====================================================================== server -> client
 

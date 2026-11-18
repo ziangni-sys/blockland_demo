@@ -172,8 +172,6 @@ export interface ClientView {
 
 // ====================================================================== constants (completed here)
 
-/** TPS goes into the globals at most this often (section 4: once a second). */
-const TPS_REPORT_TICKS = 20;
 /** At most this many Samples messages per client per tick; the rest wait a tick (section 13). */
 const SAMPLE_MESSAGES_PER_TICK = 4;
 /** Upper bounds of one ship / entity sample's encoded size, for choosing what fits the messages above. */
@@ -406,7 +404,6 @@ interface Client {
   rules: string;
   readonly players: Map<number, PlayerEntry>;
   tps: number | null;
-  tpsTick: number;
   roomOpen: boolean;
   readonly stats: ClientStats;
 }
@@ -490,7 +487,6 @@ export class Replicator {
       rules: rulesKey(this.sim.rules),
       players: new Map(),
       tps: null,
-      tpsTick: -Infinity,
       roomOpen: this.roomOpenValue,
       stats: { batches: 0, reliableBytes: 0, sampleMessages: 0, sampleBytes: 0, sectionBytes: new Array<number>(13).fill(0), largestBatch: 0, lastBatch: 0 },
     };
@@ -509,7 +505,10 @@ export class Replicator {
     if (c !== undefined) c.viewRadius = clampRadius(r);
   }
 
-  /** The measured ticks per second (section 4); reported in the globals when it changes, at most once a second. */
+  /**
+   * The measured ticks per second (section 4); every change goes into the next batch's globals.
+   * ServerHost, which has the wall clock, gives a new value at most once a second.
+   */
   set tps(v: number) {
     this.tpsValue = Math.round(v * 10) / 10;
   }
@@ -1446,9 +1445,8 @@ export class Replicator {
       c.players.delete(id);
     }
     if (ops.length > 0) g.players = ops;
-    if (this.tpsValue !== null && this.tpsValue !== c.tps && tick - c.tpsTick >= TPS_REPORT_TICKS) {
+    if (this.tpsValue !== null && this.tpsValue !== c.tps) {
       c.tps = this.tpsValue;
-      c.tpsTick = tick;
       g.tps = this.tpsValue;
     }
     if (this.roomOpenValue !== c.roomOpen) {

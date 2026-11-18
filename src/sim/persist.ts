@@ -32,6 +32,9 @@ export interface SaveBundle {
   blobs: Array<[string, Uint8Array]>;
 }
 
+/** Names of the blobs exportSave writes (a loader reads these). */
+export const SAVE_BLOBS: readonly string[] = Object.freeze(['sim', 'ticks', 'glue', 'structures', 'entities', 'players']);
+
 /** Layout of the 'sim' blob: time, rng, time-of-day offset, world rules. Only this version is read. */
 const SIM_BLOB_VERSION = 3;
 

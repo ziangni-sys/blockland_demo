@@ -132,7 +132,7 @@ export function serverDigest(ctx: DigestContext, sim: Simulation, scope: Scope, 
   for (const id of scope.structures) {
     const s = sim.structures.get(id);
     if (s === undefined) continue;
-    d.structures.set(id, structureDigest(s, s instanceof Rotor ? s.angle : 0));
+    d.structures.set(id, structureDigest(s, s instanceof Rotor ? s.angle : 0, s.grid.position, s.grid.rotation));
   }
   for (const id of scope.entities) {
     const e = sim.entities.get(id);
@@ -152,7 +152,7 @@ export function replicaDigest(state: ReplicaState, columns?: ReadonlySet<number>
   for (const [id, rs] of state.structures) {
     const s = rs.structure;
     const angle = s instanceof Rotor ? rotorAngleAt(s, state.tick - rs.rotorTick) : 0;
-    d.structures.set(id, structureDigest(s, angle));
+    d.structures.set(id, structureDigest(s, angle, rs.pose.pos, rs.pose.rot));
   }
   for (const [id, e] of state.entities) {
     let fields = '';
@@ -185,7 +185,8 @@ function rotorAngleAt(r: Rotor, ticks: number): number {
   return scratch.angle;
 }
 
-function structureDigest(s: Structure, angle: number): StructureDigest {
+/** `pos` / `rot`: the pose to compare (the server's grid; the replica's latest pose from the server). */
+function structureDigest(s: Structure, angle: number, pos: Vec3, rot: Quat): StructureDigest {
   const g = s.grid;
   const b = g.cellBounds();
   const box = b === null ? 'empty' : `${b.minX},${b.minY},${b.minZ},${b.maxX},${b.maxY},${b.maxZ}`;
@@ -209,8 +210,8 @@ function structureDigest(s: Structure, angle: number): StructureDigest {
     glue: hashInts(s.glue.toArray()),
     fields,
     pivot: { ...g.pivot },
-    pos: { ...g.position },
-    rot: { ...g.rotation },
+    pos: { ...pos },
+    rot: { ...rot },
     angle,
   };
 }
