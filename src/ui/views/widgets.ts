@@ -354,3 +354,105 @@ export class SlotWidget {
     return this.item;
   }
 }
+
+// ------------------------------------------------------------------ copyable text
+
+export const ICON_COPY = '<svg viewBox="0 0 24 24"><path d="M9 9h10v11H9zM5 15V4h10"/></svg>';
+export const ICON_LINK = '<svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.2 1.2M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.2-1.2"/></svg>';
+export const ICON_PEOPLE = '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.6-3.3 2.8-5 5.5-5s4.9 1.7 5.5 5"/><circle cx="17" cy="9" r="2.4"/><path d="M15.5 14.2c2.4-.4 4.4 1 5 4.3"/></svg>';
+export const ICON_LEAVE = '<svg viewBox="0 0 24 24"><path d="M14 5h5v14h-5M10 8l-4 4 4 4M6 12h10"/></svg>';
+
+/**
+ * Put `text` on the clipboard: the async Clipboard API, else the selected `field` and the old
+ * copy command (sandboxed frames without clipboard permission). Resolves with whether it worked.
+ */
+export async function copyToClipboard(doc: Document, text: string, field: HTMLInputElement | HTMLTextAreaElement | null): Promise<boolean> {
+  const nav = doc.defaultView?.navigator;
+  try {
+    if (nav?.clipboard) {
+      await nav.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to the selection
+  }
+  if (!field) return false;
+  try {
+    field.focus();
+    field.select();
+    const ok = doc.execCommand('copy');
+    // Leave the text readable from the top, not selected and scrolled to its end.
+    field.setSelectionRange?.(0, 0);
+    field.scrollTop = 0;
+    field.blur();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A read-only value with a Copy button (an invitation link, a room code, an answer code, the
+ * diagnostics). The value stays selectable, so it can also be copied by hand; the button says
+ * "Copied" for a moment after it worked.
+ */
+export class CopyField {
+  readonly el: HTMLElement;
+  readonly field: HTMLInputElement | HTMLTextAreaElement;
+  private readonly btn: HTMLButtonElement;
+  private readonly label: HTMLElement;
+  private value = '';
+  private timer = 0;
+
+  constructor(
+    private readonly ctx: UiContext,
+    opts: { multiline?: boolean; mono?: boolean; cls?: string; labelKey: StringKey; act: string },
+  ) {
+    const d = ctx.doc;
+    const id = ctx.id('copy');
+    this.field = opts.multiline
+      ? h(d, 'textarea', `bl-input bl-copy-text${opts.mono ? ' bl-mono' : ''}`, { id, readonly: true, rows: 3, spellcheck: 'false' })
+      : h(d, 'input', `bl-input${opts.mono ? ' bl-mono' : ''}`, { id, type: 'text', readonly: true, spellcheck: 'false' });
+    ctx.attr(this.field, 'aria-label', opts.labelKey);
+    this.field.addEventListener('focus', () => this.field.select());
+    this.label = ctx.text(h(d, 'span', 'bl-btn-label'), 'room.copy');
+    this.btn = h(d, 'button', 'bl-btn bl-copy-btn', { type: 'button', 'data-act': opts.act }, [svg(d, ICON_COPY), this.label]);
+    this.btn.addEventListener('click', () => void this.copy());
+    this.el = h(d, 'div', `bl-copy${opts.multiline ? ' bl-copy--multi' : ''}${opts.cls ? ` ${opts.cls}` : ''}`, null, [this.field, this.btn]);
+  }
+
+  set(value: string): void {
+    if (value === this.value) return;
+    this.value = value;
+    this.field.value = value;
+    this.flash(false);
+  }
+
+  get(): string {
+    return this.value;
+  }
+
+  async copy(): Promise<boolean> {
+    const ok = await copyToClipboard(this.ctx.doc, this.value, this.field);
+    if (ok) this.flash(true);
+    return ok;
+  }
+
+  private flash(on: boolean): void {
+    const win = this.ctx.doc.defaultView;
+    if (this.timer && win) win.clearTimeout(this.timer);
+    this.timer = 0;
+    this.label.textContent = this.ctx.t(on ? 'room.copied' : 'room.copy');
+    this.btn.classList.toggle('is-done', on);
+    if (on && win) this.timer = win.setTimeout(() => this.flash(false), 1600);
+  }
+
+  relocalize(): void {
+    this.flash(false);
+  }
+
+  dispose(): void {
+    const win = this.ctx.doc.defaultView;
+    if (this.timer && win) win.clearTimeout(this.timer);
+  }
+}

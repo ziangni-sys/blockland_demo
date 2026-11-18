@@ -17,7 +17,10 @@ import { InventoryView } from './views/inventory';
 import { HudLayoutController } from './views/layout';
 import { LoadingView } from './views/loading';
 import { MainMenuView } from './views/mainMenu';
+import { JoinScreenView } from './views/join';
+import { NameView } from './views/name';
 import { PauseView } from './views/pause';
+import { RoomScreenView } from './views/room';
 import type { ScreenView } from './views/screen';
 import { SettingsView } from './views/settings';
 import { ToastStack } from './views/toasts';
@@ -28,6 +31,10 @@ const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'pass
 export interface UiOptions {
   /** RGBA pixels (size*size*4, row 0 = top) for an item icon, or null for the placeholder. */
   iconProvider?: IconProvider;
+  /** Whether a text is an acceptable player name (the client's rule; default: 1..24 characters once trimmed). */
+  nameOk?: (text: string) => boolean;
+  /** Whether a text is something to join: a link, a room code or an invitation code (the client's rule; default: not empty). */
+  canJoin?: (text: string) => boolean;
 }
 
 type ModalScreen = Exclude<Screen, 'none'>;
@@ -40,7 +47,7 @@ function iconSizeFor(dpr: number): number {
 
 /** Screens shown over a running world (the HUD and debug overlay stay mounted beneath). */
 function isInGame(s: UiState): boolean {
-  if (s.screen === 'mainMenu' || s.screen === 'loading') return false;
+  if (s.screen === 'mainMenu' || s.screen === 'loading' || s.screen === 'join' || s.screen === 'name') return false;
   if (s.screen === 'settings') return s.settingsReturn !== 'mainMenu';
   return true;
 }
@@ -96,6 +103,7 @@ export class UiRoot implements UiHandle {
     const iconSize = iconSizeFor(win ? win.devicePixelRatio : 1);
     this.ctx = new UiContext(doc, actions, new IconCache(doc, opts.iconProvider), iconSize, reduced);
 
+    const nameOk = opts.nameOk ?? ((t: string) => [...t.trim()].length >= 1 && [...t.trim()].length <= 24);
     this.el = h(doc, 'div', 'bl-ui', { 'data-screen': '', 'data-ingame': '0', lang: 'zh-CN' });
     this.hud = new Hud(this.ctx);
     this.toasts = new ToastStack(this.ctx);
@@ -105,8 +113,11 @@ export class UiRoot implements UiHandle {
       loading: new LoadingView(this.ctx),
       pause: new PauseView(this.ctx),
       inventory: this.inventory,
-      settings: new SettingsView(this.ctx),
+      settings: new SettingsView(this.ctx, nameOk),
       death: new DeathView(this.ctx),
+      room: new RoomScreenView(this.ctx),
+      join: new JoinScreenView(this.ctx, opts.canJoin ?? ((t) => t.trim() !== '')),
+      name: new NameView(this.ctx, nameOk),
     };
     const safeProbe = h(doc, 'div', 'bl-safe-probe', { 'aria-hidden': 'true' });
     this.el.prepend(this.hud.el, safeProbe);

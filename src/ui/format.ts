@@ -5,6 +5,14 @@
 import { t } from './i18n';
 import type { Language } from './model';
 
+/**
+ * `text` (a player's name) isolated from the sentence around it (FSI ... PDI): a name in a
+ * right-to-left script, or ending in neutral characters, keeps the sentence's order.
+ */
+export function isolate(text: string): string {
+  return `\u2068${text}\u2069`;
+}
+
 /** U+2212 MINUS SIGN: same width as digits in most fonts, unlike the hyphen. */
 const MINUS = String.fromCharCode(0x2212);
 

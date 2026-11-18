@@ -131,7 +131,10 @@ async function session(build, renderer) {
   }
   const host = await site(build);
   const browser = await chromium.launch(launch);
-  const page = await (await browser.newContext({ viewport: VIEWPORT })).newPage();
+  const context = await browser.newContext({ viewport: VIEWPORT });
+  // The name is asked once on a page that can go online (package 11); this script plays alone.
+  await context.addInitScript(() => localStorage.setItem('playerName', 'Player One'));
+  const page = await context.newPage();
   page.on('console', (m) => m.type() === 'error' && problems.push(`console error: ${m.text()}`));
   page.on('pageerror', (e) => problems.push(`page error: ${e.message}`));
   const G = (fn, arg) => page.evaluate(fn, arg);

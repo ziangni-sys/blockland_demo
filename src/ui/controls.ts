@@ -57,6 +57,7 @@ export const CONTROLS: readonly ControlSection[] = [
       { keys: [k('Esc')], desc: 'ctl.pause' },
       { keys: [k('F5')], desc: 'ctl.view' },
       { keys: [k('F3')], desc: 'ctl.debug' },
+      { keys: [k('Tab')], desc: 'ctl.players' },
     ],
   },
   {

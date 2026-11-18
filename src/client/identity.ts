@@ -12,8 +12,6 @@ import type { KeyValueStore } from './settings';
 
 /** The localStorage key of the identity (and `${PLAYER_KEY_STORAGE}:<slot>` for a slot). */
 export const PLAYER_KEY_STORAGE = 'playerKey';
-/** The name sent in Hello until names can be chosen (package 11). */
-export const DEFAULT_PLAYER_NAME = 'Player';
 /** Slot names: what a person would type in the address, kept short. */
 const SLOT_RE = /^[A-Za-z0-9_-]{1,32}$/;
 const KEY_RE = /^[0-9a-f]{32}$/;

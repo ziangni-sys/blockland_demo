@@ -1,7 +1,7 @@
 /**
  * In-game HUD: crosshair, context hint (with a status notice under it), hotbar with the fading item name, the off-hand slot
  * (left of the hotbar, with its swap key), survival gauges, helm instrument, debug overlay and
- * the click-to-play veil.
+ * the click-to-play veil, and the player list while Tab is held (views/players.ts).
  *
  * Only the hotbar slots are interactive, and only in drag-to-look mode (where clicks reach
  * the DOM); everything else lets pointer events fall through to the 3D view. Where the
@@ -14,6 +14,7 @@ import { h, Retrigger, setHidden, svg, TextSlot } from '../dom';
 import { DebugOverlay } from './debug';
 import { BreathGauge, VitalGauge } from './gauges';
 import { HelmInstrument } from './helm';
+import { PlayerListOverlay } from './players';
 import { SlotWidget } from './widgets';
 
 const CROSSHAIR =
@@ -49,6 +50,7 @@ export class Hud {
   private readonly breath: BreathGauge;
   private readonly helm: HelmInstrument;
   private readonly debug: DebugOverlay;
+  private readonly players: PlayerListOverlay;
   private readonly veilMouse: SVGSVGElement;
   private readonly veilDrag: SVGSVGElement;
   private readonly veilTitle: HTMLElement;
@@ -110,6 +112,7 @@ export class Hud {
 
     this.helm = new HelmInstrument(ctx);
     this.helmEl = this.helm.el;
+    this.players = new PlayerListOverlay(ctx);
 
     this.veilMouse = svg(d, VEIL_MOUSE, 'bl-veil-icon');
     this.veilDrag = svg(d, VEIL_DRAG, 'bl-veil-icon');
@@ -126,6 +129,7 @@ export class Hud {
       this.hintEl,
       this.cluster,
       this.helm.el,
+      this.players.el,
       this.veil,
     ]);
   }
@@ -180,6 +184,7 @@ export class Hud {
     }
 
     this.helm.update(s.helm);
+    this.players.update(s.playerList, s.online);
     this.updateVeil(!s.pointerLocked, s.dragLook);
   }
 

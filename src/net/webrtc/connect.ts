@@ -231,9 +231,13 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
   });
 }
 
-/** A guest's connection to the host of room `code`: rejects with a DialError. */
-export async function joinRoom(signaller: Signaller, code: string, deps: ConnectDeps): Promise<WebRtcTransport> {
+/**
+ * A guest's connection to the host of room `code`: rejects with a DialError. `onDialled` is called
+ * when the signalling found the room and the handshake with the host starts (the page shows the stage).
+ */
+export async function joinRoom(signaller: Signaller, code: string, deps: ConnectDeps, onDialled?: () => void): Promise<WebRtcTransport> {
   const path = await signaller.dial(code);
+  onDialled?.();
   return connectPeer(path, 'guest', signaller.patienceMs, deps);
 }
 

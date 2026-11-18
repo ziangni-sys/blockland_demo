@@ -6,8 +6,9 @@
  * shadow, in the UI's font stack. It is drawn unlit and unfogged (readable at night), depth-tested
  * against everything opaque (hidden behind blocks, ships and bodies) and never writes depth.
  *
- * SIZE. A tag is LABEL_WORLD_HEIGHT blocks tall near the camera and never smaller on screen than
- * LABEL_MIN_PX CSS pixels (labelHeight), so a name stays readable as far as its player can be seen.
+ * SIZE. A tag is LABEL_WORLD_HEIGHT blocks tall, but never smaller on screen than LABEL_MIN_PX CSS
+ * pixels, so a name stays readable as far as its player can be seen, and never larger than
+ * LABEL_MAX_PX, so a player standing a block or two away does not wear a banner (labelHeight).
  *
  * FOG. The tag is not fogged like a surface (it would turn into a sky-coloured smudge); it fades
  * instead, its opacity 1 - the fog factor at its distance (lighting.fogFactor: the distance fog in
@@ -28,6 +29,8 @@ import { createFogParams, fogFactor, type FogParams } from './lighting';
 export const LABEL_WORLD_HEIGHT = 0.3;
 /** A tag is never drawn smaller than this on screen (CSS pixels of the viewport height). */
 export const LABEL_MIN_PX = 15;
+/** Nor larger than this (the pill's height at its raster's nominal size is 25 px). */
+export const LABEL_MAX_PX = 32;
 /** Gap between the top of the head and the bottom of the tag (blocks). */
 export const LABEL_GAP = 0.18;
 /** Render order in the transparent list: after water (0) and the overlays (60+). */
@@ -50,13 +53,13 @@ const BRASS = '#d5a957';
 const TEXT = '#fdf7ea';
 
 /**
- * World height of a tag at `distance` blocks from the camera: LABEL_WORLD_HEIGHT, or more so that
- * it covers at least LABEL_MIN_PX of a viewport `viewportPx` CSS pixels tall with a vertical field
- * of view of `fovDeg` degrees.
+ * World height of a tag at `distance` blocks from the camera: LABEL_WORLD_HEIGHT, held between
+ * LABEL_MIN_PX and LABEL_MAX_PX of a viewport `viewportPx` CSS pixels tall with a vertical field of
+ * view of `fovDeg` degrees.
  */
 export function labelHeight(distance: number, fovDeg: number, viewportPx: number): number {
   const perBlock = viewportPx / (2 * Math.tan((Math.max(1, Math.min(179, fovDeg)) * Math.PI) / 360) * Math.max(1e-3, distance));
-  return Math.max(LABEL_WORLD_HEIGHT, LABEL_MIN_PX / perBlock);
+  return Math.min(LABEL_MAX_PX / perBlock, Math.max(LABEL_WORLD_HEIGHT, LABEL_MIN_PX / perBlock));
 }
 
 /** The text a tag shows: control characters out, at most LABEL_MAX_CHARS code points. */

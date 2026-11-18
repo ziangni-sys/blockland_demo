@@ -70,6 +70,8 @@ const GAME_KEYS = new Set([
   'Escape',
   'F3',
   'F5',
+  // Held: the player list over the HUD (package 11); its default would move focus out of the game.
+  'Tab',
   'Digit1',
   'Digit2',
   'Digit3',

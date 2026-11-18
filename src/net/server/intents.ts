@@ -53,7 +53,9 @@
  * respawn). THE ACK (intentAck, the Replicator's ClientFeed): the highest seq processed, so a batch's
  * inventory is the result of every intent up to its ack (the client's InventoryPredictor replays
  * the rest). HOST COMMANDS: only from the host's connection (NetServer join's `host`); from anyone
- * else a toast 'toast.host.only'. Kick is package 11's: ignored.
+ * else a toast 'toast.host.only'. Kick (package 11) asks NetServer to end that guest's connection
+ * with Kick('kicked') (kicks(), drained after beforeTick): never the host's own player; the
+ * player leaves at the start of the next tick like any ended connection.
  */
 import { ID_MASK } from '../../blocks/cell';
 import { isItem } from '../../blocks/items';
@@ -160,6 +162,8 @@ function heldItem(p: Player): number {
 
 export class IntentQueue {
   private readonly players = new Map<PlayerKey, PlayerIntents>();
+  /** Identities a host command removed in this tick (kicks()). */
+  private kicked: PlayerKey[] = [];
   // Scratch (per instance, ARCHITECTURE rule 5).
   private readonly eye: Vec3 = vec3();
   private readonly local: Vec3 = vec3();
@@ -215,6 +219,12 @@ export class IntentQueue {
 
   intentAck(key: PlayerKey): number | null {
     return this.players.get(key)?.ack ?? null;
+  }
+
+  kicks(): PlayerKey[] {
+    const out = this.kicked;
+    this.kicked = [];
+    return out;
   }
 
   // ------------------------------------------------------------------ queries (tests, debug panel)
@@ -456,9 +466,12 @@ export class IntentQueue {
       case 'give':
         if (isItem(c.item) && c.count >= 1) ctrl.giveItem(c.item, Math.min(c.count, MAX_GIVE));
         return;
-      case 'kick':
-        // Package 11.
+      case 'kick': {
+        const target = sim.players.online().find((o) => o.entityId === c.entityId);
+        if (target === undefined || target.key === ctrl.key || this.players.get(target.key)?.host !== false) return;
+        if (!this.kicked.includes(target.key)) this.kicked.push(target.key);
         return;
+      }
     }
   }
 }
