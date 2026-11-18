@@ -23,6 +23,14 @@
  *    already sent; the far end's onClose fires when it arrives. Nothing is delivered to an end
  *    after it closed or saw the close.
  * LinkConditions objects are read at every send: changing one changes the link from then on.
+ *
+ * SHARED UPLINK (LinkConditions.shared): several links leave one sender through one SharedUplink,
+ * as a room's host page sends to every guest over its own uplink. Every guest's connection is its
+ * own congestion-controlled association, and such flows share a bottleneck about evenly, so the
+ * uplink is modelled as processor sharing: its bandwidth is split evenly between the links that
+ * have bytes waiting, each link's own messages leaving in order. Each message also costs header
+ * bytes per packet (IP, UDP, DTLS, SCTP), which use bandwidth but are not in `bufferedBytes`
+ * (a data channel's bufferedAmount counts payload only).
  */
 import { Rng } from '../core/rng';
 import { DEFAULT_RTO_MS, MAX_RELIABLE_BYTES, MAX_UNRELIABLE_BYTES } from './protocol';
@@ -40,6 +48,11 @@ export interface LinkConditions {
   bandwidthBytesPerSec?: number;
   /** Reliable retransmission timer, ms (default DEFAULT_RTO_MS). */
   rtoMs?: number;
+  /**
+   * The sender's uplink this direction shares with other links (a room's host sending to every
+   * guest); takes the place of bandwidthBytesPerSec.
+   */
+  shared?: SharedUplink;
   /** Seed of this direction's random numbers. */
   seed: number;
 }
@@ -192,8 +205,109 @@ function checkConditions(c: LinkConditions, name: string): void {
     c.loss <= 1 &&
     (c.bandwidthBytesPerSec === undefined || (c.bandwidthBytesPerSec > 0 && Number.isFinite(c.bandwidthBytesPerSec))) &&
     (c.rtoMs === undefined || (c.rtoMs > 0 && Number.isFinite(c.rtoMs))) &&
+    (c.shared === undefined || c.bandwidthBytesPerSec === undefined) &&
     Number.isInteger(c.seed);
-  if (!ok) throw new RangeError(`invalid ${name} link conditions: ${JSON.stringify(c)}`);
+  if (!ok) throw new RangeError(`invalid ${name} link conditions: ${JSON.stringify({ ...c, shared: c.shared?.bytesPerSec })}`);
+}
+
+/** A message waiting in a SharedUplink. */
+interface UplinkItem {
+  readonly channel: Channel;
+  /** Payload bytes (bufferedBytes). */
+  readonly size: number;
+  /** Bytes on the wire, headers included. */
+  readonly wire: number;
+  /** Wire bytes not sent yet. */
+  remaining: number;
+  /** Called when its last byte left. */
+  readonly departed: () => void;
+}
+
+/** Bytes left below this count as sent (floating point rounding of the shares). */
+const UPLINK_EPSILON = 1e-6;
+
+/** One sender's uplink shared by several links (see the file comment, SHARED UPLINK). */
+export class SharedUplink {
+  /** Waiting messages per link, oldest first. */
+  private readonly flows = new Map<object, UplinkItem[]>();
+  private lastUpdate = 0;
+  /** Only the newest scheduled completion check counts. */
+  private generation = 0;
+  /** Wire bytes handed to the uplink so far, headers included. */
+  wireBytes = 0;
+
+  /**
+   * `bytesPerSec` of the uplink; `headerBytes` per packet of at most `packetBytes` payload (a
+   * reliable message longer than a packet goes in several).
+   */
+  constructor(
+    private readonly net: LoopbackNet,
+    readonly bytesPerSec: number,
+    readonly headerBytes = 80,
+    readonly packetBytes = MAX_UNRELIABLE_BYTES,
+  ) {
+    if (!(bytesPerSec > 0 && Number.isFinite(bytesPerSec)) || !(headerBytes >= 0) || !(packetBytes > 0)) {
+      throw new RangeError(`invalid shared uplink: ${bytesPerSec} B/s, ${headerBytes} B per ${packetBytes} B packet`);
+    }
+  }
+
+  /** Queue `size` payload bytes of `flow` on `channel`; `departed` runs when they have left (size 0: when every earlier message of the flow has). */
+  enqueue(flow: object, channel: Channel, size: number, departed: () => void): void {
+    this.advance();
+    const wire = size === 0 ? 0 : size + this.headerBytes * Math.ceil(size / this.packetBytes);
+    let q = this.flows.get(flow);
+    if (q === undefined) {
+      q = [];
+      this.flows.set(flow, q);
+    }
+    q.push({ channel, size, wire, remaining: wire, departed });
+    this.wireBytes += wire;
+    this.complete();
+    this.schedule();
+  }
+
+  /** Payload bytes of `flow` on `channel` that have not left yet. */
+  buffered(flow: object, channel: Channel): number {
+    this.advance();
+    const q = this.flows.get(flow);
+    if (q === undefined) return 0;
+    let total = 0;
+    for (const it of q) if (it.channel === channel && it.wire > 0) total += Math.ceil((it.size * it.remaining) / it.wire);
+    return total;
+  }
+
+  /** Serve every flow with bytes waiting its share of the time since the last update. */
+  private advance(): void {
+    const now = this.net.now;
+    const dt = now - this.lastUpdate;
+    this.lastUpdate = now;
+    if (dt <= 0 || this.flows.size === 0) return;
+    const share = (dt * this.bytesPerSec) / 1000 / this.flows.size;
+    for (const q of this.flows.values()) q[0]!.remaining -= share;
+  }
+
+  /** Every message at the head of its flow whose bytes have all left departs. */
+  private complete(): void {
+    for (const [flow, q] of this.flows) {
+      while (q.length > 0 && q[0]!.remaining <= UPLINK_EPSILON) q.shift()!.departed();
+      if (q.length === 0) this.flows.delete(flow);
+    }
+  }
+
+  /** Check again when the next head message will have left (at the present shares). */
+  private schedule(): void {
+    const gen = ++this.generation;
+    if (this.flows.size === 0) return;
+    let least = Infinity;
+    for (const q of this.flows.values()) least = Math.min(least, q[0]!.remaining);
+    const at = this.net.now + (Math.max(0, least) * this.flows.size * 1000) / this.bytesPerSec;
+    this.net.schedule(at, () => {
+      if (gen !== this.generation) return;
+      this.advance();
+      this.complete();
+      this.schedule();
+    });
+  }
 }
 
 /** A reliable message (or the close marker) waiting for its turn on a link. */
@@ -256,6 +370,8 @@ class Link {
   }
 
   buffered(channel: Channel): number {
+    const shared = this.cond.shared;
+    if (shared !== undefined) return shared.buffered(this, channel);
     const now = this.net.now;
     const q = this.queued;
     let k = 0;
@@ -271,7 +387,13 @@ class Link {
 
   send(channel: Channel, bytes: Uint8Array): void {
     const copy = bytes.slice();
-    const departure = this.depart(channel, copy.length);
+    const shared = this.cond.shared;
+    if (shared !== undefined) shared.enqueue(this, channel, copy.length, () => this.transmit(channel, copy, this.net.now));
+    else this.transmit(channel, copy, this.depart(channel, copy.length));
+  }
+
+  /** A message that left the sender at `departure`: lost, or on its way. */
+  private transmit(channel: Channel, copy: Uint8Array, departure: number): void {
     const latency = this.cond.latencyMs;
     const lost = this.rng.next() < this.cond.loss;
     const arrival = departure + latency + this.rng.next() * this.cond.jitterMs;
@@ -302,7 +424,12 @@ class Link {
   }
 
   close(reason: string): void {
-    const departure = this.depart(RELIABLE, 0);
+    const shared = this.cond.shared;
+    if (shared !== undefined) shared.enqueue(this, RELIABLE, 0, () => this.transmitClose(reason, this.net.now));
+    else this.transmitClose(reason, this.depart(RELIABLE, 0));
+  }
+
+  private transmitClose(reason: string, departure: number): void {
     this.reliable.push({ bytes: null, reason, ready: departure + this.cond.latencyMs });
     this.flush();
   }

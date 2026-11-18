@@ -104,7 +104,7 @@ describe('the server clock (package 8)', () => {
     expect(seen.length).toBeGreaterThan(250); // late wake-ups still tick 20 times a second (drift corrected)
     expect(new Set(seen)).toEqual(new Set([20]));
     expect(globalsTps).toEqual([20]); // the first batch (section 18), never again
-    expect(h.reports.filter((r) => r.type === 'status')).toEqual([{ type: 'status', tps: 20, players: 1 }]);
+    expect(h.reports.filter((r) => r.type === 'status')).toEqual([{ type: 'status', tps: 20, players: 1, guests: [] }]);
   });
 
   it.each([
@@ -133,7 +133,7 @@ describe('the server clock (package 8)', () => {
     const t = h.sim.ticks;
     h.run(5000);
     expect(h.sim.ticks).toBe(t);
-    a.send({ type: 'ping', clientMs: 1 });
+    a.send({ type: 'ping', clientMs: 1, rttMs: 0 });
     h.run(10);
     expect(a.pongs.at(-1)?.tick).toBe(t); // connections are still served
     await h.host.control({ type: 'pause', paused: false });

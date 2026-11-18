@@ -319,8 +319,8 @@ describe('limits are the same on both ends', () => {
   });
 
   it('messages on the wrong channel, unknown ids and the other direction\'s ids are protocol errors', () => {
-    const ping = encodeClientMessage({ type: 'ping', clientMs: 5 });
-    expect(decodeClientMessage(ping, UNRELIABLE)).toEqual({ type: 'ping', clientMs: 5 });
+    const ping = encodeClientMessage({ type: 'ping', clientMs: 5, rttMs: 140 });
+    expect(decodeClientMessage(ping, UNRELIABLE)).toEqual({ type: 'ping', clientMs: 5, rttMs: 140 });
     expect(() => decodeClientMessage(ping, RELIABLE)).toThrow(/wrong channel/);
     expect(() => decodeClientMessage(Uint8Array.of(0x7f), RELIABLE)).toThrow(ProtocolError);
     expect(() => decodeClientMessage(Uint8Array.of(MSG.kick, 1, 0), RELIABLE)).toThrow(ProtocolError);

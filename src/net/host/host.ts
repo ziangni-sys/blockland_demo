@@ -18,8 +18,9 @@
  * own batch. The measured TPS = ticks run in the last 2000 ms of wall time (counting the ticks of
  * the present wake-up; over the tick slots since the clock started while that is shorter), at
  * most TPS (timer lateness would otherwise show 20.5), given to the Replicator (the globals) when
- * it changed, at most once a second of wall time. The page gets `status` (TPS, players) when it
- * changed, at most once a second, and `tickTime` (how long the ticks took) once a second.
+ * it changed, at most once a second of wall time. The page gets `status` (TPS, players, and each
+ * guest's bytes a second, backlog and round trip) when it changed and every second while guests
+ * are in, at most once a second, and `tickTime` (how long the ticks took) once a second.
  * The clock of a new or loaded world starts at the first accepted Hello, so the host's own client
  * joins a loaded world before its first tick (scenario 36: still at the wheel, on the deck).
  * Pause (single player) stops it; it is refused while the room is open, and opening the room
@@ -52,8 +53,8 @@ import { AUTOSAVE_TICKS, MAX_CATCHUP_TICKS } from '../protocol';
 import { IntentQueue } from '../server/intents';
 import { MoveQueue } from '../server/moves';
 import { Replicator } from '../server/replicator';
-import type { Transport } from '../transport';
-import type { CreateOptions, HostToPage, PageToHost } from './control';
+import { RELIABLE, UNRELIABLE, type Transport } from '../transport';
+import type { CreateOptions, GuestTraffic, HostToPage, PageToHost } from './control';
 import { NetServer, type IntentSink, type MoveSink } from './netserver';
 
 /** Milliseconds per tick. */
@@ -172,6 +173,8 @@ export class ServerHost {
   /** The TPS last given to the Replicator, and when. */
   private tpsReported = { at: -Infinity, tps: TPS };
   private lastStatus = { at: -Infinity, tps: -1, players: -1 };
+  /** Bytes sent to each guest by the last status, for its bytes a second. */
+  private guestBytes = new Map<string, number>();
   /** Tick durations since the last tickTime report: count, total and longest ms, and when it went. */
   private tickCost = { at: -Infinity, n: 0, totalMs: 0, maxMs: 0 };
   private sinceSave = 0;
@@ -532,10 +535,31 @@ export class ServerHost {
       this.tickCost = { at: now, n: 0, totalMs: 0, maxMs: 0 };
     }
     const s = this.lastStatus;
-    const players = this.open().net.playerCount;
-    if (now - s.at < STATUS_INTERVAL_MS || (s.tps === this.tpsValue && s.players === players)) return;
+    const w = this.open();
+    const players = w.net.playerCount;
+    const traffic = w.net.traffic().filter((t) => !t.local);
+    if (now - s.at < STATUS_INTERVAL_MS || (s.tps === this.tpsValue && s.players === players && traffic.length === 0)) return;
+    const seconds = (now - s.at) / 1000;
+    const bytes = new Map<string, number>();
+    const guests: GuestTraffic[] = [];
+    for (const t of traffic) {
+      const st = w.replicator.stats(t.key);
+      const ctrl = w.sim.players.get(t.key);
+      if (st === undefined || ctrl === undefined) continue;
+      const total = st.reliableBytes + st.sampleBytes;
+      bytes.set(t.key, total);
+      const before = this.guestBytes.get(t.key);
+      guests.push({
+        entityId: ctrl.entityId,
+        name: t.name,
+        bytesPerSec: before === undefined || !Number.isFinite(seconds) ? 0 : Math.round((total - before) / seconds),
+        backlogBytes: t.transport.bufferedBytes(RELIABLE) + t.transport.bufferedBytes(UNRELIABLE),
+        rttMs: t.rttMs,
+      });
+    }
+    this.guestBytes = bytes;
     this.lastStatus = { at: now, tps: this.tpsValue, players };
-    this.o.report({ type: 'status', tps: this.tpsValue, players });
+    this.o.report({ type: 'status', tps: this.tpsValue, players, guests });
   }
 
   // ------------------------------------------------------------------ saving

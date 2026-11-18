@@ -60,7 +60,7 @@ export function startServerWorker(scope: ServerWorkerScope, deps: ServerWorkerDe
     }
     // The port is wrapped (and so started) only when the connect is carried out: until then it
     // keeps the client's Hello and whatever follows, however long earlier commands take.
-    if (msg.type === 'connect') void host.control({ type: 'connect', port: () => new PortTransport(msg.port as PortLike), local: msg.local });
+    if (msg.type === 'connect') void host.control({ type: 'connect', port: () => new PortTransport(msg.port as PortLike, () => deps.clock.now()), local: msg.local });
     else void host.control(msg);
   };
   return host;

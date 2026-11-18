@@ -40,6 +40,7 @@ import {
   BUILD_ID,
   CONNECTION_TIMEOUT_MS,
   HOST_STALL_MS,
+  MAX_REPORTED_RTT_MS,
   MESSAGE_CHANNEL,
   type ClientMessage,
   type GeneratorSpec,
@@ -258,7 +259,7 @@ export class NetClient {
     }
     if (c !== null && c.welcome !== null && c.transport.open && now - c.lastPingAt >= PING_INTERVAL_MS) {
       c.lastPingAt = now;
-      this.sendOn(c, { type: 'ping', clientMs: Math.floor(now) >>> 0 });
+      this.sendOn(c, { type: 'ping', clientMs: Math.floor(now) >>> 0, rttMs: Math.min(MAX_REPORTED_RTT_MS, Math.round(c.clock.rtt ?? 0)) });
     }
     this.reopen(now);
   }

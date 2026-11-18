@@ -51,12 +51,12 @@ export interface Transport {
   - 可靠通道：不丢、不乱序。按 `loss` 抽中的消息模拟一次 SCTP 重传：送达时间 = min(第 3 条消息的送达时间 + 2 × `latencyMs`, 发出时间 + `rtoMs` + `latencyMs`)，前者是快速重传，后者是重传计时器。“第 3 条消息”是同一方向上在它之后发出、本身没丢的第 3 条消息（两条通道都算），取它在网络上的到达时间（队头阻塞之前的）。重传没有抖动。它挡住后面的可靠消息（队头阻塞）：送达时间 = max(上一条的送达时间, 本条的时间)。
   - 设了 `bandwidthBytesPerSec` 时按字节排队，两条通道共用一个字节队列；丢掉的消息占带宽，重传不占。`bufferedBytes` 反映积压，用来测背压。
 - **WebRTC（工作包 10）必须提供**：同一个 `RTCPeerConnection` 上两条数据通道，`'r'`（`ordered: true`）和 `'u'`（`ordered: false, maxRetransmits: 0`），`binaryType = 'arraybuffer'`；可靠通道按 16 KiB 分片，每片前加一个字节（0 整条、1 首片后跟 u32 总长、2 中间、3 末片），这个格式永远不改（第 3 节）；`bufferedBytes` 就是 `bufferedAmount`；ICE 失败、任一通道关闭都触发 `onClose`。信令放在单独的 `Signaller` 接口后面，不属于 `Transport`。
-- **房间里的积压**：数据通道在房主主线程，Worker 里的 `PortTransport` 看不到它的 `bufferedAmount`，postMessage 也没有背压。所以主线程为每个客人的每条通道，在 `bufferedamountlow` 时和至少每 100 ms 往这个端口回一条 `{kind: 'backlog', channel, bufferedAmount, seen}`（`seen` = 它从这个端口累计收到的这条通道的字节数）。`PortTransport.bufferedBytes` = 最近一次报告的 `bufferedAmount` + （累计发出的 − `seen`），第一次报告之前是 0。本机客户端的端口没有报告，积压是 0。
+- **房间里的积压**：数据通道在房主主线程，Worker 里的 `PortTransport` 看不到它的 `bufferedAmount`，postMessage 也没有背压。所以主线程为每个客人的每条通道，在 `bufferedamountlow` 时和至少每 100 ms 往这个端口回一条 `{kind: 'backlog', channel, bufferedAmount, seen}`（`seen` = 它从这个端口累计收到的这条通道的字节数）。`PortTransport.bufferedBytes` = 最近一次报告的 `bufferedAmount` + （累计发出的 − `seen`） − 这条通道自那次报告以来估计送出的字节（按它前后两次报告之间的送出速度；到达间隔不到 50 ms 的两次报告不用来量速度，见第 18 节“工作包 13”），不小于 0；第一次报告之前是 0。本机客户端的端口没有报告，积压是 0。
 - **端口上的帧**（`host/port.ts`，工作包 10 的转发方照这个说）：数据 `{kind: 'msg', channel, data: ArrayBuffer}`（复制一份后转交）；关闭 `{kind: 'close', reason}`，排在已发的消息之后；转发方回报的积压 `{kind: 'backlog', channel, bufferedAmount, seen}`。
 - **背压**（服务器每个 tick 给每个客户端打包前检查；阈值按“排多久”算，不按字节）：
-  - 每条通道记一个送出速率：（上个 tick 的积压 + 这个 tick 交给 `send` 的 − 现在的积压）/ 50 ms，平滑。
-  - 可以推迟的新兴趣（第 5 节）只在可靠积压 ≤ max(8 KiB, 0.1 秒 × 速率) 时发：校正、方块变化、背包前面最多排约 0.1 秒。必须发的照发。
-  - 不可靠积压 > max(2 KiB, 3 × 上个 tick 的采样字节)：这个 tick 不发采样（过时的位姿没用）。
+  - 每条通道记一个送出速率：（上个 tick 的积压 + 这个 tick 交给 `send` 的 − 现在的积压）/ 50 ms，平滑；通道现在是空的时，不低于这个 tick 的值（链路还有余量，线每个 tick 翻一倍，像慢启动）。
+  - **线** = max(`RELIABLE_BACKLOG_FLOOR` = 2 KiB, 0.1 秒 × 可靠速率)。可以推迟的新兴趣（第 5 节）把可靠积压填到线为止，一个 tick 至多 `SNAPSHOT_BUDGET`：校正、方块变化、背包前面最多排约 0.1 秒加一个物件。比剩下的预算长的物件等下一个 tick；积压不到半个下限时，一个 tick 的第一个物件不管多长照发（大结构体和快照不会饿死）。必须发的照发。房主自己的连接（同一台机器里的端口，没有要保护的链路，也不报积压）不用线：每个 tick 发满 `SNAPSHOT_BUDGET`，越过预算的那个物件也发，采样也不按下面的量限。
+  - 采样：不可靠积压 > max(`SAMPLE_FLOOR_BYTES` = 512, 一个 tick 的不可靠送出量)，或者可靠积压超过上面的线（必须发的内容已经排了 0.1 秒以上，链路超出了它的份额）：这个 tick 不发采样（过时的位姿没用）；否则至多发 max(512, 两个 tick 的不可靠送出量) 字节、至多 4 条消息，放不下的按第 13 节的先后等。
   - 可靠积压超过 `MAX_BACKLOG`（8 MiB）持续 10 秒：`Kick(too_slow)`。
 
 ## 3. 连接的生命周期
@@ -429,7 +429,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 - 出生点附近 30 个轻度改动的区块、3 条船：约 80 + 2 + 2 ≈ 84 KB（船按存档量法的上限 12 KB 时约 94 KB）。
 - 最坏：半径 9 内 280 列全改过，约 560～800 KB。
-- 快照预算 `SNAPSHOT_BUDGET = 16 KB/tick`（320 KB/s）是上限；推迟的新兴趣只在可靠积压不到 0.1 秒的送出量时发（第 2 节），所以实际速度就是房主上行送得出的速度，校正和方块变化前面不会排上几秒。就绪区最多 49 列，最坏约 140 KB：320 KB/s 下约 0.45 秒，1 Mbit/s 上行约 1.1 秒。
+- 快照预算 `SNAPSHOT_BUDGET = 16 KB/tick`（320 KB/s）是上限；推迟的新兴趣只把可靠积压填到 0.1 秒的送出量（第 2 节的线），所以实际速度就是房主上行分给这个客人的速度，校正和方块变化前面不会排上几秒。就绪区最多 49 列，最坏约 140 KB：320 KB/s 下约 0.45 秒，1 Mbit/s 上行约 1.1 秒（三个客人同时加入时各分三分之一，实测见下面的“实测”）。
 
 **3700 格的船在四个人旁边组装**（每个客人）：
 
@@ -442,17 +442,45 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 **大面积流水**（溃坝）：这个游戏的水每 tick 平均只改几格到几十格（实测平均约 4 格，峰值约 130 格）。稀疏时每列增量的头占主要部分，约 3～3.5 B/格；格子密集时约 2.5 B/格。即使按峰值算也只有约 8 KB/s。
 
+**实测**（工作包 13，2026-11-18；`tests/net/room-scenes.ts`，表由 `tests/net/room-measure.test.ts` 生成，回归测试在 `tests/net/room-join.test.ts`、`room-load.test.ts`、`room-play.test.ts`）。4 人房间：房主自己的客户端在端口上（不占上行），3 个客人经房主页面真的转发方（`client/forward.ts`，积压每 100 ms 报告一次）连到服务器；三个客人平分房主的上行（各自是独立的拥塞控制连接，近似公平分享），每条消息每 1150 字节另算 80 字节的头；单程 30 ms，不丢包；客人和房主的订阅半径 9（渲染距离 8）。数字是每个客人的（三个几乎相同），“包”“采样”是载荷，“线上”含头；“等”是可靠消息在房主那里排队的最长时间（每个包都带着必须发的内容，至少是心跳），括号里是工作包 13 调整之前。
+
+| 场景 | 上行 | 包 B/s | 采样 B/s | 线上 B/s | 最大的包 | 等（之前）ms | 就绪 / 圆内全部 tick |
+|---|---|---|---|---|---|---|---|
+| 三人同时加入，出生点 11×11 列都改过 | 256 kbit/s | 8640 | 2 | 10743 | 3645 | 490（2956） | 269 / 509 |
+|  | 1 Mbit/s | 37194 | 9 | 40846 | 5058 | 150（687） | 63 / 115 |
+|  | 5 Mbit/s | 157386 | 34 | 169539 | 15118 | 100（137） | 20 / 27 |
+| 3700 格的船在四人旁边组装、开 10 秒、停靠 | 三种 | 1168（其中格子增量 1002） | 457～475 | 4699～4771 | 7706 | 775 / 198 / 40（不变） | |
+| 四人全速飞散 15 秒，没去过的地形 | 三种 | 287 | 600 | 3395 | 126 | 19 / 5 / 1 | |
+| 同上，路上每列都改过 | 256 kbit/s | 7536 | 425 | 10624 | 4944 | 640（3374） | |
+|  | 1 Mbit/s | 35109 | 599 | 40029 | 4944 | 148（732） | |
+|  | 5 Mbit/s | 43240 | 598 | 49003 | 15484 | 50（81） | |
+| 四人站在转圈行驶的风车船上 30 秒 | 三种 | 324 | 697 | 4305 | 86 | 16 / 4 / 1 | |
+| 6×6×2 个爆破箱连锁，掉落开着 | 256 kbit/s | 3211 | 4983（5681） | 10703 | 1435 | 329（1387） | |
+|  | 1 Mbit/s | 3230 | 20162 | 27026 | 1435 | 80（184） | |
+|  | 5 Mbit/s | 3243 | 24258 | 31498 | 1435 | 8（8） | |
+| 26×1×4 个爆破箱排成一行连锁 | 256 kbit/s | 4494 | 3900 | 10742 | 1033 | 478（—） | |
+|  | 1 Mbit/s | 4501 | 21074 | 29298 | 1013 | 119（—） | |
+|  | 5 Mbit/s | 4483 | 29982 | 38894 | 1028 | 5（—） | |
+| 16×16×4 的坝溃决，30 秒 | 三种 | 193（格子增量 37） | 0 | 1877 | 213 | 27 / 7 / 1 | |
+
+- 平常玩（风车船）每个客人线上约 4.3 KB/s，四分之三是头（每 tick 一个包、一条采样消息，各 80 字节）：3 个客人约 13 KB/s ≈ 105 kbit/s。房主上行低于约 110 kbit/s 时 4 人房间玩不了：96 kbit/s 下风车船的包排到 0.86 秒还在涨，什么都越来越晚（别人的动作、方块、自己的校正），直到积压超过 `MAX_BACKLOG` 才被踢（要很久）。128 kbit/s 下平常玩没问题（等 34 ms），但三人同时加入要 34 秒才就绪（685 tick），爆破箱连锁时包排 1.8 秒。256 kbit/s：同时加入约 13 秒就绪，连锁 0.33 秒（104 个箱子排成一行的连锁 0.48 秒：必须发的内容本身在峰值时就超出了每人的份额），算是能玩的下限；1 Mbit/s 以上什么场景都在 0.2 秒以内。
+- 低带宽时看得出来的：加入和飞进改过的地形时加载慢（受上行限制），一大批东西在动时远处的东西采样变稀（256 kbit/s 的连锁里一个东西两条采样之间的 tick 数 95% 在 12 以内，画面上远处的掉落物一顿一顿地走），一次很大的必须发的包（组装 3700 格的船，7.7 KB）在 256 kbit/s 下让那个客人的所有东西晚约 0.8 秒。
+- 房主的开销（这台机器，墙上时间，4 个客户端）：模拟一个 tick 平均 0.1～4 ms（连锁爆炸最多，单个 tick 最多约 35 ms），3700 格的船组装的那个 tick 80～195 ms（模拟的组装，不是同步）；`Replicator` 平均 0.1～1.3 ms，单个 tick 偶尔到 10～30 ms，测过的最多一次 91 ms（机器上同时跑着别的测试、负载 7～10 时，一次 GC 或调度）。相对 50 ms 的 tick 都很小。随客户端数平方增长的只有“每个客户端每个 tick 看一遍所有玩家”（玩家每个 tick 都算变了）和玩家表的比较，4 人时可以忽略；快照和结构体记录的编码每 tick 只做一次，各客户端共用字节。
+
 **超预算时的优先级**（每个客户端、每个 tick）：
 
 1. 必须发、整段发：私有区（校正在最前）、已有对象的变化、这个 tick 新出现的结构体和实体、退订、事件、全局区（第 5 节）。
 2. 剩下的预算按顺序给推迟的新兴趣：结构体生成（近的先，父在子前）→ 实体生成（近的先）→ 区块快照（近的先）。
-3. 采样另算：不可靠积压超过第 2 节的线时整个 tick 不发；一个 tick 的采样超过 4 条消息（约 4.6 KB）时，近的先发，其余轮到下一个 tick。
+3. 采样另算：不可靠积压超过第 2 节的线，或者可靠积压超过推迟内容的线时，整个 tick 不发；一个 tick 的采样放不进第 2 节的量（至多 4 条消息，约 4.6 KB）时，最陈旧的先发，陈旧按远近加权：距上一条采样的 tick 数 × 32 / (32 + 水平距离)。每个在动的东西都轮得到，远的轮得少：近处的每个 tick 都占满时，150 格外的约每 6 个 tick 一条。
 
 **服务器对每个客户端的限制**：
 
 - 上行单条消息 ≤ `MAX_CLIENT_MESSAGE_BYTES = 2048` 字节，`Hello` ≤ `MAX_HELLO_BYTES = 512` 字节。
-- 意图：不丢，按第 10 节每 tick 应用；排队超过 `INTENT_QUEUE_LIMIT = 1024` 条断开。
-- 移动上报：队列上限 10（第 8 节）。
+- 字节（客人的连接，房主自己的不限）：预算 `CLIENT_BURST_BYTES = 128 KiB`，每秒补 `CLIENT_RATE_BYTES = 16 KiB`；每条消息花它的长度加 `MESSAGE_COST_BYTES = 16`。预算用光：`Kick(protocol_error)`（握手之前 `Refuse(bad_hello)`）。正常玩时约 2.5 KB/s，断线十几秒后成批到的意图和上报也在预算内。
+- 意图：不丢，按第 10 节每 tick 应用；排队超过 `INTENT_QUEUE_LIMIT = 1024` 条断开。游戏规则没有限住的几种另有节奏（第 18 节“工作包 13”）：`DropCursor` 按“按下”算（每 tick 一个）；连续的几条 `Aim` 只校验最后一条；`SetViewRadius` 每 `VIEW_RADIUS_INTERVAL_TICKS = 20` 个 tick 至多生效一次，最新的值等着。
+- 移动上报：队列上限 10（第 8 节）；两个 tick 之间收到的也只留最新的 10 条。
+- `Ping`：每个连接每 `PONG_INTERVAL_MS = 50` ms 至多回一个 `Pong`（按时钟，暂停时照回），多的不回；带上来的 `rttMs` 截到 `MAX_REPORTED_RTT_MS = 60000`。
+- 加入：一个身份一分钟内至多加入 `JOINS_PER_KEY_PER_MINUTE = 6` 次；超出的连接握手照样通过，但不加入，等到这一分钟允许（房主自己的不限）。不按所有客人合计：那样一个换着身份进出的客户端就能把别人的重连挡在外面。
 - `viewRadius` ≤ 17；名字 ≤ `MAX_NAME_LENGTH = 24` 个字符；身份 ≤ `MAX_PLAYER_KEY_LENGTH = 128`。
 - 可靠积压 > 8 MiB 持续 10 秒：`Kick(too_slow)`。
 - 握手之后解不开的消息、未知的消息 id、第二个 `Hello`、消息到达的通道和它规定的通道不同：`Kick(protocol_error)`（握手之前的错误回 `Refuse(bad_hello)`）。客户端收到 M2.1 存不下的格子值（≥ 2¹⁶）同样按协议错误断开。
@@ -493,7 +521,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 |---|---|---|---|---|
 | 0x01 | `Hello` | 可靠 | `str build, str playerKey, str name, u8 viewRadius`（开头的 id + `build` 永不改） | ~60 B |
 | 0x02 | `Bye` | 可靠 | — | 1 B |
-| 0x03 | `Ping` | 不可靠 | `u32 clientMs` | 5 B |
+| 0x03 | `Ping` | 不可靠 | `u32 clientMs, vu rttMs`（客户端量到的往返，0 = 还没有；房主页面的状态显示它） | 6～8 B |
 | 0x10 | `MoveReport` | 不可靠 | `vu seq, vu epoch, vu viewTick, vu carrierId, f64×3 pos, f32×3 vel, f32 yaw, f32 pitch, u8 flags`（0 着地 1 潜行 2 疾跑 3 飞行 4 输入 sneak）`, i8 forward, i8 strafe, u8 landings` | ~57 B |
 | 0x20 | `Aim` | 可靠 | `vu seq, vu moveSeq, OptTarget use, bool mineSame, [OptTarget mine]`（两个目标相同时必须用 `mineSame`：标志为假又重复同一个目标按协议错误） | 6～40 B |
 | 0x21 | `Use` | 可靠 | `vu seq, vu moveSeq, u8 slot, u8 flags`（0 sneak）`, OptTarget` | 7～24 B |
@@ -631,7 +659,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 **服务器一个 tick**（`ServerHost.tickOnce()`）：`netServer.beforeTick()`（超时；离开和顶替；握手通过的加入；然后按玩家实体 id、到达顺序把排队的上报全部交给 `moves.receive`，再把排队的意图全部交给 `intents.receive`，然后 `moves.beforeTick()`、`intents.beforeTick()`）→ `sim.tick()` → `replicator.endTick()` → `netServer.afterTick()`（踢掉太慢的客户端）。上报和意图在到达时只排队，过滤是 `moves.ts`、`intents.ts` 的事。两次 tick 之间：处理到达的消息（只排队，`Ping` 立刻回）、按时间预算生成区块（`sim.chunks.wanted()` + `loadColumn`，和现在 `ChunkStreamer` 喂 `provide()` 一样在 tick 之外做，`syncChunks` 只留给测试）。
 
-**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players }`（变了才发，每秒最多一次）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。Worker 自己打不开 IndexedDB 时存到页面的存储里（`host/pagestorage.ts`，第 18 节工作包 9）：Worker → 页面 `storage { id, call }`（`call` 是 `open`，或者宿主用到的存储调用 `getMeta`、`listChunkKeys`、`getChunks`、`getBlob`、`putAll`），页面 → Worker `storageResult { id, ok, value }` 或 `storageResult { id, ok: false, code, message }`（`code` 是 `SaveStorageError` 的 code，别的错误为 null）。回答不是命令，不排在等它的命令（比如正在读档的 `load`）后面。
+**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players, guests }`（TPS 或玩家数变了时发，有客人在时每秒发一次，每秒最多一次；`guests` 是每个客人的实体 id、名字、每秒发给它的字节、积压、往返，第 18 节“工作包 13”）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。Worker 自己打不开 IndexedDB 时存到页面的存储里（`host/pagestorage.ts`，第 18 节工作包 9）：Worker → 页面 `storage { id, call }`（`call` 是 `open`，或者宿主用到的存储调用 `getMeta`、`listChunkKeys`、`getChunks`、`getBlob`、`putAll`），页面 → Worker `storageResult { id, ok, value }` 或 `storageResult { id, ok: false, code, message }`（`code` 是 `SaveStorageError` 的 code，别的错误为 null）。回答不是命令，不排在等它的命令（比如正在读档的 `load`）后面。
 
 **无头联机测试的组装**（`tests/net/harness.ts`，一个进程里）
 
@@ -643,7 +671,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - `tests/net/digest.ts`：每列格子的 CRC32、胶面集合、结构体（格子、胶、字段、pivot、同一 tick 的位姿）、实体（位置容差）的摘要；`compareReplica(server, client)` 返回不一致的列表。`track(c)`：服务器在每个 tick 后按 `Replicator.clientView` 记下被改过的列和结构体、实体的摘要，客户端应用完同一个 tick 的包（`NetClient.onBatch`）后比较，用来做逐 tick 的一致性检查；还在生成的列两边都不算，位姿（连同实体的载体：动着的实体换载体走采样）不比（`NetClient` 一帧里先应用所有的包再插采样，到某个包时最新的位姿可能早一个 tick 或已经晚一个 tick）。每帧还检查 `renderTick` 不超过最新已应用的包，不对的也记进 `mismatches`。全量比较（`compareNow`，含位姿）在 `quiesce()` 之后做；在丢包的链路上，先等船停住（停下时最终位姿走可靠通道），否则还在动的船的最后一条采样可能丢了。`history` 选项记下最近 2400 个 tick 的船位姿、转子角度、实体位置，给按 `renderTick` 的显示检查用。
 - 除了传输、计时器、区块来源这三样，全部是产品代码。
 
-**工作包 10～14 接在哪里**：10 实现 `Transport`（`WebRtcTransport`）和 `Signaller`，房主页面把数据通道转发到 `connect` 进来的端口，并往端口回报积压（第 2 节）；11 用 `Refuse`/`Kick` 的原因、`Hello` 的名字、全局区的玩家表、`NetClient` 的重连、地址参数 `?slot=` 和宿主控制的 `openRoom`；12 读 `ClientReplica` 里玩家实体的标志、手持物品、掌舵和玩家表的名字；13 调 `SNAPSHOT_BUDGET`、背压的线、D 的公式，用 `Replicator` 的字节统计；14 两个页面（第二个用 `?slot=`）加一个本地信令。
+**工作包 10～14 接在哪里**：10 实现 `Transport`（`WebRtcTransport`）和 `Signaller`，房主页面把数据通道转发到 `connect` 进来的端口，并往端口回报积压（第 2 节）；11 用 `Refuse`/`Kick` 的原因、`Hello` 的名字、全局区的玩家表、`NetClient` 的重连、地址参数 `?slot=` 和宿主控制的 `openRoom`；12 读 `ClientReplica` 里玩家实体的标志、手持物品、掌舵和玩家表的名字；13 调 `SNAPSHOT_BUDGET`、背压的线、D 的公式，用 `Replicator` 的字节统计（做了什么见第 18 节“工作包 13”）；14 两个页面（第二个用 `?slot=`）加一个本地信令。
 
 ## 16. 测试计划
 
@@ -717,7 +745,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **携带时的 yaw**（第 7、8 节）：实体有载体时，yaw 是相对载体世界朝向（`headingOf(载体的世界旋转)`）的，和移动上报一样。载体被删时，客户端除了换算位置，还要把 yaw 加上被删载体的世界朝向、减去父结构体的世界朝向。
 - **世界事件**（第 11 节）：只发给这个包之前就已有那一列或那个结构体的客户端。同一个包里刚生成的结构体上的事件不发，生成记录里已经有那一格。
 - **实体的推迟**（第 8、13 节）：脚下区块在本包才发出快照的实体，用快照之后剩下的预算发，预算不够就在后面的包里发。
-- **采样的先后**（第 13 节）：采样超过 4 条消息时，上个 tick 被挤掉的先发，然后近的先发。被挤掉之后不再动的不补采样，它的最终位姿走可靠的 `structureRests` 或最终状态。
+- **采样的先后**（第 13 节）：放不下时按陈旧度乘近度（工作包 13 改定，见第 13 节第 3 条）。被挤掉之后不再动的不补采样，它的最终位姿走可靠的 `structureRests` 或最终状态。
 - **放不下的重发**（第 13、14 节）：放不进 `MAX_BATCH_CELLS` 的必须发的重发快照，改发整列的增量。
 - **必须发的内容超限**（第 5、13 节）：必须发的内容超过 `MAX_BATCH_CELLS` 或 `MAX_RELIABLE_BYTES` 时，这个客户端按 `too_slow` 断开，不再给它发包。正常玩法到不了这个量。
 - **TPS**（第 4 节）：不在 `Welcome` 里，新客户端在第一个包的全局区收到。
@@ -748,7 +776,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **超时和意图洪水**（第 3、13 节）：超时在每个 tick 开头检查，暂停的服务器不让任何人超时。两个 tick 之间排队的意图超过 `INTENT_QUEUE_LIMIT`，tick 之前就 `Kick(protocol_error)`；`IntentSink.receive` 返回 false 时也是。
 - **宿主控制的顺序**（第 15 节）：命令按发出的顺序一条一条执行。`connect` 可以紧跟任何命令发出（读档、存档还在进行时）；Worker 收到 `connect` 时就接管端口但不启动它，在它被执行之前到达的消息（包括关闭）留在端口里，执行时按顺序交给连接。
 - **积压的第一次报告**（第 2 节）：转发方在端口接上时立刻回报一次（`bufferedAmount` 0、`seen` 0），之后照常。否则在第一次报告之前积压按 0 算，和本机的端口分不开，加入的头几个包是盲发的。
-- **已知的缺口**（第 2、13 节）：可靠积压的检查通过之后，一个 tick 的推迟内容可以用满 `SNAPSHOT_BUDGET`（16 KB），所以“校正、方块变化前面最多排约 0.1 秒”在约 160 KB/s 以下不成立（64 KB/s 实测排 200～250 ms）。改法是每个 tick 推迟的新兴趣最多发 min(`SNAPSHOT_BUDGET`, max(8 KiB, 0.1 秒 × 速率)) 字节；`Replicator` 还没有这样做，留给工作包 13。
+- **已知的缺口**（第 2、13 节）：可靠积压的检查通过之后，一个 tick 的推迟内容可以用满 `SNAPSHOT_BUDGET`（16 KB），所以“校正、方块变化前面最多排约 0.1 秒”在约 160 KB/s 以下不成立（64 KB/s 实测排 200～250 ms）。工作包 13 已改：推迟的内容只把积压填到线为止（第 2 节）。
 
 ### 工作包 6（自己的角色）
 
@@ -853,6 +881,23 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **名字和雾、水**：名字不像表面那样染上雾色，而是随雾变淡：不透明度 = 1 − 它那个距离上的雾因子（空气里的距离雾；相机在水里、岩浆里时是介质的指数雾），所以和身体一起没入雾里，雾不透明处（不透明度低于 0.02）不画。不透明度按精灵算（每个精灵的 uniform），同名的两个标签各按各的距离变淡。眼睛在液体里而相机不在那种液体里时（从水面上看潜水的人），名字不画，像被墙挡住一样；相机也在水里时照常画，随水雾变淡。船体干舱里的人不算在水里。玻璃这类透明方块和水面一样不挡名字（也不挡身体）。
 - **自己的角色**（越肩、正面视角）：同一个模型，姿态、手持物、自身运动都来自预测，没有名字。
 - **开发工具**：`window.__blocklands.game.debug.bots()` 在本页的服务器里加入脚本控制的玩家（`client/devbots.ts`，第一次调用时才载入，单独一个 chunk；单文件产物 `build:artifact` 里没有它，`bots()` 返回 null）。服务器拒绝的加入（名字不合法、房间满了）不留下机器人。每个是页面里一个真的客户端（`NetClient` + `OwnPlayer` + `ClientIntents`，经 `connect { local: false }` 的端口），会先 `openRoom`。浏览器测试 `scripts/e2e-players.mjs` 用它。
+
+### 工作包 13（带宽与限速）
+
+- **怎么量**（第 13 节“实测”）：回环加了 `SharedUplink`（`net/loopback.ts`，`LinkConditions.shared`）：几条链路从同一个发送方出去，带宽在有字节在排的链路之间平分（每个客人的连接是独立的拥塞控制，共享瓶颈时近似公平），每条链路自己的消息按顺序走；每条消息每 1150 字节另算 80 字节的头，占带宽但不算进 `bufferedBytes`（`bufferedAmount` 只数载荷）。头按每条消息算偏悲观：同一个 tick 的包和采样实际上可能被 SCTP 捆进同一个 UDP 包。
+- **推迟的新兴趣的线**（第 2 节）：线 = max(`RELIABLE_BACKLOG_FLOOR` = 2 KiB, `BACKLOG_WINDOW_S` = 0.1 秒 × 可靠速率)；推迟的内容把积压填到线为止，一个 tick 至多 `SNAPSHOT_BUDGET`。原来积压一低于 max(8 KiB, 0.1 秒) 就发满 16 KB，三人同时加入时包在 1 Mbit/s 下排 0.69 秒、256 kbit/s 下 3 秒；下限 8 KiB 在 256 kbit/s（每人约 10 KB/s）下本身就是 0.8 秒。比剩下的预算长的物件等下一个 tick，积压不到半个下限时一个 tick 的第一个物件照发（95% 的等待 163 → 100 ms）。256 kbit/s 下剩下的等待（约 0.5 秒）是一个快照本身（2.5～3.6 KB）的传输时间，不拆快照就降不下去。
+- **速率的慢启动**（第 2 节）：送出速率平滑（0.25），但通道现在是空的时不低于这个 tick 送出的量：链路跟得上时线每个 tick 翻一倍。不这样的话 5 Mbit/s 上三人加入要 27 个 tick 而不是 20 个。
+- **房主自己的连接不受线和采样量的限制**（第 2 节）：它走同一台机器里的端口，端口不报积压（读到的总是 0），没有要保护的链路。按客人的规则从 2 KiB 慢启动，单机加入（半径 9、周围改过的地形）要 12 个 tick 才就绪、37 个 tick 圆内全部到齐，之前是 9 和 31；而且送出速率在安静时会降下去，每次传送或飞进改过的地形都从 2 KiB 重新开始。现在它每个 tick 发满 `SNAPSHOT_BUDGET`（越过预算的那个物件也发，和工作包 13 之前一样），采样只受每 tick 4 条消息的限制：单机又是 9 / 31 个 tick，字节数相同。
+- **报告之间的积压**（第 2 节“房间里的积压”）：`PortTransport` 构造时可以给一个时钟（Worker 给宿主的时钟）。两次报告之间，它把这条通道按前后两次报告算出的送出速度送出的字节从积压里减掉：后一次报告时还有积压，说明一直忙着，这个速度就是它的能力（平滑 0.5）；后一次报告时没有积压，能力至少是这个速度。原来按“最近一次报告的 `bufferedAmount` + 累计发出 − `seen`”算，报告最多隔 100 ms，正好是推迟的整个窗口：链路早把字节送走了，服务器还当它们在排队，推迟的内容和采样都被压住：配上上面的线，256 KB/s 的客人加入要 9.8 秒，减掉送出量后 1.35 秒（链路本身要 1.0 秒）。没有时钟时不减（本机客户端的端口、测试）。时钟量的是报告**到达** Worker 的时间，不是房主页面发出的时间：Worker 忙上一阵（一个长 tick，例如组装 3700 格的船的那个 80～195 ms，或者 GC）时，这期间排着的报告会在几微秒之内一起到，页面 100 ms 里送出的字节除以这么短的间隔，速度大了几千倍，之后每次报告一过积压就读成 0，慢启动又把线抬上去，服务器每个 tick 往已经满了的通道里倒满预算：审查时一次 200 ms 的卡顿让 256 kbit/s 下的包排到 8.6 秒（页面缓冲 85 KB），1 Mbit/s 下 4.5 秒。所以到达间隔不到 `DRAIN_MIN_GAP_MS`（50 ms，报告间隔的一半）的两次报告不用来量速度，下一次从后到的那一份量起（一批里最后一份，到达时间离它发出的时间最近）。现在同样的卡顿（110 ms、200 ms、1 秒）下 256 kbit/s 最多排 0.53 秒、1 Mbit/s 0.19 秒，和不卡时一样（`tests/net/room-join.test.ts`、`port.test.ts`）。代价：快的链路上 `bufferedamountlow` 的报告常常紧跟着定时的报告（几毫秒），这种对原来也量速度，量出的偏大，反而让 5 Mbit/s 的三人加入快一个 tick（19 / 26 → 现在 20 / 27 个 tick）。转发方在报告里带上页面自己的时间会更准，但那是工作包 10 的文件，这样已经够了。
+- **采样**（第 2 节、第 13 节第 3 条）：采样和包走同一条链路，下一个 tick 就过时了。不可靠积压 > max(`SAMPLE_FLOOR_BYTES` = 512, 一个 tick 的不可靠送出量) 时这个 tick 不发；否则至多 max(512, 两个 tick 的送出量) 字节、至多 4 条消息。原来是积压 > max(2 KiB, 3 × 上个 tick 的采样) 才停、每个 tick 最多 4 条消息（约 4.6 KB，每人约 90 KB/s）：连锁爆炸时采样塞满 256 kbit/s 的链路，包排 1.4 秒（现在 0.33 秒）。可靠积压超过线（第 2 节）时这个 tick 也不发采样：这时必须发的内容本身已经超出了这个客人的份额，采样只会让包排得更久。104 个爆破箱排成一行的连锁在 256 kbit/s 下，包排 736 → 478 ms，采样的量几乎不变（只在峰值时停），两条采样之间的 tick 数 95% 在 16 → 8 以内（不再排在过时的采样后面）。放不下的按陈旧度 × 近度排：距上一条采样的 tick 数 × 32 / (32 + 水平距离)，每个 `SentStructure`、`SentEntity` 记着上一条采样的 tick。原来“上个 tick 被挤掉的先发，然后近的先发”在需要的量是能发的两倍以上时，远处的东西会一直被近处的挤掉。
+- **客人能发多少**（第 13 节）：每个客人的连接一个字节预算（`CLIENT_BURST_BYTES` 128 KiB，每秒补 `CLIENT_RATE_BYTES` 16 KiB，每条消息花长度 + `MESSAGE_COST_BYTES` 16），用光就 `Kick(protocol_error)`，握手之前 `Refuse(bad_hello)`。原因不另加：客户端的提示文字是工作包 11 的，现有的“连接出错（协议错误）”说得通。实测：每秒 4000 条上报（约 290 KB/s）的洪水约半秒后被踢，期间另外两个客人每个 tick 的包都按时到；一次 88 KB 的突发（断线后成批到的）照收。
+- **移动上报**：`NetServer` 两个 tick 之间只留最新的 `QUEUE_LIMIT`（10）条，`moves.ts` 本来也只留这么多；不这样的话洪水每 tick 有几百条进 `moves.receive`。
+- **`Ping`**：每个连接每 `PONG_INTERVAL_MS`（50 ms）至多回一个 `Pong`，多的不回（客户端每秒只发一个）；按服务器的时钟算，不按 tick，模拟暂停时 `Pong` 照回（第 4 节“`Pong` 还在到”）。不这样的话字节预算之内每秒 700 个 `Ping`（审查时试过）换来 700 个 `Pong`，都排进这个客人自己的通道，下行慢的客户端会让房主页面替它攒着。`rttMs` 截到 `MAX_REPORTED_RTT_MS`（60 秒，客户端本来就截到这么多），房主页面不会显示 2⁴⁰ 毫秒。
+- **游戏规则没有限住的意图**：`DropCursor` 按“按下”算（这个 tick 的应用到它为止）：创造模式里“取一组 + 扔掉”原来每 tick 能扔 8 组，每组一个要发生成记录和采样的实体。连续的几条 `Aim` 只校验最后一条（前面的被覆盖，从来没人用）：一阵 `Aim` 只花一次校验。`SetViewRadius` 每 `VIEW_RADIUS_INTERVAL_TICKS`（20）个 tick 至多生效一次，最新的值等着（确认号照走）：每次改都要重订阅、服务器加载或丢掉模拟半径里的列，每 tick 来回切会让服务器一直在生成、它自己那份上行一直满。其余意图已经由每 tick 至多 16 条（`INTENTS_PER_TICK`）和按下每 tick 一个限住，消息大小由第 13 节的上限限住。
+- **加入的次数**：一个身份一分钟内至多加入 `JOINS_PER_KEY_PER_MINUTE`（6）次；超出的连接握手照样通过（顶替照样发生），但留在“已接受”里，等到这一分钟允许再加入（仍占 `full` 的名额）。循环重连的客户端每次都让服务器做一次离开、加入和整套重新同步。房主自己的连接不限。不设所有客人合计的次数（审查后去掉了原来的每分钟 20 次）：身份是客户端自己选的，一个客户端换着 20 个身份进出就用光这一分钟，别的客人断线重连时被挡在世界外面最多一分钟（实测 19 秒）；它也挡不住存档里的玩家记录越积越多（20 次一分钟一天还是约 2.9 万条）。换身份要新开一个连接，新连接的多少由房主页面管（工作包 10）。“一个传输的 Hello 次数”本来就是一次（第二个 `Hello` 是协议错误），不说话的连接由房主页面限住（工作包 10）。
+- **房主页面看得到的**（第 15 节）：宿主控制的 `status` 多一个 `guests`（`control.ts GuestTraffic`）：每个客人的实体 id、名字、上次状态以来每秒发给它的字节（包 + 采样的载荷）、两条通道的积压（服务器按转发方报告的估计）、往返（客户端量的，`Ping` 带上来：`Ping` 改成 `u32 clientMs, vu rttMs`）。有客人在时每秒发一次，没客人时照旧只在 TPS 或玩家数变了时发。界面由工作包 11 做。
+- **没改的常量**：`SNAPSHOT_BUDGET`（16 KB/tick）在 5 Mbit/s 三人加入时也不是瓶颈（每人分到约 200 KB/s，预算是 320 KB/s）；`SAMPLE_MESSAGES_PER_TICK`（4）只在 5 Mbit/s 以上才碰得到；`CHUNK_RESEND_CELLS`、`STRUCTURE_RESEND_CELLS`（1024）：3700 格的船组装时清掉的格子分在几列里，每列都在线下，走增量，一个包 7.7 KB，和第 13 节的估计相同；插值延迟 D 的公式不变：采样变稀是按东西轮流发，不是丢包，不该把 D 顶上去，远处的东西一顿一顿地走是低带宽时有意的取舍。
+- **没做的**：`too_slow` 还是按 8 MiB 积压持续 10 秒，上行低于约 110 kbit/s 时客人们的积压涨得很慢，要很久才到；按“排多久”踢人会在共享的上行上把三个客人同时踢掉，所以没改。要省带宽，最大的一块是头（平常玩时四分之三）：每 tick 一个包、一条采样消息是协议的约定，改成没内容时隔一个 tick 发一次要改客户端的时钟，留到需要时。
 
 ## 附：有意不做的，以及什么时候需要
 
