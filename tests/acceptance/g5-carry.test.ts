@@ -16,7 +16,7 @@ import { exportSave } from '../../src/sim/persist';
 import type { Simulation } from '../../src/sim/simulation';
 import type { Me, TestWorld } from './world';
 import type { Rotor, Ship } from '../../src/structures/structure';
-import { boxOverlapsSolid } from '../../src/voxel/shape';
+import { boxOverlapsSolid, deepestPenetration } from '../../src/voxel/shape';
 import {
   B,
   Events,
@@ -92,9 +92,18 @@ function distToRect(lx: number, lz: number, x0: number, z0: number, x1: number, 
   return -Math.min(lx - x0, x1 - lx, lz - z0, z1 - lz);
 }
 
-/** The player's body overlaps world blocks (as the authority on its movement placed it: see Me.body). */
-function inWorldBlock(w: TestWorld): boolean {
-  return boxOverlapsSolid(w.sim.world, w.me.body.box());
+/**
+ * The player's body is inside world blocks. Both copies are checked (see Me.body): the body as the
+ * authority on its movement placed it must not overlap at all; the server's copy of the carried
+ * body (what other players see and the server judges with) no deeper than TestWorld.carriedOverlap
+ * (0 in direct mode, where the two are the same body).
+ */
+function inWorldBlock(w: TestWorld, carrier: Ship): boolean {
+  const world = w.sim.world;
+  if (boxOverlapsSolid(world, w.me.body.box())) return true;
+  const box = w.me.player.box();
+  if (!boxOverlapsSolid(world, box)) return false;
+  return (deepestPenetration(world, box)?.depth ?? Infinity) > w.carriedOverlap(carrier, box);
 }
 
 // ====================================================================================== 19
@@ -405,7 +414,7 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
           me.input.forward = 1;
           w.tick();
           expect(p.health).toBe(20);
-          expect(inWorldBlock(w)).toBe(false);
+          expect(inWorldBlock(w, ship)).toBe(false);
           expect(p.carrierId).toBe(ship.id);
           if (Math.abs(me.body.pos.z - p.halfWidth - 3) < 0.01) contact++; // against the wall face (Me.body)
         }
@@ -434,7 +443,7 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
       w.tick();
       yaw.update();
       expect(p.health).toBe(20);
-      expect(inWorldBlock(w)).toBe(false);
+      expect(inWorldBlock(w, ship)).toBe(false);
       expect(p.carrierId).toBe(ship.id);
       if (Math.abs(me.body.pos.z - p.halfWidth - 3) < 0.01) contact++; // against the wall face (Me.body)
     }
@@ -456,7 +465,7 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
       me.input.forward = 1;
       w.tick();
       expect(p.health).toBe(20);
-      expect(inWorldBlock(w)).toBe(false);
+      expect(inWorldBlock(w, ship)).toBe(false);
       expect(p.carrierId).toBe(ship.id);
       if (Math.abs(me.body.pos.z - p.halfWidth - 3) < 0.01) contact++; // against the wall face (Me.body)
     }
@@ -785,9 +794,10 @@ describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时
     w.tick(40);
     expect(ship.throttle).toBe(1);
     expect(ship.rudder).toBe(-1);
-    // the inventory opens: the client lets go of the wheel and zeroes the movement keys
-    me.releaseHelm();
+    // the inventory opens: the client zeroes the movement keys and lets go of the wheel (the
+    // release takes a tick, in which no key may walk the player)
     stopInput(w);
+    me.releaseHelm();
     expect(p.steeringShipId).toBe(0);
     expect(ship.helmsmanId).toBe(0);
     expect(ship.throttle).toBe(0);

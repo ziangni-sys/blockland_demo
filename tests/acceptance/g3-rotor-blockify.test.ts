@@ -248,7 +248,12 @@ describe('11. 挖掉轴承或用 TNT 炸掉轴承，风车就地方块化。', (
     const H = T + 6;
     const tw = flatWorld('creative', { x: -3.5, y: T + 7, z: -1.5 }, 12);
     const { sim, me } = tw;
+    // Hovering where it spawned: the teleport puts back what the player fell before it could fly
+    // (the client's first ticks, READY in tests/acceptance/world.ts) and stops it. It waits a tick
+    // after the take-off, which a client-driven player's server learns from its next report.
     me.setFlying(true);
+    tw.tick();
+    me.teleport(-3.5, T + 7, -1.5);
     const cells = colouredWindmill(sim, H, 6);
     tw.tick(2);
     const log = new Events(sim);

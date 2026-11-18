@@ -32,8 +32,12 @@
  *    world before its first tick, scenario 36). So a world just made (or loaded) can be read with
  *    the player in it before anything moves. The client predicts after the first batch: the first
  *    use of `me` that acts (anything but player, view and helmView) runs the world to READY_TICKS
- *    ticks after the join, unless `warmup` or the test's own ticks did. In those ticks nobody holds
- *    a key (in network mode the server holds the player where it joined until its first report).
+ *    ticks after the join, unless `warmup` or the test's own ticks did (`w.ready()` does it at
+ *    once). In those ticks nobody holds a key, but the player does not move the same: in direct
+ *    mode the server moves it both ticks, in network mode the server holds it where it joined in
+ *    the first (no report yet) and the client predicts the second. A player at rest at the join
+ *    (on the ground, carried) ends where it was in both; a test whose player spawns in the air
+ *    puts it where it wants after READY (take off, a tick, teleport: scenario 11's blast test).
  *  - SYNC (1): aiming at anything (lookAtCell, aimAt, use, pressUse, useOn, mine) right after the
  *    test changed the scene between two ticks (cells, glue, which structures or entities exist):
  *    the client sees the change with the next batch.
@@ -63,14 +67,15 @@ import { relative } from 'node:path';
 import { expect, inject } from 'vitest';
 import { B } from '../../src/blocks/defs';
 import type { Dir } from '../../src/core/dirs';
+import { qrotate, vec3, type AABB } from '../../src/core/math';
 import type { Player } from '../../src/entities/entity';
 import { maxStackOf, type Inventory, type InventoryArea } from '../../src/entities/inventory';
 import type { HeldInput } from '../../src/net/client/predict';
 import { importSave, type SaveBundle } from '../../src/sim/persist';
 import type { PlayerControl } from '../../src/sim/players';
 import { Simulation, type GameMode, type SimOptions } from '../../src/sim/simulation';
-import { TPS } from '../../src/core/constants';
 import type { GridCell, HelmView, InteractionView, PlayerKey } from '../../src/sim/view';
+import type { Ship } from '../../src/structures/structure';
 import { testMeta, NetHarness, type HeadlessClient } from '../net/harness';
 
 export type WorldMode = 'direct' | 'network';
@@ -106,7 +111,7 @@ export interface Me {
    * server's pose), and the server places the same carrier-local feet with its present pose, so
    * against the world the server's copy may overlap by the carrier's motion of that tick
    * (NETCODE section 9: the overlap allowance of a carried body). A check of the body against the
-   * world checks both: this one without overlap, `player` within carrierLag().
+   * world checks both: this one without overlap, `player` within carriedOverlap().
    */
   readonly body: Player;
   /** The server's interaction view of the player (preview, hint, conflicts, gluing ...). */
@@ -163,6 +168,11 @@ export interface TestWorld {
   /** Run `n` ticks (network: lockstep steps). */
   tick(n?: number): void;
   /**
+   * READY now (see the file comment): the world runs to READY_TICKS ticks after the join unless
+   * it has already; the first use of `me` that acts does the same.
+   */
+  ready(): void;
+  /**
    * One tick of a loop that ticks while something has not happened in the simulation yet (the
    * ship reaches a heading, the first crush, the water settles ...). How many such ticks there are
    * is an outcome of the simulation, which differs between the modes where the product does by
@@ -174,11 +184,14 @@ export interface TestWorld {
    */
   tickWhile(): void;
   /**
-   * How far the server's copy of a carried body may overlap the world (NETCODE section 9): 0 in
-   * direct mode (the server's body is the one that moved); in network mode one tick of the
-   * carrier's motion (`speed`, blocks per second at the body) plus 1e-6.
+   * How deep the server's copy of a body carried by `carrier` may overlap the world (NETCODE
+   * section 9: the overlap allowance of a carried body; see Me.body). Direct mode: 0, the server's
+   * body is the one that moved. Network mode: the client placed the carrier-local feet against the
+   * carrier's pose as its replica shows it, the server places them with its present pose, so the
+   * two differ by the carrier's motion at the body over the last tick plus the precision of the
+   * pose in the replica (section 14: Pos32 is 1/512 block, Rot64 1/32767 a component).
    */
-  carrierLag(speed: number): number;
+  carriedOverlap(carrier: Ship, box: AABB): number;
   /** Network mode: the harness and the client (null in direct mode). */
   readonly harness: NetHarness | null;
   readonly client: HeadlessClient | null;
@@ -231,7 +244,7 @@ declare module 'vitest' {
 // ====================================================================== the waits (both modes)
 
 /** See THE SAME TICKS IN BOTH MODES. */
-const READY_TICKS = 2;
+export const READY_TICKS = 2;
 const SYNC_TICKS = 1;
 const TELEPORT_TICKS = 2;
 const COMMAND_TICKS = 1;
@@ -286,14 +299,9 @@ abstract class BaseWorld implements TestWorld {
   /** Network mode: what the client must have after READY. */
   protected abstract checkReady(): void;
 
-  abstract carrierLag(speed: number): number;
+  abstract carriedOverlap(carrier: Ship, box: AABB): number;
 
   tick(n = 1): void {
-    if (process.env.TRACE_TICKS && n > 0) {
-      const fr = new Error().stack!.split('\n').slice(2).map((l) => l.trim()).filter((l) => !l.includes('world.ts'))[0] ?? '?';
-      const m = /([\w-]+\.ts):(\d+)/.exec(fr);
-      appendFileSync(`${process.env.TRACE_TICKS}/${WORLD_MODE}.trace`, `${expect.getState().currentTestName?.slice(-50)}\t${m ? m[1] + ':' + m[2] : fr}\t${n}\t${this.sim.ticks}\n`);
-    }
     for (let i = 0; i < n; i++) {
       this.stepping = true;
       try {
@@ -559,7 +567,7 @@ class DirectWorld extends BaseWorld {
     this.sim.tick();
   }
   protected checkReady(): void {}
-  carrierLag(_speed: number): number {
+  carriedOverlap(_carrier: Ship, _box: AABB): number {
     return 0;
   }
 }
@@ -705,6 +713,11 @@ class DirectMe extends BaseMe<DirectWorld> {
 
 // ====================================================================== network
 
+/** How far a quantized pose (Pos32 x 3, NETCODE section 14) may put the pivot from the true one. */
+const POSE_POSITION_PRECISION = Math.sqrt(3) * (0.5 / 512);
+/** How far a quantized rotation (Rot64: each component to half of 1/32767) may turn it (radians, 2|dq|). */
+const POSE_ANGLE_PRECISION = 2 * 2 * (0.5 / 32767);
+
 class NetWorld extends BaseWorld {
   readonly mode = 'network';
   readonly me: NetMe;
@@ -733,8 +746,23 @@ class NetWorld extends BaseWorld {
     const c = this.client;
     if (c.own === null || c.intents === null) throw new Error(`network world: the client is not ready after ${READY_TICKS} ticks`);
   }
-  carrierLag(speed: number): number {
-    return speed / TPS + 1e-6;
+  carriedOverlap(carrier: Ship, box: AABB): number {
+    const g = carrier.grid;
+    let motion = 0;
+    let lever = 0;
+    for (const x of [box.minX, box.maxX]) {
+      for (const y of [box.minY, box.maxY]) {
+        for (const z of [box.minZ, box.maxZ]) {
+          // the corner held in the carrier's frame, at its previous pose and at its present one
+          const l = g.toLocal(vec3(x, y, z));
+          const r = vec3(l.x - g.pivot.x, l.y - g.pivot.y, l.z - g.pivot.z);
+          const was = qrotate(g.prevRotation, r);
+          motion = Math.max(motion, Math.hypot(x - g.prevPosition.x - was.x, y - g.prevPosition.y - was.y, z - g.prevPosition.z - was.z));
+          lever = Math.max(lever, Math.hypot(r.x, r.y, r.z));
+        }
+      }
+    }
+    return motion + POSE_POSITION_PRECISION + POSE_ANGLE_PRECISION * lever + 1e-6;
   }
 
   /** The end checks (see AFTER EACH TEST). */

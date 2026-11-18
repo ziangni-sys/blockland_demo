@@ -215,8 +215,12 @@ export function bodyIn(grid: VoxelGrid, e: Entity): boolean {
   return boxOverlapsSolid(grid, e.box(aabb()));
 }
 
-/** Depth that counts as touching, not inside (blocks). */
-export const TOUCH = 0.01;
+/**
+ * Depth that counts as touching, not inside (blocks). A world-axis box resting on a rocking deck
+ * touches it by about 1e-5 when placed against the deck's previous pose (a client-driven body:
+ * the client places it against the carrier as it shows it); 1e-4 leaves room for that and no more.
+ */
+export const TOUCH = 1e-4;
 
 /** How deep the entity's body is inside the hard cells of `grid` (0 = not inside; the push's measure). */
 export function depthIn(grid: VoxelGrid, e: Entity): number {

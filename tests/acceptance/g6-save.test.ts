@@ -16,7 +16,7 @@ import { NX, NY, NZ, PX, PY, PZ } from '../../src/core/dirs';
 import { decodeTicks } from '../../src/save/codec';
 import { exportSave, type SaveBundle } from '../../src/sim/persist';
 import type { Simulation } from '../../src/sim/simulation';
-import { WORLD_MODE, type TestWorld } from './world';
+import { READY_TICKS, WORLD_MODE, type TestWorld } from './world';
 import { Rotor, Ship } from '../../src/structures/structure';
 import { FlatGenerator, VoidGenerator } from '../../src/worldgen/generator';
 import {
@@ -290,6 +290,24 @@ function pourWater(): TestWorld {
   return w;
 }
 
+/**
+ * Brings a reloaded game `b` in step with the game never saved `a` it came from: b's player holds
+ * no key until its client is ready (READY, tests/acceptance/world.ts), so `a` runs the same ticks
+ * with its keys let go; then both hold the keys `a` held (the client re-applies them).
+ */
+function readyInStep(a: TestWorld, b: TestWorld): void {
+  const held = { forward: a.me.input.forward, strafe: a.me.input.strafe };
+  a.me.input.forward = 0;
+  a.me.input.strafe = 0;
+  a.tick(READY_TICKS);
+  b.ready();
+  expect(b.sim.ticks, 'in step').toBe(a.sim.ticks);
+  for (const w of [a, b]) {
+    w.me.input.forward = held.forward;
+    w.me.input.strafe = held.strafe;
+  }
+}
+
 describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度都一致。在大平台上倒一格水，0.4 秒后存档；读档后水会继续流，最终流满 113 格（半径 7 的菱形）。', () => {
   let played: Harbour;
   let before: Snapshot;
@@ -396,14 +414,19 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     expect(snapshot(loadWorld(HARBOUR, await readAgain(saved)))).toEqual(before);
   });
 
-  // DIRECT MODE ONLY (this test and the next): the reloaded game must go on tick for tick exactly
-  // like the one never saved. Through the network the reloaded game has a new connection: its
-  // client is ready only after the first batch, and until its first movement report the server
-  // holds the player (riding the deck, at the wheel without keys); the game never saved goes on
-  // with its client stepping the player. The two then differ by that one tick (a rider ~3e-4
-  // block, a helm without throttle for a tick), which no tolerance-free comparison survives.
-  // What the round trip keeps is checked in both modes by the tests around these; the rejoin
-  // itself by scenario 36 (tests/net/e2e-save.test.ts, e2e-own-*.test.ts).
+  // DIRECT MODE ONLY (this test and the second next one): the reloaded game must go on tick for
+  // tick exactly like the one never saved, with no tolerance. Through the network the reloaded
+  // game has a new connection: readyInStep lines up the ticks and the keys, but in the first of
+  // them the server holds the reloaded player (no movement report yet, NETCODE section 18,
+  // package 9 "工作包 9 的另一半"), while the never-saved game's client steps its player:
+  //  - a rider on the deck: the held player does not take that tick's turn of the deck into its
+  //    look, so its yaw is off by about 2.5e-5 rad and its feet by about 5e-8 block from then on;
+  //  - a helmsman: a client's keys reach the helm one tick after its report (section 8 掌舵), so
+  //    the never-saved ship steers one tick longer on the keys it held before readyInStep let
+  //    them go; ship and helmsman drift apart (about 0.1 block after 40 ticks).
+  // The windmills are not touched by either and are compared in both modes (the test between
+  // these two); what the round trip keeps is checked in both modes by the tests around them; the
+  // rejoin itself by scenario 36 (tests/net/e2e-save.test.ts, e2e-own-*.test.ts).
   it.skipIf(WORLD_MODE === 'network')('存档往返: a player standing on the deck of a sailing ship (not steering) stays aboard through the round trip, in step', async () => {
     const { w, sim } = playHarbour();
     const { me } = w;
@@ -419,6 +442,7 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     const s = await saveThroughStorage(w, 'rider', 'rider', HARBOUR.seed);
     const b = loadWorld(HARBOUR, s.loaded);
     expect(snapshot(b)).toEqual(snapshot(w));
+    readyInStep(w, b);
     for (let i = 0; i < 40; i++) {
       w.tick();
       b.tick();
@@ -434,13 +458,24 @@ describe('23. 存档往返后，结构体（含嵌套）、胶水、风车角度
     expect(loaded.sim.rng.state).toBe(before.rng);
   });
 
-  it.skipIf(WORLD_MODE === 'network')('结构体、胶水、风车角度一致（读档后继续）: the reloaded game goes on exactly like the one never saved (windmills, ship, player in step)', async () => {
+  it('风车角度一致（读档后继续）: the reloaded windmills turn on tick for tick exactly like the ones never saved', async () => {
     const a = played.w;
     const b = loadWorld(HARBOUR, await readAgain(saved));
     expect(snapshot(a)).toEqual(before); // (the unsaved game has not moved on yet)
-    // The client re-applies the keys still held (W + D) to the reloaded game.
-    b.me.input.forward = a.me.input.forward;
-    b.me.input.strafe = a.me.input.strafe;
+    readyInStep(a, b);
+    expect(b.sim.structures.rotors().map((r) => r.angle)).toEqual(a.sim.structures.rotors().map((r) => r.angle));
+    for (let i = 0; i < 40; i++) {
+      a.tick();
+      b.tick();
+      expect(b.sim.structures.rotors().map((r) => [r.angle, r.angularSpeed])).toEqual(a.sim.structures.rotors().map((r) => [r.angle, r.angularSpeed]));
+    }
+  });
+
+  it.skipIf(WORLD_MODE === 'network')('结构体、胶水、风车角度一致（读档后继续）: the reloaded game goes on exactly like the one never saved (windmills, ship, player in step)', async () => {
+    const a = playHarbour().w; // the same game again, never saved
+    const b = loadWorld(HARBOUR, await readAgain(saved));
+    expect(snapshot(a)).toEqual(before);
+    readyInStep(a, b);
     for (let i = 0; i < 40; i++) {
       a.tick();
       b.tick();
