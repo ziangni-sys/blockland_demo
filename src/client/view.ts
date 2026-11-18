@@ -1,8 +1,14 @@
 /**
- * Per-frame render state built from the simulation: camera, environment, entities and
- * overlays. Everything is interpolated between the previous and the current tick with the
- * loop's alpha, and written into objects owned by this class (no per-frame garbage beyond a
- * few small arrays when lists change).
+ * Per-frame render state built from the client's replica (docs/NETCODE.md section 15, package 9):
+ * camera, environment, entities and overlays, written into objects owned by this class (no
+ * per-frame garbage beyond a few small arrays when lists change).
+ *
+ * Everything is shown as the replica holds it for this frame: the structures at the display pose
+ * the NetClient frame and the prediction left on their grids (ships at renderTick, rotors at
+ * rotorTick), the other entities interpolated at renderTick in their carrier's frame
+ * (ClientReplica.entities), and the player this client plays where the prediction shows it
+ * (ShownPlayer: OwnPlayer.displayPos, the held look turned with its carrier). The own entity is not
+ * in the replica's entity stream (section 8): in the third-person views it is drawn from ShownPlayer.
  */
 import { DAY_TICKS } from '../core/constants';
 import { quat, vec3, type Vec3 } from '../core/math';
@@ -10,7 +16,13 @@ import { ID_MASK, liquidAmount, STATE_MASK, STATE_SHIFT } from '../blocks/cell';
 import { I } from '../blocks/items';
 import { B } from '../blocks/defs';
 import { LIQUID, LIQUID_LAVA, LIQUID_WATER, OPAQUE, SOLID } from '../blocks/registry';
+import { FALLING_HEIGHT, ITEM_HEIGHT, PLAYER_HEIGHT, RABBIT_HEIGHT, TNT_HEIGHT } from '../entities/constants';
+import type { Inventory } from '../entities/inventory';
+import { headingOf } from '../entities/structs';
 import { LIQUID_FULL_HEIGHT } from '../mesh/mesher';
+import type { EntityKind, Target } from '../net/protocol';
+import type { ReplicaView } from '../net/client/apply';
+import type { ClientReplica } from '../net/client/replica';
 import type {
   CameraState,
   EntityRenderState,
@@ -19,12 +31,9 @@ import type {
   OverlayFace,
   OverlayState,
 } from '../render/backend';
-import type { PlayerControl } from '../sim/players';
-import type { Simulation } from '../sim/simulation';
-import type { InteractionView } from '../sim/view';
-import { FallingBlockEntity, ItemEntity, Player, TntEntity, type Entity } from '../entities/entity';
 import { isDryCell } from '../structures/hull';
 import type { GlueStore } from '../structures/glue';
+import { Ship } from '../structures/structure';
 import type { VoxelGrid } from '../voxel/grid';
 import { raycastGrids, type CellPredicate } from '../voxel/raycast';
 import type { World } from '../voxel/world';
@@ -42,7 +51,7 @@ import {
   type CameraQueries,
   type ViewMode,
 } from './camera';
-import { approach, interpolateCarried, lerpAngle, lerpVec, type FramePose } from './interp';
+import { approach } from './interp';
 
 /** Radius (blocks) around the player in which COVERED glued faces are drawn while glue is in a hand. */
 export const GLUE_VIEW_RADIUS = 8;
@@ -59,6 +68,46 @@ export const GLUE_REFRESH_MS = 250;
 const FULL_SKY = 0xf0;
 /** Sprinting widens the view a little (smoothed). */
 const SPRINT_FOV_SCALE = 1.1;
+/** Height of each entity kind's body (its light is sampled half way up, at most 0.5 above the feet). */
+const KIND_HEIGHT: Readonly<Record<EntityKind, number>> = Object.freeze({
+  player: PLAYER_HEIGHT,
+  item: ITEM_HEIGHT,
+  falling: FALLING_HEIGHT,
+  tnt: TNT_HEIGHT,
+  rabbit: RABBIT_HEIGHT,
+});
+
+/**
+ * The player this client plays, as shown this frame (session.ts fills it from the prediction, or
+ * from the server's correction while the world is still loading).
+ */
+export interface ShownPlayer {
+  /** Its entity id (Welcome). */
+  id: number;
+  /** Feet, world, as shown. */
+  readonly feet: Vec3;
+  eyeHeight: number;
+  /** The look as shown (radians): the held look, turned with the carrier at the frame's pose. */
+  yaw: number;
+  pitch: number;
+  sprinting: boolean;
+  /** Moving faster than 1 block/s relative to its carrier (the sprint widening needs it). */
+  moving: boolean;
+  dead: boolean;
+  /** Hurt a moment ago (its model flashes). */
+  hurt: boolean;
+  /** The inventory as shown (predicted); null before the server sent one. */
+  inventory: Inventory | null;
+}
+
+/** What the camera reads of the replica: the world and the structures at their display pose. */
+export type CameraScene = Pick<ClientReplica, 'world' | 'structures'>;
+/** What the entity list reads of the replica: the entities at a renderTick, and the world's light. */
+export type EntityScene = Pick<ClientReplica, 'world' | 'entities'>;
+
+export function shownPlayer(): ShownPlayer {
+  return { id: 0, feet: vec3(), eyeHeight: 1.62, yaw: 0, pitch: 0, sprinting: false, moving: false, dead: false, hurt: false, inventory: null };
+}
 
 /** Light (sky, block) of the open cell at or just above a point, 0..15 each. */
 export function sampleLight(world: World, x: number, y: number, z: number, out: { sky: number; block: number }): void {
@@ -104,6 +153,14 @@ function newEntityState(): EntityRenderState {
   return { id: 0, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 };
 }
 
+/** True when the main hand or the off-hand of `inv` holds glue. */
+function glueInHand(inv: Inventory | null): boolean {
+  if (inv === null) return false;
+  const main = inv.selectedStack();
+  const off = inv.offhand;
+  return (main !== null && main.item === I.GLUE) || (off !== null && off.item === I.GLUE);
+}
+
 export class ViewBuilder {
   readonly camera: CameraState = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, fov: 75 };
   readonly env: EnvironmentState = { dayTime: 0, submerged: 'none', viewDistance: 128, time: 0 };
@@ -114,8 +171,6 @@ export class ViewBuilder {
   private fovScale = 1;
   /** Third person with the camera clear of the player's model: the local player is drawn. */
   private showSelf = false;
-  /** Body yaw of the local player this frame (the interpolated look yaw). */
-  private selfYaw = 0;
   private readonly pose = cameraPose();
   private readonly eye: Vec3 = vec3();
   /** Easing state and scratch of the 'back' placement; reset when the view mode changes. */
@@ -123,10 +178,10 @@ export class ViewBuilder {
   private lastMode: ViewMode | null = null;
   /**
    * Grids the camera queries of the current updateCamera call test (null outside the call),
-   * for the ray of 'front' (current poses).
+   * for the ray of 'front' (display poses).
    */
   private rayGrids: VoxelGrid[] | null = null;
-  /** The world and every structure as drawn this frame (render pose), for the sweep of 'back'. */
+  /** The world and every structure as drawn this frame (display pose), for the sweep of 'back'. */
   private readonly sweepFrames: CameraGridFrame[] = [];
   private sweepCount = 0;
   private readonly sweepTmp = sweepScratch();
@@ -138,16 +193,11 @@ export class ViewBuilder {
     sweep: (o, d, max, half, graded) => sweepGrids(this.sweepFrames, this.sweepCount, blocksCamera, o, d, max, half, graded, this.sweepTmp),
   };
 
-  // overlay caches (rebuilt only when the simulation publishes a new object)
+  // overlay caches (rebuilt only when the replica holds a new object)
   private readonly targetCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0 };
-  /**
-   * What the cached preview list was built from. Keyed on the parts, not the wrapper: the
-   * simulation publishes a fresh `preview` object every tick around the same `cells` array.
-   */
-  private lastPreviewCells: Int32Array | null | undefined = undefined;
-  private lastPreviewGrid = -1;
-  private lastPreviewKind: string | null = null;
-  private lastConflicts: InteractionView['conflicts'] | undefined = undefined;
+  /** What the cached preview list was built from (the replica replaces the preview object when it changes). */
+  private lastPreview: ReplicaView['preview'] | undefined = undefined;
+  private lastConflicts: ReplicaView['conflicts'] | undefined = undefined;
   private glueAt = -Infinity;
   /**
    * What the glue list was last collected from: [hand holds glue (0/1), world glue version,
@@ -157,88 +207,65 @@ export class ViewBuilder {
   private readonly glueKey: number[] = [];
 
   // scratch
-  private readonly framePrev: FramePose = { position: vec3(), rotation: quat() };
-  private readonly frameCur: FramePose = { position: vec3(), rotation: quat() };
-  private readonly frameRender: FramePose = { position: vec3(), rotation: quat() };
   private readonly scratch: Vec3 = vec3();
   private readonly scratch2: Vec3 = vec3();
+  private readonly rot = quat();
   private readonly light = { sky: 15, block: 0 };
 
   /**
-   * Interpolated position of an entity's feet. Riders (and helmsmen) are interpolated in their
-   * carrier's frame so they do not jitter against the carrier's interpolated mesh.
+   * The camera for the view mode: first person at the player's eyes, or third person over the
+   * shoulder ('back', kept CAMERA_CLEARANCE from every block of every grid as drawn this frame,
+   * moving out again eased over `dt` seconds) or in front of the face ('front', pulled in by a
+   * ray); see src/client/camera.ts. The look is the shown player's.
    */
-  renderPosition(sim: Simulation, e: Entity, alpha: number, out: Vec3): Vec3 {
-    const carrierId = e instanceof Player && e.steeringShipId !== 0 ? e.steeringShipId : e.carrierId;
-    if (carrierId !== 0) {
-      const s = sim.structures.get(carrierId);
-      if (s && !s.removed) {
-        const g = s.grid;
-        g.renderPose(0, this.framePrev.position, this.framePrev.rotation);
-        g.renderPose(1, this.frameCur.position, this.frameCur.rotation);
-        g.renderPose(alpha, this.frameRender.position, this.frameRender.rotation);
-        return interpolateCarried(e.prevPos, e.pos, this.framePrev, this.frameCur, this.frameRender, g.pivot, alpha, out, this.scratch);
-      }
-    }
-    return lerpVec(e.prevPos, e.pos, alpha, out);
-  }
-
-  /**
-   * The camera for the view mode: first person at the local player's eyes, or third person
-   * over the shoulder ('back', kept CAMERA_CLEARANCE from every block of every grid as drawn
-   * this frame, moving out again eased over `dt` seconds) or in front of the face ('front',
-   * pulled in by a ray); see src/client/camera.ts. `yaw`/`pitch` come straight from the input
-   * (blended with the carrier's turn). The eye position is interpolated exactly like the player
-   * model's.
-   */
-  updateCamera(sim: Simulation, me: PlayerControl, alpha: number, yaw: number, pitch: number, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
-    const p = me.player;
-    const pos = this.renderPosition(sim, p, alpha, this.scratch2);
+  updateCamera(replica: CameraScene, me: ShownPlayer, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
     const eye = this.eye;
-    eye.x = pos.x;
-    eye.y = pos.y + p.eyeHeight;
-    eye.z = pos.z;
+    eye.x = me.feet.x;
+    eye.y = me.feet.y + me.eyeHeight;
+    eye.z = me.feet.z;
     if (mode !== this.lastMode) {
       resetCameraRig(this.rig);
       this.lastMode = mode;
     }
-    this.rayGrids = mode === 'front' ? sim.grids() : null;
-    this.sweepCount = mode === 'back' ? this.collectSweepFrames(sim, alpha) : 0;
-    const pose = placeCamera(mode, eye, yaw, pitch, this.cameraQueries, this.rig, dt, this.pose);
+    this.rayGrids = mode === 'front' ? replicaGrids(replica) : null;
+    this.sweepCount = mode === 'back' ? this.collectSweepFrames(replica) : 0;
+    const pose = placeCamera(mode, eye, me.yaw, me.pitch, this.cameraQueries, this.rig, dt, this.pose);
     this.rayGrids = null;
     this.sweepCount = 0;
-    this.showSelf = mode !== 'first' && !p.dead && selfModelGap(pose.x, pose.y, pose.z, eye, yaw, p.eyeHeight) >= SELF_HIDE_CLEARANCE;
-    this.selfYaw = yaw;
+    this.showSelf = mode !== 'first' && !me.dead && selfModelGap(pose.x, pose.y, pose.z, eye, me.yaw, me.eyeHeight) >= SELF_HIDE_CLEARANCE;
     const cam = this.camera;
     cam.x = pose.x;
     cam.y = pose.y;
     cam.z = pose.z;
     cam.yaw = pose.yaw;
     cam.pitch = pose.pitch;
-    const moving = Math.hypot(p.vel.x - p.carrierVel.x, p.vel.z - p.carrierVel.z) > 1;
-    this.fovScale = approach(this.fovScale, p.sprinting && moving ? SPRINT_FOV_SCALE : 1, 10, dt);
+    this.fovScale = approach(this.fovScale, me.sprinting && me.moving ? SPRINT_FOV_SCALE : 1, 10, dt);
     cam.fov = Math.min(150, fov * this.fovScale);
     return cam;
   }
 
+  /** The eyes of the last updateCamera (world). */
+  get eyePos(): Readonly<Vec3> {
+    return this.eye;
+  }
+
   /**
    * Fills sweepFrames with the world (identity) and every structure at the pose it is drawn
-   * with at `alpha` (the same renderPose the structure renderer uses), so the camera keeps its
-   * clearance from what is on the screen. Returns the number of frames.
+   * with (the display pose on its grid), so the camera keeps its clearance from what is on the
+   * screen. Returns the number of frames.
    */
-  private collectSweepFrames(sim: Simulation, alpha: number): number {
+  private collectSweepFrames(replica: CameraScene): number {
     const frames = this.sweepFrames;
-    const structures = sim.structures.all();
+    const structures = replica.structures();
     while (frames.length < structures.length + 1) frames.push(cameraGridFrame());
     const w = frames[0]!;
-    w.grid = sim.world;
+    w.grid = replica.world;
     let n = 1;
     for (let i = 0; i < structures.length; i++) {
       const s = structures[i]!;
-      if (s.removed) continue;
       const f = frames[n++]!;
       f.grid = s.grid;
-      s.grid.renderPose(alpha, f.position, f.rotation);
+      s.grid.renderPose(1, f.position, f.rotation);
       f.pivot.x = s.grid.pivot.x;
       f.pivot.y = s.grid.pivot.y;
       f.pivot.z = s.grid.pivot.z;
@@ -248,98 +275,114 @@ export class ViewBuilder {
     return n;
   }
 
-  updateEnvironment(sim: Simulation, alpha: number, timeSec: number, renderDistance: number): EnvironmentState {
+  /**
+   * The time of day is the replica's (the server's world time and day offset at the renderTick
+   * of the frame, section 4: never the client's own clock); the medium at the camera, except in
+   * the dry cells of a ship's hull.
+   */
+  updateEnvironment(replica: ClientReplica, timeSec: number, renderDistance: number): EnvironmentState {
     const env = this.env;
-    // THE time of day is the simulation's (world.time + dayOffset, see Simulation.dayTime):
-    // world.time alone is wrong once setDayTime() was used or a save restored an offset.
-    // sim.dayTime is the current tick's; alpha interpolates from the previous one.
-    const d = sim.dayTime + (alpha - 1) / DAY_TICKS;
-    env.dayTime = d - Math.floor(d);
+    env.dayTime = replica.dayTime;
     env.viewDistance = renderDistance * 16;
     env.time = timeSec;
     const c = this.camera;
-    let medium = mediumAt(sim.world, c.x, c.y, c.z);
-    if (medium !== 'none' && this.inDryHull(sim, c)) medium = 'none';
+    let medium = mediumAt(replica.world, c.x, c.y, c.z);
+    if (medium !== 'none' && this.inDryHull(replica, c)) medium = 'none';
     env.submerged = medium;
     return env;
   }
 
   /** True when the point is in a dry cell of some ship's hull (water there is cut away). */
-  private inDryHull(sim: Simulation, p: Vec3): boolean {
-    const ships = sim.structures.ships();
-    for (let i = 0; i < ships.length; i++) {
-      const s = ships[i]!;
-      const h = s.hull;
-      if (!h || s.removed) continue;
+  private inDryHull(replica: ClientReplica, p: Vec3): boolean {
+    const structures = replica.structures();
+    for (let i = 0; i < structures.length; i++) {
+      const s = structures[i]!;
+      if (!(s instanceof Ship) || !s.hull) continue;
       const l = s.grid.toLocal(p, this.scratch);
-      if (isDryCell(h, Math.floor(l.x), Math.floor(l.y), Math.floor(l.z))) return true;
+      if (isDryCell(s.hull, Math.floor(l.x), Math.floor(l.y), Math.floor(l.z))) return true;
     }
     return false;
   }
 
   /**
-   * Every entity, interpolated and lit. The local player is left out in first person (and when
-   * the third-person camera is too close to the model, see selfModelGap); in third person it
-   * is drawn at the same interpolated position as the camera's eye, facing the look yaw of
-   * updateCamera — so call updateCamera first in a frame.
+   * Every entity of the replica at `renderTick`, lit; plus the player this client plays in the
+   * third-person views (not when the camera is too close to the model, see selfModelGap), at
+   * the eyes of updateCamera facing the shown look — so call updateCamera first in a frame.
    */
-  updateEntities(sim: Simulation, me: PlayerControl, alpha: number): readonly EntityRenderState[] {
+  updateEntities(replica: EntityScene, me: ShownPlayer, renderTick: number): readonly EntityRenderState[] {
     const list = this.entityList;
     list.length = 0;
-    const player = me.player;
-    const all = sim.entities.all();
-    const world = sim.world;
-    for (let i = 0; i < all.length; i++) {
-      const e = all[i]!;
-      if (e.removed || (e === player && !this.showSelf)) continue;
-      let s = this.entityPool[list.length];
-      if (!s) {
-        s = newEntityState();
-        this.entityPool.push(s);
-      }
-      const pos = this.renderPosition(sim, e, alpha, this.scratch2);
+    const world = replica.world;
+    const views = replica.entities(renderTick);
+    for (let i = 0; i < views.length; i++) {
+      const e = views[i]!;
+      const s = this.nextState();
       s.id = e.id;
       s.kind = e.kind;
-      s.x = pos.x;
-      s.y = pos.y;
-      s.z = pos.z;
-      s.yaw = e === player ? this.selfYaw : lerpAngle(e.prevYaw, e.yaw, alpha);
-      s.payload = e instanceof ItemEntity ? e.stack.item : e instanceof FallingBlockEntity ? e.cell : 0;
-      s.flash = e instanceof TntEntity ? (Math.floor(e.fuse / 4) % 2 === 0 ? 0.8 : 0) : e instanceof Player && e.hurtTicks > 0 ? 0.6 : 0;
-      sampleLight(world, pos.x, pos.y + Math.min(0.5, e.height * 0.5), pos.z, this.light);
-      s.sky = this.light.sky;
-      s.block = this.light.block;
+      s.x = e.pos.x;
+      s.y = e.pos.y;
+      s.z = e.pos.z;
+      s.yaw = e.yaw;
+      s.payload = e.kind === 'item' ? e.item : e.kind === 'falling' ? e.cell : 0;
+      s.flash = e.kind === 'tnt' ? (Math.floor(e.fuse / 4) % 2 === 0 ? 0.8 : 0) : 0;
+      this.lightAt(world, s, KIND_HEIGHT[e.kind]);
+      list.push(s);
+    }
+    if (this.showSelf) {
+      const s = this.nextState();
+      s.id = me.id;
+      s.kind = 'player';
+      s.x = me.feet.x;
+      s.y = me.feet.y;
+      s.z = me.feet.z;
+      s.yaw = me.yaw;
+      s.payload = 0;
+      s.flash = me.hurt ? 0.6 : 0;
+      this.lightAt(world, s, PLAYER_HEIGHT);
       list.push(s);
     }
     return list;
   }
 
-  /** Overlays from the interaction view plus the glued faces around the player. */
-  updateOverlays(sim: Simulation, me: PlayerControl, nowMs: number): OverlayState {
+  private nextState(): EntityRenderState {
+    let s = this.entityPool[this.entityList.length];
+    if (!s) {
+      s = newEntityState();
+      this.entityPool.push(s);
+    }
+    return s;
+  }
+
+  private lightAt(world: World, s: EntityRenderState, height: number): void {
+    sampleLight(world, s.x, s.y + Math.min(0.5, height * 0.5), s.z, this.light);
+    s.sky = this.light.sky;
+    s.block = this.light.block;
+  }
+
+  /**
+   * Overlays: the outline of `target` (the client's own use target, section 10: drawn at once),
+   * the mining cracks the server reports (only on the target itself), the assembly preview and
+   * the docking conflicts of the private view, and the glued faces around the player.
+   */
+  updateOverlays(replica: ClientReplica, me: ShownPlayer, target: Target | null, nowMs: number): OverlayState {
     const o = this.overlay;
-    const v = me.view;
-    if (v.target) {
+    if (target !== null) {
       const t = this.targetCell;
-      t.structureId = v.target.gridId;
-      t.x = v.target.x;
-      t.y = v.target.y;
-      t.z = v.target.z;
+      t.structureId = target.gridId;
+      t.x = target.x;
+      t.y = target.y;
+      t.z = target.z;
       o.target = t;
     } else {
       o.target = null;
     }
-    // Cracks only on the target itself (the cell being mined is the server's; the outline the player's).
+    const v = replica.ownState.view;
     const m = v.mining;
-    const t = v.target;
-    o.breakProgress = t !== null && m !== null && m.gridId === t.gridId && m.x === t.x && m.y === t.y && m.z === t.z ? Math.max(0, Math.min(1, m.progress)) : 0;
-    const pv = v.preview;
-    const pvCells = pv ? pv.cells : null;
-    const pvGrid = pv ? pv.gridId : -1;
-    const pvKind = pv ? pv.kind : null;
-    if (pvCells !== this.lastPreviewCells || pvGrid !== this.lastPreviewGrid || pvKind !== this.lastPreviewKind) {
-      this.lastPreviewCells = pvCells;
-      this.lastPreviewGrid = pvGrid;
-      this.lastPreviewKind = pvKind;
+    o.breakProgress =
+      target !== null && m !== null && m.gridId === target.gridId && m.x === target.x && m.y === target.y && m.z === target.z ? Math.max(0, Math.min(1, m.progress)) : 0;
+    if (v.preview !== this.lastPreview) {
+      const pv = v.preview;
+      this.lastPreview = pv;
       const cells: OverlayCell[] = [];
       if (pv) {
         const a = pv.cells;
@@ -351,7 +394,7 @@ export class ViewBuilder {
       this.lastConflicts = v.conflicts;
       o.conflicts = v.conflicts.map((c) => ({ structureId: 0, x: c.x, y: c.y, z: c.z }));
     }
-    this.updateGlue(sim, me, nowMs);
+    this.updateGlue(replica, me, nowMs);
     return o;
   }
 
@@ -359,33 +402,32 @@ export class ViewBuilder {
    * Glued faces near the player (DESIGN 强力胶: glue on a face is visible): every EXPOSED face
    * (a side that is not a hard block) within GLUE_EXPOSED_RADIUS, whatever the player holds;
    * COVERED faces (hard blocks on both sides) within GLUE_VIEW_RADIUS while glue is in the main
-   * hand or the off-hand. Re-collected when a glue store changes or a hand starts / stops
-   * holding glue, and at least every GLUE_REFRESH_MS (blocks placed on or taken off a glued face
-   * switch it between covered and exposed; the light at a decal changes). An unchanged result
+   * hand or the off-hand (as shown). Re-collected when a glue store changes or a hand starts /
+   * stops holding glue, and at least every GLUE_REFRESH_MS (blocks placed on or taken off a glued
+   * face switch it between covered and exposed; the light at a decal changes). An unchanged result
    * keeps the previous array.
    */
-  private updateGlue(sim: Simulation, me: PlayerControl, nowMs: number): void {
+  private updateGlue(replica: ClientReplica, me: ShownPlayer, nowMs: number): void {
     const o = this.overlay;
-    const p = me.player;
-    if (p.dead) {
+    if (me.dead) {
       if (o.glue.length > 0) o.glue = [];
       this.glueKey.length = 0;
       return;
     }
-    const inv = p.inventory;
-    const main = inv.selectedStack();
-    const off = inv.offhand;
-    const inHand = (main !== null && main.item === I.GLUE) || (off !== null && off.item === I.GLUE);
-    const structures = sim.structures.all();
-    const changed = this.updateGlueKey(inHand ? 1 : 0, sim.worldGlue.version, structures);
+    const inHand = glueInHand(me.inventory);
+    const structures = replica.structures();
+    const changed = this.updateGlueKey(inHand ? 1 : 0, replica.worldGlue.version, structures);
     if (!changed && nowMs - this.glueAt < GLUE_REFRESH_MS) return;
     this.glueAt = nowMs;
     const faces: OverlayFace[] = [];
-    const eye = p.eyePos(this.scratch2);
-    collectGlueFaces(sim.world, sim.worldGlue, 0, eye, inHand, sim.world, faces);
+    const eye = this.scratch2;
+    eye.x = me.feet.x;
+    eye.y = me.feet.y + me.eyeHeight;
+    eye.z = me.feet.z;
+    collectGlueFaces(replica.world, replica.worldGlue, 0, eye, inHand, replica.world, faces);
     for (let i = 0; i < structures.length; i++) {
       const s = structures[i]!;
-      if (s.removed || s.glue.size === 0) continue;
+      if (s.glue.size === 0) continue;
       collectGlueFaces(s.grid, s.glue, s.id, s.grid.toLocal(eye, this.scratch), inHand, null, faces);
     }
     if (!sameFaces(o.glue, faces)) o.glue = faces;
@@ -409,6 +451,20 @@ export class ViewBuilder {
     k.length = len;
     return changed;
   }
+
+  /** The world heading of structure `id` as displayed this frame (its grid's composed rotation), or NaN. */
+  displayHeading(replica: ClientReplica, id: number): number {
+    const rs = replica.state.structures.get(id);
+    if (rs === undefined) return Number.NaN;
+    return headingOf(rs.structure.grid.worldRotation(this.rot));
+  }
+}
+
+/** The world and every structure grid of the replica (display poses). */
+export function replicaGrids(replica: CameraScene): VoxelGrid[] {
+  const out: VoxelGrid[] = [replica.world];
+  for (const s of replica.structures()) out.push(s.grid);
+  return out;
 }
 
 /**
