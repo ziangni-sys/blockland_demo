@@ -631,7 +631,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 **服务器一个 tick**（`ServerHost.tickOnce()`）：`netServer.beforeTick()`（超时；离开和顶替；握手通过的加入；然后按玩家实体 id、到达顺序把排队的上报全部交给 `moves.receive`，再把排队的意图全部交给 `intents.receive`，然后 `moves.beforeTick()`、`intents.beforeTick()`）→ `sim.tick()` → `replicator.endTick()` → `netServer.afterTick()`（踢掉太慢的客户端）。上报和意图在到达时只排队，过滤是 `moves.ts`、`intents.ts` 的事。两次 tick 之间：处理到达的消息（只排队，`Ping` 立刻回）、按时间预算生成区块（`sim.chunks.wanted()` + `loadColumn`，和现在 `ChunkStreamer` 喂 `provide()` 一样在 tick 之外做，`syncChunks` 只留给测试）。
 
-**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players }`（变了才发，每秒最多一次）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。
+**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players }`（变了才发，每秒最多一次）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。
 
 **无头联机测试的组装**（`tests/net/harness.ts`，一个进程里）
 
@@ -660,7 +660,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 | 场景 | 测试 |
 |---|---|
-| 30 单机走同一套协议 | `tests/acceptance` 加 `TestWorld`：`sim`（服务器的 Simulation，用来搭场景、读结果）、`me`、`tick(n)`。`me.input`（保持的输入：forward、strafe、sneak、jump、yaw、pitch）、`me.player`（服务器上的实体，只读）、`me.lookAtCell/aimAt/useOn/mine/hold/teleport/...`。“直接”模式下 `me` 包着 `sim.soloPlayer`；“联机”模式下输入和瞄准交给 `HeadlessClient`（经预测和意图），传送、换模式走房主命令，链路零延迟，`tick()` 按锁步走：客户端一帧（输入、预测、发送）→ 送达 → 服务器一个 tick → 送达 → 客户端应用，D 固定为 1；这时每个 tick 正好一条上报，`moves.ts` 的队列总是空的，tick 数和直接模式一样。工作包 9 把验收测试和 helper 全部改成用 `w.me`（现在 14 个文件里有 459 处 `soloSim`/`soloPlayer`、141 处直接写 `input` 或调 `teleport`），并加一个守卫测试，拦住 `tests/acceptance` 里的 `soloPlayer` 和对 `.input.` 的写。vitest 加一个 project 用联机模式再跑一遍全部验收测试（`npm test` 两种都跑），每个测试结束后 `compareReplica` 必须为空。浏览器冒烟测试经 Worker 跑单机，两种渲染器。 |
+| 30 单机走同一套协议 | `tests/acceptance` 加 `TestWorld`：`sim`（服务器的 Simulation，用来搭场景、读结果）、`me`、`tick(n)`。`me.input`（保持的输入：forward、strafe、sneak、jump、yaw、pitch）、`me.player`（服务器上的实体，只读）、`me.lookAtCell/aimAt/useOn/mine/hold/teleport/...`。“直接”模式下 `me` 包着 `sim.soloPlayer`；“联机”模式下输入和瞄准交给 `HeadlessClient`（经预测和意图），传送、换模式走房主命令，链路零延迟，`tick()` 按锁步走：客户端一帧（输入、预测、发送）→ 送达 → 服务器一个 tick → 送达 → 客户端应用，D 固定为 1；这时每个 tick 正好一条上报，`moves.ts` 的队列总是空的；联机模式要等客户端的地方，直接模式也等同样多的 tick，所以 tick 数和直接模式一样（运行结束时比较）。工作包 9 把验收测试和 helper 全部改成用 `w.me`（现在 14 个文件里有 459 处 `soloSim`/`soloPlayer`、141 处直接写 `input` 或调 `teleport`），并加一个守卫测试，拦住 `tests/acceptance` 里的 `soloPlayer` 和对 `.input.` 的写。vitest 用三个 project：unit、acceptance（直接模式）、acceptance-net（联机模式，`npm test` 两种都跑），每个测试结束后 `compareReplica` 必须为空。浏览器冒烟测试经 Worker 跑单机，两种渲染器。细节见第 18 节“工作包 9 的另一半”。 |
 | 31 两人在行驶的船上 | 两个客户端，往返 150 ms、抖动 20 ms、丢包 5%；船以油门 1、舵 0.5 转圈 60 秒；两人都站着不动。断言：每个客户端上，对方在 `renderTick` 的载体局部位置和服务器上的差 < 0.05 格；加入以后没有收到 cause 以 `check:` 开头或为 `crush` 的校正；没有 `crush` 受伤事件；自己的载体局部位置漂移 < 0.01。再跑一遍两人在甲板上来回走：校正次数 0。 |
 | 32 停靠时有人在甲板上 | A 掌舵（船斜着 30° 行驶后停靠），B 站在离 pivot 最远的甲板角上；延迟同 31。断言：停靠后两人都在世界方块上着地；B 的世界位置等于取整变换后他原来的甲板位置（差 < 0.05）；没有下落超过 0.6 格；没有受伤；两端摘要一致。 |
 | 33 同一区块里同时放和挖 | 两个客户端（30 ms；120 ms + 5% 丢包），按固定种子在同一个 16×16 范围里随机放置、挖掘 30 秒。逐 tick 比较被改过的列的摘要；`quiesce()` 后两个副本和服务器全量一致。 |
@@ -788,6 +788,37 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **背包预测**：`CreativePick` 只在客户端看到的模式（私有区的 vitals，没有时用世界规则的默认模式）是创造时预测；中键选取的物品按目标的 `cell` 算（`entities/inventory.ts` 的 `pickBlockItem`），服务器按它那一格算，两者 id 相同才执行。
 - **脚本控制的客户端驱动玩家**：`PlayerControl.lookAt`、`lookAtCell`、`aimAt` 对客户端驱动的玩家同时声称它的客户端会声称的目标（从眼睛投两条射线，`Hands.claimLook`），所以模拟层的测试和 `tests/drive/client.ts` 的滞后客户端照样能点。有真客户端连着时不能这样用：客户端的 `Aim` 和每个 tick 的重新校验会覆盖它（`tests/net/e2e-scenes.ts` 的 `useOn` 只给服务器驱动的机器人用）。
 - **死亡和复活时松开按键**（第 10 节）：在模拟层做（`Interaction.onEntityEvent` 的死亡、`PlayerControl.respawn`），服务器驱动的玩家也一样：死前一直按着的键复活后不再起作用，要重新按（DESIGN“多玩家规则”）。
+
+### 工作包 9 的另一半（场景 30：验收测试的两种模式）
+
+- **`TestWorld`**（`tests/acceptance/world.ts`，第 16 节场景 30）：`w.sim`（服务器的 Simulation）、`w.me`、`w.tick(n)`。直接模式下 `me` 包着身份 `me` 的 `PlayerControl`（服务器驱动）；联机模式下 `me` 是房主自己连接上的 `HeadlessClient`。测试只经 `w.me` 行动：保持的键和视角（`me.input`）、脚本动作、房主命令（传送 `Teleport`、物品 `Give`、模式 `SetPlayerMode`）。两种模式的 Simulation 用同样的 `SimOptions` 建（出生点、加载半径、在 tick 里同步生成区块），联机模式由 `ServerHost.serve` 接管；`ServerHostOptions.starterItems: false` 不发开局物品（直接模式没有）。客户端的订阅半径就是 `loadRadius`。
+- **锁步**（`NetHarness` 的 `lockstep` 选项，`step()`）：服务器自己的计时器不触发；一步 = 虚拟时间前进 50 ms，每个客户端一帧（应用、预测一个客户端 tick、上报、意图），送达，服务器 `tickOnce()`，送达，客户端应用（`HeadlessClient.applyNow`，不走客户端 tick）。客户端的时钟换成 `LockstepClock`（经 `NetClientOptions.clock` 注入，只给测试用）：应用完 tick T 的包时 `renderTick = T`（`arrivalTick = T + 1`，`D = 1`），`rotorTick = T + 1`（`rotorLead = 0`）：客户端 tick k 在服务器 tick k 之前走，船在服务器 k − 1 的位姿，转子在 k 的。这样每步正好一条上报，在同一步的服务器 tick 里被接受。锁步的客户端不发 `Ping`。
+- **锁步里视线的眼睛**：取预测的身体现在的位置（`HeadlessClient.eyes = 'body'`），不取画面（`displayPos`）。在整数的 `rotorTick` 上画面停在上一个客户端 tick（`alpha = 0`），比服务器晚一步；两步之间身体的位置正是服务器在下一个 tick 做动作时这个玩家的位置，和直接模式的服务器射线一致。
+- **加入在第一个 tick 之前**：建世界（或读档）时 Hello 立刻送达，并立刻执行第一个 tick 的开头（`NetServer.beforeTick()`：加入、`Welcome`），下一步再跑这个 tick 的其余部分。所以刚建好或刚读档的世界里玩家已经在，什么都没动，和直接模式一样能读（场景 36 里房主自己的客户端读档后也是在第一个 tick 前加入）。
+- **两种模式跑同样的 tick**：联机模式要等的地方（服务器只能从客户端那里知道，客户端只能从下一个包知道），直接模式也等同样多的 tick，所以同一个测试在两种模式下 tick 数相同。等待有：就绪（READY，第一次需要客户端的 `me` 操作先走到加入后第 2 个 tick；只读 `me.player`、`me.view` 不算；`w.ready()` 显式地走）；测试在两个 tick 之间改了服务器上的场景（格子、胶、结构体或实体的增减）之后瞄准任何东西，先走 1 个 tick（SYNC）；传送（房主命令，走到客户端采纳校正，2 个 tick，远距离重新加载不支持）；直接模式里立刻生效的命令（复活、松舵、扔光标、换模式、`Give`）是意图或房主命令，在下一个 tick 开头执行，两种模式都跑完那个 tick 才返回；手里没有的物品（创造模式整组从物品栏取，预测，不花 tick；否则 `Give`，1 个 tick）；手拿舵轮时 `useOn` 先走 1 个 tick，让服务器有转过去之后的视角（工作包 7“视角和点击”）。联机模式在等待之后检查等够了（就绪、采纳了校正、意图都被确认）。“直到某事发生为止”的循环用 `w.tickWhile()`：循环的次数是模拟的结果，按设计在两种模式下可以不同（舵从客户端的上报晚一个 tick 拿到按键，第 8 节“掌舵”；客户端驱动的玩家要过挤压的滞回才被判挤伤）。`tests/acceptance/tick-parity.ts`（vitest 的 globalSetup）在整次运行结束时比较两个 project 里每个通过的测试的每个世界的 tick 数（不含 `tickWhile` 的），不同就让运行失败；`tests/net/test-world.test.ts` 逐个等待地比较。
+- **就绪的两个 tick 里玩家怎么动**：直接模式下服务器驱动的玩家两个 tick 都按（空的）输入走；联机模式下第一个 tick 服务器让玩家停着（还没有上报），第二个 tick 客户端预测一个 tick。玩家在出生点静止（站在地上、在船上被带着）时没有区别；悬在空中的出生点会差一个 tick 的下落，测试要它悬停就在就绪后起飞、等一个 tick（服务器从下一条上报知道起飞）、再传送回原处（场景 11 的 TNT 测试）。
+- **被携带的身体和世界的重叠**（第 9 节）：`me.body` 是负责它移动的一方放的身体（直接模式是服务器的实体，联机模式是客户端预测的），和世界不许重叠；服务器的副本 `me.player` 允许重叠 `w.carriedOverlap(载体, 盒子)`：直接模式 0；联机模式是载体在这个 tick 里在盒子各角的位移，加上副本里载体位姿的精度（`Pos32` 半个 1/512 格每轴，`Rot64` 每分量半个 1/32767，乘到 pivot 的距离），再加 1e-6。客户端按它副本里（量化的、上一个 tick 的）位姿放载体局部的脚，服务器按自己现在的位姿换算。场景 19 贴墙的测试两份都检查；实测重叠最多是允许值的 0.87。
+- **每个测试结束时**（联机模式）：客户端仍然连着、就绪；副本和服务器在 `Replicator` 给它的全部内容上 `compareReplica` 为空（含位姿；测试最后改过场景就先走一步）；没有 cause 以 `check:` 开头的校正（零延迟下客户端看到的就是服务器判断用的）。`beforeAll` 里建的世界被一个文件里的测试共用，在文件结束时检查。
+- **只在直接模式里跑的**：场景 23 的两个测试要求读档后的游戏和没存过的游戏逐 tick 完全相同（甲板上的人、掌舵开着的船）。两种模式下都先对齐：读档的世界就绪的两个 tick 里，没存过的游戏松开按键跑同样的两个 tick，然后两边按同样的键。联机时读档后的游戏是一条新连接，第一个 tick 里服务器让玩家停着（还没有上报），没存过的游戏里客户端照常走这个玩家：甲板上的人没有把这个 tick 甲板的转动算进视角（yaw 差约 2.5e-5 弧度，脚差约 5e-8 格）；掌舵时客户端的按键晚一个 tick 才到舵（第 8 节“掌舵”），没存过的船比读档的多按松开前的键开一个 tick，40 个 tick 后船和舵手差约 0.1 格。没有容差的比较过不去。两边风车的角度和转速不受影响，在两种模式下逐 tick 比较（单独的测试）；存档保存了什么，由前后的测试在两种模式下检查；重新加入由场景 36 的端到端测试检查。
+- **光照**：直接模式没有客户端，也就没有光照（工作包 9 的另一半把光照从服务器拿掉）。场景 25 里画出的胶面亮度只在联机模式下检查（客户端副本算的光）；直接模式下画胶面用同一个 `collectGlueFaces`，读服务器的格子和胶，露天的格子按满天光。
+- **嵌进方块的身体**（第 9 节，`EntityManager.judgeWorldStuck`）：没有载体的客户端驱动玩家只要和世界方块重叠（`boxOverlapsSolid`，同服务器驱动的身体移动），服务器就把它挪到最近的空位并发 cause 为 `unstick` 的校正。世界不会动，延迟解释不了没有载体的身体和世界的重叠，那只能是有方块放进了身体。原来按“深度 > `REPORT_HARD_TOLERANCE`”判：浅的重叠留着不管，客户端又不自己挪位，身体继续往方块里沉，每条上报都被 `check:world` 拒回原处，永远如此。有载体的身体照旧按容差加载体速度乘延迟判。
+- **第一次在两个 tick 之间看到的结构体**（`entities/structs.ts`）：在 tick 之间提出校正时（读档后第一个 tick 之前加入），实体的结构体缓存第一次看到的结构体以它现在的位姿为速度基准（`rebuild(.., 'now')`），不用 `renderPose(0)`：那是已经结束的那个 tick 开头的位姿，下一个 tick 会把两个 tick 的运动当成一个，停在甲板上的人拿到两倍的船速。
+- **`ServerHost.serve`**：create 和 load 最后都调它；测试自己建好 Simulation 时直接调它（不放示例船、不报 `ready`、不先存一次）。存档的打包和读回抽成 `host.ts` 的 `saveBundle`（`exportSave` + `generator` 块）和 `readSave`（`ServerHost.load` 读存储的那部分），验收测试的存档往返在两种模式下都用它们。
+- **场景 30 不覆盖的**：锁步、零延迟下客户端永远不会瞄准过时的格子（SYNC 先让它收到变化），所以“目标格换了，意图按无目标执行”（第 18 节工作包 7）只由 `tests/net` 的单元和端到端测试覆盖，验收测试的联机模式发现不了服务器漏掉这项检查。第 16 节“LESSONS 里联机可能带回来的坑”第一行要求的 g5 携带场景在 150 ms + 5% 丢包下再跑一遍，工作包 9 没有做（`TestWorld` 只有锁步的联机模式，延迟下等待和 tick 数都要另定）；150 ms 的携带覆盖目前只有 `tests/net/e2e-own-*` 的场景（甲板、码头起跳、从甲板跳进水里、场景 31、32）。
+
+### 工作包 9（浏览器游戏改接）
+
+- **页面怎么启动自己的服务器**（第 1、15 节）：`client/server.ts` 的 `LocalServer` 依次试三种方式：blob URL 的模块 Worker；data: URL 的模块 Worker（不透明来源的沙箱拒绝前一种）；主线程上的同一个 Worker 入口（`net/host/worker.ts startServerWorker`，接在一个 `MessageChannel` 上，中间仍是宿主控制消息和字节）。一种方式构造失败、在第一条回答之前报错、或者 20 秒没有回答，就终止它，把同一条命令（`create` 或 `load`）交给下一种。主线程的那份代码在普通构建里是单独的 chunk，和 Worker 的 chunk 一样第一次用到时才载入。一个 `LocalServer` 只开一个世界，关服之后下一个世界另起一个。
+- **世界列表和删除**（第 12 节）：页面自己打开同一个数据库，只读世界列表和元数据、删除世界。主菜单出现时没有服务器在跑，所以删除不会和 Worker 的写入冲突。读档之前页面先看元数据（`client/saves.ts checkWorld`）：世界不存在、由更新或更旧的版本保存，各给自己的提示，不启动服务器。新世界在服务器第一次存档成功后出现在列表里。
+- **页面的存储不能持久时**（沙箱、IndexedDB 打不开）：提示照 M1，来自服务器 `ready` 里的 `persistent: false` 和原因；读世界列表用的页面存储另外提示一次。
+- **暂停**（第 4 节）：单机里暂停菜单、从它打开的设置和死亡界面暂停世界，同 M1；背包界面不暂停。页面隐藏时：正在玩就打开暂停菜单（同 M1），在别的界面就让服务器存一次档。宿主拒绝暂停（`error { what: 'pause' }`，房间开着）时客户端也不停。工作包 11 开放房间之后，隐藏页面不能再暂停（DESIGN“联机的世界不暂停”）。恢复之后 1.5 秒内不显示卡顿提示（第一个包还在路上）。
+- **远距离校正之后的加载界面**（第 3、9 节）：`OwnPlayer.reloading` 在新位置的就绪区插进副本时结束。服务器在校正的同一个包里订阅新位置，单机里这些列常常在采纳校正的那个客户端 tick 之前就生成完了，`reloading` 当场结束。所以页面不只看 `reloading`：采纳了一条要重新加载的校正，就回到加载界面，同样等中间 5×5 列网格化完，否则会有几帧看不到新位置的地形。重新加载的就绪区按当前的订阅半径算（设置里改过渲染距离也一样）。加载界面下世界照常运行（M1 里加载时模拟停住），身体由服务器托着。
+- **设置里的渲染距离**：发 `SetViewRadius(渲染距离 + 1)`，同时改 `NetClient.viewRadius`（重连时的 `Hello` 和就绪区用它）。
+- **显示的模式和死亡**：暂停菜单切模式后，在服务器确认那两条房主命令（意图确认号）之前就显示新模式；发出 `Respawn` 之后、确认之前不再弹出死亡界面。
+- **连接结束**：单机里 `Kick`、`Refuse` 或协议错误只会来自 bug。页面显示原因，让服务器存档关服，回到主菜单。
+- **调试面板**（F3）加一行网络（连接状态、往返时间、插值延迟 D、`rotorLead`、每秒收发字节，页面在自己的传输外面包一层计数）和一行服务器（运行方式、全局区的 TPS、`tickTime` 的 tick 耗时）。
+- **名字**：工作包 11 之前 `Hello` 里的名字固定是 `Player`。
+- **服务器没有光照**（第 15 节工作包 9）：服务器的区块共用一份没人写的光照数组（天空光 15、方块光 0，和 `World` 在没有光照数据处报告的一样），每列省 32 KB。
 
 ## 附：有意不做的，以及什么时候需要
 

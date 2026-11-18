@@ -1,16 +1,21 @@
 /**
- * Input mapping: keyboard / mouse state -> PlayerInput. DOM-free (the listeners live in
+ * Input mapping: keyboard / mouse state -> what the client sends. DOM-free (the listeners live in
  * inputdom.ts) so the state machine is unit-tested in Node.
  *
- * Held keys and buttons are plain state. Short presses that may start and end between two
- * ticks are counted (jumpPresses / attackPresses / usePresses) and handed to the simulation,
- * which consumes them (src/entities/input.ts). So is the off-hand swap key (SWAP_KEY): a
- * one-shot command (swapPresses) that the simulation carries out in its tick.
+ * Held keys are plain state, written every frame into the prediction's held input (writeHeld:
+ * net/client/predict.ts HeldInput, which OwnPlayer reads at every client tick). The look is
+ * absolute (yaw / pitch), turned by mouse movement here and by a turning carrier there (the page
+ * copies it back after each frame). Jump presses are counted (a double tap toggles flight) and
+ * handed over with the held input. The mouse buttons and the off-hand swap key are EVENTS, kept in
+ * order (takeEvents): the page turns each into an intent (net/client/intents.ts: Use / UseRelease,
+ * Attack / AttackRelease, SwapHands), so a click that starts and ends between two frames still
+ * reaches the server as a press and a release. A hotbar selection (digit keys, wheel, a click on
+ * the hotbar) is reported once (takeSlotChange) and becomes a SelectSlot intent.
  *
  * Key names are KeyboardEvent.code values (physical positions), so WASD stays WASD on
  * AZERTY and other layouts.
  */
-import type { PlayerInput } from '../entities/input';
+import type { HeldInput } from '../net/client/predict';
 import { HOTBAR_SIZE } from '../ui/model';
 
 /** What a key press asks the client (not the simulation) to do. */
@@ -35,6 +40,12 @@ export const BUTTON_ATTACK = 0;
 /** Middle button: pick block (a command, never a held button). */
 export const BUTTON_PICK = 1;
 export const BUTTON_USE = 2;
+
+/**
+ * What a button or the off-hand key did, in order (takeEvents): presses and releases of the use
+ * (right) and attack (left) buttons, and a press of the off-hand swap key (SWAP_KEY).
+ */
+export type InputEvent = 'useDown' | 'useUp' | 'attackDown' | 'attackUp' | 'swap';
 
 const FORWARD_KEYS = ['KeyW', 'ArrowUp'];
 const BACK_KEYS = ['KeyS', 'ArrowDown'];
@@ -102,19 +113,20 @@ export function wrapYaw(y: number): number {
 }
 
 export class InputState {
-  /** Absolute look direction (radians); the camera and PlayerInput both read it. */
+  /** Absolute look direction (radians); the camera and the held input both read it. */
   yaw = 0;
   pitch = 0;
-  /** Selected hotbar slot 0..8. */
+  /** Selected hotbar slot 0..8 (the page keeps it in step with the inventory as shown). */
   slot = 0;
 
   private readonly keys = new Set<string>();
   /** Held mouse buttons, bit = 1 << button. */
   private buttons = 0;
-  private attackPresses = 0;
-  private usePresses = 0;
+  /** Button and swap events since the last takeEvents(), in order. */
+  private events: InputEvent[] = [];
   private jumpPresses = 0;
-  private swapPresses = 0;
+  /** The player chose a slot since the last takeSlotChange(). */
+  private slotChanged = false;
   private lastForwardTap = -Infinity;
   private sprintLatch = false;
   private wheelAcc = 0;
@@ -140,12 +152,12 @@ export class InputState {
     }
     const slot = slotForKey(code);
     if (slot >= 0) {
-      this.slot = slot;
+      this.selectSlot(slot);
       return 'none';
     }
     if (!repeat) {
       if (code === 'Space') this.jumpPresses++;
-      if (code === SWAP_KEY) this.swapPresses++;
+      if (code === SWAP_KEY) this.events.push('swap');
       if (code === 'KeyW' || code === 'ArrowUp') {
         // Double-tap forward sprints until the key is released.
         if (now - this.lastForwardTap <= SPRINT_DOUBLE_TAP_MS) this.sprintLatch = true;
@@ -173,28 +185,45 @@ export class InputState {
   // ------------------------------------------------------------ mouse
 
   /**
-   * A button went down and is held (attack = 0, use = 2). Counts a press. The middle button is
+   * A button went down and is held (attack = 0, use = 2): a press event. The middle button is
    * not held: it returns the 'pickBlock' command. Other buttons are ignored.
    */
   buttonDown(button: number): InputCommand {
     if (button === BUTTON_PICK) return 'pickBlock';
-    if (button === BUTTON_ATTACK) this.attackPresses++;
-    else if (button === BUTTON_USE) this.usePresses++;
-    else return 'none';
-    this.buttons |= 1 << button;
+    if (button !== BUTTON_ATTACK && button !== BUTTON_USE) return 'none';
+    const bit = 1 << button;
+    if ((this.buttons & bit) !== 0) this.events.push(button === BUTTON_USE ? 'useUp' : 'attackUp');
+    this.buttons |= bit;
+    this.events.push(button === BUTTON_USE ? 'useDown' : 'attackDown');
     return 'none';
   }
 
+  /** A held button went up: a release event (nothing when it was not held). */
   buttonUp(button: number): void {
-    if (button === BUTTON_ATTACK || button === BUTTON_USE) this.buttons &= ~(1 << button);
+    if (button !== BUTTON_ATTACK && button !== BUTTON_USE) return;
+    const bit = 1 << button;
+    if ((this.buttons & bit) === 0) return;
+    this.buttons &= ~bit;
+    this.events.push(button === BUTTON_USE ? 'useUp' : 'attackUp');
   }
 
-  /** A click that was never "held" (drag-to-look tap): one press, no hold; middle = 'pickBlock'. */
+  /** A click that was never "held" (drag-to-look tap): a press and its release; middle = 'pickBlock'. */
   click(button: number): InputCommand {
     if (button === BUTTON_PICK) return 'pickBlock';
-    if (button === BUTTON_ATTACK) this.attackPresses++;
-    else if (button === BUTTON_USE) this.usePresses++;
+    if (button !== BUTTON_ATTACK && button !== BUTTON_USE) return 'none';
+    this.buttonDown(button);
+    this.buttonUp(button);
     return 'none';
+  }
+
+  /** The use (right) button is held. */
+  get useHeld(): boolean {
+    return (this.buttons & (1 << BUTTON_USE)) !== 0;
+  }
+
+  /** The attack (left) button is held. */
+  get attackHeld(): boolean {
+    return (this.buttons & (1 << BUTTON_ATTACK)) !== 0;
   }
 
   /** Rotate the view by a mouse movement in pixels. Moving right turns right (yaw decreases). */
@@ -210,11 +239,6 @@ export class InputState {
     this.pitch = clampPitch(pitch);
   }
 
-  /** Turn by a heading change (a ship turned under the player). */
-  addYaw(d: number): void {
-    if (Number.isFinite(d) && d !== 0) this.yaw = wrapYaw(this.yaw + d);
-  }
-
   /**
    * Mouse wheel: one hotbar step per notch (line / page mode) or per WHEEL_STEP_PIXELS of
    * pixel-mode delta (smooth trackpads). Down / towards the user = next slot.
@@ -223,7 +247,7 @@ export class InputState {
   wheel(deltaY: number, deltaMode: number): void {
     if (!Number.isFinite(deltaY) || deltaY === 0) return;
     if (deltaMode !== 0) {
-      this.slot = wrapSlot(this.slot + (deltaY > 0 ? 1 : -1));
+      this.selectSlot(wrapSlot(this.slot + (deltaY > 0 ? 1 : -1)));
       this.wheelAcc = 0;
       return;
     }
@@ -232,24 +256,44 @@ export class InputState {
     this.wheelAcc += deltaY;
     while (Math.abs(this.wheelAcc) >= WHEEL_STEP_PIXELS) {
       const dir = this.wheelAcc > 0 ? 1 : -1;
-      this.slot = wrapSlot(this.slot + dir);
+      this.selectSlot(wrapSlot(this.slot + dir));
       this.wheelAcc -= dir * WHEEL_STEP_PIXELS;
     }
   }
 
+  /** The player chooses hotbar slot `i` (reported by takeSlotChange). */
   selectSlot(i: number): void {
-    if (Number.isInteger(i) && i >= 0 && i < HOTBAR_SIZE) this.slot = i;
+    if (!Number.isInteger(i) || i < 0 || i >= HOTBAR_SIZE) return;
+    this.slot = i;
+    this.slotChanged = true;
   }
 
-  /** Let go of everything (window blur, screen change): nothing stays stuck down. */
+  /** The slot the player chose since the last call, or -1. */
+  takeSlotChange(): number {
+    if (!this.slotChanged) return -1;
+    this.slotChanged = false;
+    return this.slot;
+  }
+
+  /**
+   * Follow a selection made elsewhere (pick block, the server's inventory): no change is
+   * reported, unless the player chose a slot that is not taken yet (that one wins).
+   */
+  followSlot(i: number): void {
+    if (!this.slotChanged && Number.isInteger(i) && i >= 0 && i < HOTBAR_SIZE) this.slot = i;
+  }
+
+  /**
+   * Let go of everything (window blur, screen change): nothing stays stuck down. The buttons go
+   * up without release events: the page releases the intents of buttons that are no longer
+   * held (useHeld / attackHeld).
+   */
   releaseAll(): void {
     this.keys.clear();
     this.buttons = 0;
     this.sprintLatch = false;
-    this.attackPresses = 0;
-    this.usePresses = 0;
+    this.events = [];
     this.jumpPresses = 0;
-    this.swapPresses = 0;
     this.wheelAcc = 0;
   }
 
@@ -264,50 +308,45 @@ export class InputState {
   get sprinting(): boolean {
     return this.sprintLatch || this.keys.has('ControlLeft') || this.keys.has('ControlRight');
   }
+  get sneaking(): boolean {
+    return this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+  }
 
   /**
-   * Write the state into the simulation's PlayerInput. With `playing` false (a screen such as
-   * the inventory is open) movement, buttons and presses are zeroed but the look direction
-   * and the hotbar slot are still written. Pending presses are moved into `input` (the
-   * simulation consumes them there) or, when not playing, discarded.
+   * Write the held keys and the look into `held` (the prediction's held input). With `playing`
+   * false (a screen such as the inventory is open) the keys are zeroed but the look is still
+   * written. Pending jump presses are added to `held.jumpPresses` (OwnPlayer takes them) or,
+   * when not playing, discarded.
    */
-  writeTo(input: PlayerInput, playing: boolean): void {
-    input.yaw = this.yaw;
-    input.pitch = this.pitch;
-    input.slot = this.slot;
+  writeHeld(held: HeldInput, playing: boolean): void {
+    held.yaw = this.yaw;
+    held.pitch = this.pitch;
     if (!playing) {
-      input.forward = 0;
-      input.strafe = 0;
-      input.jump = false;
-      input.sneak = false;
-      input.sprint = false;
-      input.attack = false;
-      input.use = false;
-      input.attackPresses = 0;
-      input.usePresses = 0;
-      input.jumpPresses = 0;
-      input.swapPresses = 0;
-      this.attackPresses = 0;
-      this.usePresses = 0;
+      held.forward = 0;
+      held.strafe = 0;
+      held.jump = false;
+      held.sneak = false;
+      held.sprint = false;
       this.jumpPresses = 0;
-      this.swapPresses = 0;
       return;
     }
-    input.forward = this.forward;
-    input.strafe = this.strafe;
-    input.jump = this.keys.has('Space');
-    input.sneak = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
-    input.sprint = this.sprinting;
-    input.attack = (this.buttons & (1 << BUTTON_ATTACK)) !== 0;
-    input.use = (this.buttons & (1 << BUTTON_USE)) !== 0;
-    input.attackPresses += this.attackPresses;
-    input.usePresses += this.usePresses;
-    input.jumpPresses += this.jumpPresses;
-    input.swapPresses += this.swapPresses;
-    this.attackPresses = 0;
-    this.usePresses = 0;
+    held.forward = this.forward;
+    held.strafe = this.strafe;
+    held.jump = this.keys.has('Space');
+    held.sneak = this.sneaking;
+    held.sprint = this.sprinting;
+    held.jumpPresses += this.jumpPresses;
     this.jumpPresses = 0;
-    this.swapPresses = 0;
+  }
+
+  /**
+   * The button and swap events since the last call, in order. With `playing` false they are
+   * discarded (an empty list): a screen is open, so nothing reaches the world.
+   */
+  takeEvents(playing: boolean): InputEvent[] {
+    const out = this.events;
+    this.events = [];
+    return playing ? out : [];
   }
 }
 

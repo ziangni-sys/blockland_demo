@@ -21,8 +21,8 @@ import {
   assembleShipByHand,
   idAt,
   labels,
-  makeSeaSim,
-  makeSim,
+  makeSeaWorld,
+  makeWorld,
   put,
   raftShipByHand,
   startRotorByHand,
@@ -59,7 +59,8 @@ function expectWorldAir(sim: Simulation, cells: readonly CellSpec[]): void {
 // =====================================================================================
 describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；木板和羊毛不连；圆石和圆石不连；同种石砖相连。', () => {
   it('felt of every colour and canvas, in a row where each neighbour differs, is assembled as one body', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const row = [
       B.WOOL_WHITE,
       B.WOOL_RED,
@@ -74,7 +75,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
     const cloth: CellSpec[] = row.map((id, i) => [i, T, -3, id] as const);
     for (const [x, y, z, id] of cloth) put(sim, x, y, z, id);
     helmAt(sim); // on the white felt
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...cloth]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -82,7 +83,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
   });
 
   it('a windmill whose sails are felt of different colours and canvas starts as one rotor holding all of them', () => {
-    const sim = makeSim('creative', { x: 0.5, y: T, z: -1.5 });
+    const w = makeWorld('creative', { x: 0.5, y: T, z: -1.5 });
+    const { sim, me } = w;
     for (let y = T; y <= T + 4; y++) put(sim, -1, y, -4, B.STONE_BRICKS); // tower
     put(sim, 0, T + 4, -4, B.BEARING, facingState(PX));
     const blades: CellSpec[] = [
@@ -96,7 +98,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
       [1, T + 4, -6, B.CANVAS],
     ];
     for (const [x, y, z, id] of blades) put(sim, x, y, z, id);
-    const a = startRotorByHand(sim, 0, T + 4, -4);
+    const a = startRotorByHand(w, 0, T + 4, -4);
     const expected = labels(blades);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -105,7 +107,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
   });
 
   it('broadleaf and conifer planks join into one body', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const planks: CellSpec[] = [
       [0, T, -3, B.PLANKS_OAK],
       [1, T, -3, B.PLANKS_PINE],
@@ -115,7 +118,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
     ];
     for (const [x, y, z, id] of planks) put(sim, x, y, z, id);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...planks]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -123,7 +126,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
   });
 
   it('planks and felt do not join: felt and canvas touching the planks under the helm stay in the world', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const planks: CellSpec[] = [
       [0, T, -3, B.PLANKS_OAK],
       [1, T, -3, B.PLANKS_PINE],
@@ -137,7 +141,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
     ];
     for (const [x, y, z, id] of [...planks, ...cloth]) put(sim, x, y, z, id);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...planks]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -145,7 +149,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
   });
 
   it('felt and planks do not join the other way round either: planks touching the felt under the helm stay', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const cloth: CellSpec[] = [
       [0, T, -3, B.WOOL_YELLOW],
       [1, T, -3, B.CANVAS],
@@ -158,7 +163,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
     ];
     for (const [x, y, z, id] of [...cloth, ...planks]) put(sim, x, y, z, id);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...cloth]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -166,7 +171,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
   });
 
   it('rubble does not join rubble: the helm takes the rubble block it stands on, not the rubble around it', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const under: CellSpec = [0, T, -3, B.COBBLE];
     const around: CellSpec[] = [
       [1, T, -3, B.COBBLE],
@@ -176,7 +182,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
     ];
     for (const [x, y, z, id] of [under, ...around]) put(sim, x, y, z, id);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], under]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -184,7 +190,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
   });
 
   it('stone bricks join stone bricks', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const bricks: CellSpec[] = [
       [0, T, -3, B.STONE_BRICKS],
       [1, T, -3, B.STONE_BRICKS],
@@ -194,7 +201,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
     ];
     for (const [x, y, z, id] of bricks) put(sim, x, y, z, id);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...bricks]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -202,7 +209,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
   });
 
   it('only the same kind: red bricks, sandstone and glass touching the stone bricks stay in the world', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const bricks: CellSpec[] = [
       [0, T, -3, B.STONE_BRICKS],
       [1, T, -3, B.STONE_BRICKS],
@@ -215,7 +223,7 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
     ];
     for (const [x, y, z, id] of [...bricks, ...others]) put(sim, x, y, z, id);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...bricks]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -226,7 +234,8 @@ describe('1. 不同颜色的羊毛和帆布连成一体；木板连成一体；�
 // =====================================================================================
 describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向相连；点方块侧面放原木得到横原木。', () => {
   it('upright logs stacked on top of each other join', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const trunk: CellSpec[] = [
       [0, T, -3, B.LOG_OAK],
       [0, T + 1, -3, B.LOG_OAK],
@@ -234,7 +243,7 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
     ];
     for (const [x, y, z, id] of trunk) put(sim, x, y, z, id, logCell(AXIS_Y));
     helmAt(sim, 0, T + 3, -3);
-    const a = assembleShipByHand(sim, 0, T + 3, -3);
+    const a = assembleShipByHand(w, 0, T + 3, -3);
     const expected = labels([[0, T + 3, -3, B.HELM], ...trunk]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -242,7 +251,8 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
   });
 
   it('upright logs side by side do not join', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const under: CellSpec = [0, T, -3, B.LOG_OAK];
     const beside: CellSpec[] = [
       [1, T, -3, B.LOG_OAK],
@@ -252,7 +262,7 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
     ];
     for (const [x, y, z, id] of [under, ...beside]) put(sim, x, y, z, id, logCell(AXIS_Y));
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], under]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -260,7 +270,8 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
   });
 
   it('a log lying east-west joins the logs lying in line with it along x', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const trunk: CellSpec[] = [
       [-1, T, -3, B.LOG_OAK],
       [0, T, -3, B.LOG_OAK],
@@ -269,7 +280,7 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
     ];
     for (const [x, y, z, id] of trunk) put(sim, x, y, z, id, logCell(AXIS_X));
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...trunk]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -277,7 +288,8 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
   });
 
   it('a log lying north-south joins along z, but not the north-south logs lying beside it', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const trunk: CellSpec[] = [
       [0, T, -3, B.LOG_PINE],
       [0, T, -4, B.LOG_PINE],
@@ -289,7 +301,7 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
     ];
     for (const [x, y, z, id] of [...trunk, ...beside]) put(sim, x, y, z, id, logCell(AXIS_Z));
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM], ...trunk]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -297,7 +309,8 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
   });
 
   it('a lying log joins only along its own axis: not logs beside, above or below it, nor logs lying another way', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     // East-west trunk raised one row, helm on its west end.
     const trunk: CellSpec[] = [
       [0, T + 1, -3, B.LOG_OAK],
@@ -314,7 +327,7 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
     put(sim, -1, T + 1, -3, B.LOG_OAK, logCell(AXIS_Y)); // in line, but upright
     put(sim, 0, T + 1, -4, B.LOG_PINE, logCell(AXIS_Z)); // another kind beside, lying the other way
     helmAt(sim, 0, T + 2, -3);
-    const a = assembleShipByHand(sim, 0, T + 2, -3);
+    const a = assembleShipByHand(w, 0, T + 2, -3);
     const expected = labels([[0, T + 2, -3, B.HELM], ...trunk]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -327,12 +340,13 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
   });
 
   it('a lying log does not join a log of another kind lying in line with it (one trunk = one kind)', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     put(sim, 0, T, -3, B.LOG_OAK, logCell(AXIS_X));
     put(sim, 1, T, -3, B.LOG_PINE, logCell(AXIS_X));
     put(sim, -1, T, -3, B.LOG_PINE, logCell(AXIS_X));
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([
       [HX, HY, HZ, B.HELM],
       [0, T, -3, B.LOG_OAK],
@@ -345,40 +359,42 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
   });
 
   it('the player clicking the side face of a block places a lying log (along that face\'s axis); the top face an upright one', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     put(sim, 0, T, -3, B.STONE);
     put(sim, -3, T, -3, B.STONE);
-    sim.soloPlayer.hold(B.LOG_OAK);
+    me.hold(B.LOG_OAK);
 
-    expect(sim.soloPlayer.useOn(0, T, -3, PZ)).toBe(true); // south side face
+    expect(me.useOn(0, T, -3, PZ)).toBe(true); // south side face
     expect(idAt(sim.world, 0, T, -2)).toBe(B.LOG_OAK);
     expect(stateAxis(cellState(sim.world.getCell(0, T, -2)))).toBe(AXIS_Z);
 
-    expect(sim.soloPlayer.useOn(-3, T, -3, PX)).toBe(true); // east side face
+    expect(me.useOn(-3, T, -3, PX)).toBe(true); // east side face
     expect(idAt(sim.world, -2, T, -3)).toBe(B.LOG_OAK);
     expect(stateAxis(cellState(sim.world.getCell(-2, T, -3)))).toBe(AXIS_X);
 
-    expect(sim.soloPlayer.useOn(0, T, -3, PY)).toBe(true); // top face
+    expect(me.useOn(0, T, -3, PY)).toBe(true); // top face
     expect(idAt(sim.world, 0, T + 1, -3)).toBe(B.LOG_OAK);
     expect(stateAxis(cellState(sim.world.getCell(0, T + 1, -3)))).toBe(AXIS_Y);
   });
 
   it('logs the player lays against side faces form a lying trunk that a helm on it assembles; an upright log in line stays', () => {
-    const sim = makeSim('creative', { x: 4.5, y: T, z: -1.5 });
+    const w = makeWorld('creative', { x: 4.5, y: T, z: -1.5 });
+    const { sim, me } = w;
     put(sim, 0, T, -3, B.STONE);
-    sim.soloPlayer.hold(B.LOG_OAK);
-    expect(sim.soloPlayer.useOn(0, T, -3, PX)).toBe(true); // east face of the stone -> log at (1, T, -3)
-    expect(sim.soloPlayer.useOn(1, T, -3, PX)).toBe(true); // east face of that log -> log at (2, T, -3)
+    me.hold(B.LOG_OAK);
+    expect(me.useOn(0, T, -3, PX)).toBe(true); // east face of the stone -> log at (1, T, -3)
+    expect(me.useOn(1, T, -3, PX)).toBe(true); // east face of that log -> log at (2, T, -3)
     expect(stateAxis(cellState(sim.world.getCell(1, T, -3)))).toBe(AXIS_X);
     expect(stateAxis(cellState(sim.world.getCell(2, T, -3)))).toBe(AXIS_X);
-    sim.soloPlayer.hold(B.HELM);
-    expect(sim.soloPlayer.useOn(1, T, -3, PY)).toBe(true); // the helm on top of the first log
+    me.hold(B.HELM);
+    expect(me.useOn(1, T, -3, PY)).toBe(true); // the helm on top of the first log
     expect(idAt(sim.world, 1, T + 1, -3)).toBe(B.HELM);
-    sim.soloPlayer.hold(B.LOG_OAK);
-    expect(sim.soloPlayer.useOn(3, T - 1, -3, PY)).toBe(true); // top face of the ground -> upright log at (3, T, -3)
+    me.hold(B.LOG_OAK);
+    expect(me.useOn(3, T - 1, -3, PY)).toBe(true); // top face of the ground -> upright log at (3, T, -3)
     expect(stateAxis(cellState(sim.world.getCell(3, T, -3)))).toBe(AXIS_Y);
 
-    const a = assembleShipByHand(sim, 1, T + 1, -3, PX);
+    const a = assembleShipByHand(w, 1, T + 1, -3, PX);
     const expected = labels([
       [1, T + 1, -3, B.HELM],
       [1, T, -3, B.LOG_OAK],
@@ -396,12 +412,13 @@ describe('2. 竖原木上下相连、左右不连；横原木只沿自身轴向�
 // =====================================================================================
 describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连，正面不连；基岩不能被连入结构体。', () => {
   it('a helm the player puts on a rubble block is assembled together with that rubble block', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     put(sim, 0, T, -3, B.COBBLE);
-    sim.soloPlayer.hold(B.HELM);
-    expect(sim.soloPlayer.useOn(0, T, -3, PY)).toBe(true);
+    me.hold(B.HELM);
+    expect(me.useOn(0, T, -3, PY)).toBe(true);
     expect(idAt(sim.world, 0, T + 1, -3)).toBe(B.HELM);
-    const a = assembleShipByHand(sim, 0, T + 1, -3);
+    const a = assembleShipByHand(w, 0, T + 1, -3);
     const expected = labels([
       [0, T + 1, -3, B.HELM],
       [0, T, -3, B.COBBLE],
@@ -412,7 +429,8 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   });
 
   it('the helm sticks only to the block below it: rubble beside it or on top of it stays', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     put(sim, 0, T, -3, B.COBBLE);
     const notBelow: CellSpec[] = [
       [1, T + 1, -3, B.COBBLE],
@@ -422,7 +440,7 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
     ];
     for (const [x, y, z, id] of notBelow) put(sim, x, y, z, id);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([
       [HX, HY, HZ, B.HELM],
       [0, T, -3, B.COBBLE],
@@ -442,12 +460,13 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   }
 
   it('a bearing the player mounts on the side of the raft (its back on a plank) is part of the ship', () => {
-    const sim = makeSim('creative', { x: 4.5, y: T, z: -0.5 });
+    const w = makeWorld('creative', { x: 4.5, y: T, z: -0.5 });
+    const { sim, me } = w;
     const planks = raft(sim);
-    sim.soloPlayer.hold(B.BEARING);
-    expect(sim.soloPlayer.useOn(2, T, -4, PX)).toBe(true); // east face of a raft plank
+    me.hold(B.BEARING);
+    expect(me.useOn(2, T, -4, PX)).toBe(true); // east face of a raft plank
     expect(idAt(sim.world, 3, T, -4)).toBe(B.BEARING);
-    const a = assembleShipByHand(sim, 1, T + 1, -3);
+    const a = assembleShipByHand(w, 1, T + 1, -3);
     const expected = labels([[1, T + 1, -3, B.HELM], [3, T, -4, B.BEARING], ...planks]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -455,14 +474,15 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   });
 
   it('the front of a bearing does not stick: a bearing facing the raft stays, and so does the block in front of the ship\'s bearing', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const planks = raft(sim);
     put(sim, 3, T, -4, B.BEARING, facingState(PX)); // back on the raft
     put(sim, 4, T, -4, B.PLANKS_OAK); // in front of it (where a rotor's hub would be)
     put(sim, -1, T, -4, B.BEARING, facingState(PX)); // its FRONT against the raft, its back on air
     put(sim, 1, T, -6, B.BEARING, facingState(PZ)); // front against the raft from the north
     put(sim, 1, T + 1, -7, B.CANVAS); // (unrelated decoration nowhere near the raft)
-    const a = assembleShipByHand(sim, 1, T + 1, -3);
+    const a = assembleShipByHand(w, 1, T + 1, -3);
     const expected = labels([[1, T + 1, -3, B.HELM], [3, T, -4, B.BEARING], ...planks]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -474,10 +494,11 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   });
 
   it('deeprock under a helm is not taken: the ship is the helm alone', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     put(sim, 0, T, -3, B.DEEPROCK);
     helmAt(sim);
-    const a = assembleShipByHand(sim, HX, HY, HZ);
+    const a = assembleShipByHand(w, HX, HY, HZ);
     const expected = labels([[HX, HY, HZ, B.HELM]]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -485,7 +506,8 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   });
 
   it('deeprock cannot be glued to a raft, and even glue forced onto its face does not pull it into the ship', () => {
-    const sim = makeSim();
+    const w = makeWorld();
+    const { sim, me } = w;
     const toasts = new Toasts(sim);
     const planks: CellSpec[] = [];
     for (let z = -4; z <= -3; z++) for (let x = 0; x <= 2; x++) planks.push([x, T, z, B.PLANKS_OAK]);
@@ -493,14 +515,14 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
     helmAt(sim, 1, T + 1, -3);
     put(sim, 3, T, -3, B.DEEPROCK);
     // The player tries to put glue on it.
-    sim.soloPlayer.hold(I.GLUE);
-    expect(sim.soloPlayer.useOn(3, T, -3, PZ)).toBe(true);
-    expect(sim.soloPlayer.useOn(3, T, -3, PY)).toBe(true);
+    me.hold(I.GLUE);
+    expect(me.useOn(3, T, -3, PZ)).toBe(true);
+    expect(me.useOn(3, T, -3, PY)).toBe(true);
     expect(toasts.keys()).toEqual(['toast.glue.cannot', 'toast.glue.cannot']);
     expect(sim.worldGlue.size).toBe(0);
     // Glue written straight into the store (as a corrupt save might) changes nothing either.
     sim.worldGlue.add(2, T, -3, PX);
-    const a = assembleShipByHand(sim, 1, T + 1, -3);
+    const a = assembleShipByHand(w, 1, T + 1, -3);
     const expected = labels([[1, T + 1, -3, B.HELM], ...planks]);
     expect(a.preview).toEqual(expected);
     expect(a.cells).toEqual(expected);
@@ -508,22 +530,24 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
   });
 
   it('a deeprock block the player puts on the deck of a ship does not become part of the ship (a stone put the same way does)', () => {
-    const sim = makeSeaSim();
-    const ship = raftShipByHand(sim);
+    const w = makeSeaWorld();
+    const { sim, me } = w;
+    const ship = raftShipByHand(w);
     const n0 = ship.grid.count;
-    sim.soloPlayer.hold(B.STONE);
-    expect(sim.soloPlayer.useOn(3, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
+    me.hold(B.STONE);
+    expect(me.useOn(3, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
     expect(idAt(ship.grid, 3, SEA_TOP, 5)).toBe(B.STONE); // building on a deck works
     expect(ship.grid.count).toBe(n0 + 1);
-    sim.soloPlayer.hold(B.DEEPROCK);
-    expect(sim.soloPlayer.useOn(1, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
+    me.hold(B.DEEPROCK);
+    expect(me.useOn(1, SEA_TOP - 1, 5, PY, ship.id)).toBe(true);
     const inShip = structureLabels(ship.grid).filter((l) => l.endsWith(':deeprock'));
     expect(inShip).toEqual([]);
     expect(ship.grid.count).toBe(n0 + 1);
   });
 
   it('a bearing with deeprock in front has nothing to turn: no rotor starts, even with sails glued to the deeprock', () => {
-    const sim = makeSim('creative', { x: 0.5, y: T, z: -1.5 });
+    const w = makeWorld('creative', { x: 0.5, y: T, z: -1.5 });
+    const { sim, me } = w;
     const toasts = new Toasts(sim);
     for (let y = T; y <= T + 4; y++) put(sim, -1, y, -4, B.STONE_BRICKS);
     put(sim, 0, T + 4, -4, B.BEARING, facingState(PX));
@@ -538,12 +562,12 @@ describe('3. 舵轮和它下方的圆石相连；轴承和背面的方块相连�
       put(sim, x, y, z, B.CANVAS);
       sim.worldGlue.add(x, y, z, d); // forced: the player could not do this
     }
-    sim.soloPlayer.emptyHand();
-    expect(sim.soloPlayer.useOn(0, T + 4, -4, PZ)).toBe(true);
-    expect(sim.soloPlayer.useOn(0, T + 4, -4, PZ)).toBe(true);
+    me.emptyHand();
+    expect(me.useOn(0, T + 4, -4, PZ)).toBe(true);
+    expect(me.useOn(0, T + 4, -4, PZ)).toBe(true);
     expect(toasts.keys()).toContain('fail.rotor.no_hub');
     expect(sim.structures.rotors().length).toBe(0);
-    expect(sim.soloPlayer.view.preview).toBeNull();
+    expect(me.view.preview).toBeNull();
     expectWorld(sim, [
       [1, T + 4, -4, B.DEEPROCK],
       ...sails.map(([x, y, z]) => [x, y, z, B.CANVAS] as const),

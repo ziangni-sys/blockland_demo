@@ -218,9 +218,13 @@ export class BodyMover {
     this.cache.reset();
   }
 
-  /** Tick step 4 begins: re-read every structure pose (the carry base becomes the previous carry). */
-  beginCarry(): void {
-    this.cache.rebuild(this.host.structures());
+  /**
+   * Tick step 4 begins: re-read every structure pose (the carry base becomes the previous carry).
+   * `firstSeen` 'now': called between ticks, a structure the cache has not seen yet takes its pose
+   * now as the base (structs.ts).
+   */
+  beginCarry(firstSeen: 'tickStart' | 'now' = 'tickStart'): void {
+    this.cache.rebuild(this.host.structures(), firstSeen);
   }
 
   /** End of the tick: the current poses become the velocity base of the next tick. */

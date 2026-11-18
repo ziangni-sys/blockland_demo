@@ -12,7 +12,10 @@
  *   4. carried entities follow their carriers
  *   5. entities move, collide, get pushed / crushed, attach / detach (blast crates explode here)
  *   6. ambient rabbits
- *   7. lighting catches up; every joined player's InteractionView is rebuilt
+ *   7. every joined player's InteractionView is rebuilt
+ * No light: the game rules never read it, so the server computes none; the clients light their
+ * replicas (net/client/replica.ts; sim/chunks.ts gives every server chunk one shared open-sky
+ * light array).
  * Block updates (falling sand, popping torches) queued by any phase run right after it.
  *
  * PLAYERS. The simulation starts with no players and knows no "local" one: join(key) /
@@ -28,7 +31,6 @@ import { mod } from '../core/math';
 import { Rng } from '../core/rng';
 import { World } from '../voxel/world';
 import type { VoxelGrid } from '../voxel/grid';
-import { LightEngine } from '../light/engine';
 import { Fluids } from '../liquid/fluids';
 import { GlueStore } from '../structures/glue';
 import { StructureManager } from '../structures/manager';
@@ -58,9 +60,8 @@ export interface SimOptions {
   /** Chunk radius kept loaded around a player who joins (default 8; capped at MAX_VIEW_RADIUS). */
   loadRadius?: number;
   /**
-   * Generate missing chunks synchronously inside tick() (headless tests, tools).
-   * In the browser this is false: the client pulls `chunks.wanted()` and feeds
-   * `chunks.provide()` from worker threads.
+   * Generate missing chunks synchronously inside tick() (headless tests, tools). A server host
+   * leaves it false and generates `chunks.wanted()` between ticks (net/host/host.ts).
    */
   syncChunks?: boolean;
   /** Where new players start (the world spawn); defaults to generator.spawnPoint(). Not saved. */
@@ -69,14 +70,11 @@ export interface SimOptions {
   rabbits?: boolean;
 }
 
-/** Lighting work per tick (cells visited) — keeps a big relight from stalling a frame. */
-const LIGHT_BUDGET = 60_000;
 /** Time of day a new world starts at (0 = sunrise). */
 const START_DAY_TIME = 0.04;
 
 export class Simulation {
   readonly world: World;
-  readonly light: LightEngine;
   readonly fluids: Fluids;
   readonly chunks: ChunkManager;
   readonly worldGlue = new GlueStore();
@@ -132,10 +130,8 @@ export class Simulation {
     this.rng = new Rng((opts.seed ^ 0x51ed270b) >>> 0);
 
     this.world = new World(opts.seed);
-    this.light = new LightEngine(this.world);
     this.fluids = new Fluids(this.world);
-    this.chunks = new ChunkManager(this.world, this.light, this.fluids);
-    this.light.attach();
+    this.chunks = new ChunkManager(this.world, this.fluids);
     this.fluids.attach();
 
     const structureHost = this.makeStructureHost();
@@ -147,7 +143,7 @@ export class Simulation {
     this.players = new PlayerRegistry(this);
     this.rabbits = new RabbitSpawner(this, opts.rabbits ?? true);
     // The one sim-level world hook (block updates, washed-away drops, preview staleness). It is
-    // registered after the light, liquid and structure hooks, so it sees each change last.
+    // registered after the liquid and structure hooks, so it sees each change last.
     this.unsubWorld = this.world.onCellChange((x, y, z, oldCell, newCell, flags) => {
       this.interaction.onWorldChange(x, y, z, oldCell, newCell, flags);
       this.blocks.onWorldChange(x, y, z, oldCell, newCell, flags);
@@ -327,8 +323,7 @@ export class Simulation {
     // 6. ambient life
     this.rabbits.tick();
 
-    // 7. lighting, view
-    this.light.update(LIGHT_BUDGET);
+    // 7. views
     this.interaction.buildViews();
   }
 

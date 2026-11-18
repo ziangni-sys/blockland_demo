@@ -2,8 +2,8 @@
  * Scene builders and probes for the 携带 acceptance scenarios (19–22), headless.
  *
  * Scenes are built with world.setCell (blocks, the sea comes from the generator); the player
- * then acts through the paths the real game uses: look + right-click (useOn / use), held
- * movement input (forward / strafe / jump / sneak), the held item. Internals are only touched to
+ * (tests/acceptance/world.ts) then acts through the paths the real game uses: look + right-click
+ * (useOn / use), held movement keys (forward / strafe / jump / sneak), the held item. Internals are only touched to
  * build a scene (a ship sailing on under a remembered throttle while nobody is at the wheel) and
  * to observe results.
  */
@@ -17,8 +17,7 @@ import type { SimEvent } from '../../src/sim/view';
 import { Rotor, Ship } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator } from '../../src/worldgen/generator';
-import { soloSim } from '../solo';
-import { withDrive } from './drive-modes';
+import { testWorld, type TestWorld } from './world';
 
 /** Sea world: deeprock y=0, stone 1..19, water 20..29; the first air cell is y = SEA_TOP. */
 export const SEA_TOP = 30;
@@ -29,8 +28,8 @@ export const WATER_SURFACE = SEA_TOP - 1 + 8 / 9;
 /** Default flat world: deeprock, stone, dirt, turf; the first air cell is y = FLAT_TOP. */
 export const FLAT_TOP = 35;
 
-export function seaSim(mode: GameMode, spawn: Vec3, seed = 1901): Simulation {
-  return withDrive(soloSim({
+export function seaWorld(mode: GameMode, spawn: Vec3, seed = 1901): TestWorld {
+  return testWorld({
     seed,
     mode,
     generator: new FlatGenerator([
@@ -42,11 +41,11 @@ export function seaSim(mode: GameMode, spawn: Vec3, seed = 1901): Simulation {
     loadRadius: 3,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  }));
+  });
 }
 
-export function flatSim(mode: GameMode, spawn: Vec3, seed = 2001): Simulation {
-  return withDrive(soloSim({
+export function flatWorld(mode: GameMode, spawn: Vec3, seed = 2001): TestWorld {
+  return testWorld({
     seed,
     mode,
     generator: new FlatGenerator(),
@@ -54,7 +53,7 @@ export function flatSim(mode: GameMode, spawn: Vec3, seed = 2001): Simulation {
     loadRadius: 2,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  }));
+  });
 }
 
 /** Fill an inclusive box of a grid with a block id (or full cell value). */
@@ -101,8 +100,8 @@ export function buildHull(sim: Simulation, s: HullSpec): Vec3 {
 }
 
 /** The face of a cell that looks toward the player's eyes (horizontal). */
-export function faceToward(sim: Simulation, x: number, z: number): Dir {
-  const e = sim.soloPlayer.player.eyePos();
+export function faceToward(w: TestWorld, x: number, z: number): Dir {
+  const e = w.me.player.eyePos();
   const dx = e.x - (x + 0.5);
   const dz = e.z - (z + 0.5);
   if (Math.abs(dx) > Math.abs(dz)) return dx > 0 ? PX : NX;
@@ -113,24 +112,25 @@ export function faceToward(sim: Simulation, x: number, z: number): Dir {
  * The player assembles the ship at a world helm the way the game does it: aim, right-click
  * (preview), right-click again (assemble + take the wheel). Returns the new ship.
  */
-export function assembleAtHelm(sim: Simulation, helm: Vec3): Ship {
-  const face = faceToward(sim, helm.x, helm.z);
-  expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at').toBe(true);
-  expect(sim.soloPlayer.view.preview?.kind).toBe('ship');
-  expect(sim.soloPlayer.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at again').toBe(true);
+export function assembleAtHelm(w: TestWorld, helm: Vec3): Ship {
+  const { sim, me } = w;
+  const face = faceToward(w, helm.x, helm.z);
+  expect(me.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at').toBe(true);
+  expect(me.view.preview?.kind).toBe('ship');
+  expect(me.useOn(helm.x, helm.y, helm.z, face), 'the helm can be aimed at again').toBe(true);
   const ships = sim.structures.ships();
   expect(ships.length).toBe(1);
   const ship = ships[0]!;
-  expect(sim.soloPlayer.player.steeringShipId).toBe(ship.id);
+  expect(me.player.steeringShipId).toBe(ship.id);
   return ship;
 }
 
 /** A plain right-click while steering lets go of the wheel (the player stays aboard). */
-export function releaseWheelByClick(sim: Simulation): void {
-  expect(sim.soloPlayer.player.steeringShipId).not.toBe(0);
-  sim.soloPlayer.use();
-  sim.tick();
-  expect(sim.soloPlayer.player.steeringShipId).toBe(0);
+export function releaseWheelByClick(w: TestWorld): void {
+  expect(w.me.player.steeringShipId).not.toBe(0);
+  w.me.use();
+  w.tick();
+  expect(w.me.player.steeringShipId).toBe(0);
 }
 
 /** Heading of a structure (radians, CCW from above, 0 = bow toward -Z). */
@@ -151,23 +151,23 @@ export function wrap(a: number): number {
  * stick go. Returns the number of ticks it took. The rudder commands a yaw rate (max 0.25 rad/s
  * at rest; +1 = clockwise), so the stick is set proportionally to the remaining error.
  */
-export function steerToYaw(sim: Simulation, ship: Ship, target: number, maxTicks = 900): number {
-  const p = sim.soloPlayer.player;
-  expect(p.steeringShipId).toBe(ship.id);
+export function steerToYaw(w: TestWorld, ship: Ship, target: number, maxTicks = 900): number {
+  const { me } = w;
+  expect(me.player.steeringShipId).toBe(ship.id);
   let calm = 0;
   for (let t = 0; t < maxTicks; t++) {
     const err = wrap(target - yawOf(ship.grid));
     const wantRate = Math.max(-0.25, Math.min(0.25, 1.2 * err));
-    p.input.strafe = Math.max(-1, Math.min(1, -wantRate / 0.25));
-    sim.tick();
+    me.input.strafe = Math.max(-1, Math.min(1, -wantRate / 0.25));
+    w.tickWhile();
     if (Math.abs(err) < 0.004 && Math.abs(ship.grid.angularVelocity.y) < 0.003) {
       if (++calm >= 10) {
-        p.input.strafe = 0;
+        me.input.strafe = 0;
         return t;
       }
     } else calm = 0;
   }
-  p.input.strafe = 0;
+  me.input.strafe = 0;
   return maxTicks;
 }
 
@@ -205,26 +205,27 @@ export function yawToward(a: Vec3, b: Vec3): number {
  * Walk (held W, looking where it goes, like a player steering with the mouse) until the feet
  * are within `tol` of the world point `target()` returns each tick. Returns the ticks used.
  */
-export function walkTo(sim: Simulation, target: () => Vec3, tol = 0.1, maxTicks = 200): number {
-  const p = sim.soloPlayer.player;
+export function walkTo(w: TestWorld, target: () => Vec3, tol = 0.1, maxTicks = 200): number {
+  const { me } = w;
   for (let t = 0; t < maxTicks; t++) {
     const g = target();
+    const p = me.player;
     const d = hdist(p.pos, g);
     if (d < tol) {
-      p.input.forward = 0;
+      me.input.forward = 0;
       return t;
     }
-    p.input.yaw = yawToward(p.pos, g);
-    p.input.forward = Math.min(1, d / 0.6);
-    sim.tick();
+    me.input.yaw = yawToward(p.pos, g);
+    me.input.forward = Math.min(1, d / 0.6);
+    w.tickWhile();
   }
-  p.input.forward = 0;
+  me.input.forward = 0;
   return maxTicks;
 }
 
 /** Idle the held input. */
-export function stopInput(sim: Simulation): void {
-  const i = sim.soloPlayer.player.input;
+export function stopInput(w: TestWorld): void {
+  const i = w.me.input;
   i.forward = 0;
   i.strafe = 0;
   i.jump = false;

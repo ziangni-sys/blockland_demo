@@ -1,9 +1,9 @@
 /**
  * Helpers for the acceptance scenarios 10–14 (docs/ACCEPTANCE.md "风车与方块化").
  *
- * Self-contained on purpose: everything goes through the public Simulation surface (player
- * input, inventory, the scripted helpers) to act, and reads structures / world / entities only to
- * build scenes and to observe results.
+ * Self-contained on purpose: everything the player does goes through the test world's player
+ * (tests/acceptance/world.ts: held keys, look, clicks, held items); structures, world and entities
+ * of the server's Simulation are read only to build scenes and to observe results.
  */
 import { ID_MASK, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
@@ -14,24 +14,24 @@ import type { SimEvent } from '../../src/sim/view';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator } from '../../src/worldgen/generator';
-import { soloSim } from '../solo';
+import { testWorld, type TestWorld } from './world';
 
 /** Default flat world: deeprock y=0, stone 1..30, dirt 31..33, turf 34; first air at y = 35. */
 export const T = 35;
 /** Sea world: deeprock y=0, stone 1..19, water 20..29; first air at y = 30. */
 export const SEA = 30;
 
-export function flatWorld(mode: GameMode, spawn: { x: number; y: number; z: number }, seed = 1): Simulation {
-  return soloSim({ seed, mode, generator: new FlatGenerator(), syncChunks: true, rabbits: false, loadRadius: 2, spawn });
+export function flatWorld(mode: GameMode, spawn: { x: number; y: number; z: number }, seed = 1): TestWorld {
+  return testWorld({ seed, mode, generator: new FlatGenerator(), syncChunks: true, rabbits: false, loadRadius: 2, spawn });
 }
 
-export function seaWorld(mode: GameMode, spawn: { x: number; y: number; z: number }, seed = 2): Simulation {
+export function seaWorld(mode: GameMode, spawn: { x: number; y: number; z: number }, seed = 2): TestWorld {
   const generator = new FlatGenerator([
     { id: B.DEEPROCK, thickness: 1 },
     { id: B.STONE, thickness: 19 },
     { id: B.WATER, thickness: 10 },
   ]);
-  return soloSim({ seed, mode, generator, syncChunks: true, rabbits: false, loadRadius: 3, spawn });
+  return testWorld({ seed, mode, generator, syncChunks: true, rabbits: false, loadRadius: 3, spawn });
 }
 
 export function set(grid: VoxelGrid, x: number, y: number, z: number, id: number, state = 0): void {
@@ -151,30 +151,31 @@ export function turnedAboutY(k: number, hx: number, _hy: number, hz: number, x: 
 }
 
 /** Right-click the bearing twice like a player (preview, then start). Returns the new rotor. */
-export function startByPlayer(sim: Simulation, x: number, y: number, z: number, face: Dir | undefined, gridId = 0): Rotor {
+export function startByPlayer(w: TestWorld, x: number, y: number, z: number, face: Dir | undefined, gridId = 0): Rotor {
+  const { sim, me } = w;
   const before = new Set(sim.structures.rotors());
-  if (!sim.soloPlayer.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (first click)');
-  if (sim.soloPlayer.view.preview?.kind !== 'rotor') throw new Error('no rotor preview after the first click');
-  if (!sim.soloPlayer.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (second click)');
+  if (!me.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (first click)');
+  if (me.view.preview?.kind !== 'rotor') throw new Error('no rotor preview after the first click');
+  if (!me.useOn(x, y, z, face, gridId)) throw new Error('cannot aim at the bearing (second click)');
   const fresh = sim.structures.rotors().filter((r) => !before.has(r));
   if (fresh.length !== 1) throw new Error(`expected one new rotor, got ${fresh.length}`);
   return fresh[0]!;
 }
 
 /** Tick until the rotor's angle (relative to its parent) lies in [lo, hi). Throws after maxTicks. */
-export function spinUntil(sim: Simulation, rotor: Rotor, lo: number, hi: number, maxTicks = 2000): number {
+export function spinUntil(w: TestWorld, rotor: Rotor, lo: number, hi: number, maxTicks = 2000): number {
   for (let i = 0; i < maxTicks; i++) {
     if (rotor.angle >= lo && rotor.angle < hi) return i;
-    sim.tick();
+    w.tickWhile();
   }
   throw new Error(`rotor angle never reached [${lo}, ${hi}) (now ${rotor.angle})`);
 }
 
 /** Tick until an explosion event; returns it (throws after maxTicks). */
-export function tickUntilExplosion(sim: Simulation, log: Events, maxTicks = 200): Extract<SimEvent, { type: 'explosion' }> {
+export function tickUntilExplosion(w: TestWorld, log: Events, maxTicks = 200): Extract<SimEvent, { type: 'explosion' }> {
   const n0 = log.of('explosion').length;
   for (let i = 0; i < maxTicks; i++) {
-    sim.tick();
+    w.tickWhile();
     const ex = log.of('explosion');
     if (ex.length > n0) return ex[n0]!;
   }
@@ -182,13 +183,13 @@ export function tickUntilExplosion(sim: Simulation, log: Events, maxTicks = 200)
 }
 
 /** Largest linear and angular speed of a ship over the next `ticks` ticks (and its largest displacement). */
-export function watchShip(sim: Simulation, ship: Ship, ticks: number): { maxSpeed: number; maxSpin: number; maxMove: number } {
+export function watchShip(tw: TestWorld, ship: Ship, ticks: number): { maxSpeed: number; maxSpin: number; maxMove: number } {
   const p0 = { x: ship.grid.position.x, y: ship.grid.position.y, z: ship.grid.position.z };
   let maxSpeed = 0;
   let maxSpin = 0;
   let maxMove = 0;
   for (let i = 0; i < ticks; i++) {
-    sim.tick();
+    tw.tick();
     const v = ship.grid.linearVelocity;
     const w = ship.grid.angularVelocity;
     const p = ship.grid.position;

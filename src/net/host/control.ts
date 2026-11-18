@@ -7,8 +7,8 @@
  * Page -> host: create a world or load one, connect a client (one MessagePort per connection; the
  * page's own client is `local`, which makes it the host's connection), pause (single player:
  * only while the room is closed), save, open or close the room, shut down.
- * Host -> page: the world is ready, a save finished, status (measured TPS and players), errors,
- * closed.
+ * Host -> page: the world is ready, a save finished, status (measured TPS and players), the time
+ * the ticks take (for the page's debug overlay), errors, closed.
  *
  * `PageToHost` is generic in what a connection is: a MessagePort on the way into the Worker, a
  * TransportOpener inside (ServerHost.control calls it when it carries the connect out, worker.ts
@@ -51,6 +51,8 @@ export type HostToPage =
   | { type: 'saved'; ok: boolean; code: string | null }
   /** Measured ticks per second and players in the world; sent when it changes, at most once a second. */
   | { type: 'status'; tps: number; players: number }
+  /** Mean and longest milliseconds of the host's clock one tick took since the last report; about once a second while ticks run. */
+  | { type: 'tickTime'; meanMs: number; maxMs: number }
   /** A command could not be carried out (`what` = the command, or 'tick' when the simulation threw). */
   | { type: 'error'; what: string; message: string }
   /** The server shut down. */

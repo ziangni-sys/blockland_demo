@@ -1,9 +1,10 @@
 /**
  * Scene builders and observers for the acceptance scenarios 6-9 (组装与停靠).
  *
- * Scenes are built with world.setCell (and worldGlue.add for glue the scene starts with); the
- * player then acts through the same input path the client uses (look, right-click, left-click,
- * sneak, held item, movement keys). Internals are only read here, to observe results.
+ * Scenes are built on the server's Simulation with world.setCell (and worldGlue.add for glue the
+ * scene starts with); the player then acts through the test world's player (tests/acceptance/
+ * world.ts: look, right-click, left-click, sneak, held item, movement keys). Internals are only
+ * read here, to observe results.
  */
 import { ID_MASK, cellState, facingState, makeCell, stateFacing } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
@@ -14,7 +15,7 @@ import { Simulation, type GameMode } from '../../src/sim/simulation';
 import type { Message, SimEvent } from '../../src/sim/view';
 import type { Ship } from '../../src/structures/structure';
 import { FlatGenerator } from '../../src/worldgen/generator';
-import { soloSim } from '../solo';
+import { testWorld, type TestWorld } from './world';
 
 /** Sea: deeprock y=0, stone y=1..19, water sources y=20..29; the first air cell is y = SEA_TOP. */
 export const SEA_TOP = 30;
@@ -30,8 +31,8 @@ export interface SeaOpts {
 }
 
 /** A real sea, ten water sources deep over stone, with a generous loaded area. */
-export function seaSim(o: SeaOpts): Simulation {
-  return soloSim({
+export function seaWorld(o: SeaOpts): TestWorld {
+  return testWorld({
     seed: o.seed ?? 62,
     mode: o.mode ?? 'creative',
     generator: new FlatGenerator([

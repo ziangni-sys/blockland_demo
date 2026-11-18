@@ -1,6 +1,7 @@
 /**
- * Text the client itself shows (loading steps, storage / save notices, fault toasts). The
- * simulation's own messages go through src/sim/messages.ts, the UI chrome through src/ui.
+ * Text the client itself shows (loading steps, storage / save notices, the connection and the
+ * game server, fault toasts). The simulation's own messages go through src/sim/messages.ts, the
+ * UI chrome through src/ui.
  */
 import type { Language } from '../ui/model';
 
@@ -8,6 +9,9 @@ const STRINGS = {
   'loading.graphics': { zh: '正在启动图形…', en: 'Starting graphics…' },
   'loading.reading': { zh: '正在读取存档…', en: 'Reading the save…' },
   'loading.preparing': { zh: '正在准备世界…', en: 'Preparing the world…' },
+  'loading.server': { zh: '正在启动游戏服务器…', en: 'Starting the game server…' },
+  'loading.connecting': { zh: '正在连接…', en: 'Connecting…' },
+  'loading.reconnecting': { zh: '连接中断，正在重连…', en: 'Connection lost, reconnecting…' },
   'loading.terrain': { zh: '正在生成地形 {done}/{total}', en: 'Generating terrain {done}/{total}' },
   'loading.meshing': { zh: '正在构建地形网格 {done}/{total}', en: 'Building terrain meshes {done}/{total}' },
   'loading.finishing': { zh: '即将就绪…', en: 'Almost there…' },
@@ -44,6 +48,17 @@ const STRINGS = {
     zh: '这个世界由旧版本的游戏保存，当前版本已无法读取。可以在列表里删除它',
     en: 'This world was saved by an older version of the game and can no longer be opened. You can delete it from the list',
   },
+  'net.hostStalled': {
+    zh: '房主的服务器运行受限（页面可能在后台）',
+    en: 'The host’s server is being slowed down (its page may be in the background)',
+  },
+  'net.linkUnstable': { zh: '连接不稳定', en: 'The connection is unstable' },
+  'net.kicked': { zh: '服务器断开了连接（{reason}）', en: 'The server ended the connection ({reason})' },
+  'net.refused': { zh: '服务器拒绝了连接（{reason}）', en: 'The server refused the connection ({reason})' },
+  'net.failed': { zh: '连接出错：{msg}', en: 'The connection failed: {msg}' },
+  'server.failed': { zh: '无法启动游戏服务器：{msg}', en: 'Could not start the game server: {msg}' },
+  'server.crashed': { zh: '游戏服务器停止了运行', en: 'The game server stopped' },
+  'server.stopped': { zh: '世界的模拟出错，已经停住：{msg}', en: 'The world stopped after an error: {msg}' },
   'delete.failed': { zh: '删除失败：{msg}', en: 'Could not delete the world: {msg}' },
   'graphics.failed': { zh: '无法启动图形：{msg}', en: 'Could not start graphics: {msg}' },
   'graphics.notReady': { zh: '图形尚未就绪，请稍候', en: 'Graphics are not ready yet' },
