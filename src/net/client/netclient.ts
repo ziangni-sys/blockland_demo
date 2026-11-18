@@ -107,6 +107,12 @@ export interface NetClientOptions {
   viewRadius: number;
   /** Defaults to BUILD_ID. */
   build?: string;
+  /**
+   * The clock of each connection (default: a new ServerClock). Tests that step a client and the
+   * server in lockstep pass one that holds renderTick and rotorTick at fixed distances from the
+   * newest applied batch (tests/net/harness.ts LockstepClock).
+   */
+  clock?: () => ServerClock;
 }
 
 interface Connection {
@@ -331,7 +337,7 @@ export class NetClient {
     }
     const c: Connection = {
       transport: t,
-      clock: new ServerClock(),
+      clock: this.opts.clock?.() ?? new ServerClock(),
       replica: null,
       welcome: null,
       batches: [],

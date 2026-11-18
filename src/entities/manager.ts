@@ -734,10 +734,12 @@ export class EntityManager {
     c.epoch = d.epoch;
     d.settledTick = this.host.world.time;
     // A carrier the structure cache has not seen yet (raised before the first tick after a load,
-    // or for a ship assembled in this tick): read the poses now, else the frame would be lost.
+    // or for a ship assembled in this tick): read the poses now, else the frame would be lost; a
+    // structure seen for the first time takes its pose now as its base (a loaded ship's start-of-
+    // tick pose is that of the saved tick: the next tick would carry the rider at twice the speed).
     if (p.carrierId !== 0 && this.body.record(p.carrierId) === undefined) {
       const s = this.host.structure(p.carrierId);
-      if (s !== undefined && !s.removed) this.body.beginCarry();
+      if (s !== undefined && !s.removed) this.body.beginCarry('now');
     }
     this.judge.toReportFrame(p, c);
     if (c.carrierId === 0 && p.carrierId !== 0) {
@@ -1144,11 +1146,21 @@ export class EntityManager {
 
   /**
    * A client-driven player deeper in world blocks than lag explains (a block put into it): moved
-   * to the nearest free spot (a correction), or suffocating when there is none.
+   * to the nearest free spot (a correction), or suffocating when there is none. Lag explains world
+   * overlap only for a carried body (its carrier's pose leads the client's copy); the world does
+   * not move, so an uncarried body overlapping it at all had a block put into it, and is moved
+   * out as a server-driven one is (BodyMover: any overlap). A shallow overlap left alone would
+   * never end: the client does not relocate, its body sinks on into the block, and every report
+   * is refused ('check:world') back to the same place.
    */
   private judgeWorldStuck(p: Player, d: ClientDrive): void {
-    const tol = this.judge.worldTolerance(p.carrierId, p.carrierId !== 0 ? Math.max(this.judge.speedAt(p.carrierId, p.pos), d.carrierWithin(d.lag)) : 0, d.lag);
-    if (!(hardDepth(this.host.world, p.box(this.box1)) > tol)) {
+    const world = this.host.world;
+    const box = p.box(this.box1);
+    const stuck =
+      p.carrierId === 0
+        ? boxOverlapsSolid(world, box)
+        : hardDepth(world, box) > this.judge.worldTolerance(p.carrierId, Math.max(this.judge.speedAt(p.carrierId, p.pos), d.carrierWithin(d.lag)), d.lag);
+    if (!stuck) {
       p.unstuckFails = 0;
       p.unstuckWait = 0;
       return;

@@ -2,25 +2,29 @@
  * Helpers for the save acceptance scenarios (docs/ACCEPTANCE.md 23-24, group g6-save).
  *
  * Scenes are built with world.setCell; everything the PLAYER does (gluing, assembling, starting
- * windmills, steering, pouring) goes through the simulation's input path (look + right-click
- * with an item in hand). Saves go through the storage path the browser uses: exportSave ->
- * SaveManager.save (SaveStorage.putAll with a WorldMeta) -> SaveManager.load
- * (listChunkKeys / getChunks / getBlob) -> new Simulation(...) -> importSave -> the player rejoins.
+ * windmills, steering, pouring) goes through the test world's player (tests/acceptance/world.ts:
+ * look + right-click with an item in hand). Saves go through the server's storage path
+ * (docs/NETCODE.md section 12): network mode, ServerHost.save() into the host's MemoryStorage
+ * (exportSave + the generator blob, SaveStorage.putAll with a WorldMeta); direct mode, the same
+ * bundle (net/host/host.ts saveBundle) written with putAll. They come back with net/host/host.ts
+ * readSave (listChunkKeys / getChunks / getBlob, as ServerHost.load reads them) into a new test
+ * world built the same way (importSave), which the player joins before its first tick.
  */
+import { expect } from 'vitest';
 import { ID_MASK, facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import type { Dir } from '../../src/core/dirs';
-import { SaveManager } from '../../src/client/saves';
+import { readSave, saveBundle } from '../../src/net/host/host';
 import { SAVE_VERSION, type WorldMeta } from '../../src/save/codec';
-import { MemoryStorage } from '../../src/save/storage';
+import { MemoryStorage, type SaveStorage } from '../../src/save/storage';
 import { exportSave, type SaveBundle } from '../../src/sim/persist';
-import { Simulation, type GameMode } from '../../src/sim/simulation';
+import type { GameMode, Simulation } from '../../src/sim/simulation';
 import type { Message, SimEvent } from '../../src/sim/view';
 import { Rotor, Ship, type Structure } from '../../src/structures/structure';
 import type { VoxelGrid } from '../../src/voxel/grid';
 import { FlatGenerator, type ChunkGenerator } from '../../src/worldgen/generator';
-import { loadSolo, soloSim } from '../solo';
+import { testWorld, type TestWorld } from './world';
 
 // ------------------------------------------------------------------ worlds
 
@@ -43,9 +47,9 @@ export interface SimSpec {
   loadRadius: number;
 }
 
-/** A new world as the client would open it (headless: synchronous chunks, no rabbits). */
-export function newWorld(spec: SimSpec): Simulation {
-  return soloSim({
+/** A new world as a host opens it (headless: synchronous chunks, no rabbits). */
+export function newWorld(spec: SimSpec): TestWorld {
+  return testWorld({
     seed: spec.seed,
     mode: spec.mode,
     generator: spec.generator(),
@@ -56,19 +60,17 @@ export function newWorld(spec: SimSpec): Simulation {
   });
 }
 
-/** A Simulation built to receive a save (same seed and generator), then importSave(), then the player rejoins. */
-export function loadWorld(spec: SimSpec, bundle: SaveBundle): Simulation {
-  return loadSolo(
-    {
-      seed: spec.seed,
-      mode: spec.mode,
-      generator: spec.generator(),
-      syncChunks: true,
-      rabbits: false,
-      loadRadius: spec.loadRadius,
-    },
-    bundle,
-  );
+/** A world built to receive a save (same seed and generator), importSave(), then the player rejoins (before the first tick). */
+export function loadWorld(spec: SimSpec, bundle: SaveBundle): TestWorld {
+  return testWorld({
+    seed: spec.seed,
+    mode: spec.mode,
+    generator: spec.generator(),
+    syncChunks: true,
+    rabbits: false,
+    loadRadius: spec.loadRadius,
+    load: bundle,
+  });
 }
 
 
@@ -77,47 +79,52 @@ export function loadWorld(spec: SimSpec, bundle: SaveBundle): Simulation {
 export interface StoredSave {
   /** What exportSave produced. */
   exported: SaveBundle;
-  /** What came back out of the storage (fresh byte arrays). */
+  /** What came back out of the storage (fresh byte arrays; the bundle importSave takes). */
   loaded: SaveBundle;
   meta: WorldMeta;
-  storage: MemoryStorage;
+  storage: SaveStorage;
 }
 
 /**
- * Save `sim` the way the client does (SaveManager.save -> putAll with a WorldMeta) into a fresh
- * MemoryStorage and read it back the way the client does (SaveManager.load -> listChunkKeys,
- * getChunks, getBlob).
+ * Save the world the way its server does (see the file comment) and read it back the way
+ * ServerHost.load does (readSave). Network mode: the host's own save of its own world (meta id
+ * and all), into its storage. Direct mode: a fresh MemoryStorage, under `worldId`.
  */
-export async function saveThroughStorage(sim: Simulation, worldId: string, seedText: string, seedHash: number): Promise<StoredSave> {
-  const storage = new MemoryStorage();
-  const saves = new SaveManager(storage);
-  let exported: SaveBundle | null = null;
-  const meta: WorldMeta = {
-    id: worldId,
-    name: worldId,
-    seed: seedText,
-    seedHash: seedHash >>> 0,
-    mode: sim.soloPlayer.player.mode,
-    createdAt: 0,
-    lastPlayed: 0,
-    version: SAVE_VERSION,
-    time: sim.world.time,
-  };
-  await saves.save(() => {
-    exported = exportSave(sim);
-    return { meta, bundle: exported };
-  });
-  if (exported === null) throw new Error('the snapshot was never taken');
-  const res = await saves.load(worldId);
-  if (!res.ok) throw new Error(`SaveManager.load failed: ${res.reason} ${String(res.error)}`);
-  return { exported, loaded: res.bundle, meta: res.meta, storage };
+export async function saveThroughStorage(w: TestWorld, worldId: string, seedText: string, seedHash: number): Promise<StoredSave> {
+  const sim = w.sim;
+  const exported = exportSave(sim);
+  let storage: SaveStorage;
+  let id: string;
+  if (w.harness !== null) {
+    const host = w.harness.host;
+    expect(await host.save(), 'the host saved').toBe(true);
+    storage = w.harness.storage;
+    id = host.meta.id;
+  } else {
+    storage = new MemoryStorage();
+    id = worldId;
+    const meta: WorldMeta = {
+      id,
+      name: worldId,
+      seed: seedText,
+      seedHash: seedHash >>> 0,
+      mode: sim.rules.defaultMode,
+      createdAt: 0,
+      lastPlayed: 0,
+      version: SAVE_VERSION,
+      time: sim.world.time,
+    };
+    const b = saveBundle(sim, sim.generator.spec());
+    await storage.putAll(id, meta, b.chunks, b.blobs);
+  }
+  const back = await readSave(storage, id);
+  expect(back.generator, 'the generator came back').toEqual(sim.generator.spec());
+  return { exported, loaded: back.bundle, meta: back.meta, storage };
 }
 
 /** Read the same save out of its storage once more (a second, independent copy of the bytes). */
 export async function readAgain(saved: StoredSave): Promise<SaveBundle> {
-  const res = await new SaveManager(saved.storage).load(saved.meta.id);
-  if (!res.ok) throw new Error(`SaveManager.load failed: ${res.reason} ${String(res.error)}`);
-  return res.bundle;
+  return (await readSave(saved.storage, saved.meta.id)).bundle;
 }
 
 /** The bytes of one named blob of a bundle. */
@@ -129,19 +136,19 @@ export function blobOf(bundle: SaveBundle, name: string): Uint8Array {
 // ------------------------------------------------------------------ player actions
 
 /** Aim at a cell of a grid and right-click once (one tick). Throws when the ray hits something else. */
-export function rightClick(sim: Simulation, x: number, y: number, z: number, face?: Dir, gridId = 0): void {
-  if (!sim.soloPlayer.useOn(x, y, z, face, gridId)) {
-    const t = sim.soloPlayer.targetCell();
+export function rightClick(w: TestWorld, x: number, y: number, z: number, face?: Dir, gridId = 0): void {
+  if (!w.me.useOn(x, y, z, face, gridId)) {
+    const t = w.me.targetCell();
     throw new Error(`cannot aim at ${gridId}:${x},${y},${z} (ray hits ${t ? `${t.gridId}:${t.x},${t.y},${t.z} face ${t.face}` : 'nothing'})`);
   }
 }
 
 /** With glue in hand, right-click face `a[3]` of cell a of a grid: glue it (or with sneak: remove its glue). */
-export function glueFace(sim: Simulation, a: readonly [number, number, number, Dir], gridId = 0, sneak = false): void {
-  sim.soloPlayer.hold(I.GLUE);
-  sim.soloPlayer.player.input.sneak = sneak;
-  rightClick(sim, a[0], a[1], a[2], a[3], gridId);
-  sim.soloPlayer.player.input.sneak = false;
+export function glueFace(w: TestWorld, a: readonly [number, number, number, Dir], gridId = 0, sneak = false): void {
+  w.me.hold(I.GLUE);
+  w.me.input.sneak = sneak;
+  rightClick(w, a[0], a[1], a[2], a[3], gridId);
+  w.me.input.sneak = false;
 }
 
 // ------------------------------------------------------------------ observation
@@ -240,8 +247,8 @@ export function glueStores(sim: Simulation): Record<string, number[]> {
 }
 
 /** The player's saved state that matters to the player: where, looking where, holding what. */
-export function playerState(sim: Simulation): Record<string, unknown> {
-  const p = sim.soloPlayer.player;
+export function playerState(w: TestWorld): Record<string, unknown> {
+  const p = w.me.player;
   const inv = p.inventory;
   return {
     id: p.id,

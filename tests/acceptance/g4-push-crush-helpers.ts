@@ -21,10 +21,9 @@ import type { Rotor, Ship } from '../../src/structures/structure';
 import { Simulation, type GameMode } from '../../src/sim/simulation';
 import type { SimEvent } from '../../src/sim/view';
 import type { VoxelGrid } from '../../src/voxel/grid';
-import { boxOverlapsSolid } from '../../src/voxel/shape';
+import { boxOverlapsSolid, deepestPenetration } from '../../src/voxel/shape';
 import { FlatGenerator } from '../../src/worldgen/generator';
-import { soloSim } from '../solo';
-import { withDrive } from './drive-modes';
+import { testWorld, type TestWorld } from './world';
 
 // ------------------------------------------------------------------ worlds
 
@@ -33,8 +32,8 @@ export const LAND_TOP = 35;
 /** Sea world: deeprock y=0, stone 1..19, water 20..29 (surface cells y = 29); first air at y = SEA_TOP. */
 export const SEA_TOP = 30;
 
-export function landSim(mode: GameMode, spawn: Vec3, seed = 41): Simulation {
-  return withDrive(soloSim({
+export function landWorld(mode: GameMode, spawn: Vec3, seed = 41): TestWorld {
+  return testWorld({
     seed,
     mode,
     generator: new FlatGenerator(),
@@ -42,11 +41,11 @@ export function landSim(mode: GameMode, spawn: Vec3, seed = 41): Simulation {
     loadRadius: 2,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  }));
+  });
 }
 
-export function seaSim(mode: GameMode, spawn: Vec3, seed = 42): Simulation {
-  return withDrive(soloSim({
+export function seaWorld(mode: GameMode, spawn: Vec3, seed = 42): TestWorld {
+  return testWorld({
     seed,
     mode,
     generator: new FlatGenerator([
@@ -58,7 +57,7 @@ export function seaSim(mode: GameMode, spawn: Vec3, seed = 42): Simulation {
     loadRadius: 2,
     rabbits: false,
     spawn: { x: spawn.x, y: spawn.y, z: spawn.z },
-  }));
+  });
 }
 
 /** Fill an inclusive box of world cells with a block id (0 = air). */
@@ -92,14 +91,15 @@ export function buildWindmill(sim: Simulation, bearing: Cell3, facing: Dir, canv
 /**
  * The player starts the windmill on the world bearing at `bearing` like a player does: look at
  * the bearing's `face`, right-click (preview), right-click again (start). Each click is checked
- * to hit that very bearing (Simulation.useOn runs one tick per click). Returns the new rotor.
+ * to hit that very bearing (useOn runs one tick per click). Returns the new rotor.
  */
-export function startWindmillByClicks(sim: Simulation, bearing: Cell3, face: Dir): Rotor {
+export function startWindmillByClicks(w: TestWorld, bearing: Cell3, face: Dir): Rotor {
+  const { sim, me } = w;
   const before = new Set(sim.structures.rotors());
   const [x, y, z] = bearing;
-  if (!sim.soloPlayer.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) face ${face}`);
-  if (sim.soloPlayer.view.preview?.kind !== 'rotor') throw new Error('windmill: the first right-click did not preview a rotor');
-  if (!sim.soloPlayer.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) a second time`);
+  if (!me.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) face ${face}`);
+  if (me.view.preview?.kind !== 'rotor') throw new Error('windmill: the first right-click did not preview a rotor');
+  if (!me.useOn(x, y, z, face)) throw new Error(`windmill: cannot aim at the bearing (${x},${y},${z}) a second time`);
   const started = sim.structures.rotors().filter((r) => !before.has(r));
   if (started.length !== 1) throw new Error(`windmill: the second right-click started ${started.length} rotors`);
   return started[0]!;
@@ -213,6 +213,20 @@ export function extent(pts: readonly Vec3[]): Box3 {
 /** Does the entity's body overlap a hard cell of `grid` (the same test the push and crush use)? */
 export function bodyIn(grid: VoxelGrid, e: Entity): boolean {
   return boxOverlapsSolid(grid, e.box(aabb()));
+}
+
+/**
+ * Depth that counts as touching, not inside (blocks). A world-axis box resting on a rocking deck
+ * touches it by about 1e-5 when placed against the deck's previous pose (a client-driven body:
+ * the client places it against the carrier as it shows it); 1e-4 leaves room for that and no more.
+ */
+export const TOUCH = 1e-4;
+
+/** How deep the entity's body is inside the hard cells of `grid` (0 = not inside; the push's measure). */
+export function depthIn(grid: VoxelGrid, e: Entity): number {
+  const b = e.box(aabb());
+  if (!boxOverlapsSolid(grid, b)) return 0;
+  return deepestPenetration(grid, b)?.depth ?? Infinity;
 }
 
 /** Live item entities (and their total count), optionally of one item. */
