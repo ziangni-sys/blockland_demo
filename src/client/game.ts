@@ -67,6 +67,7 @@ import {
 import type { GenErrorResponse, GenResponse } from '../worldgen/protocol';
 import { nextViewMode, type ViewMode } from './camera';
 import { debugLines } from './debug';
+import type { DevBots } from './devbots';
 import { describeError, Faults } from './faults';
 import { DEFAULT_PLAYER_NAME, pageRandom, playerKeyFor, slotFromSearch } from './identity';
 import { InputState, type InputCommand, type LookSettings } from './input';
@@ -92,6 +93,9 @@ import {
 import { WorkerPool } from './workers';
 
 export const CLIENT_VERSION = '0.1.0';
+
+/** vite.config.ts: true in the single-file artifact build (the game as players get it). */
+declare const __ARTIFACT__: boolean;
 
 /** Main-thread budget for terrain delivery + meshing per frame while playing / while loading. */
 const PLAY_WORK_BUDGET_MS = 4;
@@ -215,6 +219,8 @@ export class Game implements InputHost {
   private fpsFrames = 0;
   private fpsSince = 0;
   private serverTps: number | null = null;
+  /** Dev tooling: the scripted extra players of the current server (debug.bots()), or null. */
+  private devBots: { server: LocalServer; bots: Promise<DevBots> } | null = null;
   private readonly traffic = { at: -Infinity, in: 0, out: 0, inRate: 0, outRate: 0 };
   private heartbeat: unknown = null;
   private resizeObserver: ResizeObserver | null = null;
@@ -966,6 +972,8 @@ export class Game implements InputHost {
   }
 
   private endSession(): void {
+    void this.devBots?.bots.then((b) => b.dispose());
+    this.devBots = null;
     const s = this.session;
     if (s) {
       this.session = null;
@@ -1395,6 +1403,30 @@ export class Game implements InputHost {
     pick: (): boolean => this.session?.pickBlock() ?? false,
     /** Save immediately (resolves with whether it succeeded). */
     save: (): Promise<boolean> => this.saveNow(),
+    /**
+     * Dev tooling (package 12): scripted extra players joined to this page's own server, to see
+     * other players without a second browser (client/devbots.ts, loaded on first use in its own
+     * chunk; opens the room). Null without a world, and always in the single-file artifact, which
+     * leaves the module out (the branch is dead there, so the build drops the import).
+     */
+    bots: (): Promise<DevBots> | null => {
+      const server = this.server;
+      if (__ARTIFACT__ || server === null) return null;
+      if (this.devBots?.server !== server) {
+        const w = this.win;
+        const bots = import('./devbots').then(
+          (m) =>
+            new m.DevBots(server, {
+              now: () => w.performance.now(),
+              setInterval: (fn, ms) => w.setInterval(fn, ms),
+              clearInterval: (id) => w.clearInterval(id),
+              setTimeout: (fn, ms) => w.setTimeout(fn, ms),
+            }),
+        );
+        this.devBots = { server, bots };
+      }
+      return this.devBots.bots;
+    },
     backendStats: () => this.backend.stats(),
   };
 }

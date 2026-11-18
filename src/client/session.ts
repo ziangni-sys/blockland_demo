@@ -286,8 +286,9 @@ export class WorldSession {
       this.deps.onError('environment', e);
     }
     try {
-      const renderTick = this.net.clock?.renderTick ?? -Infinity;
-      b.setEntities(Number.isFinite(renderTick) ? v.updateEntities(r, this.shown, renderTick) : []);
+      const clock = this.net.clock;
+      const renderTick = clock?.renderTick ?? -Infinity;
+      b.setEntities(clock !== null && Number.isFinite(renderTick) ? v.updateEntities(r, this.shown, renderTick, clock.rotorTick) : []);
     } catch (e) {
       this.deps.onError('entities', e);
     }
@@ -568,6 +569,10 @@ export class WorldSession {
       s.pitch = this.held.pitch;
       s.sprinting = p.sprinting;
       s.moving = Math.hypot(p.vel.x - p.carrierVel.x, p.vel.z - p.carrierVel.z) > MOVING_SPEED;
+      s.carrierId = p.carrierId;
+      s.sneaking = p.sneaking;
+      s.flying = p.flying;
+      s.steeringShipId = p.steeringShipId;
       return;
     }
     // Loading: where the server's correction has the player, looking where it says.
@@ -580,6 +585,10 @@ export class WorldSession {
     s.pitch = corr.pitch;
     s.sprinting = false;
     s.moving = false;
+    s.carrierId = corr.carrierId;
+    s.sneaking = false;
+    s.flying = corr.flying;
+    s.steeringShipId = corr.seatShipId;
   }
 
   /**
