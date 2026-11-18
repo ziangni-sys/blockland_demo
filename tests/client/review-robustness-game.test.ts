@@ -110,6 +110,8 @@ import type { UiState } from '../../src/ui/model';
 import { MemoryStorage, type SaveStorage } from '../../src/save/storage';
 import { B } from '../../src/blocks/defs';
 import { makeCell } from '../../src/blocks/cell';
+import { BroadcastSignaller } from '../../src/net/webrtc/broadcast';
+import type { SignalPath } from '../../src/net/webrtc/signal';
 
 function fakeEnv(): { win: Window; canvas: HTMLCanvasElement; uiRoot: HTMLElement } {
   const store = new Map<string, string>();
@@ -389,6 +391,32 @@ describe('review: the server fails', { timeout: 60_000 }, () => {
     game.quitWithoutSaving();
     expect(game.screen).toBe('mainMenu');
     expect(game.server).toBeNull();
+  });
+
+  it('a world that stops while its room is open closes the room (package 10): a guest dialing the code hears at once that there is no room', async () => {
+    // Opening a room needs a browser that can go online; no guest connects in this test.
+    vi.stubGlobal('RTCPeerConnection', function RTCPeerConnection() {
+      throw new Error('no WebRTC in this test');
+    });
+    const { game, host } = await gameWithWorld(new MemoryStorage());
+    expect((await game.openRoom('broadcast', { code: 'RXAMCDEF' })).ok).toBe(true);
+    await until(game, () => host().netServer.roomOpen);
+    const dial = (): Promise<SignalPath> =>
+      new BroadcastSignaller({
+        open: (name) => new BroadcastChannel(name) as never,
+        timers: { set: (fn, ms) => setTimeout(fn, ms), clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+        random: (b) => void crypto.getRandomValues(b),
+        knockMs: 1000,
+      }).dial('RXAMCDEF');
+    // While the world runs, the room answers a knock.
+    (await dial()).close();
+    host().sim.tick = () => {
+      throw new Error('review: injected simulation failure');
+    };
+    await until(game, () => game.screen === 'pause');
+    expect(game.room?.state).toBe('closed');
+    await until(game, () => !host().netServer.roomOpen);
+    await expect(dial()).rejects.toMatchObject({ code: 'unknown' });
   });
 
   it('a server failure while the world is still loading closes it and returns to the menu', async () => {
