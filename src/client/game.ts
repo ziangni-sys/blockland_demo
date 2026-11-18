@@ -39,6 +39,14 @@
  * The player's identity is the browser's stored random key (client/identity.ts; `?slot=` picks
  * another). The player's mode, the time of day, teleport and give (debug helpers) are host
  * commands.
+ *
+ * ROOMS (package 10, client/room.ts). The host opens its world to guests (openRoom: the page owns
+ * the guests' WebRTC connections and forwards each to its server Worker; the world no longer
+ * pauses while the room is open or guests are in). A guest page joins someone else's room
+ * (joinRoom, or the address `?join=<code>&signal=cloud|broadcast|manual`): no server of its own,
+ * a NetClient over a WebRtcTransport; "Save & quit" just leaves. Every way a join fails ends in
+ * its own message and back at the menu. The single-file build has no network: it says so. Until
+ * the lobby (package 11) these are reached through the debug helpers and the address.
  */
 import { hashString } from '../core/rng';
 import { paintAllTiles } from '../art/tiles';
@@ -46,6 +54,8 @@ import { renderItemIcon } from '../art/icons';
 import type { MeshResponse } from '../mesh/types';
 import type { HostToPage } from '../net/host/control';
 import type { HostCommand } from '../net/protocol';
+import { ManualSignaller } from '../net/webrtc/manual';
+import { DialError, newRoomCode } from '../net/webrtc/signal';
 import type { BackendInfo, RenderBackend } from '../render/backend';
 import { createThreeBackend } from '../render/three/index';
 import type { WorldMeta } from '../save/codec';
@@ -53,6 +63,7 @@ import { openBestStorage } from '../save/idb';
 import type { SaveStorage } from '../save/storage';
 import { formatMessage } from '../sim/messages';
 import { Rotor, Ship } from '../structures/structure';
+import { chunkKey } from '../voxel/chunk';
 import { createUi } from '../ui/index';
 import {
   DEFAULT_SETTINGS,
@@ -73,8 +84,22 @@ import { InputState, type InputCommand, type LookSettings } from './input';
 import { InputBinder, type InputHost } from './inputdom';
 import { FrameLoop } from './loop';
 import { checkWorld, listWorlds, makeWorldId, newWorldMeta } from './saves';
+import {
+  dialFailureKey,
+  GuestJoin,
+  joinFromSearch,
+  kickKey,
+  onlineAvailable,
+  pageConnectDeps,
+  pageSignaller,
+  pageTimers,
+  refuseKey,
+  RoomHost,
+  type RoomState,
+  type SignalKind,
+} from './room';
 import { LocalServer, type OpenCommand, type ServerWay } from './server';
-import { WorldSession } from './session';
+import { WorldSession, type SessionDeps } from './session';
 import { applySettingsPatch, languageFromLocale, SettingsStore, type KeyValueStore } from './settings';
 import { clientText, type ClientStringKey } from './strings';
 import { ToastList } from './toasts';
@@ -158,8 +183,14 @@ export class Game implements InputHost {
   screen: Screen = 'mainMenu';
   settingsReturn: Screen = 'mainMenu';
   session: WorldSession | null = null;
-  /** The open world's game server. */
+  /** The open world's game server (null while this page is a guest). */
   server: LocalServer | null = null;
+  /** The open world's room for guests (package 10), null until it is opened. */
+  room: RoomHost | null = null;
+  /** The way to the host while this page is a guest in someone else's room (package 10). */
+  guest: GuestJoin | null = null;
+  /** Rooms closed and replaced by another while their guests stay (ended with the world). */
+  private readonly retiredRooms: RoomHost[] = [];
   /** The open world's meta as the server reported it. */
   worldMeta: WorldMeta | null = null;
   /** What the open world's server said about its storage (`ready`). */
@@ -215,6 +246,8 @@ export class Game implements InputHost {
   private fpsFrames = 0;
   private fpsSince = 0;
   private serverTps: number | null = null;
+  /** The room's signalling was lost (its return is announced). */
+  private roomWasLost = false;
   private readonly traffic = { at: -Infinity, in: 0, out: 0, inRate: 0, outRate: 0 };
   private heartbeat: unknown = null;
   private resizeObserver: ResizeObserver | null = null;
@@ -272,6 +305,9 @@ export class Game implements InputHost {
     }
     this.heartbeat = this.win.setInterval(() => this.session?.heartbeat(this.win.performance.now()), HEARTBEAT_MS);
     this.loop.start();
+    // A link to someone's room (package 10): join it at once.
+    const join = joinFromSearch(search(this.win));
+    if (join !== null) void this.joinRoom(join.signal, join.code, { fromAddress: true });
   }
 
   // ================================================================== InputHost
@@ -564,6 +600,8 @@ export class Game implements InputHost {
     const s = this.session;
     const server = this.server;
     if (!s || !server || this.worldPaused === paused) return;
+    // A world open to guests, or with guests in, does not pause (DESIGN: 联机的世界不暂停).
+    if (paused && [this.room, ...this.retiredRooms].some((r) => r !== null && (r.state !== 'closed' || r.guests > 0))) return;
     this.worldPaused = paused;
     if (paused) {
       s.setPaused(true);
@@ -826,25 +864,26 @@ export class Game implements InputHost {
       this.toast(this.storageNotice(first.reason ?? ''), 'warn');
     }
     if (command.type === 'create') void this.refreshWorlds();
-    this.startSession(server);
+    this.startSession((ready, failed) => {
+      if (server !== this.server) return failed('the server is gone');
+      try {
+        ready(server.connect());
+      } catch (e) {
+        failed(describeError(e));
+      }
+    });
     return true;
   }
 
-  private startSession(server: LocalServer): void {
+  /** Play a world through `openTransport`: the page's own server (the host's connection), or a room's host (a guest). */
+  private startSession(openTransport: SessionDeps['openTransport']): void {
     const session: WorldSession = new WorldSession({
       backend: this.backend,
       genPool: this.genPool,
       meshPool: this.meshPool,
       now: () => this.win.performance.now(),
       onError: (what, err) => this.faults.report(what, err),
-      openTransport: (ready, failed) => {
-        if (server !== this.server) return failed('the server is gone');
-        try {
-          ready(server.connect());
-        } catch (e) {
-          failed(describeError(e));
-        }
-      },
+      openTransport,
       playerKey: this.playerKey,
       name: DEFAULT_PLAYER_NAME,
       viewRadius: loadRadiusFor(this.settings.renderDistance),
@@ -857,17 +896,21 @@ export class Game implements InputHost {
     this.envTime = 0;
     this.worldPaused = false;
     this.binder.exitLock();
-    this.showLoading('loading.connecting', 0.05);
+    this.showLoading(this.guest !== null ? 'join.connecting' : 'loading.connecting', 0.05);
     session.start();
   }
 
   /** The connection ended for good (kicked, refused, broken): the world closes (saved first when possible). */
   private onNetStatus(s: WorldSession, status: string): void {
     if (s !== this.session || this.quitting) return;
+    if (status === 'joining' || status === 'ready') this.guest?.connected();
+    else if (status === 'reconnecting') this.guest?.linkLost();
     const lang = this.settings.language;
     let msg: string | null = null;
-    if (status === 'kicked') msg = clientText(lang, 'net.kicked', { reason: s.net.kick?.reason ?? '?' });
-    else if (status === 'refused') msg = clientText(lang, 'net.refused', { reason: s.net.refusal?.reason ?? '?' });
+    const kick = s.net.kick;
+    const refusal = s.net.refusal;
+    if (status === 'kicked') msg = kick !== null ? clientText(lang, kickKey(kick.reason)) : clientText(lang, 'net.kicked', { reason: '?' });
+    else if (status === 'refused') msg = refusal !== null ? clientText(lang, refuseKey(refusal.reason)) : clientText(lang, 'net.refused', { reason: '?' });
     else if (status === 'failed') msg = clientText(lang, 'net.failed', { msg: s.net.failure ?? '?' });
     if (msg === null) return;
     console.error(`[blocklands] ${msg}`);
@@ -897,6 +940,10 @@ export class Game implements InputHost {
       return;
     }
     this.worldStopped = true;
+    // No new guests for a world that no longer runs: they hear at once that there is no room
+    // instead of waiting for a Welcome that never comes. The guests in stay until the host quits
+    // (Kick(shutdown) when the server can still close, their links closed with the room otherwise).
+    this.room?.close();
     if (this.screen === 'inventory') this.closeInventory(false);
     // Settings opened from the pause menu return to it.
     if (this.screen !== 'settings') {
@@ -923,6 +970,8 @@ export class Game implements InputHost {
   async saveAndQuit(): Promise<void> {
     const s = this.session;
     const server = this.server;
+    // A guest has nothing to save: it leaves (Bye), the host keeps its record.
+    if (s && !server && this.guest && !this.busy) return this.leaveWorld();
     if (!s || !server || this.busy) return;
     this.busy = true;
     const from = this.screen;
@@ -971,6 +1020,11 @@ export class Game implements InputHost {
       this.session = null;
       s.dispose();
     }
+    for (const room of [this.room, ...this.retiredRooms]) room?.end();
+    this.room = null;
+    this.retiredRooms.length = 0;
+    this.guest?.end();
+    this.guest = null;
     this.server?.terminate();
     this.server = null;
     this.worldMeta = null;
@@ -992,6 +1046,162 @@ export class Game implements InputHost {
     const answer = server.waitFor((m) => m.type === 'saved', SHUTDOWN_SAVE_MS);
     server.post({ type: 'save' });
     return answer.then((m) => m !== null && m.type === 'saved' && m.ok);
+  }
+
+  // ================================================================== rooms (package 10)
+
+  /**
+   * Open the world to guests through the signalling `kind`: listens (the room code: `opts.code`,
+   * or a new random one), then the server's openRoom. Resolves with the code, or the failure (its
+   * message is shown).
+   */
+  async openRoom(kind: SignalKind, opts: { code?: string; iceServers?: readonly RTCIceServer[] } = {}): Promise<{ ok: boolean; code: string | null; error: string | null }> {
+    const lang = this.settings.language;
+    if (!onlineAvailable()) {
+      this.toast(clientText(lang, 'room.offline'), 'error');
+      return { ok: false, code: null, error: 'offline' };
+    }
+    const server = this.server;
+    if (server === null || this.session === null || this.guest !== null) {
+      this.toast(clientText(lang, 'room.noWorld'), 'error');
+      return { ok: false, code: null, error: 'no_world' };
+    }
+    if (this.room !== null && this.room.state !== 'closed') return { ok: true, code: this.room.code, error: null };
+    // A room closed before keeps its guests: it is retired (ended with the world), not ended now.
+    if (this.room !== null) this.retiredRooms.push(this.room);
+    this.room = null;
+    const random = pageRandom(this.win);
+    const code = opts.code ?? newRoomCode(random);
+    // The room's world runs: a page paused (pause menu) resumes, client after server.
+    this.pauseWorld(false);
+    const room: RoomHost = new RoomHost({
+      server,
+      signaller: pageSignaller(kind, this.win, random),
+      code,
+      deps: pageConnectDeps(this.win, opts.iceServers),
+      intervals: pageTimers(this.win),
+      onState: (st) => this.onRoomState(room, st),
+      onGuestFailed: (e) => console.warn(`[blocklands] a guest could not connect (${e.code}): ${e.message}`),
+    });
+    this.room = room;
+    try {
+      await room.open();
+    } catch (e) {
+      if (this.room === room) this.room = null;
+      const failure = e instanceof DialError ? e.code : describeError(e);
+      const msg = e instanceof DialError ? clientText(lang, dialFailureKey(e.code)) : describeError(e);
+      console.error(`[blocklands] could not open the room: ${failure}`);
+      this.toast(clientText(lang, 'room.failed', { msg }), 'error');
+      return { ok: false, code: null, error: failure };
+    }
+    if (this.room !== room || room.state === 'closed') return { ok: false, code: null, error: 'closed' };
+    console.info(`[blocklands] room open (${kind}): ${code}`);
+    this.toast(kind === 'manual' ? clientText(lang, 'room.openManual') : clientText(lang, 'room.open', { code }), 'info');
+    return { ok: true, code, error: null };
+  }
+
+  /** Close the room to new guests (the guests already in stay). */
+  closeRoom(): void {
+    const room = this.room;
+    if (room === null || room.state === 'closed') return;
+    room.close();
+    this.toast(clientText(this.settings.language, 'room.closed'), 'info');
+  }
+
+  /** Manual signalling: a new invitation code for one guest (null when the room is not open with manual signalling). */
+  async inviteManual(): Promise<string | null> {
+    const signaller = this.room?.signaller;
+    if (!(signaller instanceof ManualSignaller) || this.room?.state === 'closed') return null;
+    try {
+      return await signaller.invite();
+    } catch (e) {
+      console.error('[blocklands] the invitation could not be made', e);
+      return null;
+    }
+  }
+
+  /** Manual signalling: the guest's answer code; false (and a message) when it does not fit an open invitation. */
+  acceptManual(answer: string): boolean {
+    const signaller = this.room?.signaller;
+    if (!(signaller instanceof ManualSignaller)) return false;
+    try {
+      signaller.accept(answer);
+      return true;
+    } catch (e) {
+      this.toast(clientText(this.settings.language, e instanceof DialError ? dialFailureKey(e.code) : 'join.badCode'), 'error');
+      return false;
+    }
+  }
+
+  private onRoomState(room: RoomHost, state: RoomState): void {
+    if (room !== this.room) return;
+    const lang = this.settings.language;
+    if (state === 'lost') this.toast(clientText(lang, 'room.lost'), 'warn');
+    else if (state === 'open' && this.roomWasLost) this.toast(clientText(lang, 'room.back'), 'info');
+    this.roomWasLost = state === 'lost';
+  }
+
+  /**
+   * Join someone else's room (`code` through the signalling `kind`; a manual invitation code is
+   * the code): the page plays it as a guest, with no server of its own. False when it could not
+   * start (another world is open, this build cannot go online, no graphics).
+   */
+  async joinRoom(kind: SignalKind, code: string, opts: { iceServers?: readonly RTCIceServer[]; fromAddress?: boolean } = {}): Promise<boolean> {
+    const lang = this.settings.language;
+    if (this.busy || this.session) return false;
+    if (!onlineAvailable()) {
+      this.toast(clientText(lang, 'room.offline'), 'error');
+      return false;
+    }
+    this.busy = true;
+    try {
+      this.showLoading('loading.graphics', 0);
+      if (!(await this.graphicsReady())) {
+        this.backToMenu();
+        return false;
+      }
+      const signaller = pageSignaller(kind, this.win, pageRandom(this.win));
+      // From the address there is no lobby yet (package 11): the answer code goes in a box the player can copy.
+      if (signaller instanceof ManualSignaller && opts.fromAddress) signaller.onAnswer = (answer) => this.showAnswerCode(answer);
+      const join: GuestJoin = new GuestJoin({
+        signaller,
+        code,
+        deps: pageConnectDeps(this.win, opts.iceServers),
+        now: () => this.win.performance.now(),
+        onFinal: (key, detail) => this.joinFailed(join, key, detail),
+      });
+      this.guest = join;
+      this.startSession(join.openTransport);
+      return true;
+    } catch (e) {
+      this.faults.report('join room', e);
+      this.guest = null;
+      this.backToMenu();
+      return false;
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** A join failed for good: its message, and back to the menu. */
+  private joinFailed(join: GuestJoin, key: ClientStringKey, detail: string): void {
+    if (this.guest !== join) return;
+    const msg = clientText(this.settings.language, key);
+    console.error(`[blocklands] ${msg} (${detail})`);
+    this.toast(msg, 'error');
+    this.leaveWorld();
+  }
+
+  private showAnswerCode(answer: string): void {
+    const text = clientText(this.settings.language, 'join.answer');
+    console.info(`[blocklands] answer code: ${answer}`);
+    this.win.setTimeout(() => {
+      try {
+        this.win.prompt(text, answer);
+      } catch {
+        // no dialogs in this page (a sandbox): the console has it
+      }
+    }, 0);
   }
 
   // ================================================================== frame
@@ -1090,7 +1300,7 @@ export class Game implements InputHost {
     const lang = this.settings.language;
     const text =
       prog.phase === 'connecting'
-        ? clientText(lang, s.net.status === 'reconnecting' ? 'loading.reconnecting' : 'loading.connecting')
+        ? clientText(lang, s.net.status === 'reconnecting' ? 'loading.reconnecting' : this.guest !== null ? 'join.connecting' : 'loading.connecting')
         : prog.phase === 'terrain'
           ? clientText(lang, 'loading.terrain', { done: prog.chunksLoaded, total: prog.chunksNeeded })
           : prog.phase === 'meshing'
@@ -1341,8 +1551,60 @@ export class Game implements InputHost {
         stats: { ...this.stats, rttMs: s?.net.clock?.rtt ?? null, delayTicks: s?.net.clock?.D ?? null, serverTps: r?.state.tps ?? this.serverTps, trafficIn: s?.traffic.in ?? 0, trafficOut: s?.traffic.out ?? 0 },
         workers: this.workerModes,
         playerKey: this.playerKey,
+        isHost: s?.net.welcome?.isHost ?? null,
+        roomOpen: r ? r.state.roomOpen : null,
+        players: r ? r.state.players.size : 0,
+        room: this.room ? { code: this.room.code, signal: this.room.signaller.kind, state: this.room.state, guests: this.room.guests, connections: this.room.connections } : null,
+        join: this.guest
+          ? {
+              signal: this.guest.signaller.kind,
+              code: this.guest.code,
+              attempts: this.guest.attempts,
+              failure: this.guest.failure?.code ?? null,
+              answer: this.guest.signaller instanceof ManualSignaller ? this.guest.signaller.answer : null,
+            }
+          : null,
+        online: onlineAvailable(),
       };
     },
+    /**
+     * Open the world to guests (package 10; the lobby comes with package 11): `signal` 'cloud'
+     * (default), 'broadcast' or 'manual'; `code` a room code of your choice; `iceServers` instead of
+     * the public STUN servers (an empty list for loopback tests).
+     */
+    openRoom: (signal: SignalKind = 'cloud', opts: { code?: string; iceServers?: RTCIceServer[] } = {}) => this.openRoom(signal, opts),
+    /** Close the room to new guests. */
+    closeRoom: (): void => this.closeRoom(),
+    /** Manual signalling: a new invitation code (resolves when it is ready). */
+    invite: (): Promise<string | null> => this.inviteManual(),
+    /** Manual signalling: paste a guest's answer code. */
+    accept: (answer: string): boolean => this.acceptManual(answer),
+    /**
+     * FNV-1a hashes of the replica's columns within `radius` columns of the player, and the cell
+     * count of every structure: two pages in one room compare theirs (scripts/e2e-room.mjs).
+     */
+    digest: (radius = 2): { tick: number; columns: Record<string, number>; structures: Record<string, number> } | null => {
+      const s = this.session;
+      const r = s?.replica ?? null;
+      if (!s || !r) return null;
+      const cx0 = Math.floor(s.shown.feet.x) >> 4;
+      const cz0 = Math.floor(s.shown.feet.z) >> 4;
+      const columns: Record<string, number> = {};
+      for (let dz = -radius; dz <= radius; dz++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const chunk = r.world.chunks.get(chunkKey(cx0 + dx, cz0 + dz));
+          if (chunk === undefined) continue;
+          let h = 0x811c9dc5;
+          for (let i = 0; i < chunk.cells.length; i++) h = Math.imul(h ^ chunk.cells[i]!, 0x01000193) >>> 0;
+          columns[`${cx0 + dx},${cz0 + dz}`] = h;
+        }
+      }
+      const structures: Record<string, number> = {};
+      for (const st of r.structures()) structures[String(st.id)] = st.grid.count;
+      return { tick: r.state.tick, columns, structures };
+    },
+    /** Join a room (from the menu): `code` is the room code, or a manual invitation code. */
+    joinRoom: (signal: SignalKind, code: string, opts: { iceServers?: RTCIceServer[] } = {}): Promise<boolean> => this.joinRoom(signal, code, opts),
     /** Set the time of day `t` (0..1, 0 = sunrise): a host command (the world clock is never written). */
     setDayTime: (t: number): boolean => {
       if (!Number.isFinite(t)) return false;

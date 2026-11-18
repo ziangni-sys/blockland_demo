@@ -126,6 +126,29 @@ export class LocalServer {
     return new PortTransport(channel.port1);
   }
 
+  /**
+   * A new guest connection (package 10: the page forwards a guest's data channels to it,
+   * client/forward.ts): the page's end of its MessagePort, started. The server treats it as any
+   * remote connection (local false: Refuse when the room is closed or full).
+   */
+  connectGuest(): MessagePort {
+    if (this.dead || this.worker === null) throw new Error('the game server is not running');
+    const channel = new MessageChannel();
+    this.post({ type: 'connect', port: channel.port2, local: false }, [channel.port2]);
+    channel.port1.start();
+    return channel.port1;
+  }
+
+  /** Open the world to guests (host control openRoom: a paused server resumes, pause is refused while open). */
+  openRoom(): void {
+    this.post({ type: 'openRoom' });
+  }
+
+  /** Close the room to new guests (host control closeRoom; the guests already in stay). */
+  closeRoom(): void {
+    this.post({ type: 'closeRoom' });
+  }
+
   /** The next report that passes `pick`, or null after `timeoutMs` (or when the server is terminated). */
   waitFor(pick: (m: HostToPage) => boolean, timeoutMs: number): Promise<HostToPage | null> {
     if (this.dead) return Promise.resolve(null);
