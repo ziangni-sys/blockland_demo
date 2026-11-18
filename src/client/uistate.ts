@@ -11,6 +11,7 @@ import {
   INVENTORY_SIZE,
   type GameMode,
   type HelmView,
+  type OnlineView,
   type Screen,
   type Settings,
   type SlotView,
@@ -45,6 +46,10 @@ export interface UiInputs {
   quitUnsaved?: boolean;
   /** The world's server failed: the pause screen says so. Omitted = false. */
   worldStopped?: boolean;
+  /** Playing together (client/lobby.ts Lobby.view(): the same object while nothing changed). */
+  online: OnlineView;
+  /** Tab is held during play: the player list shows over the HUD. */
+  playerList: boolean;
   renderer: string;
   version: string;
 }
@@ -147,6 +152,8 @@ export class UiStateBuilder {
       prev.dragLook === x.dragLook &&
       prev.quitUnsaved === (x.quitUnsaved === true) &&
       prev.worldStopped === (x.worldStopped === true) &&
+      prev.online === x.online &&
+      prev.playerList === x.playerList &&
       prev.renderer === x.renderer &&
       prev.version === x.version
     ) {
@@ -177,6 +184,8 @@ export class UiStateBuilder {
       dragLook: x.dragLook,
       quitUnsaved: x.quitUnsaved === true,
       worldStopped: x.worldStopped === true,
+      online: x.online,
+      playerList: x.playerList,
       renderer: x.renderer,
       version: x.version,
     };

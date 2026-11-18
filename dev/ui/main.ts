@@ -13,6 +13,10 @@
  *   async=<ms> (world actions switch screens / update the list after a delay, like IndexedDB)
  *   newest=1  (toasts are kept newest-first)
  *   icons=art (real procedural icons from src/art; icons=placeholder: no provider)
+ *   playing together (package 11): online=0 (a build that cannot go online)  role=host|guest|none
+ *     room=closed|opening|open|lost|error|manual|manual-making|manual-invite|manual-answered
+ *     players=<1..4>  modes=1 (the host set guest modes)  join=service|host|answer|world|reconnecting|failed|ended|build
+ *     diag=1 (diagnostics shown)  plist=1 (Tab held: the player list over the HUD)  name=<text>
  *
  * window.harness: { state(), set(patch), show(screen), toast(text, kind), log, clearLog(), perf(n) }
  * Every UiActions call is appended to window.harness.log as { name, args }.
@@ -24,6 +28,10 @@ import {
   DEFAULT_SETTINGS,
   INVENTORY_SIZE,
   type GameMode,
+  type JoinView,
+  type OnlineView,
+  type PlayerRow,
+  type RoomView,
   type Screen,
   type SlotView,
   type Toast,
@@ -54,6 +62,76 @@ const SAMPLE_WORLDS: WorldSummary[] = [
 
 function stack(item: number, count: number): SlotView {
   return { item, count };
+}
+
+const PLAYER_NAMES = ['Brass Helmsman', '琥珀水手', 'Cedar Joiner', 'Quartz Lookout'];
+
+/** The online part of the state from the URL (see the header). */
+function onlineFromParams(lang: 'zh' | 'en'): OnlineView {
+  const roleParam = params.get('role');
+  const role = roleParam === 'guest' ? 'guest' : roleParam === 'none' ? null : 'host';
+  const n = Math.max(1, Math.min(4, num('players', 2)));
+  const players: PlayerRow[] = [];
+  for (let i = 0; i < n; i++) {
+    players.push({
+      entityId: i + 1,
+      name: PLAYER_NAMES[i]!,
+      host: i === 0,
+      you: role === 'guest' ? i === 1 : i === 0,
+      mode: role === 'host' && i > 0 && flag('modes') ? (i % 2 === 0 ? 'survival' : 'creative') : null,
+    });
+  }
+  const r = params.get('room') ?? 'closed';
+  const manual = r.startsWith('manual');
+  const status = r === 'opening' || r === 'open' || r === 'lost' ? r : manual ? 'open' : 'closed';
+  const invitation = r === 'manual-invite' ? `BL1I.${'eyJpIjoiOWYzYzEyYTQ1YjYwIiwicyI6InY9MFxyXG5vPS0gNDYyMzE'.repeat(14)}` : null;
+  const room: RoomView | null =
+    role !== 'host'
+      ? null
+      : {
+          status,
+          signal: manual ? 'manual' : 'cloud',
+          code: !manual && status !== 'closed' ? 'RXAM-CDEF' : null,
+          link: !manual && status !== 'closed' ? 'https://example.org/blocklands/?join=RXAMCDEF' : null,
+          invitation,
+          inviting: r === 'manual-making',
+          answered: r === 'manual-answered',
+          rules: status === 'closed' && players.length < 2 ? null : params.get('rules') === 'survival' ? 'survival' : 'creative',
+          error: r === 'error' ? (lang === 'en' ? 'Could not reach the signalling service (it may be blocked) — try again later, or use a manual invitation code' : '连不上信令服务（可能被网络屏蔽）：稍后再试，或改用手动邀请码') : null,
+        };
+  const j = params.get('join');
+  const answer = `BL1A.${'eyJpIjoiOWYzYzEyYTQ1YjYwIiwicyI6InY9MFxyXG5vPS0gNzc0MTA'.repeat(13)}`;
+  const failures: Record<string, { en: string; zh: string; retry: boolean; wasIn: boolean }> = {
+    failed: { en: 'No room has this code — check it; the host may have closed the room', zh: '没有找到这个房间：请检查房间码，房主可能已经关闭了房间', retry: true, wasIn: false },
+    ended: { en: 'The host removed you from the room', zh: '房主把你移出了房间', retry: false, wasIn: true },
+    build: { en: 'The host runs a different version of the game — both of you, reload the page', zh: '房主的游戏版本和你的不同：请双方都刷新页面', retry: false, wasIn: false },
+  };
+  const f = j !== null ? failures[j] : undefined;
+  const join: JoinView | null =
+    j === null
+      ? null
+      : {
+          stage: f ? 'failed' : j === 'answer' ? 'host' : (j as JoinView['stage']),
+          signal: j === 'answer' ? 'manual' : 'cloud',
+          answer: j === 'answer' ? answer : null,
+          error: f ? f[lang] : null,
+          canRetry: f ? f.retry : true,
+          wasIn: f ? f.wasIn : j === 'reconnecting',
+        };
+  return {
+    available: params.get('online') !== '0',
+    playerName: params.get('name') ?? (lang === 'en' ? 'Brass Helmsman' : '黄铜舵手'),
+    role: j !== null ? 'guest' : role,
+    pauses: role === 'host' && (status === 'closed' && n === 1),
+    room: j !== null ? null : room,
+    players: role === null ? [] : players,
+    maxPlayers: 4,
+    join,
+    diagnostics: flag('diag')
+      ? 'Blocklands connection diagnostics\nbuild: 594a143\nrole: guest\nsignalling: cloud\nwebrtc host: srflx -> host (udp), rtt 38 ms; out 1.2 KB/s, in 14.8 KB/s\ngame rtt: 41 ms, loss: 0.0 %, interpolation delay: 1.42 ticks\ngame traffic: in 14.6 KB/s, out 1.1 KB/s\nserver tps: 20.0\nconnection: ready\nlast error: none'
+      : null,
+    diagnosticsBusy: false,
+  };
 }
 
 function initialState(): UiState {
@@ -107,6 +185,8 @@ function initialState(): UiState {
     loading: { text: lang === 'en' ? 'Generating terrain… (chunk 37 / 81)' : '正在生成地形……（区块 37 / 81）', progress: num('progress', 0.46) },
     pointerLocked: flag('locked'),
     dragLook: flag('drag'),
+    online: onlineFromParams(lang),
+    playerList: flag('plist'),
     renderer: 'WebGPU',
     version: '0.1.0',
   };
@@ -293,7 +373,71 @@ const actions: UiActions = {
   },
   closeScreen() {
     record('closeScreen', []);
-    set({ screen: 'none', cursor: null });
+    set({ screen: state.screen === 'room' ? 'pause' : state.screen === 'join' ? 'mainMenu' : 'none', cursor: null });
+  },
+  setPlayerName(name) {
+    record('setPlayerName', [name]);
+    set({ online: { ...state.online, playerName: name.trim() }, screen: state.screen === 'name' ? 'mainMenu' : state.screen });
+  },
+  openRoomScreen() {
+    record('openRoomScreen', []);
+    set({ screen: 'room' });
+  },
+  openJoinScreen() {
+    record('openJoinScreen', []);
+    set({ screen: 'join' });
+  },
+  openRoom(way) {
+    record('openRoom', [way]);
+    const room = state.online.room;
+    if (!room) return;
+    set({ online: { ...state.online, pauses: false, room: { ...room, status: 'opening', signal: way === 'manual' ? 'manual' : 'cloud', error: null } } });
+    setTimeout(() => {
+      const r = state.online.room!;
+      const service = r.signal !== 'manual';
+      set({ online: { ...state.online, room: { ...r, status: 'open', code: service ? 'RXAM-CDEF' : null, link: service ? 'https://example.org/blocklands/?join=RXAMCDEF' : null } } });
+    }, 600);
+  },
+  closeRoom() {
+    record('closeRoom', []);
+    const room = state.online.room;
+    if (room) set({ online: { ...state.online, room: { ...room, status: 'closed', code: null, link: null, invitation: null, answered: false } } });
+  },
+  makeInvitation() {
+    record('makeInvitation', []);
+  },
+  acceptAnswer(code) {
+    record('acceptAnswer', [code]);
+  },
+  setPlayerMode(entityId, mode) {
+    record('setPlayerMode', [entityId, mode]);
+    set({ online: { ...state.online, players: state.online.players.map((p) => (p.entityId === entityId ? { ...p, mode } : p)) } });
+  },
+  setWorldRules(mode) {
+    record('setWorldRules', [mode]);
+    const room = state.online.room;
+    if (room) set({ online: { ...state.online, room: { ...room, rules: mode } } });
+  },
+  kickPlayer(entityId) {
+    record('kickPlayer', [entityId]);
+    set({ online: { ...state.online, players: state.online.players.filter((p) => p.entityId !== entityId) } });
+  },
+  join(text) {
+    record('join', [text]);
+  },
+  retryJoin() {
+    record('retryJoin', []);
+  },
+  abandonJoin() {
+    record('abandonJoin', []);
+    set({ screen: 'mainMenu' });
+  },
+  leaveRoom() {
+    record('leaveRoom', []);
+    set({ screen: 'mainMenu' });
+  },
+  copyDiagnostics() {
+    record('copyDiagnostics', []);
   },
 };
 
@@ -367,7 +511,7 @@ function addButton(label: string, fn: () => void): void {
   });
   panel.appendChild(b);
 }
-for (const s of ['none', 'mainMenu', 'loading', 'pause', 'inventory', 'settings', 'death'] as const) addButton(s, () => set({ screen: s }));
+for (const s of ['none', 'mainMenu', 'loading', 'pause', 'inventory', 'settings', 'death', 'room', 'join', 'name'] as const) addButton(s, () => set({ screen: s }));
 addButton('lang', () => actions.changeSettings({ language: state.settings.language === 'zh' ? 'en' : 'zh' }));
 addButton('mode', () => set({ mode: state.mode === 'creative' ? 'survival' : 'creative' }));
 addButton('helm', () => set({ helm: state.helm ? null : { throttle: 0.5, rudder: 0.2, speed: 3.4, sails: 8 } }));

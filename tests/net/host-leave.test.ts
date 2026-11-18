@@ -217,6 +217,7 @@ describe('leaving (package 8)', () => {
         leave: (k) => calls.push(`intents.leave ${k}`),
         receive: (k, m: IntentMessage) => calls.push(`intents.receive ${k} ${m.type} ${'seq' in m ? m.seq : ''}`) > 0,
         beforeTick: () => calls.push('intents.beforeTick'),
+        kicks: () => [],
         intentAck: () => intentAck,
       };
       return s;

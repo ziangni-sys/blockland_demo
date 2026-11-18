@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { encodeClientMessage } from '../../src/net/codec';
-import { cleanName, validKey } from '../../src/net/host/netserver';
+import { validKey } from '../../src/net/host/netserver';
+import { cleanName } from '../../src/net/names';
 import { MAX_PLAYERS, MSG, type IntentMessage } from '../../src/net/protocol';
 import { RELIABLE, UNRELIABLE } from '../../src/net/transport';
 import { ByteWriter } from '../../src/save/bytes';

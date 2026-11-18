@@ -67,8 +67,8 @@ export type RtcChannel = Pick<
   'label' | 'readyState' | 'bufferedAmount' | 'bufferedAmountLowThreshold' | 'binaryType' | 'send' | 'close' | 'onmessage' | 'onclose' | 'onerror' | 'onbufferedamountlow'
 >;
 
-/** The part of an RTCPeerConnection this transport uses. */
-export type RtcPeerState = Pick<RTCPeerConnection, 'connectionState' | 'onconnectionstatechange' | 'close'>;
+/** The part of an RTCPeerConnection this transport uses (getStats: the page's connection diagnostics; fakes may leave it out). */
+export type RtcPeerState = Pick<RTCPeerConnection, 'connectionState' | 'onconnectionstatechange' | 'close'> & { getStats?: () => Promise<RTCStatsReport> };
 
 /** A one-shot timer (the page's setTimeout). */
 export interface Timers {
@@ -143,6 +143,15 @@ export class WebRtcTransport implements Transport {
       this.shutDown();
       this.timers.set(() => this.report('send_failed'), 0);
     }
+  }
+
+  /**
+   * The peer connection's statistics (the page's connection diagnostics read the candidate pair in
+   * use), or null when the connection is closed or cannot report them.
+   */
+  stats(): Promise<RTCStatsReport> | null {
+    if (!this.isOpen || this.peer.getStats === undefined) return null;
+    return this.peer.getStats();
   }
 
   bufferedBytes(channel: Channel): number {

@@ -85,6 +85,7 @@ describe('clientText', () => {
 });
 
 const WORLDS: UiInputs['worlds'] = [];
+const ONLINE: UiInputs['online'] = { available: true, playerName: 'Ada', role: null, pauses: true, room: null, players: [], maxPlayers: 4, join: null, diagnostics: null, diagnosticsBusy: false };
 
 function inputs(inv: Inventory | null, over: Partial<UiInputs> = {}): UiInputs {
   return {
@@ -107,6 +108,8 @@ function inputs(inv: Inventory | null, over: Partial<UiInputs> = {}): UiInputs {
     loading: null,
     pointerLocked: true,
     dragLook: false,
+    online: ONLINE,
+    playerList: false,
     renderer: 'WebGL2',
     version: '0.1.0',
     ...over,

@@ -16,7 +16,7 @@
  *    Refuse(closed); a guest with the key of the host's connection: Refuse(same_key);
  *  - MAX_PLAYERS identities already have a player or a connection: Refuse(full).
  * A refused connection gets the Refuse and is closed. An accepted one waits for the next tick.
- * Names: control characters removed, then 1..MAX_NAME_LENGTH characters (code points). Keys:
+ * Names: the rule of net/names.ts (invisible characters removed, 1..MAX_NAME_LENGTH code points). Keys:
  * 1..MAX_PLAYER_KEY_LENGTH printable ASCII characters without spaces.
  *
  * REPLACEMENT. A Hello with a key that already has a connection (accepted or joined) replaces it:
@@ -24,7 +24,8 @@
  * any more (its later close or silence is ignored). At the next tick the player leaves and joins
  * again for the new connection, which syncs from scratch.
  *
- * LEAVING. Bye, the transport's onClose, a Kick (protocol_error, too_slow, timeout) and
+ * LEAVING. Bye, the transport's onClose, a Kick (protocol_error, too_slow, timeout; kicked: the
+ * host's Kick command, which IntentSink.kicks() hands over after its beforeTick) and
  * CONNECTION_TIMEOUT_MS without any message (not for local connections: the host's own client
  * lives in the same page) all end a connection at once; its player leaves at the next tick
  * (sim.leave keeps the record). Only an identity's CURRENT connection makes it leave. A
@@ -64,6 +65,7 @@ import type { PlayerControl } from '../../sim/players';
 import type { Simulation } from '../../sim/simulation';
 import type { PlayerKey } from '../../sim/view';
 import { decodeClientMessage, encodeServerMessage, ProtocolError, readHelloBuild } from '../codec';
+import { cleanName } from '../names';
 import {
   BUILD_ID,
   CLIENT_BURST_BYTES,
@@ -125,6 +127,8 @@ export interface IntentSink {
   beforeTick(): void;
   /** Highest intent seq processed for `key`, or null before the first (ClientFeed.intentAck). */
   intentAck(key: PlayerKey): number | null;
+  /** Guests the host removed with the Kick host command since the last call (package 11): their connections end with Kick('kicked'). */
+  kicks(): PlayerKey[];
 }
 
 // ====================================================================== the server
@@ -184,13 +188,6 @@ export interface ConnectionTraffic {
   readonly local: boolean;
   readonly transport: Transport;
   readonly rttMs: number;
-}
-
-/** Name of a Hello with its control characters removed, or null when not 1..MAX_NAME_LENGTH characters remain. */
-export function cleanName(name: string): string | null {
-  const clean = name.replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
-  const n = [...clean].length;
-  return n >= 1 && n <= MAX_NAME_LENGTH ? clean : null;
 }
 
 /** A PlayerKey: 1..MAX_PLAYER_KEY_LENGTH printable ASCII characters, no spaces. */
@@ -304,6 +301,10 @@ export class NetServer {
     }
     moves.beforeTick(this.roomOpenValue);
     intents.beforeTick();
+    for (const key of intents.kicks()) {
+      const c = this.byKey.get(key);
+      if (c !== undefined && c.state === 'joined' && !c.local) this.kick(c, 'kicked', 'the host removed you from the room');
+    }
   }
 
   /** After Replicator.endTick(): kick the clients it found too slow. */
