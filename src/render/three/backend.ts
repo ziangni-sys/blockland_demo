@@ -48,12 +48,13 @@ import { SECTION_SIZE } from '../../core/constants';
 import { B } from '../../blocks/defs';
 import { BLOCKS } from '../../blocks/registry';
 import { buildBox } from './boxgeom';
-import { EntityAssets, EntityLayer, type CarrierQuery } from './entities';
+import { EntityAssets, EntityLayer } from './entities';
+import { labelView } from './labels';
 import { computeBoundsFromPositions, setBoxBounds, toBufferGeometry, type GeometryOptions } from './geometry';
 import { computeFog, computeSkyState, createFogParams, createSkyState, linearToSrgb, SUN_TILT } from './lighting';
 import { createModelMaterial } from './models';
 import { OverlayLayer, type OverlayAnchor } from './overlays';
-import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix, transformPoint, worldToLocal } from './pose';
+import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix } from './pose';
 import { createSky, type Sky } from './sky';
 import { createVoxelMaterials, DRY_SLOTS, SharedUniforms, type VoxelMaterials } from './shading';
 import { prepareTilePixels } from './tiles';
@@ -111,11 +112,6 @@ const ORDER = [0, 1, 0];
 const PRIME_MAX_MESHES = 48;
 const PRIME_MAX_VERTICES = 65536;
 
-/** Horizontal / vertical slack of the carrier test around a structure's mesh bounds (blocks). */
-const CARRY_PAD_XZ = 0.75;
-const CARRY_PAD_BELOW = 0.5;
-const CARRY_PAD_ABOVE = 2.5;
-
 interface SectionRecord {
   meshes: [THREE.Mesh | null, THREE.Mesh | null, THREE.Mesh | null];
   /** World position of the section's local origin. */
@@ -132,12 +128,6 @@ interface StructureRecord {
   light: THREE.Vector4;
   pose: StructurePose;
   hasPose: boolean;
-  /** WORLD local->world matrix at the end of the previous rendered frame (carrier motion of entities). */
-  prevMatrix: Float64Array;
-  hasPrev: boolean;
-  /** Local-space bounds of all meshes (minX, minY, minZ, maxX, maxY, maxZ); hasBounds false = none. */
-  bounds: Float64Array;
-  hasBounds: boolean;
   dryTex: THREE.Data3DTexture | null;
   dry: DryVolume | null;
 }
@@ -364,16 +354,14 @@ export class ThreeBackend implements RenderBackend {
   private readonly slotIds = new Int32Array(DRY_SLOTS);
   private readonly slotDist = new Float64Array(DRY_SLOTS);
   private readonly scratchV = { x: 0, y: 0, z: 0 };
-  private readonly scratchL = { x: 0, y: 0, z: 0 };
 
   private readonly resolveParent = (structureId: number): THREE.Object3D | null => {
     if (structureId === 0) return this.overlayRoot;
     return this.structures.get(structureId)?.group ?? null;
   };
 
-  private readonly carrierQuery: CarrierQuery = {
-    selfMotion: (x, y, z, dx, dy, dz, out) => this.selfMotion(x, y, z, dx, dy, dz, out),
-  };
+  /** Camera and viewport for the name tags' screen size (EntityLayer.animate). */
+  private readonly labelView = labelView();
 
   constructor(private readonly opts: ThreeBackendOptions = {}) {
     this.placeholderTiles = makeTileTexture(new Uint8Array(4 * 4 * 4).fill(255), 4, 1);
@@ -707,10 +695,6 @@ export class ThreeBackend implements RenderBackend {
       light: new THREE.Vector4(1, 0, 0, 0),
       pose: newPose(),
       hasPose: false,
-      prevMatrix: new Float64Array(16),
-      hasPrev: false,
-      bounds: new Float64Array(6),
-      hasBounds: false,
       dryTex: null,
       dry: null,
     };
@@ -763,10 +747,6 @@ export class ThreeBackend implements RenderBackend {
     }
     const mats = this.materials!;
     const rec = this.structures.get(id) ?? this.createStructure(id);
-    const b = rec.bounds;
-    b[0] = b[1] = b[2] = Infinity;
-    b[3] = b[4] = b[5] = -Infinity;
-    rec.hasBounds = false;
     for (let i = 0; i < 3; i++) {
       const data: GeometryData | null = mesh[GROUPS[i]!];
       const old = rec.meshes[i]!;
@@ -791,14 +771,6 @@ export class ThreeBackend implements RenderBackend {
       m.position.set(ox, oy, oz);
       m.updateMatrix();
       m.matrixWorldNeedsUpdate = true;
-      const bb = geo.boundingBox!;
-      b[0] = Math.min(b[0]!, bb.min.x + ox);
-      b[1] = Math.min(b[1]!, bb.min.y + oy);
-      b[2] = Math.min(b[2]!, bb.min.z + oz);
-      b[3] = Math.max(b[3]!, bb.max.x + ox);
-      b[4] = Math.max(b[4]!, bb.max.y + oy);
-      b[5] = Math.max(b[5]!, bb.max.z + oz);
-      rec.hasBounds = true;
       this.queueUpload(m);
     }
     rec.group.matrixWorldNeedsUpdate = true;
@@ -992,7 +964,16 @@ export class ThreeBackend implements RenderBackend {
       this.clearPendingPoses();
       return;
     }
-    this.entities?.animate(this.envTime, this.carrierQuery);
+    if (this.entities) {
+      const l = this.labelView;
+      l.x = this.camWorld.x;
+      l.y = this.camWorld.y;
+      l.z = this.camWorld.z;
+      l.fov = this.camera.fov;
+      l.viewportPx = this.height;
+      l.fog = this.fog;
+      this.entities.animate(this.envTime, l);
+    }
     this.assignDrySlots();
     this.releaseUploaded();
     this.primeUploads();
@@ -1004,14 +985,8 @@ export class ThreeBackend implements RenderBackend {
     this.endFrame();
   }
 
-  /** Per-frame bookkeeping after drawing: previous structure poses, per-frame pose cache. */
+  /** Per-frame bookkeeping after drawing: the per-frame pose cache. */
   private endFrame(): void {
-    const list = this.structureList;
-    for (let i = 0; i < list.length; i++) {
-      const rec = list[i]!;
-      if (rec.hasPose) poseToMatrix(rec.pose, rec.prevMatrix);
-      rec.hasPrev = rec.hasPose;
-    }
     this.clearPendingPoses();
   }
 
@@ -1070,42 +1045,6 @@ export class ThreeBackend implements RenderBackend {
     }
     for (let i = 0; i < deferred.length; i++) q.push(deferred[i]!);
     deferred.length = 0;
-  }
-
-  /**
-   * CarrierQuery: the displacement of an entity relative to the structure that most
-   * plausibly carries it. For every structure whose (padded) bounds contain the entity, the
-   * point fixed to the structure that is at the entity now was at prevMatrix * local in the
-   * previous frame; the entity's motion relative to that structure is its own displacement
-   * minus the point's. The smallest relative motion wins (no carrier included), so an
-   * entity standing on a sailing ship or a turntable reads as standing still.
-   */
-  private selfMotion(x: number, y: number, z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void {
-    out.x = dx;
-    out.y = dy;
-    out.z = dz;
-    let best = dx * dx + dy * dy + dz * dz;
-    const list = this.structureList;
-    for (let i = 0; i < list.length && best > 0; i++) {
-      const rec = list[i]!;
-      if (!rec.hasPose || !rec.hasPrev || !rec.hasBounds) continue;
-      const l = worldToLocal(rec.pose, x, y, z, this.scratchL);
-      const b = rec.bounds;
-      if (l.x < b[0]! - CARRY_PAD_XZ || l.x > b[3]! + CARRY_PAD_XZ) continue;
-      if (l.z < b[2]! - CARRY_PAD_XZ || l.z > b[5]! + CARRY_PAD_XZ) continue;
-      if (l.y < b[1]! - CARRY_PAD_BELOW || l.y > b[4]! + CARRY_PAD_ABOVE) continue;
-      const prev = transformPoint(rec.prevMatrix, l.x, l.y, l.z, this.scratchV);
-      const rx = dx - (x - prev.x);
-      const ry = dy - (y - prev.y);
-      const rz = dz - (z - prev.z);
-      const m = rx * rx + ry * ry + rz * rz;
-      if (m < best) {
-        best = m;
-        out.x = rx;
-        out.y = ry;
-        out.z = rz;
-      }
-    }
   }
 
   /** Picks the DRY_SLOTS structures nearest to the camera that have a dry volume. */

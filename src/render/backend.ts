@@ -45,14 +45,33 @@ export interface EnvironmentState {
 
 export type EntityKind = 'player' | 'item' | 'falling' | 'tnt' | 'rabbit';
 
-/** One entity to draw this frame (already interpolated by the client). (x, y, z) is the BOTTOM CENTRE of its body. */
+/**
+ * How a player model holds itself: standing / walking, sneaking (bent), sprinting (leaning
+ * forward), flying (legs trailing), or seated at a helm with both hands on the wheel.
+ */
+export type PlayerPosture = 'stand' | 'sneak' | 'sprint' | 'fly' | 'helm';
+
+/**
+ * One entity to draw this frame (already interpolated by the client). (x, y, z) is the BOTTOM
+ * CENTRE of its body.
+ *
+ * (vx, vy, vz) is the entity's OWN motion: its velocity relative to whatever carries it (a ship,
+ * a rotor, or the world), in world axes, blocks per second. The client measures it from the
+ * interpolated position in the carrier's frame, so someone standing on a sailing, turning ship has
+ * none and someone walking its deck has their walking speed. It drives the walk and hop
+ * animations; the backend does not guess carriers.
+ */
 export interface EntityRenderState {
   id: number;
   kind: EntityKind;
   x: number;
   y: number;
   z: number;
+  /** Body heading (radians, the camera convention). */
   yaw: number;
+  vx: number;
+  vy: number;
+  vz: number;
   /**
    * item    : item id shown (block id -> small cube, other -> flat icon)
    * falling : cell being carried
@@ -64,6 +83,24 @@ export interface EntityRenderState {
   /** Sky / block light at the entity, 0..15 each. */
   sky: number;
   block: number;
+  /**
+   * Players: where the head looks (world heading and pitch, radians). The head turns from the
+   * body up to a limit the model sets (at a helm the body faces the wheel, the head looks around).
+   * Others: unused (headYaw = yaw, headPitch 0).
+   */
+  headYaw: number;
+  headPitch: number;
+  /** Players: item id in the main hand (0 = empty hand). Others: 0. */
+  held: number;
+  /** Players: posture. Others: 'stand'. */
+  posture: PlayerPosture;
+  /**
+   * Players: the name tag drawn above the head (plain text, one line; null = none, the own player
+   * never has one). The backend draws it as a billboard tag hidden behind whatever is in front of
+   * it, kept readable at a distance (a minimum size on screen), unlit (readable at night).
+   * Others: null.
+   */
+  label: string | null;
 }
 
 /**

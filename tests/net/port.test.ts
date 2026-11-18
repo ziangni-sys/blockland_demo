@@ -1,17 +1,14 @@
 /**
  * Package 8: PortTransport (NETCODE section 2, "房间里的积压", section 16 package 8): bytes are
  * transferred or copied, never shared; the close travels behind the messages; the backlog comes
- * from the forwarder's reports; and on a slow guest link the Replicator, reading that backlog,
- * defers the new interest without making must-send content wait more than about 0.1 s.
+ * from the forwarder's reports. The forwarder itself, and the Replicator's back-pressure on a slow
+ * guest link through it, are package 10's (tests/net/forward.test.ts).
  */
 import { describe, expect, it } from 'vitest';
-import { makeCell } from '../../src/blocks/cell';
-import { B } from '../../src/blocks/defs';
 import { PortTransport, type PortBacklog, type PortLike } from '../../src/net/host/port';
 import type { LoopbackNet } from '../../src/net/loopback';
 import { MAX_UNRELIABLE_BYTES } from '../../src/net/protocol';
 import { RELIABLE, UNRELIABLE, type Channel, type Transport } from '../../src/net/transport';
-import { Rng } from '../../src/core/rng';
 import { NetHarness } from './harness';
 
 /** A MessagePort pair on the loopback's virtual clock; postMessage structured-clones and transfers like the real one. */
@@ -113,156 +110,4 @@ describe('PortTransport (package 8)', () => {
     expect(t.bufferedBytes(RELIABLE)).toBe(0);
     expect(t.open).toBe(true);
   });
-
-  it('a slow guest link: snapshots are deferred, the batches (must-send content) never wait more than about 0.1 s', async () => {
-    const withReports = await slowJoin(true);
-    const blind = await slowJoin(false);
-    // With the reports: every batch starts going out within ~0.1 s.
-    expect(withReports.maxWaitMs).toBeLessThan(100);
-    // All the snapshots arrived, paced by the link (about 260 KB at 256 KB/s), not dropped.
-    expect(withReports.readyMs).toBeGreaterThan(1000);
-    expect(withReports.columns).toBe(blind.columns);
-    // Without them (bufferedBytes is 0) the same join puts 0.3 s of snapshots in front of the batches.
-    expect(blind.maxWaitMs).toBeGreaterThan(250);
-  });
 });
-
-interface Queued {
-  channel: Channel;
-  bytes: Uint8Array;
-  enqueued: number;
-  start: number;
-  finish: number;
-}
-
-/**
- * The host page's forwarder of one guest (package 10's side, simulated): it takes the server's
- * frames from the port, sends them over a data channel of `bandwidth` bytes per second (one queue
- * for both channels), delivers them to the guest's transport, and reports the backlog on
- * 'bufferedamountlow' (queue empty) and every 100 ms.
- */
-class Forwarder {
-  readonly seen: [number, number] = [0, 0];
-  private queue: Queued[] = [];
-  private lastFinish = 0;
-  maxWait = 0;
-  waits: number[] = [];
-  readonly client: Transport;
-
-  constructor(
-    private readonly net: LoopbackNet,
-    private readonly port: FakePort,
-    private readonly bandwidth: number,
-    private readonly reports: boolean,
-  ) {
-    const self = this;
-    this.client = {
-      open: true,
-      onMessage: null,
-      onClose: null,
-      send(channel: Channel, bytes: Uint8Array): void {
-        const copy = bytes.slice();
-        self.port.postMessage({ kind: 'msg', channel, data: copy.buffer }, [copy.buffer]);
-      },
-      bufferedBytes: () => 0,
-      close(): void {},
-    };
-    port.onmessage = (ev) => {
-      const f = ev.data as { kind: string; channel: Channel; data: ArrayBuffer };
-      if (f.kind === 'msg') this.enqueue(f.channel, new Uint8Array(f.data));
-    };
-    if (reports) {
-      // A first report as soon as the port is connected: the server then knows from its first
-      // batch on that this connection's backlog is reported (see the report on section 2).
-      this.report();
-      this.tick();
-    }
-  }
-
-  private enqueue(channel: Channel, bytes: Uint8Array): void {
-    this.seen[channel] += bytes.length;
-    const now = this.net.now;
-    const start = Math.max(now, this.lastFinish);
-    const finish = start + (bytes.length * 1000) / this.bandwidth;
-    this.lastFinish = finish;
-    const q: Queued = { channel, bytes, enqueued: now, start, finish };
-    this.queue.push(q);
-    if (channel === RELIABLE) {
-      this.waits.push(start - now);
-      this.maxWait = Math.max(this.maxWait, start - now);
-    }
-    this.net.schedule(finish, () => {
-      this.queue.splice(this.queue.indexOf(q), 1);
-      this.client.onMessage?.(channel, bytes);
-      if (this.queue.length === 0 && this.reports) this.report();
-    });
-  }
-
-  private buffered(channel: Channel): number {
-    const now = this.net.now;
-    let n = 0;
-    for (const q of this.queue) {
-      if (q.channel !== channel) continue;
-      n += q.start >= now ? q.bytes.length : Math.ceil((q.bytes.length * (q.finish - now)) / (q.finish - q.start));
-    }
-    return n;
-  }
-
-  private report(): void {
-    for (const ch of [RELIABLE, UNRELIABLE] as const) {
-      this.port.postMessage({ kind: 'backlog', channel: ch, bufferedAmount: this.buffered(ch), seen: this.seen[ch] } satisfies PortBacklog, []);
-    }
-  }
-
-  private tick(): void {
-    this.net.schedule(this.net.now + 100, () => {
-      this.report();
-      this.tick();
-    });
-  }
-}
-
-/** A guest joins a world of 121 modified columns over a 256 KB/s link while a block changes next to it every tick. */
-async function slowJoin(reports: boolean): Promise<{ maxWaitMs: number; readyMs: number; columns: number }> {
-  const h = new NetHarness({ chunkColumns: 200 });
-  await h.create();
-  h.addClient('host', {}, { local: true, viewRadius: 6 });
-  h.run(3000);
-  const sim = h.sim;
-  const rng = new Rng(5);
-  const ids = [B.STONE, B.DIRT, B.COBBLE, B.PLANKS_OAK, B.GLASS, B.LOG_OAK];
-  for (let cx = -5; cx <= 5; cx++) {
-    for (let cz = -5; cz <= 5; cz++) {
-      for (let i = 0; i < 1500; i++) sim.world.setCell(cx * 16 + rng.int(0, 15), 5 + rng.int(0, 39), cz * 16 + rng.int(0, 15), makeCell(ids[rng.int(0, ids.length - 1)]!));
-    }
-  }
-  h.run(200);
-  await h.host.control({ type: 'openRoom' });
-  let fwd: Forwarder | null = null;
-  const guest = h.addClient(
-    'guest',
-    {},
-    {
-      viewRadius: 5,
-      transport: () => {
-        const [ps, pf] = fakePorts(h.net);
-        fwd = new Forwarder(h.net, pf, 256 * 1024, reports);
-        h.host.connect(new PortTransport(ps), false);
-        return fwd.client;
-      },
-    },
-  );
-  const start = h.net.now;
-  let readyAt = -1;
-  for (let i = 0; i < 600 && readyAt < 0; i++) {
-    sim.world.setCell(1, 6, 1, makeCell(i % 2 === 0 ? B.GLASS : B.STONE));
-    h.run(50);
-    if (guest.state !== null && h.host.replicator.clientView('guest')?.pendingColumns === 0 && guest.net.waiting === 0) readyAt = h.net.now;
-  }
-  expect(readyAt).toBeGreaterThan(0);
-  h.run(2000);
-  h.quiesce();
-  expect(h.compareNow(guest, false)).toEqual([]);
-  expect(guest.net.connectionCount).toBe(1);
-  return { maxWaitMs: fwd!.maxWait, readyMs: readyAt - start, columns: guest.state!.world.chunks.size };
-}

@@ -10,7 +10,8 @@
  *  - no module of src/net has module-level mutable state (LESSONS "临时向量被改写");
  *  - no module touches browser or timer globals, except the two host files that are the host's
  *    I/O: host/worker.ts (the Worker entry: self, postMessage, timers, clocks) and host/port.ts
- *    (MessagePort).
+ *    (MessagePort). net/webrtc (package 10) names the WebRTC, WebSocket and BroadcastChannel
+ *    types but never constructs them: the page passes them in.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix, relative } from 'node:path';
@@ -33,6 +34,10 @@ const isNetBase = (t: string): boolean => /^net\/[^/]+$/.test(t);
 /** Browser, timer and clock globals: none of these modules may mention them (the host and the client's page own time and I/O). */
 const NO_DOM_OR_TIME =
   /\b(window|document|navigator|self|globalThis|postMessage|performance|Date|Math\.random|setTimeout|setInterval|clearTimeout|clearInterval|requestAnimationFrame|MessagePort|MessageChannel|Worker|WebSocket|RTC\w+|localStorage|indexedDB|fetch)\b/;
+
+/** NO_DOM_OR_TIME for net/webrtc: the types of the page's connections may be named (and BroadcastChannel's postMessage called), never constructed. */
+const NO_DOM_OR_TIME_BUT_RTC_TYPES =
+  /\b(window|document|navigator|self|globalThis|performance|Date|Math\.random|setTimeout|setInterval|clearTimeout|clearInterval|requestAnimationFrame|MessagePort|MessageChannel|Worker|localStorage|indexedDB|fetch)\b|\bnew\s+(RTC\w+|WebSocket|BroadcastChannel)\b/;
 
 const RULES: Record<string, Rule> = {
   // net/{protocol, codec, transport, loopback}: core, blocks, save/bytes; types from sim/view.ts,
@@ -60,6 +65,13 @@ const RULES: Record<string, Rule> = {
       isNetBase(t),
     types: () => false,
     forbiddenGlobals: NO_DOM_OR_TIME,
+  },
+  // net/webrtc (package 10): the WebRTC transport and the signallers, on the base modules only.
+  // The page passes in the peer connections, sockets, BroadcastChannel, timers and randomness.
+  'net/webrtc': {
+    runtime: (t) => isNetBase(t) || t.startsWith('net/webrtc/'),
+    types: () => false,
+    forbiddenGlobals: NO_DOM_OR_TIME_BUT_RTC_TYPES,
   },
   // net/host (package 8): net/server, sim, save, worldgen and the base modules (plus core).
   'net/host': {
@@ -288,6 +300,10 @@ describe('src/net import rules (NETCODE section 15)', () => {
     expect(netViolations('net/host/worker.ts', 'document.title = "x";')).toHaveLength(1);
     expect(netViolations('net/host/port.ts', 'port.postMessage(m);\nconst p: MessagePort = q;')).toHaveLength(0);
     expect(netViolations('net/host/port.ts', 'setTimeout(f, 1);')).toHaveLength(1);
+    // net/webrtc names the browser's connection types but never makes them; base modules only.
+    expect(netViolations('net/webrtc/x.ts', "import { MAX_RELIABLE_BYTES } from '../protocol';\nimport { DialError } from './signal';\nlet c: RTCDataChannel | null = null;\nch.postMessage(m);")).toHaveLength(0);
+    expect(netViolations('net/webrtc/x.ts', 'const pc = new RTCPeerConnection();\nconst ws = new WebSocket(u);\nsetTimeout(f, 1);')).toHaveLength(3);
+    expect(netViolations('net/webrtc/x.ts', "import { NetClient } from '../client/netclient';")).toHaveLength(1);
     expect(clientHostViolations('client/x.ts', "import { PortTransport } from '../net/host/port';\nimport type { HostToPage } from '../net/host/control';")).toHaveLength(0);
     expect(clientHostViolations('client/x.ts', "import { parsePageMessage } from '../net/host/control';")).toHaveLength(1);
     expect(clientHostViolations('client/x.ts', "import { ServerHost } from '../net/host/host';\nconst w = import('../net/host/worker?worker&inline');")).toHaveLength(2);

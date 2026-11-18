@@ -9,18 +9,28 @@
  * (ClientReplica.entities), and the player this client plays where the prediction shows it
  * (ShownPlayer: OwnPlayer.displayPos, the held look turned with its carrier). The own entity is not
  * in the replica's entity stream (section 8): in the third-person views it is drawn from ShownPlayer.
+ *
+ * OTHER PLAYERS (package 12) are drawn as people from what the replica holds of them: the body at the
+ * interpolated position, facing its look (at a helm: toward the wheel, the head free to look around), the
+ * head tilted by the pitch, the posture from the flags (sneaking, sprinting, flying) and the helm,
+ * the main-hand item, and the name from the player table as a tag. A dead player is not drawn (nor
+ * its tag); the own player never gets a tag. Every entity's own motion (EntityRenderState vx, vy, vz,
+ * which drives the walk) is measured here from its interpolated position in the frame of its carrier
+ * (as the display pose places it), over the display time: the replica's renderTick for the others,
+ * the rotorTick the own prediction runs on for the own player. So someone standing on a sailing,
+ * turning ship stands still and someone walking its deck walks at their speed on it.
  */
-import { DAY_TICKS } from '../core/constants';
+import { DAY_TICKS, TPS } from '../core/constants';
 import { quat, vec3, type Vec3 } from '../core/math';
 import { ID_MASK, liquidAmount, STATE_MASK, STATE_SHIFT } from '../blocks/cell';
 import { I } from '../blocks/items';
 import { B } from '../blocks/defs';
 import { LIQUID, LIQUID_LAVA, LIQUID_WATER, OPAQUE, SOLID } from '../blocks/registry';
-import { FALLING_HEIGHT, ITEM_HEIGHT, PLAYER_HEIGHT, RABBIT_HEIGHT, TNT_HEIGHT } from '../entities/constants';
+import { FALLING_HEIGHT, ITEM_HEIGHT, PLAYER_EYE_HEIGHT, PLAYER_HEIGHT, RABBIT_HEIGHT, TNT_HEIGHT } from '../entities/constants';
 import type { Inventory } from '../entities/inventory';
 import { headingOf } from '../entities/structs';
 import { LIQUID_FULL_HEIGHT } from '../mesh/mesher';
-import type { EntityKind, Target } from '../net/protocol';
+import type { EntityKind, PlayerFlags, Target } from '../net/protocol';
 import type { ReplicaView } from '../net/client/apply';
 import type { ClientReplica } from '../net/client/replica';
 import type {
@@ -30,6 +40,7 @@ import type {
   OverlayCell,
   OverlayFace,
   OverlayState,
+  PlayerPosture,
 } from '../render/backend';
 import { isDryCell } from '../structures/hull';
 import type { GlueStore } from '../structures/glue';
@@ -98,15 +109,25 @@ export interface ShownPlayer {
   hurt: boolean;
   /** The inventory as shown (predicted); null before the server sent one. */
   inventory: Inventory | null;
+  /** The structure the predicted body stands on (0 = none): its own motion is measured on it. */
+  carrierId: number;
+  sneaking: boolean;
+  flying: boolean;
+  /** The ship whose wheel it holds (0 = none). */
+  steeringShipId: number;
 }
 
 /** What the camera reads of the replica: the world and the structures at their display pose. */
 export type CameraScene = Pick<ClientReplica, 'world' | 'structures'>;
-/** What the entity list reads of the replica: the entities at a renderTick, and the world's light. */
-export type EntityScene = Pick<ClientReplica, 'world' | 'entities'>;
+/**
+ * What the entity list reads of the replica: the entities at a renderTick, the world's light and
+ * liquids, and the structures at their display pose (the carriers own motion is measured in, the
+ * helms players face, the dry hulls that keep water off a head).
+ */
+export type EntityScene = Pick<ClientReplica, 'world' | 'entities' | 'state' | 'structures'>;
 
 export function shownPlayer(): ShownPlayer {
-  return { id: 0, feet: vec3(), eyeHeight: 1.62, yaw: 0, pitch: 0, sprinting: false, moving: false, dead: false, hurt: false, inventory: null };
+  return { id: 0, feet: vec3(), eyeHeight: 1.62, yaw: 0, pitch: 0, sprinting: false, moving: false, dead: false, hurt: false, inventory: null, carrierId: 0, sneaking: false, flying: false, steeringShipId: 0 };
 }
 
 /** Light (sky, block) of the open cell at or just above a point, 0..15 each. */
@@ -150,7 +171,39 @@ export const blocksCamera: CellPredicate = (cell) => {
 };
 
 function newEntityState(): EntityRenderState {
-  return { id: 0, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 };
+  return { id: 0, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, vx: 0, vy: 0, vz: 0, payload: 0, flash: 0, sky: 15, block: 0, headYaw: 0, headPitch: 0, held: 0, posture: 'stand', label: null };
+}
+
+/** Heading (yaw, radians) a body faces when it looks along a horizontal Dir: the camera convention, forward = (-sin yaw, 0, -cos yaw). */
+const DIR_YAW: readonly number[] = [-Math.PI / 2, Math.PI / 2, 0, 0, Math.PI, 0];
+
+/** The posture a player model shows for its flags and helm. */
+export function postureOf(flags: PlayerFlags | null, steering: boolean): PlayerPosture {
+  if (steering) return 'helm';
+  if (flags === null) return 'stand';
+  if (flags.flying) return 'fly';
+  if (flags.sneaking) return 'sneak';
+  if (flags.sprinting) return 'sprint';
+  return 'stand';
+}
+
+/**
+ * Where one entity was last frame, in the frame of its carrier: what its own motion is measured
+ * against (ViewBuilder.trackMotion). Pooled by entity id; dropped when the entity is gone.
+ */
+interface MotionTrack {
+  carrierId: number;
+  /** Position last frame: local to the carrier (world when carrierId is 0). */
+  x: number;
+  y: number;
+  z: number;
+  /** Display time (ticks) of that position. */
+  tick: number;
+  /** The own velocity measured last (blocks / s, world axes). */
+  vx: number;
+  vy: number;
+  vz: number;
+  stamp: number;
 }
 
 /** True when the main hand or the off-hand of `inv` holds glue. */
@@ -168,6 +221,14 @@ export class ViewBuilder {
 
   private readonly entityPool: EntityRenderState[] = [];
   private readonly entityList: EntityRenderState[] = [];
+  private readonly tracks = new Map<number, MotionTrack>();
+  private readonly freeTracks: MotionTrack[] = [];
+  private trackStamp = 0;
+  private readonly sweepTrack = (t: MotionTrack, id: number): void => {
+    if (t.stamp === this.trackStamp) return;
+    this.tracks.delete(id);
+    this.freeTracks.push(t);
+  };
   private fovScale = 1;
   /** Third person with the camera clear of the player's model: the local player is drawn. */
   private showSelf = false;
@@ -293,7 +354,7 @@ export class ViewBuilder {
   }
 
   /** True when the point is in a dry cell of some ship's hull (water there is cut away). */
-  private inDryHull(replica: ClientReplica, p: Vec3): boolean {
+  private inDryHull(replica: Pick<ClientReplica, 'structures'>, p: Vec3): boolean {
     const structures = replica.structures();
     for (let i = 0; i < structures.length; i++) {
       const s = structures[i]!;
@@ -305,17 +366,24 @@ export class ViewBuilder {
   }
 
   /**
-   * Every entity of the replica at `renderTick`, lit; plus the player this client plays in the
-   * third-person views (not when the camera is too close to the model, see selfModelGap), at
-   * the eyes of updateCamera facing the shown look — so call updateCamera first in a frame.
+   * Every entity of the replica at `renderTick`, lit, with its own motion; the other players as
+   * people (posture, head, held item, name tag; the dead ones left out); plus the player this client
+   * plays in the third-person views (not when the camera is too close to the model, see
+   * selfModelGap), at the eyes of updateCamera facing the shown look, its motion measured over
+   * `ownTick` (the rotorTick its prediction runs on) — so call updateCamera first in a frame, and
+   * updateEnvironment (the medium the camera is in, which decides whether a diver's name shows).
    */
-  updateEntities(replica: EntityScene, me: ShownPlayer, renderTick: number): readonly EntityRenderState[] {
+  updateEntities(replica: EntityScene, me: ShownPlayer, renderTick: number, ownTick: number): readonly EntityRenderState[] {
     const list = this.entityList;
     list.length = 0;
+    this.trackStamp++;
     const world = replica.world;
     const views = replica.entities(renderTick);
     for (let i = 0; i < views.length; i++) {
       const e = views[i]!;
+      const held = e.player;
+      const flags = e.look?.flags ?? held?.flags ?? null;
+      if (e.kind === 'player' && (held?.flags.dead === true || flags?.dead === true)) continue;
       const s = this.nextState();
       s.id = e.id;
       s.kind = e.kind;
@@ -325,6 +393,22 @@ export class ViewBuilder {
       s.yaw = e.yaw;
       s.payload = e.kind === 'item' ? e.item : e.kind === 'falling' ? e.cell : 0;
       s.flash = e.kind === 'tnt' ? (Math.floor(e.fuse / 4) % 2 === 0 ? 0.8 : 0) : 0;
+      this.trackMotion(replica, e.id, e.carrierId, e.pos, renderTick, s);
+      if (e.kind === 'player') {
+        const steering = held !== null && held.steeringShipId !== 0 ? held.steeringShipId : 0;
+        s.headYaw = e.yaw;
+        s.headPitch = e.pitch;
+        s.yaw = steering !== 0 ? this.helmYaw(replica, steering, e.pos, e.yaw) : e.yaw;
+        s.held = held?.heldItem ?? 0;
+        s.posture = postureOf(flags, steering !== 0);
+        s.label = this.nameHiddenByLiquid(replica, e.pos) ? null : e.name;
+      } else {
+        s.headYaw = e.yaw;
+        s.headPitch = 0;
+        s.held = 0;
+        s.posture = 'stand';
+        s.label = null;
+      }
       this.lightAt(world, s, KIND_HEIGHT[e.kind]);
       list.push(s);
     }
@@ -335,13 +419,107 @@ export class ViewBuilder {
       s.x = me.feet.x;
       s.y = me.feet.y;
       s.z = me.feet.z;
-      s.yaw = me.yaw;
+      s.headYaw = me.yaw;
+      s.headPitch = me.pitch;
+      s.yaw = me.steeringShipId !== 0 ? this.helmYaw(replica, me.steeringShipId, me.feet, me.yaw) : me.yaw;
       s.payload = 0;
       s.flash = me.hurt ? 0.6 : 0;
+      s.held = me.inventory?.selectedStack()?.item ?? 0;
+      s.posture = me.steeringShipId !== 0 ? 'helm' : me.flying ? 'fly' : me.sneaking ? 'sneak' : me.sprinting ? 'sprint' : 'stand';
+      s.label = null;
+      this.trackMotion(replica, me.id, me.carrierId, me.feet, ownTick, s);
       this.lightAt(world, s, PLAYER_HEIGHT);
       list.push(s);
     }
+    this.tracks.forEach(this.sweepTrack);
     return list;
+  }
+
+  /**
+   * Own motion of entity `id` at world `pos` on `carrierId` at display time `tick`, written into
+   * s.vx/vy/vz: the displacement since its last frame relative to the carrier (the point of the
+   * carrier where it stood then, at the carrier's display pose now), over the display time that
+   * passed. A new entity, a change of carrier or a carrier the replica lacks keeps the last measure
+   * (zero at first); a frame whose display time did not advance (paused, stalled) has none.
+   */
+  private trackMotion(replica: EntityScene, id: number, carrierId: number, pos: Vec3, tick: number, s: EntityRenderState): void {
+    let t = this.tracks.get(id);
+    const fresh = t === undefined;
+    if (t === undefined) {
+      t = this.freeTracks.pop() ?? { carrierId: 0, x: 0, y: 0, z: 0, tick: 0, vx: 0, vy: 0, vz: 0, stamp: 0 };
+      t.vx = t.vy = t.vz = 0;
+      this.tracks.set(id, t);
+    }
+    t.stamp = this.trackStamp;
+    const grid = carrierId === 0 ? null : (replica.state.structures.get(carrierId)?.structure.grid ?? null);
+    const local = this.scratch;
+    if (grid === null) {
+      local.x = pos.x;
+      local.y = pos.y;
+      local.z = pos.z;
+    } else {
+      grid.toLocal(pos, local);
+    }
+    const dt = tick - t.tick;
+    if (!fresh && t.carrierId === carrierId && (carrierId === 0 || grid !== null) && Number.isFinite(dt)) {
+      if (dt > 1e-6) {
+        const then = this.scratch2;
+        then.x = t.x;
+        then.y = t.y;
+        then.z = t.z;
+        if (grid !== null) grid.toWorld(then, then);
+        const k = TPS / dt;
+        t.vx = (pos.x - then.x) * k;
+        t.vy = (pos.y - then.y) * k;
+        t.vz = (pos.z - then.z) * k;
+      } else {
+        t.vx = t.vy = t.vz = 0;
+      }
+    }
+    t.carrierId = carrierId;
+    t.x = local.x;
+    t.y = local.y;
+    t.z = local.z;
+    t.tick = tick;
+    s.vx = t.vx;
+    s.vy = t.vy;
+    s.vz = t.vz;
+  }
+
+  /**
+   * True when the eyes of a player standing at `feet` are in a liquid the camera is not in (this
+   * frame's updateEnvironment): seen from above the surface, a diver's name is hidden with its body,
+   * as a wall hides it. Seen from within the same liquid it fades with the medium's fog (labels.ts).
+   */
+  private nameHiddenByLiquid(replica: EntityScene, feet: Vec3): boolean {
+    const y = feet.y + PLAYER_EYE_HEIGHT;
+    const medium = mediumAt(replica.world, feet.x, y, feet.z);
+    if (medium === 'none' || medium === this.env.submerged) return false;
+    const eye = this.scratch2;
+    eye.x = feet.x;
+    eye.y = y;
+    eye.z = feet.z;
+    return !this.inDryHull(replica, eye);
+  }
+
+  /**
+   * The world heading a player at (feet) `pos` at the wheel of ship `shipId` faces: toward the wheel
+   * (the helm cell's centre at the ship's display pose; the seat is normally right behind it, but a
+   * blocked seat leaves the helmsman where it stood), or along the ship's forward when standing on
+   * the wheel's spot; `look` without that ship.
+   */
+  private helmYaw(replica: EntityScene, shipId: number, pos: Vec3, look: number): number {
+    const ship = replica.state.structures.get(shipId)?.structure;
+    if (!(ship instanceof Ship)) return look;
+    const c = this.scratch2;
+    c.x = ship.helmX + 0.5;
+    c.y = ship.helmY + 0.5;
+    c.z = ship.helmZ + 0.5;
+    ship.grid.toWorld(c, c);
+    const dx = c.x - pos.x;
+    const dz = c.z - pos.z;
+    if (dx * dx + dz * dz > 0.09) return Math.atan2(-dx, -dz);
+    return headingOf(ship.grid.worldRotation(this.rot)) + DIR_YAW[ship.forward]!;
   }
 
   private nextState(): EntityRenderState {

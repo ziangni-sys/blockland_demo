@@ -144,43 +144,6 @@ export function dryVolumeMatrix(pose: StructurePose, dry: DryVolume, out: Mat4Ou
 }
 
 /**
- * World -> structure-local point: local = pivot + q^-1 * (world - p). Inverse of
- * poseToMatrix (normalizes the quaternion the same way).
- */
-export function worldToLocal(pose: StructurePose, x: number, y: number, z: number, out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
-  const { qx, qy, qz, qw } = pose;
-  const n = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
-  const inv = n > 1e-12 ? 1 / n : 0;
-  // Conjugate (inverse rotation) of the normalized quaternion.
-  const cx = -qx * inv;
-  const cy = -qy * inv;
-  const cz = -qz * inv;
-  const cw = n > 1e-12 ? qw * inv : 1;
-  const vx = x - pose.px;
-  const vy = y - pose.py;
-  const vz = z - pose.pz;
-  // v + 2w(c x v) + 2 c x (c x v)
-  const tx = 2 * (cy * vz - cz * vy);
-  const ty = 2 * (cz * vx - cx * vz);
-  const tz = 2 * (cx * vy - cy * vx);
-  out.x = pose.pivotX + vx + cw * tx + (cy * tz - cz * ty);
-  out.y = pose.pivotY + vy + cw * ty + (cz * tx - cx * tz);
-  out.z = pose.pivotZ + vz + cw * tz + (cx * ty - cy * tx);
-  return out;
-}
-
-/** Applies a column-major matrix to a point (x, y, z, 1). */
-export function transformPoint(m: ArrayLike<number>, x: number, y: number, z: number, out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
-  const ox = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
-  const oy = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
-  const oz = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
-  out.x = ox;
-  out.y = oy;
-  out.z = oz;
-  return out;
-}
-
-/**
  * World position of the centre of a dry volume box (used to rank volumes by distance to the
  * camera when more structures have dry volumes than the shader has slots).
  */
