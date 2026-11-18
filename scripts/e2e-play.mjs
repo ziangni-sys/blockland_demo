@@ -27,7 +27,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const VIEWPORT = { width: 960, height: 540 };
 const SEED = 'play-session';
-const RENDER_DISTANCE = 6;
+// The software renderers of a busy container draw a frame or two a second at larger distances.
+const RENDER_DISTANCE = 4;
 const B = { PLANKS: 10, COBBLE: 2, HELM: 50, BEARING: 51 };
 const GLUE = 1024;
 const PY = 2;
@@ -183,6 +184,17 @@ async function session(build, renderer) {
     }
   };
   const center = { x: VIEWPORT.width / 2, y: VIEWPORT.height / 2 };
+  /**
+   * Engage the game (pointer lock, or drag-to-look) with a click on the canvas, unless it already
+   * is: closing a screen asks for the lock again by itself, and a click with the pointer locked is
+   * a left click that mines (at once in creative).
+   */
+  const engage = async () => {
+    await page.waitForTimeout(800);
+    if (await G(() => window.__blocklands.game.pointerLocked)) return;
+    await page.mouse.click(center.x, center.y);
+    await page.waitForTimeout(500);
+  };
   const click = async (button) => {
     await page.mouse.click(center.x, center.y, { button });
     await frames(2);
@@ -257,8 +269,7 @@ async function session(build, renderer) {
     check(st.renderer === (renderer === 'default' ? 'webgpu' : 'webgl2'), `renderer ${st.renderer}`);
     check(st.workers.server === 'worker', `server runs as ${st.workers.server}`);
     world.id = st.worldId;
-    await page.mouse.click(center.x, center.y); // engage (pointer lock or drag-to-look)
-    await page.waitForTimeout(800);
+    await engage();
     await shot('playing');
 
     // ---- walk, jump, swim
@@ -422,22 +433,70 @@ async function session(build, renderer) {
     }, ship.id);
     const h0 = await heading();
     const shipNow = async () => (await state()).structures.find((s) => s.id === ship.id);
-    await page.keyboard.down('KeyW');
+    /** Aim at the helm on the boat and right-click until the player steers it again. */
+    const takeHelm = async () => {
+      for (let i = 0; i < 5; i++) {
+        if ((await state()).player.steeringShipId === ship.id) return;
+        if (!(await aimAny(boat.helm, ship.id))) continue;
+        await click('right');
+        try {
+          await waitFor('steering again', (id) => window.__blocklands.game.debug.state().player.steeringShipId === id, ship.id, 20_000);
+          return;
+        } catch {
+          // aim again
+        }
+      }
+      throw new StepError('cannot take the helm again');
+    };
+    /**
+     * Hold `keys` at the helm until `cond()`. The server lets go of the helm of a helmsman whose page
+     * sent no movement report for 2 s (NETCODE section 3, STEER_TIMEOUT_TICKS): a software-rendered
+     * page in a busy container can stall that long, so the helm is taken again when that happened
+     * (and the run says so).
+     */
+    const steer = async (keys, cond, what, timeout = 180_000) => {
+      const end = Date.now() + timeout;
+      while (Date.now() < end) {
+        let let_go = false;
+        for (const k of keys) await page.keyboard.down(k);
+        try {
+          while (Date.now() < end) {
+            if (await cond()) return;
+            if ((await state()).player.steeringShipId !== ship.id) {
+              let_go = true;
+              break;
+            }
+            await page.waitForTimeout(150);
+          }
+        } finally {
+          for (const k of keys) await page.keyboard.up(k);
+        }
+        if (!let_go) break;
+        log('the helm was let go (no movement report for 2 s: a stalled page); taking it again');
+        await takeHelm();
+      }
+      throw new StepError(`timed out steering for ${what}`);
+    };
+    // Screenshots are taken with no key held: taking one can stall a software-rendered page for
+    // seconds (the helm is let go, see steer), and a helmsman let go of with W held walks off the deck.
     let s1 = ship;
-    await until(async () => {
-      s1 = await shipNow();
-      return Math.hypot(s1.x - ship.x, s1.z - ship.z) > 2;
+    let throttle = 0;
+    await steer(['KeyW'], async () => {
+      const now = await state();
+      s1 = now.structures.find((s) => s.id === ship.id);
+      throttle = Math.max(throttle, now.helm?.throttle ?? 0);
+      return Math.hypot(s1.x - ship.x, s1.z - ship.z) > 2 && throttle > 0.3;
     }, 'the boat to sail');
-    st = await state();
-    check(st.helm && st.helm.throttle > 0.3, 'the helm shows no throttle');
+    check(throttle > 0.3, 'the helm shows no throttle');
     await shot('sailing');
+    await takeHelm();
     let turned = 0;
-    await holdUntil(['KeyA'], async () => {
+    await steer(['KeyW', 'KeyA'], async () => {
       turned = Math.abs((await heading()) - h0);
       return turned > 0.3;
     }, 'the boat to turn');
     log(`sailed ${Math.hypot(s1.x - ship.x, s1.z - ship.z).toFixed(1)} blocks, turned ${turned.toFixed(2)} rad`);
-    // third-person views while sailing
+    // third-person views while the boat moves on
     await page.keyboard.press('F5');
     await waitFor('over the shoulder', () => window.__blocklands.game.debug.state().viewMode === 'back');
     await page.waitForTimeout(800);
@@ -447,7 +506,8 @@ async function session(build, renderer) {
     await page.waitForTimeout(800);
     await shot('sailing-front-view');
     await page.keyboard.press('F5');
-    await page.keyboard.up('KeyW');
+    await waitFor('first person', () => window.__blocklands.game.debug.state().viewMode === 'first');
+    await takeHelm();
     // open the inventory at the helm: the helm is let go
     await page.keyboard.press('KeyE');
     await waitFor('the inventory', () => window.__blocklands.game.screen === 'inventory');
@@ -456,37 +516,35 @@ async function session(build, renderer) {
     await page.keyboard.press('KeyE');
     await waitFor('play', () => window.__blocklands.game.screen === 'none');
     await page.waitForTimeout(1200);
-    await page.mouse.click(center.x, center.y);
+    await engage();
     // take the wheel again once the boat has coasted to a stop (nobody steers it: the throttle went
     // to 0), then dock (sneak + right-click while steering)
-    let last = await shipNow();
+    // (still: neither moving nor turning, or the look turned with the deck would miss the helm)
+    let last = { ...(await shipNow()), h: await heading() };
     await until(async () => {
-      const now = await shipNow();
+      const now = { ...(await shipNow()), h: await heading() };
       const moved = Math.hypot(now.x - last.x, now.z - last.z);
+      const turnedBy = Math.abs(now.h - last.h);
       last = now;
-      return moved < 0.02;
-    }, 'the boat to coast to a stop', 90_000, 1000);
-    const helmLocal = { x: boat.helm.x, y: boat.helm.y, z: boat.helm.z };
-    let aimed = false;
-    for (let i = 0; i < 3 && !aimed; i++) aimed = await aimAny(helmLocal, ship.id);
-    if (!aimed) {
-      const dump = await G(([c, id]) => {
-        const g = window.__blocklands.game;
-        const r = g.session.replica;
-        const grid = r.state.structures.get(id).structure.grid;
-        const w = grid.toWorld({ x: c.x + 0.5, y: c.y + 0.5, z: c.z + 0.5 }, { x: 0, y: 0, z: 0 });
-        const st = g.debug.state();
-        return { w, player: st.player, target: st.target, cellHere: grid.getCell(c.x, c.y, c.z), pos: grid.position, rot: grid.rotation, pivot: grid.pivot };
-      }, [helmLocal, ship.id]);
-      throw new StepError(`cannot aim at the helm on the boat: ${JSON.stringify(dump)}`);
+      return moved < 0.02 && turnedBy < 0.002;
+    }, 'the boat to coast to a stop', 120_000, 1000);
+    // dock: sneak + right-click while steering (taken again if a stall let go of it meanwhile)
+    let docked = false;
+    for (let i = 0; i < 4 && !docked; i++) {
+      await takeHelm();
+      await page.keyboard.down('ShiftLeft');
+      await page.waitForTimeout(300);
+      await click('right');
+      try {
+        await waitFor('the boat docked', () => !window.__blocklands.game.debug.state().structures.some((s) => s.kind === 'ship'), undefined, 30_000);
+        docked = true;
+      } catch {
+        log('not docked yet (the helm was let go before the click?): again');
+      } finally {
+        await page.keyboard.up('ShiftLeft');
+      }
     }
-    await click('right');
-    await waitFor('steering again', () => window.__blocklands.game.debug.state().player.steeringShipId !== 0);
-    await page.keyboard.down('ShiftLeft');
-    await page.waitForTimeout(300);
-    await click('right');
-    await waitFor('the boat docked', () => !window.__blocklands.game.debug.state().structures.some((s) => s.kind === 'ship'), undefined, 60_000);
-    await page.keyboard.up('ShiftLeft');
+    check(docked, 'the boat did not dock');
     const helmAt = await G(() => {
       const d = window.__blocklands.game.debug;
       const p = d.state().player;
@@ -531,7 +589,7 @@ async function session(build, renderer) {
     await page.click('.bl-screen[data-screen="pause"] .bl-btn--primary');
     await waitFor('play', () => window.__blocklands.game.screen === 'none');
     await page.waitForTimeout(1500);
-    await page.mouse.click(center.x, center.y);
+    await engage();
 
     // ---- fall damage, death, respawn
     st = await state();
@@ -550,8 +608,13 @@ async function session(build, renderer) {
     await shot('dead');
     await page.click('.bl-screen[data-screen="death"] .bl-btn--primary');
     await playing();
+    // the respawn is the server's (the screen goes at once, the health comes with its answer)
+    await waitFor('alive again with full health', () => {
+      const p = window.__blocklands.game.debug.state().player;
+      return p !== null && !p.dead && p.health === 20;
+    });
     st = await state();
-    check(!st.player.dead && st.player.health === 20, 'not alive after respawning');
+    check((await G(() => window.__blocklands.game.screen)) === 'none', 'the death screen came back');
     log(`respawned at ${st.player.x.toFixed(1)} ${st.player.y.toFixed(1)} ${st.player.z.toFixed(1)}`);
     await page.waitForTimeout(800);
     await shot('respawned');
@@ -584,7 +647,7 @@ async function session(build, renderer) {
       check((await cell(b)) === id, `block ${JSON.stringify(b)} is gone`);
     }
     for (const [c, f] of world.glued) check(await glueAt(c, f), `glue at ${JSON.stringify(c)} face ${f} is gone`);
-    await page.mouse.click(center.x, center.y);
+    await engage();
     await teleport(world.helm.x + 0.5, world.helm.y + 3, world.helm.z + 0.5);
     check((await cell(world.helm)) === B.HELM, 'the docked helm is gone');
     check((await state()).structures.filter((s) => s.kind === 'rotor').length === world.rotors, 'the windmill is gone');

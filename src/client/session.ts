@@ -34,7 +34,7 @@ import type { Inventory } from '../entities/inventory';
 import type { MeshResponse } from '../mesh/types';
 import { ClientIntents, type ViewRay } from '../net/client/intents';
 import { NetClient, type NetStatus } from '../net/client/netclient';
-import { emptyHeldInput, OwnPlayer, type HeldInput } from '../net/client/predict';
+import { emptyHeldInput, OwnPlayer, type HeldInput, type OwnPlayerOptions } from '../net/client/predict';
 import type { ClientReplica } from '../net/client/replica';
 import type { HostCommand, InventoryArea, TickBatchMsg } from '../net/protocol';
 import type { Channel, Transport } from '../net/transport';
@@ -152,11 +152,29 @@ export class WorldSession {
   private pendingRadius: number | null = null;
   /** Seq of the last Respawn sent: the player counts as alive until the server answered it. */
   private respawnSeq = 0;
+  /**
+   * The prediction's options, kept by reference (OwnPlayer reads them at every client tick): the
+   * ready zone of a reload follows the subscription radius.
+   */
+  private readonly ownOpts: OwnPlayerOptions;
+  /**
+   * A correction since the last frame needed a reload (OwnPlayer: farther than RELOAD_DISTANCE).
+   * Kept apart from OwnPlayer.reloading, which can end in the very client tick that adopted the
+   * correction when the new place's columns arrived first (the server subscribes them in the same
+   * batch): the meshes around the new place are still to be waited for.
+   */
+  private reloadSeen = false;
   private disposed = false;
   private readonly ray = { eye: vec3(), origin: vec3(), dir: vec3() };
   private readonly tmp: Vec3 = vec3();
 
   constructor(private readonly deps: SessionDeps) {
+    this.ownOpts = {
+      viewRadius: deps.viewRadius,
+      onCorrection: (c) => {
+        if (c.display === 'reload') this.reloadSeen = true;
+      },
+    };
     this.structures = new StructureRenderer(deps.backend, deps.meshPool, deps.onError);
     this.net = new NetClient({
       openTransport: (ready, failed) => deps.openTransport((t) => ready(new CountingTransport(t, this.traffic)), failed),
@@ -383,6 +401,7 @@ export class WorldSession {
   /** The subscription radius (and the next Hello's, and a reload's ready zone). */
   setViewRadius(radius: number): void {
     this.net.viewRadius = radius;
+    this.ownOpts.viewRadius = radius;
     if (this.intents !== null) this.intents.setViewRadius(radius);
     else this.pendingRadius = radius;
   }
@@ -510,16 +529,17 @@ export class WorldSession {
       if (!this.loadingProgress().done) return;
       this.state = 'ready';
       if (this.own === null) {
-        this.own = new OwnPlayer(r, this.held, (rep) => this.net.sendMoveReport(rep), { viewRadius: this.net.viewRadius });
+        this.own = new OwnPlayer(r, this.held, (rep) => this.net.sendMoveReport(rep), this.ownOpts);
         this.intents = new ClientIntents(r, (m) => this.net.send(m));
         if (this.pendingRadius !== null) {
           this.intents.setViewRadius(this.pendingRadius);
           this.pendingRadius = null;
         }
       }
-    } else if (this.own?.reloading) {
+    } else if (this.own?.reloading || this.reloadSeen) {
       this.state = 'loading';
     }
+    this.reloadSeen = false;
   }
 
   /** Where the loading waits around: the predicted player, else the server's correction (world, at the display poses). */

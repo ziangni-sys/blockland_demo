@@ -178,6 +178,8 @@ export class SessionRig {
   viewMode: ViewMode = 'first';
   /** The world is paused (no client ticks, see WorldSession.update). */
   paused = false;
+  /** The page is stalled (a busy main thread): no frames and no heartbeats meanwhile. */
+  stalled = false;
   frames = 0;
   private lastFrame = 0;
 
@@ -240,13 +242,13 @@ export class SessionRig {
     this.session.start();
     const frame = (at: number): void => {
       this.net.schedule(at, () => {
-        this.frame();
+        if (!this.stalled) this.frame();
         frame(at + FRAME_MS);
       });
     };
     const beat = (at: number): void => {
       this.net.schedule(at, () => {
-        this.session.heartbeat(this.net.now);
+        if (!this.stalled) this.session.heartbeat(this.net.now);
         beat(at + 1000);
       });
     };

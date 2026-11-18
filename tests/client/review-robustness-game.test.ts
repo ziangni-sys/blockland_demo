@@ -249,3 +249,25 @@ describe('review: debug helpers are host commands', { timeout: 60_000 }, () => {
     expect(game.session!.net.paused).toBe(false);
   });
 });
+
+describe('review: death and respawn', { timeout: 60_000 }, () => {
+  it('dying shows the death screen and pauses the world (server and client); respawning plays on, alive', async () => {
+    const { game, host } = await gameWithWorld(new MemoryStorage());
+    const sim = host().sim;
+    const me = sim.players.get(game.playerKey)!;
+    sim.entities.kill(me.player, 'void');
+    await until(game, () => game.screen === 'death' && host().paused);
+    expect(game.session!.dead).toBe(true);
+    expect(game.session!.net.paused).toBe(true);
+    const t = sim.world.time;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sim.world.time).toBe(t);
+    (game as unknown as { actions: { respawn(): void } }).actions.respawn();
+    // The server runs again to carry the respawn out; the respawn correction reloads if it is far.
+    await until(game, () => game.screen === 'none' && game.session?.state === 'ready' && !me.player.dead && !game.session.dead);
+    expect(host().paused).toBe(false);
+    expect(game.session!.net.paused).toBe(false);
+    expect(me.player.health).toBe(me.player.maxHealth);
+    await until(game, () => sim.world.time > t + 5);
+  });
+});
