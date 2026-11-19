@@ -52,7 +52,10 @@ const STRINGS = {
     zh: '房主的服务器运行受限（页面可能在后台）',
     en: 'The host’s server is being slowed down (its page may be in the background)',
   },
-  'net.linkUnstable': { zh: '连接不稳定', en: 'The connection is unstable' },
+  'net.linkStalled': {
+    zh: '和房主的连接卡住了（网络不稳，或者房主的页面卡顿）',
+    en: 'The connection to the host is stalling (the network, or the host’s page is busy)',
+  },
   'net.kicked': { zh: '服务器断开了连接（{reason}）', en: 'The server ended the connection ({reason})' },
   'net.refused': { zh: '服务器拒绝了连接（{reason}）', en: 'The server refused the connection ({reason})' },
   'net.failed': { zh: '连接出错：{msg}', en: 'The connection failed: {msg}' },

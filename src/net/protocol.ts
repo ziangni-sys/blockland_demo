@@ -93,13 +93,17 @@ export const MAX_HELLO_BYTES = 512;
 /** Longest player name, in characters (sections 3, 13). */
 export const MAX_NAME_LENGTH = 24;
 /**
- * What a guest's connection may send (section 13, package 13): a budget of CLIENT_BURST_BYTES that
- * refills at CLIENT_RATE_BYTES a second; every message costs its bytes plus MESSAGE_COST_BYTES (the
- * work of taking it in). A client in play sends about 2.5 KB/s of such cost; one that empties the
- * budget is kicked (protocol_error). The host's own connection is not limited.
+ * What a guest's connection may send (section 13, package 13): a budget that starts at
+ * CLIENT_BURST_BYTES and refills at CLIENT_RATE_BYTES a second; every message costs its bytes plus
+ * MESSAGE_COST_BYTES (the work of taking it in). A client in play sends about 2.5 KB/s of such
+ * cost; one that empties the budget is kicked (protocol_error). What a connection does not spend
+ * it keeps, up to CLIENT_BUDGET_MAX_BYTES: a host page that was starved for minutes hands the
+ * server every guest's bytes of that time at once, and they are bytes the guest sent at its
+ * ordinary pace. The host's own connection is not limited.
  */
 export const CLIENT_RATE_BYTES = 16 * 1024;
 export const CLIENT_BURST_BYTES = 128 * 1024;
+export const CLIENT_BUDGET_MAX_BYTES = 1024 * 1024;
 export const MESSAGE_COST_BYTES = 16;
 /**
  * Joins (a new connection taking its player into the world) of one identity per rolling minute

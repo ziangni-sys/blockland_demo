@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
-import { CLIENT_BURST_BYTES, CLIENT_RATE_BYTES, JOINS_PER_KEY_PER_MINUTE, MAX_REPORTED_RTT_MS, PONG_INTERVAL_MS, VIEW_RADIUS_INTERVAL_TICKS, type MoveReportMsg, type Target } from '../../src/net/protocol';
+import { CLIENT_BUDGET_MAX_BYTES, CLIENT_BURST_BYTES, CLIENT_RATE_BYTES, JOINS_PER_KEY_PER_MINUTE, MAX_REPORTED_RTT_MS, PONG_INTERVAL_MS, VIEW_RADIUS_INTERVAL_TICKS, type MoveReportMsg, type Target } from '../../src/net/protocol';
 import { IntentQueue } from '../../src/net/server/intents';
 import { MoveQueue, QUEUE_LIMIT } from '../../src/net/server/moves';
 import { ItemEntity } from '../../src/entities/entity';
@@ -116,6 +116,34 @@ describe('limits per connection (package 13)', () => {
     h.run(20_000);
     expect(f.kick).toBeNull();
     expect(steady.sent).toBeGreaterThan(2000);
+  });
+
+  it('what a starved host page held back arrives at once and is taken: an unspent budget grows, up to CLIENT_BUDGET_MAX_BYTES', async () => {
+    const h = await room();
+    const f = h.addRawClient('f');
+    h.run(200);
+    let seq = 1;
+    // The host page is starved for two minutes: its forwarder hands the server one of the guest's
+    // reports a second, the other 19 a second wait in the page.
+    for (let s = 0; s < 120; s++) {
+      f.send(report(seq++));
+      h.run(1000);
+    }
+    expect(f.kick).toBeNull();
+    // The page is back: the 2280 reports it held (about 166 KB of cost, more than a new
+    // connection's CLIENT_BURST_BYTES), all at once.
+    const held = 120 * 19;
+    expect(held * 73).toBeGreaterThan(CLIENT_BURST_BYTES);
+    for (let i = 0; i < held; i++) f.send(report(seq++));
+    h.ticks(2);
+    expect(f.kick).toBeNull();
+    // Two minutes filled the budget to its top and no further: a flood from here gets what is left of
+    // CLIENT_BUDGET_MAX_BYTES through, then the connection is kicked like any other.
+    const sent = flood(h, f, 20, 5);
+    h.runUntil(() => f.closed, 10_000);
+    expect(f.kick?.reason).toBe('protocol_error');
+    expect((held + sent.sent) * 73).toBeGreaterThan(CLIENT_BUDGET_MAX_BYTES);
+    expect((held + sent.sent) * 73).toBeLessThan(CLIENT_BUDGET_MAX_BYTES + 2 * CLIENT_BURST_BYTES);
   });
 
   it('a burst of Aims is checked once: only the last of consecutive Aims is checked', async () => {

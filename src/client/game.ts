@@ -1448,7 +1448,7 @@ export class Game implements InputHost {
         hint = this.hintText;
         // The stall hint is a guest's (see the file comment), under the context hint.
         const stall = s.net.welcome?.isHost === false ? s.net.stall(now) : null;
-        if (stall !== null) notice = clientText(this.settings.language, stall === 'host' ? 'net.hostStalled' : 'net.linkUnstable');
+        if (stall !== null) notice = clientText(this.settings.language, stall === 'host' ? 'net.hostStalled' : 'net.linkStalled');
       }
       if (this.settings.showDebug && inWorld) {
         if (now - this.debugAt >= 250) {

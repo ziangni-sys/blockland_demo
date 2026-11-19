@@ -39,9 +39,13 @@
  * movement reports only the newest QUEUE_LIMIT of a tick are kept (moves.ts keeps no more).
  *
  * LIMITS of a guest's connection (section 13, package 13; the host's own is not limited):
- *  - bytes: a budget of CLIENT_BURST_BYTES refilled at CLIENT_RATE_BYTES a second; every message
- *    costs its length plus MESSAGE_COST_BYTES; an empty budget is Kick(protocol_error) (in the
- *    handshake Refuse(bad_hello)). This bounds what one client makes the server decode and queue;
+ *  - bytes: a budget that starts at CLIENT_BURST_BYTES, refills at CLIENT_RATE_BYTES a second and
+ *    holds at most CLIENT_BUDGET_MAX_BYTES; every message costs its length plus
+ *    MESSAGE_COST_BYTES; an empty budget is Kick(protocol_error) (in the handshake
+ *    Refuse(bad_hello)). This bounds what one client makes the server decode and queue. The
+ *    budget is counted when the bytes reach the server, not when the guest sent them: after the
+ *    host page was starved, minutes of a guest's bytes arrive at once, which is why an idle
+ *    budget grows past its start;
  *  - joins: an identity joins at most JOINS_PER_KEY_PER_MINUTE times in any minute; an accepted
  *    connection past that waits, unjoined (still counted for `full`), until the minute allows it.
  *    There is no count across identities: one client cycling identities would hold every other
@@ -68,6 +72,7 @@ import { decodeClientMessage, encodeServerMessage, ProtocolError, readHelloBuild
 import { cleanName } from '../names';
 import {
   BUILD_ID,
+  CLIENT_BUDGET_MAX_BYTES,
   CLIENT_BURST_BYTES,
   CLIENT_RATE_BYTES,
   CONNECTION_TIMEOUT_MS,
@@ -172,7 +177,7 @@ interface Connection {
   reports: MoveReportMsg[];
   /** Intents received since the last tick, in arrival order (a flood past INTENT_QUEUE_LIMIT is kicked before the tick). */
   intents: IntentMessage[];
-  /** What it may still send (CLIENT_BURST_BYTES, refilled at CLIENT_RATE_BYTES a second), and when it was refilled. */
+  /** What it may still send (from CLIENT_BURST_BYTES, refilled at CLIENT_RATE_BYTES a second up to CLIENT_BUDGET_MAX_BYTES), and when it was refilled. */
   budget: number;
   refilled: number;
   /** The round trip its client measured, ms (its last Ping, at most MAX_REPORTED_RTT_MS; 0 before one). */
@@ -330,7 +335,7 @@ export class NetServer {
     const now = this.o.now();
     c.lastHeard = now;
     if (!c.local) {
-      c.budget = Math.min(CLIENT_BURST_BYTES, c.budget + ((now - c.refilled) * CLIENT_RATE_BYTES) / 1000) - bytes.length - MESSAGE_COST_BYTES;
+      c.budget = Math.min(CLIENT_BUDGET_MAX_BYTES, c.budget + ((now - c.refilled) * CLIENT_RATE_BYTES) / 1000) - bytes.length - MESSAGE_COST_BYTES;
       c.refilled = now;
       if (c.budget < 0) {
         if (c.state === 'hello') this.refuse(c, 'bad_hello', 'too many bytes');
