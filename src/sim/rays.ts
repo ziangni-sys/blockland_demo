@@ -136,7 +136,12 @@ const CELL_SAMPLE_INSET = 0.1;
  * Is ALL of world cell (x, y, z) displaced by hulls (its centre and its eight corners, inset by
  * CELL_SAMPLE_INSET)? The bucket ray may stop at a liquid cell a hull covers only in part; this is
  * true only when no part a ray could stop at is left. displacedByHull decides by octant; when a
- * hull's grid is aligned with the world's, the eight inset corners lie in eight different octants.
+ * hull's grid is aligned with the world's, the eight inset corners lie in eight different octants,
+ * so the answer is exact. For an offset or rotated hull the nine points can miss a strip of the
+ * cell that is not displaced (thinner than the inset for hulls of full blocks, up to about a
+ * quarter of the cell next to partial hull cells); the server's check of a claimed bucket target
+ * (net/server/intents.ts) then refuses water the client's bucket ray reached. That is accepted:
+ * it needs a ray through that strip, and the refusal is a no-op, not a wrong result.
  */
 export function cellDisplaced(ships: readonly RayShip[], x: number, y: number, z: number): boolean {
   if (ships.length === 0) return false;
@@ -149,6 +154,27 @@ export function cellDisplaced(ships: readonly RayShip[], x: number, y: number, z
     if (!displacedByHull(ships, p)) return false;
   }
   return true;
+}
+
+/**
+ * Is ANY part of world cell (x, y, z) displaced by hulls, sampled at the centres of its eight
+ * octants? The counterpart of cellDisplaced for pouring: a liquid source placed there would be
+ * partly hidden inside a hull now and left behind when the ship moves away. With partial hull
+ * cells the cell centre alone is not enough: for a hull aligned with the world it lies on three
+ * mid-planes, so displacedByHull at the centre answers for octant 7 only (a lower slab of the hull
+ * would let water in, a single upper octant would refuse it). Exact for hulls aligned with the
+ * world; for offset or rotated hulls a displaced corner smaller than an octant can be missed.
+ */
+export function partlyDisplaced(ships: readonly RayShip[], x: number, y: number, z: number): boolean {
+  if (ships.length === 0) return false;
+  const p = vec3();
+  for (let i = 0; i < 8; i++) {
+    p.x = x + ((i & 1) !== 0 ? 0.75 : 0.25);
+    p.y = y + ((i & 2) !== 0 ? 0.75 : 0.25);
+    p.z = z + ((i & 4) !== 0 ? 0.75 : 0.25);
+    if (displacedByHull(ships, p)) return true;
+  }
+  return false;
 }
 
 // ====================================================================== the bucket ray
