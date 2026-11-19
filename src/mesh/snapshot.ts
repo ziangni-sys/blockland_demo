@@ -26,6 +26,10 @@ const SKY_OPEN = 0xf0;
 export function snapshotSection(world: World, cx: number, sy: number, cz: number): MeshInput {
   const cells = new Uint16Array(PADDED * PADDED * PADDED);
   const light = new Uint8Array(PADDED * PADDED * PADDED);
+  // The holes and second-part layers are allocated only when a cell of the padded box has a
+  // non-zero entry in them, so jobs without partial cells are exactly what they were in M1.
+  let holes: Uint8Array | null = null;
+  let part2: Uint32Array | null = null;
   const ox = cx * SECTION_SIZE - 1;
   const oy = sy * SECTION_SIZE - 1;
   const oz = cz * SECTION_SIZE - 1;
@@ -36,6 +40,8 @@ export function snapshotSection(world: World, cx: number, sy: number, cz: number
       const wx = ox + x;
       const chunk = world.getChunk(wx >> CHUNK_SHIFT, wz >> CHUNK_SHIFT);
       const column = (wx & CHUNK_MASK) | ((wz & CHUNK_MASK) << 4);
+      const ch = chunk !== undefined ? chunk.holes : null;
+      const cq = chunk !== undefined ? chunk.part2 : null;
       let p = x + z * PADDED;
       for (let y = 0; y < PADDED; y++, p += layer) {
         const wy = oy + y;
@@ -52,18 +58,27 @@ export function snapshotSection(world: World, cx: number, sy: number, cz: number
           const i = column | (wy << 8);
           cells[p] = chunk.cells[i]!;
           light[p] = chunk.light[i]!;
+          if (ch !== null && ch[i] !== 0) {
+            if (holes === null) holes = new Uint8Array(cells.length);
+            holes[p] = ch[i]!;
+          }
+          if (cq !== null && cq[i] !== 0) {
+            if (part2 === null) part2 = new Uint32Array(cells.length);
+            part2[p] = cq[i]!;
+          }
         }
       }
     }
   }
-  return { sx: SECTION_SIZE, sy: SECTION_SIZE, sz: SECTION_SIZE, cells, light };
+  return { sx: SECTION_SIZE, sy: SECTION_SIZE, sz: SECTION_SIZE, cells, holes, part2, light };
 }
 
 /**
  * Snapshot of a whole structure: its tight cellBounds box plus an AIR margin, no voxel
  * light (structures are shaded by the renderer from the pose's light sample).
  * (ox, oy, oz) are the structure-local coordinates of interior cell (0,0,0); pass them to
- * RenderBackend.setStructureMesh. Returns null for an empty grid.
+ * RenderBackend.setStructureMesh. Returns null for an empty grid. The holes and second-part
+ * layers are present only when the box has a non-zero entry in them (StructureGrid.copyBox).
  */
 export function snapshotStructure(grid: StructureGrid): { input: MeshInput; ox: number; oy: number; oz: number } | null {
   const b = grid.cellBounds();
@@ -71,23 +86,9 @@ export function snapshotStructure(grid: StructureGrid): { input: MeshInput; ox: 
   const sx = b.maxX - b.minX;
   const sy = b.maxY - b.minY;
   const sz = b.maxZ - b.minZ;
-  const px = sx + 2;
-  const pz = sz + 2;
-  const cells = new Uint16Array(px * (sy + 2) * pz);
-  // cellBounds is computed from the dense storage, so the box lies inside it: copy rows.
-  const src = grid.cells;
-  const gsx = grid.sx;
-  const gLayer = grid.sx * grid.sz;
-  const x0 = b.minX - grid.ox;
-  for (let y = 0; y < sy; y++) {
-    const gy = b.minY + y - grid.oy;
-    for (let z = 0; z < sz; z++) {
-      const gz = b.minZ + z - grid.oz;
-      const from = x0 + gz * gsx + gy * gLayer;
-      cells.set(src.subarray(from, from + sx), 1 + (z + 1) * px + (y + 1) * px * pz);
-    }
-  }
-  return { input: { sx, sy, sz, cells, light: null }, ox: b.minX, oy: b.minY, oz: b.minZ };
+  // The box with its 1-cell margin: the margin lies outside the cells, so it copies as AIR.
+  const l = grid.copyBox(b.minX - 1, b.minY - 1, b.minZ - 1, sx + 2, sy + 2, sz + 2);
+  return { input: { sx, sy, sz, cells: l.base, holes: l.holes, part2: l.part2, light: null }, ox: b.minX, oy: b.minY, oz: b.minZ };
 }
 
 /**

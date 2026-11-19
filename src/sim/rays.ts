@@ -25,7 +25,7 @@ import { I } from '../blocks/items';
 import { LIQUID, SOLID } from '../blocks/registry';
 import { NX, NY, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
 import { vec3, type Vec3 } from '../core/math';
-import { isDryCell, type HullInfo } from '../structures/hull';
+import { isDryHalf, type HullInfo } from '../structures/hull';
 import type { VoxelGrid } from '../voxel/grid';
 import { raycastGrid, raycastGrids, targetable, targetableOrLiquidSource, type CellPredicate, type GridHit } from '../voxel/raycast';
 
@@ -113,7 +113,7 @@ export function displacedByHull(ships: readonly RayShip[], p: Vec3): boolean {
     if (x < b.minX || y < b.minY || z < b.minZ || x >= b.maxX || y >= b.maxY || z >= b.maxZ) continue;
     if (SOLID[g.getCell(x, y, z) & ID_MASK] === 1) return true;
     const hull = ship.hull;
-    if (hull !== null && isDryCell(hull, x, y, z)) return true;
+    if (hull !== null && isDryHalf(hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) return true;
   }
   return false;
 }

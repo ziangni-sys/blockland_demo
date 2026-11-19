@@ -42,7 +42,7 @@ import type {
   OverlayState,
   PlayerPosture,
 } from '../render/backend';
-import { isDryCell } from '../structures/hull';
+import { isDryHalf } from '../structures/hull';
 import type { GlueStore } from '../structures/glue';
 import { Ship } from '../structures/structure';
 import type { VoxelGrid } from '../voxel/grid';
@@ -360,7 +360,7 @@ export class ViewBuilder {
       const s = structures[i]!;
       if (!(s instanceof Ship) || !s.hull) continue;
       const l = s.grid.toLocal(p, this.scratch);
-      if (isDryCell(s.hull, Math.floor(l.x), Math.floor(l.y), Math.floor(l.z))) return true;
+      if (isDryHalf(s.hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) return true;
     }
     return false;
   }

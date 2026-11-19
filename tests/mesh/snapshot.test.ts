@@ -20,7 +20,7 @@ function makeWorld(loaded: Array<[number, number]> = []): World {
       for (let lz = 0; lz < 16; lz++) {
         for (let lx = 0; lx < 16; lx++) {
           // A distinct id per chunk keeps cells recognisable; light encodes y and x.
-          c.set(lx, y, lz, makeCell(chunkBlock(cx, cz), y & 7));
+          c.cells[cellIndex(lx, y, lz)] = makeCell(chunkBlock(cx, cz), y & 7);
           c.light[cellIndex(lx, y, lz)] = ((y & 15) << 4) | (lx & 15);
         }
       }

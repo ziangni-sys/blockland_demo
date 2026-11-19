@@ -60,7 +60,7 @@ describe('mesh worker protocol', () => {
     const { scope, posted } = fakeScope();
     serveMeshRequests(scope);
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    scope.onmessage!({ data: { type: 'mesh', id: 5, input: { sx: 4, sy: 4, sz: 4, cells: new Uint16Array(3), light: null } } });
+    scope.onmessage!({ data: { type: 'mesh', id: 5, input: { sx: 4, sy: 4, sz: 4, cells: new Uint16Array(3), holes: null, part2: null, light: null } } });
     expect(spy).toHaveBeenCalledOnce();
     spy.mockRestore();
     const res = posted[0]!.msg as MeshErrorResponse;

@@ -1,6 +1,6 @@
 /** Shared world builders and probes for the liquid tests. Worlds are built by hand (no worldgen). */
 import { CHUNK_SHIFT, CHUNK_VOLUME, WORLD_HEIGHT } from '../../src/core/constants';
-import { AIR, ID_MASK, cellState, isLiquidSource, liquidAmount, makeCell } from '../../src/blocks/cell';
+import { AIR, ID_MASK, cellPrimary, cellSecond, cellState, isLiquidSource, liquidAmount, makeCell, partHoles } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { LIQUID } from '../../src/blocks/registry';
 import { Chunk, chunkKey } from '../../src/voxel/chunk';
@@ -17,20 +17,30 @@ export type CellFn = (x: number, y: number, z: number) => number;
 /** Stone slab at FLOOR_Y everywhere. */
 export const platform: CellFn = (_x, y) => (y === FLOOR_Y ? STONE : AIR);
 
-/** Build one chunk from a world-space cell function. */
+/**
+ * Build one chunk from a world-space cell function returning packed cells (blocks/cell.ts: both
+ * parts); the holes and second-part layers are allocated only when a cell needs them.
+ */
 export function makeChunk(cx: number, cz: number, fn: CellFn): Chunk {
-  const chunk = new Chunk(cx, cz);
+  const base = new Uint16Array(CHUNK_VOLUME);
+  let holes: Uint8Array | null = null;
+  let part2: Uint32Array | null = null;
   const x0 = cx << CHUNK_SHIFT;
   const z0 = cz << CHUNK_SHIFT;
   for (let y = 0; y < WORLD_HEIGHT; y++) {
     for (let lz = 0; lz < 16; lz++) {
       for (let lx = 0; lx < 16; lx++) {
         const c = fn(x0 + lx, y, z0 + lz);
-        if (c !== AIR) chunk.set(lx, y, lz, c);
+        if (c === AIR) continue;
+        const i = lx | (lz << 4) | (y << 8);
+        const v = cellPrimary(c);
+        base[i] = v & 0xffff;
+        if (partHoles(v) !== 0) (holes ??= new Uint8Array(CHUNK_VOLUME))[i] = partHoles(v);
+        if (cellSecond(c) !== 0) (part2 ??= new Uint32Array(CHUNK_VOLUME))[i] = cellSecond(c);
       }
     }
   }
-  return chunk;
+  return new Chunk(cx, cz, base, undefined, holes, part2);
 }
 
 export interface ChunkRange {
@@ -118,10 +128,19 @@ export function isSourceAt(world: World, x: number, y: number, z: number, id: nu
   return (c & ID_MASK) === id && isLiquidSource(cellState(c));
 }
 
-/** Copy of every chunk's cells, keyed by chunk key. */
-export function snapshotCells(world: World): Map<number, Uint16Array> {
-  const out = new Map<number, Uint16Array>();
-  for (const [k, c] of world.chunks) out.set(k, c.cells.slice());
+/**
+ * A copy of a chunk's cells: the base layer (indexable as before) carrying copies of the holes
+ * and second-part layers (null when the chunk has none with a non-zero entry).
+ */
+export type CellsSnapshot = Uint16Array & { readonly holes: Uint8Array | null; readonly part2: Uint32Array | null };
+
+/** Copy of every chunk's cells (all three layers), keyed by chunk key. */
+export function snapshotCells(world: World): Map<number, CellsSnapshot> {
+  const out = new Map<number, CellsSnapshot>();
+  for (const [k, c] of world.chunks) {
+    const l = c.layers();
+    out.set(k, Object.assign(l.base.slice(), { holes: l.holes !== null ? l.holes.slice() : null, part2: l.part2 !== null ? l.part2.slice() : null }));
+  }
   return out;
 }
 
@@ -129,7 +148,10 @@ export function snapshotCells(world: World): Map<number, Uint16Array> {
 export function cloneWorld(src: World, time = src.time): FluidWorld {
   const world = new World(src.seed);
   world.time = time;
-  for (const c of src.chunks.values()) world.addChunk(new Chunk(c.cx, c.cz, c.cells.slice(), c.light.slice()));
+  for (const c of src.chunks.values()) {
+    const l = c.layers();
+    world.addChunk(new Chunk(c.cx, c.cz, l.base.slice(), c.light.slice(), l.holes !== null ? l.holes.slice() : null, l.part2 !== null ? l.part2.slice() : null));
+  }
   const fluids = new Fluids(world);
   fluids.attach();
   return { world, fluids };

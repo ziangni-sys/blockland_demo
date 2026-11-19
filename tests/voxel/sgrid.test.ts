@@ -45,7 +45,7 @@ describe('StructureGrid storage', () => {
     expect(g.getCell(0, 0, 0)).toBe(AIR);
     expect(g.cellBounds()).toBeNull();
     expect(g.setCell(5, 5, 5, AIR)).toBe(false); // air outside storage: no growth
-    expect(g.cells.length).toBe(0);
+    expect(g.storage().layers.base.length).toBe(0);
     const v0 = g.version;
     expect(g.setCell(0, 0, 0, STONE)).toBe(true);
     expect(g.setCell(-7, 3, 9, makeCell(B.PLANKS_OAK))).toBe(true);
@@ -141,7 +141,7 @@ describe('StructureGrid storage', () => {
     for (const [dx, dy, dz] of [[1, 0, 0], [0, 0, 1], [0, 1, 0]] as const) {
       arm(dx, dy, dz, STONE);
       // A 1001-cell line: the storage holds a few times its box, never the earlier arms' extents.
-      expect(g.cells.length).toBeLessThan(4 * 1001 * 5 * 5 * 4);
+      expect(g.storage().layers.base.length).toBeLessThan(4 * 1001 * 5 * 5 * 4);
       arm(dx, dy, dz, AIR);
     }
     expect(g.count).toBe(1);

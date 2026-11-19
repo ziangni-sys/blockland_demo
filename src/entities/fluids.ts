@@ -2,15 +2,15 @@
  * How much of a body is in water / lava, after the dry-volume correction.
  *
  * World water inside a floating hull is never deleted (LESSONS 船舱里冒出水面): it is cut away
- * when drawing and ignored here. A point inside a ship's dry cell — isDryCell(hull, local cell)
- * — is not in water. isDryCell already encodes LESSONS 沉船上不会溺水: a sealed cavity is always
+ * when drawing and ignored here. A point inside a ship's dry cell — isDryHalf(hull, local half cell)
+ * — is not in water. isDryHalf already encodes LESSONS 沉船上不会溺水: a sealed cavity is always
  * dry, an open hold only while the ship can float, so the helmsman of a sinking ship drowns
  * while a sailor in the sealed cabin of a submerged one does not.
  */
 import { ID_MASK, cellState, liquidAmount } from '../blocks/cell';
 import { LIQUID, LIQUID_LAVA, LIQUID_WATER } from '../blocks/registry';
 import { vec3, type Vec3 } from '../core/math';
-import { isDryCell } from '../structures/hull';
+import { isDryHalf } from '../structures/hull';
 import type { World } from '../voxel/world';
 import type { Entity } from './entity';
 import { curToLocal, type StructRec } from './structs';
@@ -74,7 +74,7 @@ export class FluidSampler {
       p.y = y;
       p.z = z;
       const l = curToLocal(r, p, this.local);
-      if (isDryCell(hull, Math.floor(l.x), Math.floor(l.y), Math.floor(l.z))) return 0;
+      if (isDryHalf(hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) return 0;
     }
     return liq;
   }

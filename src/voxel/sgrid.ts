@@ -20,6 +20,14 @@
  * BEFORE moving the structure.
  *
  * Velocities are expressed in parent space, relative to the parent.
+ *
+ * STORAGE. A dense box in three layers (docs/SHAPES.md section 4.1): the base layer (id + state
+ * of the first part), and the holes and second-part layers, allocated the first time a cell
+ * needs them. The storage is private: cells are read with getCell / getPart2 (or getPacked in
+ * voxel/parts.ts), written with setCell, and handed out whole by copyBox, loadBox and storage().
+ * A layer is only dropped when the whole storage is reallocated (resize, grow, loadBox) and its
+ * count of non-zero entries is 0 then; storage() and copyBox() hand out a layer with no
+ * non-zero entry as null.
  */
 import {
   qcopy,
@@ -34,9 +42,11 @@ import {
   type Quat,
   type Vec3,
 } from '../core/math';
-import { AIR } from '../blocks/cell';
+import { AIR, CELL_MULTI_BIT, FULL_LIMIT, HOLES_MASK, HOLES_SHIFT, PACK_SCALE, type CellLayers } from '../blocks/cell';
 import { SET_DEFAULT, type CellBounds, type VoxelGrid } from './grid';
+import { checkCanonical } from './parts';
 
+/** Called after a structure cell changed; oldCell and newCell are packed cells (blocks/cell.ts). */
 export type StructureCellListener = (
   x: number,
   y: number,
@@ -45,6 +55,18 @@ export type StructureCellListener = (
   newCell: number,
   flags: number,
 ) => void;
+
+/** What StructureGrid.storage() hands out. */
+export interface GridStorage {
+  ox: number;
+  oy: number;
+  oz: number;
+  sx: number;
+  sy: number;
+  sz: number;
+  /** Index = (x-ox) + (z-oz)*sx + (y-oy)*sx*sz. A layer with no non-zero entry is null. */
+  layers: CellLayers;
+}
 
 const GROW_MARGIN = 2;
 /** grow() re-bases on the tight bounds when the storage is more than this many times the tight box. */
@@ -56,15 +78,22 @@ export class StructureGrid implements VoxelGrid {
   readonly isWorld = false;
 
   // ---- storage: dense box [ox, ox+sx) x [oy, oy+sy) x [oz, oz+sz) in local cell coords
-  ox = 0;
-  oy = 0;
-  oz = 0;
-  sx = 0;
-  sy = 0;
-  sz = 0;
-  /** index = (x-ox) + (z-oz)*sx + (y-oy)*sx*sz */
-  cells: Uint16Array = new Uint16Array(0);
-  /** Number of non-air cells. */
+  private ox = 0;
+  private oy = 0;
+  private oz = 0;
+  private sx = 0;
+  private sy = 0;
+  private sz = 0;
+  /** Base layer, index = (x-ox) + (z-oz)*sx + (y-oy)*sx*sz. */
+  private cells: Uint16Array = new Uint16Array(0);
+  /** Holes of the first part, same index; null until needed. */
+  private holes: Uint8Array | null = null;
+  /** Second part's value, same index (0 = none); null until needed. */
+  private part2: Uint32Array | null = null;
+  /** Non-zero entries of `holes` / `part2`. */
+  private holesCount = 0;
+  private part2Count = 0;
+  /** Number of non-air cells (a two-part cell counts once). */
   count = 0;
   /** Incremented on every cell change; caches (mesh, mass, surface) key off it. */
   version = 0;
@@ -92,35 +121,105 @@ export class StructureGrid implements VoxelGrid {
 
   // ------------------------------------------------------------ cells
 
+  /** Cell value (first part + CELL_MULTI_BIT, < 2^25) at local coordinates; AIR outside the storage. */
   getCell(x: number, y: number, z: number): number {
     const lx = x - this.ox;
     const ly = y - this.oy;
     const lz = z - this.oz;
     if (lx < 0 || ly < 0 || lz < 0 || lx >= this.sx || ly >= this.sy || lz >= this.sz) return AIR;
-    return this.cells[lx + lz * this.sx + ly * this.sx * this.sz]!;
+    const i = lx + lz * this.sx + ly * this.sx * this.sz;
+    const h = this.holes;
+    const q = this.part2;
+    if (h === null && q === null) return this.cells[i]!;
+    return this.cells[i]! | (h !== null ? h[i]! << HOLES_SHIFT : 0) | (q !== null && q[i] !== 0 ? CELL_MULTI_BIT : 0);
   }
 
-  setCell(x: number, y: number, z: number, cell: number, flags: number = SET_DEFAULT): boolean {
+  /** Second part's value at local coordinates; 0 when there is none or outside the storage. */
+  getPart2(x: number, y: number, z: number): number {
+    const q = this.part2;
+    if (q === null) return 0;
+    const lx = x - this.ox;
+    const ly = y - this.oy;
+    const lz = z - this.oz;
+    if (lx < 0 || ly < 0 || lz < 0 || lx >= this.sx || ly >= this.sy || lz >= this.sz) return 0;
+    return q[lx + lz * this.sx + ly * this.sx * this.sz]!;
+  }
+
+  /**
+   * Write a packed cell (blocks/cell.ts) and notify listeners once. Grows the storage to reach a
+   * non-air cell outside it. Returns false when nothing changed (or AIR outside the storage).
+   * Throws RangeError, before anything changes, for a value >= FULL_LIMIT that is not in canonical
+   * form (invariants I1-I6 of docs/SHAPES.md 1.3). A value below FULL_LIMIT (a full block) is never
+   * checked, whatever layers the storage has (docs/SHAPES.md 1.3, 3.4): without layers it takes the
+   * M1 path, with layers it also clears the cell's entries there.
+   */
+  setCell(x: number, y: number, z: number, packed: number, flags: number = SET_DEFAULT): boolean {
+    const full = packed < FULL_LIMIT;
+    // Checked before the storage can grow for it.
+    if (!full) checkCanonical(packed);
     let lx = x - this.ox;
     let ly = y - this.oy;
     let lz = z - this.oz;
     if (lx < 0 || ly < 0 || lz < 0 || lx >= this.sx || ly >= this.sy || lz >= this.sz) {
-      if (cell === AIR) return false;
+      if (packed === AIR) return false;
       this.grow(x, y, z);
       lx = x - this.ox;
       ly = y - this.oy;
       lz = z - this.oz;
     }
     const i = lx + lz * this.sx + ly * this.sx * this.sz;
-    const old = this.cells[i]!;
-    if (old === cell) return false;
-    this.cells[i] = cell;
+    let old: number;
+    if (full && this.holes === null && this.part2 === null) {
+      old = this.cells[i]!;
+      if (old === packed) return false;
+      this.cells[i] = packed;
+    } else {
+      old = this.packedAt(i);
+      if (old === packed) return false;
+      // A full block stores like the M1 path (16 bits), clearing the holes and second part.
+      this.writeLayers(i, full ? packed & 0xffff : packed);
+    }
     if (old === AIR) this.count++;
-    else if (cell === AIR) this.count--;
+    else if (packed === AIR) this.count--;
     this.version++;
     const ls = this.listeners;
-    for (let k = 0; k < ls.length; k++) ls[k]!(x, y, z, old, cell, flags);
+    for (let k = 0; k < ls.length; k++) ls[k]!(x, y, z, old, packed, flags);
     return true;
+  }
+
+  /** Packed cell at storage index i. */
+  private packedAt(i: number): number {
+    const h = this.holes;
+    const q = this.part2;
+    const p2 = q !== null ? q[i]! : 0;
+    return (this.cells[i]! | (h !== null ? h[i]! << HOLES_SHIFT : 0) | (p2 !== 0 ? CELL_MULTI_BIT : 0)) + p2 * PACK_SCALE;
+  }
+
+  /** Store a (validated) packed cell at storage index i, allocating a layer on its first non-zero entry. */
+  private writeLayers(i: number, packed: number): void {
+    const cell = packed < PACK_SCALE ? packed : packed % PACK_SCALE;
+    const p2 = packed < PACK_SCALE ? 0 : Math.floor(packed / PACK_SCALE);
+    const n = this.cells.length;
+    this.cells[i] = cell & 0xffff;
+    const hv = (cell >>> HOLES_SHIFT) & HOLES_MASK;
+    let h = this.holes;
+    if (h === null && hv !== 0) h = this.holes = new Uint8Array(n);
+    if (h !== null) {
+      const was = h[i]!;
+      if (was !== hv) {
+        h[i] = hv;
+        this.holesCount += was === 0 ? 1 : hv === 0 ? -1 : 0;
+      }
+    }
+    let q = this.part2;
+    if (q === null && p2 !== 0) q = this.part2 = new Uint32Array(n);
+    if (q !== null) {
+      const was = q[i]!;
+      if (was !== p2) {
+        q[i] = p2;
+        this.part2Count += was === 0 ? 1 : p2 === 0 ? -1 : 0;
+      }
+    }
   }
 
   onCellChange(fn: StructureCellListener): () => void {
@@ -131,18 +230,135 @@ export class StructureGrid implements VoxelGrid {
     };
   }
 
-  /** Visit every non-air cell. Do not mutate the grid during iteration. */
-  forEachCell(fn: (x: number, y: number, z: number, cell: number) => void): void {
+  /** Visit every non-air cell with its packed value. Do not mutate the grid during iteration. */
+  forEachCell(fn: (x: number, y: number, z: number, packed: number) => void): void {
     const { sx, sy, sz, ox, oy, oz, cells } = this;
+    const layered = this.holes !== null || this.part2 !== null;
     let i = 0;
     for (let y = 0; y < sy; y++) {
       for (let z = 0; z < sz; z++) {
         for (let x = 0; x < sx; x++, i++) {
           const c = cells[i]!;
-          if (c !== AIR) fn(x + ox, y + oy, z + oz, c);
+          if (c !== AIR) fn(x + ox, y + oy, z + oz, layered ? this.packedAt(i) : c);
         }
       }
     }
+  }
+
+  /** True when the storage has a holes or second-part layer allocated (it may be all 0, see the file comment). */
+  get layered(): boolean {
+    return this.holes !== null || this.part2 !== null;
+  }
+
+  /**
+   * Dense copy of the three layers over the box [minX, minX+sx) x ... (cells outside the storage
+   * are AIR), index (x-minX) + (z-minZ)*sx + (y-minY)*sx*sz. A layer with no non-zero entry in the
+   * box is null. Structure records and mesh snapshots use it.
+   */
+  copyBox(minX: number, minY: number, minZ: number, sx: number, sy: number, sz: number): CellLayers {
+    const base = new Uint16Array(sx * sy * sz);
+    let holes: Uint8Array | null = null;
+    let part2: Uint32Array | null = null;
+    const srcH = this.holesCount > 0 ? this.holes : null;
+    const srcQ = this.part2Count > 0 ? this.part2 : null;
+    // Intersection of the box with the storage, in local cell coordinates.
+    const x0 = Math.max(minX, this.ox);
+    const x1 = Math.min(minX + sx, this.ox + this.sx);
+    const y0 = Math.max(minY, this.oy);
+    const y1 = Math.min(minY + sy, this.oy + this.sy);
+    const z0 = Math.max(minZ, this.oz);
+    const z1 = Math.min(minZ + sz, this.oz + this.sz);
+    if (x0 >= x1 || y0 >= y1 || z0 >= z1) return { base, holes, part2 };
+    const n = x1 - x0;
+    for (let y = y0; y < y1; y++) {
+      for (let z = z0; z < z1; z++) {
+        const from = x0 - this.ox + (z - this.oz) * this.sx + (y - this.oy) * this.sx * this.sz;
+        const to = x0 - minX + (z - minZ) * sx + (y - minY) * sx * sz;
+        base.set(this.cells.subarray(from, from + n), to);
+        if (srcH !== null && anyNonZero(srcH, from, from + n)) {
+          if (holes === null) holes = new Uint8Array(base.length);
+          holes.set(srcH.subarray(from, from + n), to);
+        }
+        if (srcQ !== null && anyNonZero(srcQ, from, from + n)) {
+          if (part2 === null) part2 = new Uint32Array(base.length);
+          part2.set(srcQ.subarray(from, from + n), to);
+        }
+      }
+    }
+    return { base, holes, part2 };
+  }
+
+  /**
+   * Replace the whole content with this box: the storage becomes exactly the box, the layers are
+   * copied in (a layer whose entries are all 0 is not allocated), count is recounted and version
+   * incremented. No change events. The network client loads structure records with it.
+   * Throws RangeError when a layer's length is not sx*sy*sz.
+   */
+  loadBox(minX: number, minY: number, minZ: number, sx: number, sy: number, sz: number, layers: CellLayers): void {
+    const n = sx * sy * sz;
+    if (
+      !(Number.isInteger(n) && n >= 0) ||
+      layers.base.length !== n ||
+      (layers.holes !== null && layers.holes.length !== n) ||
+      (layers.part2 !== null && layers.part2.length !== n)
+    ) {
+      throw new RangeError(`loadBox: layers do not match a ${sx}x${sy}x${sz} box`);
+    }
+    const holesCount = layers.holes !== null ? countNonZero(layers.holes) : 0;
+    const part2Count = layers.part2 !== null ? countNonZero(layers.part2) : 0;
+    this.cells = layers.base.slice();
+    this.holes = holesCount > 0 ? layers.holes!.slice() : null;
+    this.part2 = part2Count > 0 ? layers.part2!.slice() : null;
+    this.holesCount = holesCount;
+    this.part2Count = part2Count;
+    this.ox = minX;
+    this.oy = minY;
+    this.oz = minZ;
+    this.sx = sx;
+    this.sy = sy;
+    this.sz = sz;
+    this.count = countNonZero(this.cells);
+    this.version++;
+  }
+
+  /**
+   * The storage box and its layers by reference (a layer with no non-zero entry is null), for
+   * per-cell scans such as the ship physics. Valid until the next write to this grid.
+   */
+  storage(): GridStorage {
+    return {
+      ox: this.ox,
+      oy: this.oy,
+      oz: this.oz,
+      sx: this.sx,
+      sy: this.sy,
+      sz: this.sz,
+      layers: {
+        base: this.cells,
+        holes: this.holesCount > 0 ? this.holes : null,
+        part2: this.part2Count > 0 ? this.part2 : null,
+      },
+    };
+  }
+
+  /**
+   * TESTS ONLY: share `other`'s storage (layers by reference, box, count, version), so a test
+   * client can read the server's cells as they are now (tests/drive/client.ts).
+   */
+  adoptStorage(other: StructureGrid): void {
+    this.cells = other.cells;
+    this.holes = other.holes;
+    this.part2 = other.part2;
+    this.holesCount = other.holesCount;
+    this.part2Count = other.part2Count;
+    this.ox = other.ox;
+    this.oy = other.oy;
+    this.oz = other.oz;
+    this.sx = other.sx;
+    this.sy = other.sy;
+    this.sz = other.sz;
+    this.count = other.count;
+    this.version = other.version;
   }
 
   cellBounds(): CellBounds | null {
@@ -225,12 +441,22 @@ export class StructureGrid implements VoxelGrid {
     this.resize(x0, y0, z0, x1 - x0, y1 - y0, z1 - z0);
   }
 
-  /** Reallocate storage to the given box, keeping existing cells that fit. */
+  /**
+   * Reallocate storage to the given box, keeping existing cells that fit. Every layer with a
+   * non-zero entry is moved the same way; a layer whose count is 0 now is not carried over.
+   */
   resize(ox: number, oy: number, oz: number, sx: number, sy: number, sz: number): void {
-    const next = new Uint16Array(sx * sy * sz);
+    const n = sx * sy * sz;
+    const next = new Uint16Array(n);
     const old = this.cells;
+    const oldH = this.holesCount > 0 ? this.holes : null;
+    const oldQ = this.part2Count > 0 ? this.part2 : null;
+    const nextH = oldH !== null ? new Uint8Array(n) : null;
+    const nextQ = oldQ !== null ? new Uint32Array(n) : null;
     const { sx: osx, sy: osy, sz: osz, ox: oox, oy: ooy, oz: ooz } = this;
     let count = 0;
+    let holesCount = 0;
+    let part2Count = 0;
     for (let y = 0; y < osy; y++) {
       const ny = y + ooy - oy;
       if (ny < 0 || ny >= sy) continue;
@@ -240,15 +466,35 @@ export class StructureGrid implements VoxelGrid {
         for (let x = 0; x < osx; x++) {
           const nx = x + oox - ox;
           if (nx < 0 || nx >= sx) continue;
-          const c = old[x + z * osx + y * osx * osz]!;
+          const from = x + z * osx + y * osx * osz;
+          const c = old[from]!;
           if (c !== AIR) {
-            next[nx + nz * sx + ny * sx * sz] = c;
+            const to = nx + nz * sx + ny * sx * sz;
+            next[to] = c;
             count++;
+            if (oldH !== null) {
+              const h = oldH[from]!;
+              if (h !== 0) {
+                nextH![to] = h;
+                holesCount++;
+              }
+            }
+            if (oldQ !== null) {
+              const q = oldQ[from]!;
+              if (q !== 0) {
+                nextQ![to] = q;
+                part2Count++;
+              }
+            }
           }
         }
       }
     }
     this.cells = next;
+    this.holes = holesCount > 0 ? nextH : null;
+    this.part2 = part2Count > 0 ? nextQ : null;
+    this.holesCount = holesCount;
+    this.part2Count = part2Count;
     this.ox = ox;
     this.oy = oy;
     this.oz = oz;
@@ -391,4 +637,15 @@ export class StructureGrid implements VoxelGrid {
     }
     return { position: outPos, rotation: outRot };
   }
+}
+
+function countNonZero(a: Uint16Array | Uint8Array | Uint32Array): number {
+  let n = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== 0) n++;
+  return n;
+}
+
+function anyNonZero(a: Uint8Array | Uint32Array, from: number, to: number): boolean {
+  for (let i = from; i < to; i++) if (a[i] !== 0) return true;
+  return false;
 }

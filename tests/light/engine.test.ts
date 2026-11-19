@@ -243,9 +243,9 @@ describe('initChunk', () => {
     // Chunk 0 has a lamp-lit cave on its east edge; chunk 1 has a lamp right at its west edge.
     const make: ChunkFactory = (cx, cz) => {
       const c = makeFlatChunk(cx, cz, 60);
-      for (let y = 20; y < 24; y++) for (let lx = 0; lx < 16; lx++) for (let lz = 4; lz < 12; lz++) c.set(lx, y, lz, AIR);
-      if (cx === 0) c.set(13, 21, 8, LAMP);
-      if (cx === 1) c.set(0, 22, 6, TORCH);
+      for (let y = 20; y < 24; y++) for (let lx = 0; lx < 16; lx++) for (let lz = 4; lz < 12; lz++) c.cells[cellIndex(lx, y, lz)] = AIR;
+      if (cx === 0) c.cells[cellIndex(13, 21, 8)] = LAMP;
+      if (cx === 1) c.cells[cellIndex(0, 22, 6)] = TORCH;
       return c;
     };
     const { world, engine } = buildWorld([[0, 0]], make);

@@ -7,7 +7,8 @@
  * the server.
  */
 import { describe, expect, it } from 'vitest';
-import { makeCell } from '../../src/blocks/cell';
+import { AIR, makeCell, type CellLayers } from '../../src/blocks/cell';
+import { canonCell } from '../../src/blocks/shapes';
 import { B } from '../../src/blocks/defs';
 import { CHUNK_VOLUME } from '../../src/core/constants';
 import { ClientChunks, type ChunkSource } from '../../src/net/client/chunks';
@@ -17,10 +18,12 @@ import { emptyTickBatch, type TickBatchMsg } from '../../src/net/protocol';
 import { RELIABLE } from '../../src/net/transport';
 import { LightEngine } from '../../src/light/engine';
 import { Chunk } from '../../src/voxel/chunk';
+import { getPacked } from '../../src/voxel/parts';
 import { World } from '../../src/voxel/world';
 import { FlatGenerator } from '../../src/worldgen/generator';
 import { compareReplica, replicaDigest, serverDigest } from './digest';
 import { link, NetHarness, testMeta } from './harness';
+import { LOWER, slab, UPPER } from '../shapes';
 
 const gen = new FlatGenerator();
 const STONE = makeCell(B.STONE);
@@ -54,6 +57,9 @@ function batch(tick: number, fill: (b: TickBatchMsg) => void): TickBatchMsg {
 /** Index of a cell in a column. */
 const at = (lx: number, y: number, lz: number): number => lx | (lz << 4) | (y << 8);
 
+/** A column of full blocks as cell layers. */
+const full = (base: Uint16Array): CellLayers => ({ base, holes: null, part2: null });
+
 function pristineWith(edits: Array<[number, number]>): Uint16Array {
   const c = gen.generate(0, 0);
   for (const [i, v] of edits) c[i] = v;
@@ -83,6 +89,24 @@ describe('ClientChunks (package 5)', () => {
     expect(chunks.world.getCell(3, 40, 3)).toBe(STONE);
   });
 
+  it('queued deltas that overwrite a two-part cell with a full block, then air, leave no holes or second part behind', () => {
+    const src = new ManualSource();
+    const chunks = new ClientChunks(src, () => {});
+    chunks.snapshot(0, 0, 'pristine');
+    const two = canonCell(slab(B.STONE, LOWER), slab(B.PLANKS_OAK, UPPER));
+    const i = at(1, 40, 1);
+    const j = at(2, 40, 2);
+    chunks.delta(0, 0, [[i, two], [j, two]]);
+    chunks.delta(0, 0, [[i, GLASS]]); // the two-part cell becomes a full block
+    chunks.delta(0, 0, [[j, GLASS]]);
+    chunks.delta(0, 0, [[j, AIR]]); // and then air
+    src.answer();
+    const w = chunks.world;
+    expect(getPacked(w, 1, 40, 1)).toBe(GLASS);
+    expect(getPacked(w, 2, 40, 2)).toBe(AIR);
+    expect(w.getChunk(0, 0)!.layers()).toEqual(full(pristineWith([[i, GLASS], [j, AIR]])));
+  });
+
   it('pristine snapshot, unsubscribe, edit, resubscribe with cells, then the old generation finishes: it is dropped', () => {
     const src = new ManualSource();
     const chunks = new ClientChunks(src, () => {});
@@ -92,7 +116,7 @@ describe('ClientChunks (package 5)', () => {
     expect(chunks.has(0, 0)).toBe(false);
     expect(chunks.generating).toBe(0);
     const fresh = pristineWith([[at(5, 41, 5), GLASS]]);
-    chunks.snapshot(0, 0, fresh.slice());
+    chunks.snapshot(0, 0, full(fresh.slice()));
     expect(chunks.present(0, 0)).toBe(true);
     src.answer(); // the stale generation
     expect(chunks.staleResults).toBe(1);
@@ -122,7 +146,7 @@ describe('ClientChunks (package 5)', () => {
     chunks.snapshot(0, 0, 'pristine');
     chunks.delta(0, 0, [[at(1, 40, 1), STONE]]);
     const resend = pristineWith([[at(7, 42, 7), STONE]]);
-    chunks.snapshot(0, 0, resend.slice());
+    chunks.snapshot(0, 0, full(resend.slice()));
     expect(chunks.queuedDeltas()).toBe(0);
     expect(chunks.generating).toBe(0);
     src.answer();
@@ -130,7 +154,7 @@ describe('ClientChunks (package 5)', () => {
     expect(chunks.world.getChunk(0, 0)!.cells).toEqual(resend);
     // A cells resend of a present column replaces it too.
     chunks.delta(0, 0, [[at(1, 40, 1), GLASS]]);
-    chunks.snapshot(0, 0, resend.slice());
+    chunks.snapshot(0, 0, full(resend.slice()));
     expect(chunks.world.getChunk(0, 0)!.cells).toEqual(resend);
   });
 
@@ -198,7 +222,7 @@ describe('light on the replica (package 5)', () => {
     for (const [i, v] of cells) edited[i] = v;
     r.applyBatch(
       batch(5, (b) => {
-        b.snapshots.push({ cx: 0, cz: 0, cells: edited, glue: [] });
+        b.snapshots.push({ cx: 0, cz: 0, cells: full(edited), glue: [] });
         b.snapshots.push({ cx: 2, cz: 0, cells: 'pristine', glue: [] });
       }),
     );

@@ -65,12 +65,18 @@ import { ManualSignaller } from '../net/webrtc/manual';
 import type { BackendInfo, RenderBackend } from '../render/backend';
 import { createThreeBackend } from '../render/three/index';
 import type { WorldMeta } from '../save/codec';
+import { layoutProblem } from '../save/cells';
 import { openBestStorage } from '../save/idb';
 import type { SaveStorage } from '../save/storage';
 import { formatMessage } from '../sim/messages';
 import { Rotor, Ship } from '../structures/structure';
 import { chunkKey } from '../voxel/chunk';
 import { columnHash, gridHash } from '../voxel/fingerprint';
+import type { VoxelGrid } from '../voxel/grid';
+import { getPacked } from '../voxel/parts';
+import { cellPrimary, cellSecond, ID_MASK, makePart, PART_MASK, partHoles, STATE_MASK, STATE_SHIFT } from '../blocks/cell';
+import { HALF_FILL, MERGE_OK, mergeCells, mergeProblem } from '../blocks/shapes';
+import type { Dir } from '../core/dirs';
 import { createUi } from '../ui/index';
 import {
   DEFAULT_SETTINGS,
@@ -1564,6 +1570,14 @@ export class Game implements InputHost {
 
   // ================================================================== debug helpers
 
+  /** The replica's world (gridId 0) or structure grid with this id, for the debug helpers; null when there is none. */
+  private debugGrid(gridId: number): VoxelGrid | null {
+    const r = this.session?.replica ?? null;
+    if (r === null) return null;
+    if (gridId === 0) return r.world;
+    return r.structures().find((st) => st.id === gridId)?.grid ?? null;
+  }
+
   /** Scripting / debugging helpers exposed on window.__blocklands. */
   readonly debug = {
     /** Summary of the running state (used by the browser scripts). */
@@ -1679,7 +1693,7 @@ export class Game implements InputHost {
       for (let dz = -radius; dz <= radius; dz++) {
         for (let dx = -radius; dx <= radius; dx++) {
           const chunk = r.world.chunks.get(chunkKey(cx0 + dx, cz0 + dz));
-          if (chunk !== undefined) columns[`${cx0 + dx},${cz0 + dz}`] = columnHash(chunk.cells);
+          if (chunk !== undefined) columns[`${cx0 + dx},${cz0 + dz}`] = columnHash(chunk);
         }
       }
       const structures: Record<string, number> = {};
@@ -1716,8 +1730,45 @@ export class Game implements InputHost {
     },
     /** Any host command (see net/protocol.ts HostCommand). */
     hostCommand: (command: HostCommand): boolean => this.session?.hostCommand(command) ?? false,
-    /** World cell value at integer coordinates, as the replica holds it (-1 without a world). */
+    /** World cell value at integer coordinates, as the replica holds it (-1 without a world); `& 1023` is the first part's id. */
     cell: (x: number, y: number, z: number): number => this.session?.replica?.world.getCell(x, y, z) ?? -1,
+    /**
+     * Write a packed cell (blocks/cell.ts) into the world (gridId 0) or a structure: the host
+     * command SetCell (docs/SHAPES.md 14.1); the server checks it and refuses with a toast. False
+     * when the command could not be sent: no session, not the host, or a value whose layout no
+     * Cell can carry (layoutProblem; the encoder would throw). A valid layout with invalid content
+     * (overlapping parts, an unknown id) is sent, and the server refuses it with the toast.
+     */
+    setCell: (x: number, y: number, z: number, packed: number, gridId = 0): boolean => {
+      if (layoutProblem(packed) !== null) return false;
+      return this.session?.hostCommand({ kind: 'setCell', gridId, x, y, z, cell: packed }) ?? false;
+    },
+    /**
+     * Merge a half slab of `blockId` on side `dir` (a Dir: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z) into
+     * the cell, as the replica holds it now, and send the result with setCell. False when the slab
+     * does not fit there (it overlaps, or the cell would hold three parts) or nothing was sent.
+     */
+    slab: (x: number, y: number, z: number, blockId: number, dir: Dir, gridId = 0): boolean => {
+      const grid = this.debugGrid(gridId);
+      const side = HALF_FILL[dir];
+      if (grid === null || side === undefined) return false;
+      const cur = getPacked(grid, x, y, z);
+      const part = makePart(blockId, 0, ~side & 0xff);
+      if (mergeProblem(cur, part) !== MERGE_OK) return false;
+      return this.session?.hostCommand({ kind: 'setCell', gridId, x, y, z, cell: mergeCells(cur, part) }) ?? false;
+    },
+    /** The parts of a cell as the replica holds it: id, state and occupied octants (fill); null without that grid. */
+    parts: (x: number, y: number, z: number, gridId = 0): Array<{ id: number; state: number; fill: number }> | null => {
+      const grid = this.debugGrid(gridId);
+      if (grid === null) return null;
+      const packed = getPacked(grid, x, y, z);
+      const out: Array<{ id: number; state: number; fill: number }> = [];
+      for (const p of [cellPrimary(packed) & PART_MASK, cellSecond(packed)]) {
+        if ((p & ID_MASK) === 0) continue;
+        out.push({ id: p & ID_MASK, state: (p >>> STATE_SHIFT) & STATE_MASK, fill: ~partHoles(p) & 0xff });
+      }
+      return out;
+    },
     /**
      * Give a stack of `item` (a host command); resolves once it shows in the inventory, with its
      * hotbar slot selected when it went to the hotbar. False after 5 s without it.

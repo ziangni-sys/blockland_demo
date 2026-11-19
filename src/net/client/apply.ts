@@ -38,11 +38,16 @@
  *    MAX_STRUCTURE_BOX_CELLS (checked before any cell is written, so the grid's storage never
  *    grows with the coordinates in the input);
  *  - non-finite pivots, positions, rotations, rotor and helm fields (the codec passes f64 / f32
- *    through as they are).
+ *    through as they are);
+ *  - a cell that is not valid (blocks/shapes.ts cellProblem: unregistered id, holes on a block
+ *    that cannot be cut, overlapping or misordered parts ...) anywhere in the batch: snapshots,
+ *    chunk deltas, structure records and deltas, falling block entities, the parts carried by
+ *    blockBroken / blockPlaced (docs/SHAPES.md 13.2). The codec checked the layout only.
  * The cells of the chunk sections go to ReplicaColumns (chunks.ts generates pristine columns and
  * queues the deltas that arrive meanwhile); "the replica has a column" means it is subscribed.
  */
-import { AIR } from '../../blocks/cell';
+import { AIR, CELL_MULTI_BIT, HOLES_SHIFT, PACK_SCALE, type CellLayers } from '../../blocks/cell';
+import { cellProblem } from '../../blocks/shapes';
 import { CHUNK_SIZE, WORLD_HEIGHT } from '../../core/constants';
 import type { Dir } from '../../core/dirs';
 import { qfromAxisAngle, qmul, qrotate, quat, vec3, wrapAngle, type Quat, type Vec3 } from '../../core/math';
@@ -95,9 +100,9 @@ export interface ReplicaColumns {
   /** The column is subscribed (its snapshot applied, perhaps still generating). */
   has(cx: number, cz: number): boolean;
   unsubscribe(cx: number, cz: number): void;
-  /** A snapshot replaces the column: 'pristine' or its cells (handed over). */
-  snapshot(cx: number, cz: number, cells: 'pristine' | Uint16Array): void;
-  /** The cells of a delta of a subscribed column: [index, cell], index ascending. */
+  /** A snapshot replaces the column: 'pristine' or its cell layers (handed over). */
+  snapshot(cx: number, cz: number, cells: 'pristine' | CellLayers): void;
+  /** The cells of a delta of a subscribed column: [index, packed cell], index ascending. */
   delta(cx: number, cz: number, cells: ReadonlyArray<readonly [number, Cell]>): void;
 }
 
@@ -220,7 +225,8 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
   const columns = new Set<number>();
   for (const s of b.snapshots) {
     once(columns, chunkKey(s.cx, s.cz), `snapshot of column ${s.cx},${s.cz}`);
-    cols.snapshot(s.cx, s.cz, s.cells === 'pristine' ? 'pristine' : s.cells.slice());
+    if (s.cells !== 'pristine') checkVolume(s.cells, `snapshot of column ${s.cx},${s.cz}`);
+    cols.snapshot(s.cx, s.cz, s.cells === 'pristine' ? 'pristine' : copyLayers(s.cells));
     clearColumnGlue(state.worldGlue, s.cx, s.cz);
     for (const face of s.glue) setColumnGlue(state.worldGlue, s.cx, s.cz, face, true);
   }
@@ -229,6 +235,7 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
   for (const d of b.chunkDeltas) {
     once(columns, chunkKey(d.cx, d.cz), `delta of column ${d.cx},${d.cz}`);
     if (!cols.has(d.cx, d.cz)) throw new ReplicaError(`delta for column ${d.cx},${d.cz} the replica does not have`);
+    for (const [index, cell] of d.cells) checkCell(cell, `delta of column ${d.cx},${d.cz} at ${index}`);
     if (d.cells.length > 0) cols.delta(d.cx, d.cz, d.cells);
     for (const [face, added] of d.glue) setColumnGlue(state.worldGlue, d.cx, d.cz, face, added);
   }
@@ -257,6 +264,7 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
     const s = rs.structure;
     const g = s.grid;
     if (d.cells !== undefined) {
+      for (const [x, y, z, cell] of d.cells) checkCell(cell, `delta of structure ${d.id} at ${x},${y},${z}`);
       checkDeltaBox(g, d.cells, d.id);
       for (const [x, y, z, cell] of d.cells) g.setCell(x, y, z, cell);
     }
@@ -327,6 +335,7 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
     if (rec.id === state.ownEntityId) throw new ReplicaError(`spawn of the client's own entity ${rec.id}`);
     if (state.entities.has(rec.id)) throw new ReplicaError(`spawn of entity ${rec.id} the replica already has`);
     needCarrier(state, rec.carrierId, rec.id);
+    if (rec.kind === 'falling') checkCell(rec.cell, `falling block entity ${rec.id}`);
     state.entities.set(rec.id, entityFromRecord(rec, b.tick));
   }
   // 9. entity updates
@@ -358,6 +367,7 @@ export function applyBatch(state: ReplicaState, b: TickBatchMsg): void {
   state.private.events = [];
   if (b.private !== null) applyPrivate(state, b.private, b.tick);
   // 11. events
+  for (const e of b.events) if (e.type === 'blockBroken' || e.type === 'blockPlaced') checkCell(e.cell, `${e.type} event at ${e.x},${e.y},${e.z}`);
   state.events = b.events;
   // 12. globals
   if (b.globals !== null) applyGlobals(state, b.globals);
@@ -407,6 +417,35 @@ function setColumnGlue(glue: GlueStore, cx: number, cz: number, face: number, ad
   const dir = ((face >> 15) * 2) as Dir;
   if (added) glue.add(x, y, z, dir);
   else glue.remove(x, y, z, dir);
+}
+
+/** ReplicaError unless the packed cell is valid (cellProblem). */
+function checkCell(c: number, what: string): void {
+  const p = cellProblem(c);
+  if (p !== null) throw new ReplicaError(`${what}: ${p}`);
+}
+
+/**
+ * ReplicaError unless every cell of the volume is valid. The scan compares neighbours and calls
+ * cellProblem only where the value changes, so a column of full blocks costs one load and one
+ * compare per cell plus a table lookup per run.
+ */
+function checkVolume(l: CellLayers, what: string): void {
+  const { base, holes, part2 } = l;
+  const n = base.length;
+  let prev = -1;
+  for (let i = 0; i < n; i++) {
+    const q = part2 !== null ? part2[i]! : 0;
+    const v = holes === null && q === 0 ? base[i]! : (base[i]! | (holes !== null ? holes[i]! << HOLES_SHIFT : 0) | (q !== 0 ? CELL_MULTI_BIT : 0)) + q * PACK_SCALE;
+    if (v === prev) continue;
+    checkCell(v, `${what}, cell ${i}`);
+    prev = v;
+  }
+}
+
+/** Fresh copies of a volume's layers (the batch's arrays are not handed on). */
+function copyLayers(l: CellLayers): CellLayers {
+  return { base: l.base.slice(), holes: l.holes !== null ? l.holes.slice() : null, part2: l.part2 !== null ? l.part2.slice() : null };
 }
 
 function needStructure(state: ReplicaState, id: number): ReplicaStructure {
@@ -600,7 +639,8 @@ function spawnStructure(state: ReplicaState, rec: StructureRecord, tick: number)
   rs.rotorTick = tick;
   const s = rs.structure;
   const g = s.grid;
-  loadCells(g, rec);
+  checkVolume(rec.cells, `record of structure ${rec.id}`);
+  g.loadBox(rec.minX, rec.minY, rec.minZ, rec.sx, rec.sy, rec.sz, rec.cells);
   s.glue.clear();
   for (let i = 0; i < rec.glue.length; i += 4) s.glue.add(rec.glue[i]!, rec.glue[i + 1]!, rec.glue[i + 2]!, (rec.glue[i + 3]! * 2) as Dir);
   g.pivot.x = rec.pivot.x;
@@ -639,18 +679,6 @@ function spawnStructure(state: ReplicaState, rec: StructureRecord, tick: number)
     s.rudder = rec.rudder;
     s.helmsmanId = rec.helmsmanId;
   }
-}
-
-/** Replace a grid's cells with a record's box. */
-function loadCells(g: StructureGrid, rec: StructureRecord): void {
-  g.resize(0, 0, 0, 0, 0, 0);
-  if (rec.sx === 0) return;
-  g.resize(rec.minX, rec.minY, rec.minZ, rec.sx, rec.sy, rec.sz);
-  g.cells.set(rec.cells);
-  let n = 0;
-  for (let i = 0; i < rec.cells.length; i++) if (rec.cells[i] !== AIR) n++;
-  g.count = n;
-  g.version++;
 }
 
 function entityFromRecord(rec: EntityRecord, tick: number): ReplicaEntity {

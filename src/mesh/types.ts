@@ -15,8 +15,18 @@ export interface MeshInput {
   sx: number;
   sy: number;
   sz: number;
-  /** Padded cells, length px*py*pz. Margin cells outside known space should be AIR. */
+  /**
+   * Padded base layer (id + state of each cell's first part), length px*py*pz. Margin cells
+   * outside known space should be AIR.
+   */
   cells: Uint16Array;
+  /**
+   * Holes of each cell's first part, same layout as `cells` (docs/SHAPES.md 8.1). null = no cell
+   * of this box has holes. (Until the mesher reads it, partial cells mesh as full blocks.)
+   */
+  holes: Uint8Array | null;
+  /** Each cell's second part, same layout as `cells` (0 = none). null = no two-part cell in this box. */
+  part2: Uint32Array | null;
   /**
    * Padded light bytes (sky << 4 | block), same layout as `cells`.
    * null = no voxel light available (structures): the mesher emits full sky light (255),
@@ -89,6 +99,15 @@ export function meshTransferables(m: MeshData): ArrayBuffer[] {
       g.indices.buffer as ArrayBuffer,
     );
   }
+  return out;
+}
+
+/** The buffers of a MeshInput (for the postMessage transfer list of a meshing job): every layer that is not null. */
+export function meshInputTransferables(input: MeshInput): ArrayBuffer[] {
+  const out: ArrayBuffer[] = [input.cells.buffer as ArrayBuffer];
+  if (input.holes !== null) out.push(input.holes.buffer as ArrayBuffer);
+  if (input.part2 !== null) out.push(input.part2.buffer as ArrayBuffer);
+  if (input.light !== null) out.push(input.light.buffer as ArrayBuffer);
   return out;
 }
 

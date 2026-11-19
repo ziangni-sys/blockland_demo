@@ -72,6 +72,36 @@ export function isDryCell(h: HullInfo, x: number, y: number, z: number): boolean
 }
 
 /**
+ * Is the octant at half-cell coordinates (hx, hy, hz) (integers: local coordinates times 2,
+ * floored) a dry air pocket of the hull? Entities' liquid sampling, bucket rays, explosions and
+ * the camera use it. Integer arguments only (docs/SHAPES.md 4.4, 12.1). Until the hull analysis
+ * works per octant, an octant is dry when its whole cell is (isDryCell).
+ */
+export function isDryHalf(h: HullInfo, hx: number, hy: number, hz: number): boolean {
+  return isDryCell(h, hx >> 1, hy >> 1, hz >> 1);
+}
+
+/** Bilge and sealed cells of a hull (x,y,z triples, local coordinates): the cells to refill after assembly. */
+export function hullCavityCells(hull: HullInfo): Int32Array {
+  const n = hull.bilgeCount + hull.sealedCount;
+  const out = new Int32Array(n * 3);
+  const { sx, sz, kind } = hull;
+  const layer = sx * sz;
+  let o = 0;
+  for (let i = 0; i < kind.length && o < out.length; i++) {
+    const k = kind[i]!;
+    if (k !== HULL_BILGE && k !== HULL_SEALED) continue;
+    const y = Math.floor(i / layer);
+    const rem = i - y * layer;
+    const z = Math.floor(rem / sx);
+    out[o++] = hull.ox + rem - z * sx;
+    out[o++] = hull.oy + y;
+    out[o++] = hull.oz + z;
+  }
+  return out;
+}
+
+/**
  * Does this local cell displace water (contributes buoyancy when submerged)?
  * Solid hull cells always; cavities as in isDryCell.
  */

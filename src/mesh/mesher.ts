@@ -119,9 +119,18 @@ function checkInput(input: MeshInput): void {
   if (input.cells.length !== n) {
     throw new RangeError(`mesh input: cells has ${input.cells.length} entries, expected ${n}`);
   }
+  if (input.holes !== null && input.holes.length !== n) {
+    throw new RangeError(`mesh input: holes has ${input.holes.length} entries, expected ${n}`);
+  }
+  if (input.part2 !== null && input.part2.length !== n) {
+    throw new RangeError(`mesh input: part2 has ${input.part2.length} entries, expected ${n}`);
+  }
   if (input.light !== null && input.light.length !== n) {
     throw new RangeError(`mesh input: light has ${input.light.length} entries, expected ${n}`);
   }
+  // The holes and second-part layers are checked but not read yet: until the shape-aware mesher
+  // (docs/SHAPES.md 8.2) lands, a cell with parts meshes as a full block of its first part's
+  // material (16.3).
 }
 
 /**

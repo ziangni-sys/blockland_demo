@@ -5,7 +5,8 @@
  *  - WORLD CELLS (world.onCellChange) and WORLD GLUE (worldGlue.onChange), by column: the final
  *    value of every changed cell index and the final state of every changed glue face. A cell
  *    that changes several times keeps only its last value; a face glued and unglued ends
- *    "removed". Cells that arrive with a chunk (generation, restore) do not pass through setCell
+ *    "removed". The values are the listeners' packed cells (both parts), so a change of only the
+ *    holes or only the second part is captured too. Cells that arrive with a chunk (generation, restore) do not pass through setCell
  *    and are not changes: the column's content is what it was (section 6). Every change also
  *    bumps the column's version, which keys the shared snapshot bytes.
  *  - STRUCTURES. sync() compares structures.all() with what it saw last (the reference first,
@@ -36,7 +37,7 @@ import { chunkKey } from '../../voxel/chunk';
 export interface ColumnChanges {
   readonly cx: number;
   readonly cz: number;
-  /** Chunk cell index (lx | lz<<4 | y<<8) -> its final cell. */
+  /** Chunk cell index (lx | lz<<4 | y<<8) -> its final cell (packed: both parts, blocks/cell.ts). */
   readonly cells: Map<number, number>;
   /** Chunk glue face (lx | lz<<4 | y<<8 | axis<<15, canonical end in the column) -> glued at the end. */
   readonly glue: Map<number, boolean>;
@@ -44,7 +45,7 @@ export interface ColumnChanges {
 
 /** What changed in one structure since the last take (local cells). */
 export interface StructureChanges {
-  /** "x,y,z" -> [x, y, z, final cell]. */
+  /** "x,y,z" -> [x, y, z, final cell (packed)]. */
   readonly cells: Map<string, [number, number, number, number]>;
   /** "x,y,z,axis" -> [x, y, z, axis, glued at the end] (canonical end cell). */
   readonly glue: Map<string, [number, number, number, Axis, boolean]>;

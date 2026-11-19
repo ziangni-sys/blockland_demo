@@ -9,12 +9,18 @@
  */
 import { CHUNK_MASK, CHUNK_SHIFT, SECTION_SIZE, SECTIONS_PER_CHUNK, WORLD_HEIGHT } from '../core/constants';
 import { quat, vec3, type Quat, type Vec3 } from '../core/math';
-import { AIR, ID_MASK } from '../blocks/cell';
+import { AIR, CELL_MULTI_BIT, FULL_LIMIT, HOLES_SHIFT, ID_MASK, PACK_SCALE } from '../blocks/cell';
 import { CELL_BELOW_WORLD, CELL_UNLOADED } from '../blocks/defs';
 import { Chunk, chunkKey, sectionKey } from './chunk';
 import { SET_DEFAULT, type CellBounds, type VoxelGrid } from './grid';
+import { checkCanonical } from './parts';
 
-/** Called after a world cell changed. `flags` are the SET_* flags passed to setCell. */
+/**
+ * Called after a world cell changed. `oldCell` and `newCell` are PACKED cells (blocks/cell.ts:
+ * both parts); a change of only the holes or only the second part fires too. `flags` are the
+ * SET_* flags passed to setCell. Read the current state from the world, not from the arguments
+ * (docs/LESSONS.md: 光照引擎必须是第一个监听器才正确).
+ */
 export type CellChangeListener = (
   x: number,
   y: number,
@@ -226,37 +232,68 @@ export class World implements VoxelGrid {
   // ------------------------------------------------------------ cells
 
   /**
-   * Cell at integer world coordinates.
-   * y < 0 -> deeprock; y >= WORLD_HEIGHT -> AIR; unloaded chunk -> CELL_UNLOADED (solid).
+   * Cell value at integer world coordinates: the first part plus CELL_MULTI_BIT when the cell has
+   * a second part (< 2^25; read the second part with getPart2, or both with voxel/parts.ts
+   * getPacked). y < 0 -> deeprock; y >= WORLD_HEIGHT -> AIR; unloaded chunk -> CELL_UNLOADED (solid).
    */
   getCell(x: number, y: number, z: number): number {
     if (y < 0) return CELL_BELOW_WORLD;
     if (y >= WORLD_HEIGHT) return AIR;
     const c = this.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
     if (!c) return CELL_UNLOADED;
-    return c.cells[(x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4) | (y << 8)]!;
+    const i = (x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4) | (y << 8);
+    const h = c.holes;
+    const q = c.part2;
+    if (h === null && q === null) return c.cells[i]!;
+    return c.cells[i]! | (h !== null ? h[i]! << HOLES_SHIFT : 0) | (q !== null && q[i] !== 0 ? CELL_MULTI_BIT : 0);
   }
-  /** Block id at integer world coordinates. */
+  /** Second part's value at integer world coordinates; 0 when there is none, outside the world or unloaded. */
+  getPart2(x: number, y: number, z: number): number {
+    if (y < 0 || y >= WORLD_HEIGHT) return 0;
+    const c = this.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
+    if (!c || c.part2 === null) return 0;
+    return c.part2[(x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4) | (y << 8)]!;
+  }
+  /** Block id of the first part at integer world coordinates. */
   getId(x: number, y: number, z: number): number {
     return this.getCell(x, y, z) & ID_MASK;
   }
 
   /**
-   * Write a cell and notify listeners. Returns false (and does nothing) when out of the
-   * vertical range, in an unloaded chunk, or when the cell is unchanged.
+   * Write a packed cell (both parts, blocks/cell.ts) and notify listeners once. Returns false
+   * (and does nothing) when out of the vertical range, in an unloaded chunk, or when the cell is
+   * unchanged. A value below FULL_LIMIT (a full block) is never checked, whatever layers the
+   * column has (docs/SHAPES.md 1.3, 3.4): in a column without holes / second-part layers it takes
+   * the M1 path, in one with layers it also clears the cell's entries there. Any value >= FULL_LIMIT
+   * must be in canonical form (I1-I6 of docs/SHAPES.md 1.3), else RangeError and nothing changes.
    */
-  setCell(x: number, y: number, z: number, cell: number, flags: number = SET_DEFAULT): boolean {
+  setCell(x: number, y: number, z: number, packed: number, flags: number = SET_DEFAULT): boolean {
     if (y < 0 || y >= WORLD_HEIGHT) return false;
     const c = this.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
     if (!c) return false;
     const i = (x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4) | (y << 8);
-    const old = c.cells[i]!;
-    if (old === cell) return false;
-    c.cells[i] = cell;
+    let old: number;
+    if (packed < FULL_LIMIT && c.holes === null && c.part2 === null) {
+      old = c.cells[i]!;
+      if (old === packed) return false;
+      c.cells[i] = packed;
+    } else {
+      const full = packed < FULL_LIMIT; // false for NaN too, which checkCanonical refuses
+      if (!full) checkCanonical(packed);
+      const h = c.holes;
+      const q = c.part2;
+      const p2 = q !== null ? q[i]! : 0;
+      old = (c.cells[i]! | (h !== null ? h[i]! << HOLES_SHIFT : 0) | (p2 !== 0 ? CELL_MULTI_BIT : 0)) + p2 * PACK_SCALE;
+      if (old === packed) return false;
+      // A full block stores like the M1 path (16 bits), clearing the holes and second part.
+      if (full) c.writeCell(i, packed & 0xffff, 0);
+      else if (packed < PACK_SCALE) c.writeCell(i, packed, 0);
+      else c.writeCell(i, packed % PACK_SCALE, Math.floor(packed / PACK_SCALE));
+    }
     c.modified = true;
     this.markDirty(x, y, z);
     const ls = this.listeners;
-    for (let k = 0; k < ls.length; k++) ls[k]!(x, y, z, old, cell, flags);
+    for (let k = 0; k < ls.length; k++) ls[k]!(x, y, z, old, packed, flags);
     return true;
   }
 

@@ -24,10 +24,12 @@
  * Pure module (simulation layer): no DOM, no clock, no randomness.
  */
 import { CHUNK_VOLUME, WORLD_HEIGHT } from '../core/constants';
-import { MAX_BLOCK_ID } from '../blocks/cell';
+import { MAX_BLOCK_ID, type CellLayers } from '../blocks/cell';
+import { cellProblem } from '../blocks/shapes';
 import type { Chunk } from '../voxel/chunk';
 import type { ScheduledTick } from '../voxel/world';
 import { ByteReader, ByteWriter, SaveFormatError, isUint8Array } from './bytes';
+import { readCellVolume, volumeCost, writeCellVolume } from './cells';
 import { crc32 } from './crc32';
 
 /**
@@ -36,8 +38,10 @@ import { crc32 } from './crc32';
  * opened (they stay listed so the player can delete them); there is no migration code.
  * 2: the player's off-hand slot; glue that outlives one side of its face; no hub-glue flag.
  * 3: players saved by PlayerKey in their own blob (offline ones too); world rules in the sim blob.
+ * 4: cells with holes and second parts (docs/SHAPES.md 13.3): chunks are a CellVolume of Cells,
+ *    structures write each cell as a Cell (STRUCTURES_FORMAT 4), falling blocks a varuint (entities 3).
  */
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
 /**
  * Intact data written by a newer build of the game (its format version is above
@@ -162,45 +166,26 @@ export function openBlob(bytes: Uint8Array, magic: string, label: string = magic
 
 // ====================================================================== chunks
 //
-// Payload v1:
+// Payload (SAVE_VERSION 4):
 //   varint cx, varint cz
-//   u8 encoding
-//   encoding 0 (palette RLE):
-//     varuint P (1..CHUNK_VOLUME), P x u16 palette (first-appearance order)
-//     tokens until all CHUNK_VOLUME cells are covered, in cell index order
-//     (lx | lz<<4 | y<<8, so each y layer of 256 cells is contiguous):
-//       varuint token = (runLength - 1) << B | paletteIndex,  B = bit length of (P - 1)
-//   encoding 1 (raw):
-//     u16Array of exactly CHUNK_VOLUME cells
+//   CellVolume(CHUNK_VOLUME) (save/cells.ts, the protocol's layout), cell index order
+//   lx | lz<<4 | y<<8: u8 enc; 0 = palette of Cells + run tokens, 1 = raw Cells.
 //
-// Packing the palette index into the run token makes short runs (ore specks, tree trunks,
-// cave walls) cost one byte instead of two, and is never larger than a separate index +
-// length pair. The encoder computes the exact RLE size and falls back to raw whenever RLE
-// would not be smaller, so an incompressible chunk costs 64 KB + at most 19 bytes of framing.
-// Light and heightmap are not stored: they are recomputed on load.
+// The palette packs its index into the run token, so short runs (ore specks, tree trunks, cave
+// walls) cost one byte; the encoder takes the palette form only when it is strictly smaller than
+// the raw form. A chunk of full blocks costs what it did with the u16 palette of format 3, minus
+// 2 bytes per palette entry plus the entry's Cell size. Light and heightmap are not stored: they
+// are recomputed on load.
 
-const CHUNK_RLE = 0;
-const CHUNK_RAW = 1;
-/** Raw payload size: u16Array count prefix (3 bytes for 32768) + 2 bytes per cell. */
-const RAW_CELL_BYTES = 3 + CHUNK_VOLUME * 2;
 /** chunkKey() supports chunk coordinates in [-CHUNK_COORD_LIMIT, CHUNK_COORD_LIMIT). */
 const CHUNK_COORD_LIMIT = 0x80000;
 
-/** Result of decodeChunk: build the Chunk with `new Chunk(cx, cz, cells)`. */
+/** Result of decodeChunk: build the Chunk with `new Chunk(cx, cz, layers.base, light, layers.holes, layers.part2)`. */
 export interface DecodedChunk {
   cx: number;
   cz: number;
-  /** Fresh array of CHUNK_VOLUME cells, index = lx | lz<<4 | y<<8. */
-  cells: Uint16Array;
-}
-
-function varuintSize(v: number): number {
-  return v < 0x80 ? 1 : v < 0x4000 ? 2 : v < 0x200000 ? 3 : v < 0x10000000 ? 4 : 5;
-}
-
-/** Number of bits needed to store values 0..n (0 for n = 0). */
-function bitLength(n: number): number {
-  return n === 0 ? 0 : 32 - Math.clz32(n);
+  /** Fresh layers of CHUNK_VOLUME cells, index = lx | lz<<4 | y<<8; holes / part2 null when unused. */
+  layers: CellLayers;
 }
 
 function checkChunkCoord(v: number, name: string): void {
@@ -209,87 +194,22 @@ function checkChunkCoord(v: number, name: string): void {
   }
 }
 
-/**
- * Palettes larger than this go raw without finishing the scan. Real chunks hold a few dozen
- * distinct cells; only synthetic noise gets here, where building a huge palette map would
- * cost milliseconds for (at best) a marginal gain. Choosing raw is always a valid encoding.
- */
-const PALETTE_BAIL = 4096;
-
 /** Serialise a chunk's cells (not light). Typical terrain: a few hundred bytes to a few KB. */
 export function encodeChunk(chunk: Chunk): Uint8Array {
-  const cells = chunk.cells;
-  // Local copy: an imported binding can be a live-binding getter in dev/test transforms,
-  // which would sit inside the 32768-iteration loop below.
-  const n = CHUNK_VOLUME;
   checkChunkCoord(chunk.cx, 'cx');
   checkChunkCoord(chunk.cz, 'cz');
-  if (cells.length !== n) throw new RangeError(`chunk has ${cells.length} cells, expected ${n}`);
-
-  // The only pass over the cells: collect runs (palette index + length) and the palette in
-  // first-appearance order. The per-cell work is one load and one compare; the map is only
-  // touched at run boundaries. Bail out to raw as soon as even a 1-byte-per-run lower bound
-  // cannot beat it (noise-like chunks).
-  const paletteIndex = new Map<number, number>();
-  const palette: number[] = [];
-  const runIndex: number[] = [];
-  const runLength: number[] = [];
-  let prev = cells[0]!;
-  let prevIndex = 0;
-  paletteIndex.set(prev, 0);
-  palette.push(prev);
-  let start = 0;
-  let rle = true;
-  for (let i = 1; i < n; i++) {
-    const v = cells[i]!;
-    if (v === prev) continue;
-    runIndex.push(prevIndex);
-    runLength.push(i - start);
-    start = i;
-    prev = v;
-    let index = paletteIndex.get(v);
-    if (index === undefined) {
-      index = palette.length;
-      paletteIndex.set(v, index);
-      palette.push(v);
-      if (index >= PALETTE_BAIL) {
-        rle = false;
-        break;
-      }
-    }
-    prevIndex = index;
-    if (runIndex.length + palette.length * 2 >= RAW_CELL_BYTES) {
-      rle = false;
-      break;
-    }
-  }
-
-  let rleBytes = 0;
-  const bits = bitLength(palette.length - 1);
-  if (rle) {
-    runIndex.push(prevIndex);
-    runLength.push(n - start);
-    // Exact RLE size, so the choice below is never worse than raw.
-    rleBytes = varuintSize(palette.length) + palette.length * 2;
-    for (let k = 0; k < runIndex.length; k++) rleBytes += varuintSize(((runLength[k]! - 1) << bits) | runIndex[k]!);
-    rle = rleBytes < RAW_CELL_BYTES;
-  }
-
-  const w = beginBlob(BLOB_MAGIC.chunk, 32 + (rle ? rleBytes : RAW_CELL_BYTES));
+  const layers = chunk.layers();
+  if (layers.base.length !== CHUNK_VOLUME) throw new RangeError(`chunk has ${layers.base.length} cells, expected ${CHUNK_VOLUME}`);
+  const w = beginBlob(BLOB_MAGIC.chunk, 4096);
   w.varint(chunk.cx).varint(chunk.cz);
-  if (rle) {
-    w.u8(CHUNK_RLE).varuint(palette.length);
-    for (let k = 0; k < palette.length; k++) w.u16(palette[k]!);
-    for (let k = 0; k < runIndex.length; k++) w.varuint(((runLength[k]! - 1) << bits) | runIndex[k]!);
-  } else {
-    w.u8(CHUNK_RAW).u16Array(cells);
-  }
+  writeCellVolume(w, layers);
   return sealBlob(w);
 }
 
 /**
- * Inverse of encodeChunk. Throws SaveFormatError on malformed or corrupted data and
- * SaveVersionError (a SaveFormatError) on data from a newer build.
+ * Inverse of encodeChunk. Throws SaveFormatError on malformed or corrupted data, including a
+ * cell that is not valid (cellProblem: unregistered id, holes on a block that cannot be cut,
+ * overlapping parts ...), and SaveVersionError (a SaveFormatError) on data from a newer build.
  */
 export function decodeChunk(bytes: Uint8Array): DecodedChunk {
   const { reader: r } = openBlob(bytes, BLOB_MAGIC.chunk, 'chunk');
@@ -298,38 +218,11 @@ export function decodeChunk(bytes: Uint8Array): DecodedChunk {
   if (cx < -CHUNK_COORD_LIMIT || cx >= CHUNK_COORD_LIMIT || cz < -CHUNK_COORD_LIMIT || cz >= CHUNK_COORD_LIMIT) {
     r.fail(`chunk coordinates out of range (${cx}, ${cz})`);
   }
-  const encoding = r.u8();
-  let cells: Uint16Array;
-  if (encoding === CHUNK_RLE) {
-    const volume = CHUNK_VOLUME; // local: see encodeChunk
-    const n = r.count(2);
-    if (n < 1 || n > volume) r.fail(`invalid palette size ${n}`);
-    const palette = new Uint16Array(n);
-    for (let k = 0; k < n; k++) palette[k] = r.u16();
-    const bits = bitLength(n - 1);
-    const mask = (1 << bits) - 1;
-    const tokenLimit = volume * 2 ** bits; // tokens are below this, so bit ops are safe
-    cells = new Uint16Array(volume);
-    let filled = 0;
-    while (filled < volume) {
-      const token = r.varuint();
-      if (token >= tokenLimit) r.fail(`run token ${token} out of range`);
-      const index = token & mask;
-      const len = (token >>> bits) + 1;
-      if (index >= n) r.fail(`palette index ${index} out of range (palette has ${n})`);
-      if (len > volume - filled) r.fail(`run of ${len} cells overflows the chunk (${filled} filled)`);
-      const v = palette[index]!;
-      if (v !== 0) cells.fill(v, filled, filled + len); // fresh array is already air
-      filled += len;
-    }
-  } else if (encoding === CHUNK_RAW) {
-    cells = r.u16Array();
-    if (cells.length !== CHUNK_VOLUME) r.fail(`raw chunk has ${cells.length} cells, expected ${CHUNK_VOLUME}`);
-  } else {
-    return r.fail(`unknown chunk encoding ${encoding}`);
-  }
+  // The cell count is fixed, so the budget is one chunk with all three layers. Every palette
+  // entry (each raw cell in the raw form) passes cellProblem as it is read.
+  const layers = readCellVolume(r, CHUNK_VOLUME, { cells: volumeCost(CHUNK_VOLUME, true, true) }, cellProblem);
   r.expectEnd();
-  return { cx, cz, cells };
+  return { cx, cz, layers };
 }
 
 // ====================================================================== scheduled ticks

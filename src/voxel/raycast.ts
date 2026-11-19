@@ -20,7 +20,7 @@
 import { WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, NX, NY, NZ, PX, PY, PZ, nearestDir, opposite, type Dir } from '../core/dirs';
 import { vec3, type Vec3 } from '../core/math';
-import { AIR, ID_MASK, cellState, isLiquidSource } from '../blocks/cell';
+import { AIR, CELL_MULTI_BIT, ID_MASK, PACK_SCALE, PART_MASK, cellState, isLiquidSource } from '../blocks/cell';
 import { B } from '../blocks/defs';
 import { LIQUID } from '../blocks/registry';
 import type { VoxelGrid } from './grid';
@@ -38,8 +38,18 @@ export interface GridHit {
    * dominant local direction (an origin exactly on a face, moving in, reports that face).
    */
   face: Dir;
-  /** The cell value that matched. */
+  /**
+   * The octant hit, 0..7 (docs/SHAPES.md 6.1). Until the octant-level ray lands it is always 0
+   * (the ray hits whole cells).
+   */
+  octant: number;
+  /** The whole content of the cell hit: its PACKED cell (both parts, blocks/cell.ts); Target.cell carries it. */
   cell: number;
+  /**
+   * The part hit: partAt(cell, octant). Until the octant-level ray lands it is the first part
+   * (the cell value without CELL_MULTI_BIT).
+   */
+  part: number;
   /** Distance along the world ray to the entry point (0 when starting inside the cell). */
   dist: number;
   /** World-space hit point (origin + dir * dist). */
@@ -295,6 +305,7 @@ export function raycastGrid(
 
   for (;;) {
     const cell = grid.getCell(cx, cy, cz);
+    // The predicate reads the cell value (ids only); the hit carries the whole packed cell.
     if (pred(cell)) {
       return {
         grid,
@@ -302,7 +313,9 @@ export function raycastGrid(
         y: cy,
         z: cz,
         face,
-        cell,
+        octant: 0,
+        cell: cell < CELL_MULTI_BIT ? cell : cell + grid.getPart2(cx, cy, cz) * PACK_SCALE,
+        part: cell & PART_MASK,
         dist: t,
         point: vec3(origin.x + dir.x * t, origin.y + dir.y * t, origin.z + dir.z * t),
       };

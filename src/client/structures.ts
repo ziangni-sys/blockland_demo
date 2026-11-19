@@ -11,7 +11,7 @@
 import { quat, vec3, type Quat, type Vec3 } from '../core/math';
 import { Mesher } from '../mesh/mesher';
 import { snapshotStructure } from '../mesh/snapshot';
-import type { MeshData, MeshRequest, MeshResponse } from '../mesh/types';
+import { meshInputTransferables, type MeshData, type MeshRequest, type MeshResponse } from '../mesh/types';
 import type { RenderBackend, StructurePose } from '../render/backend';
 import type { ClientReplica } from '../net/client/replica';
 import { dryMask, type HullInfo } from '../structures/hull';
@@ -133,7 +133,7 @@ export class StructureRenderer {
       rec.jobVersion = version;
       const accepted = pool.submit(
         (id): MeshRequest => ({ type: 'mesh', id, input }),
-        [input.cells.buffer as ArrayBuffer],
+        meshInputTransferables(input),
         (res) => {
           if (this.disposed || this.recs.get(s.id) !== rec) return;
           rec.jobVersion = -1;

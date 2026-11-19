@@ -368,16 +368,8 @@ export class LaggedClient implements BodyHost {
       list.push(rep);
       const sg = rec.s.grid;
       const g = rep.grid;
-      // Shared cells: the server's storage as it is now.
-      g.cells = sg.cells;
-      g.ox = sg.ox;
-      g.oy = sg.oy;
-      g.oz = sg.oz;
-      g.sx = sg.sx;
-      g.sy = sg.sy;
-      g.sz = sg.sz;
-      g.count = sg.count;
-      g.version = sg.version;
+      // Shared cells: the server's storage as it is now (all three layers).
+      g.adoptStorage(sg);
       rep.hull = (rec.s as { hull?: HullInfo | null }).hull ?? null;
       // Lagged pose.
       const pr = prev.find((r) => r.s.id === rec.s.id) ?? rec;

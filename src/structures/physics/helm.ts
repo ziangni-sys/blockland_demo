@@ -17,9 +17,12 @@ export function cellFacing(cell: number): Dir {
 /**
  * First helm cell in a deterministic scan of the grid storage (y, then z, then x ascending).
  * Writes its coordinates to `out` and returns the cell, or AIR when the grid has no helm.
+ * Only the base layer is read: a helm cannot be cut and never shares its cell, so a helm cell is
+ * always a full block whose whole value is in the base layer.
  */
 export function findFirstHelm(g: StructureGrid, out: Vec3): number {
-  const { sx, sy, sz, ox, oy, oz, cells } = g;
+  const { sx, sy, sz, ox, oy, oz, layers } = g.storage();
+  const cells = layers.base;
   let i = 0;
   for (let y = 0; y < sy; y++) {
     for (let z = 0; z < sz; z++) {

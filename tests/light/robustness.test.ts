@@ -15,7 +15,7 @@ import { B } from '../../src/blocks/defs';
 import { SOLID } from '../../src/blocks/registry';
 import { Rng } from '../../src/core/rng';
 import { LightEngine } from '../../src/light/engine';
-import { Chunk, chunkKey } from '../../src/voxel/chunk';
+import { Chunk, chunkKey, cellIndex } from '../../src/voxel/chunk';
 import { World } from '../../src/voxel/world';
 import { describeMismatches, diffAgainstReference, heightmapErrors, lightSnapshot } from './reference';
 import { makeFlatChunk, makeTerrainChunk } from './terrain';
@@ -130,7 +130,7 @@ describe('chunks leaving the world and re-initialisation (no unload hook)', () =
     engine.attach();
     for (let cx = 0; cx <= 2; cx++) {
       const c = makeFlatChunk(cx, 0, 60);
-      for (let lx = 0; lx < 16; lx++) c.set(lx, 30, 8, AIR);
+      for (let lx = 0; lx < 16; lx++) c.cells[cellIndex(lx, 30, 8)] = AIR;
       addLit(world, engine, c);
     }
     return { world, engine };
@@ -167,7 +167,7 @@ describe('chunks leaving the world and re-initialisation (no unload hook)', () =
     drain(engine);
     // The world swaps chunk 1 for one without the lamp, without any unload in between.
     const fresh = new Chunk(1, 0, world.getChunk(1, 0)!.cells.slice());
-    fresh.set(4, 30, 8, AIR);
+    fresh.cells[cellIndex(4, 30, 8)] = AIR;
     addLit(world, engine, fresh);
     drain(engine);
     expect(world.getBlockLight(15, 30, 8)).toBe(0);
@@ -201,9 +201,9 @@ describe('chunks leaving the world and re-initialisation (no unload hook)', () =
     expect(world.getBlockLight(15, 30, 8)).toBe(10);
     expect(world.getBlockLight(32, 30, 8)).toBe(3);
     // Bypass the hook: move the lamp 8 cells east and open a side passage along the border.
-    c.set(4, 30, 8, AIR);
-    c.set(12, 30, 8, LAMP);
-    for (let lz = 8; lz <= 12; lz++) c.set(15, 31, lz, AIR);
+    c.cells[cellIndex(4, 30, 8)] = AIR;
+    c.cells[cellIndex(12, 30, 8)] = LAMP;
+    for (let lz = 8; lz <= 12; lz++) c.cells[cellIndex(15, 31, lz)] = AIR;
     engine.initChunk(c);
     drain(engine);
     expectConsistent(world, 're-initialised');
@@ -250,7 +250,7 @@ describe('chunks leaving the world and re-initialisation (no unload hook)', () =
         const v = present[rng.int(0, present.length - 1)]!;
         if (world.getChunk(v.cx, v.cz) === v) {
           if (rng.chance(0.5)) {
-            for (let j = 0; j < 6; j++) v.set(rng.int(0, 15), rng.int(20, 80), rng.int(0, 15), CELLS[rng.int(0, CELLS.length - 1)]!);
+            for (let j = 0; j < 6; j++) v.cells[cellIndex(rng.int(0, 15), rng.int(20, 80), rng.int(0, 15))] = CELLS[rng.int(0, CELLS.length - 1)]!;
           }
           engine.initChunk(v);
           reinits++;

@@ -24,7 +24,8 @@
  * LightEngine.initChunk). Removing a column is only World.removeChunk: the light engine notices
  * missing chunks itself (light/engine.ts "WHICH CHUNKS EXIST").
  */
-import { CHUNK_SIZE } from '../../core/constants';
+import { CHUNK_SIZE, CHUNK_VOLUME } from '../../core/constants';
+import { HOLES_MASK, HOLES_SHIFT, PACK_SCALE, type CellLayers } from '../../blocks/cell';
 import { Chunk, chunkKey } from '../../voxel/chunk';
 import { World } from '../../voxel/world';
 import type { Cell } from '../protocol';
@@ -33,8 +34,8 @@ import type { ReplicaColumns } from './apply';
 /**
  * Builds pristine columns (the generator named by Welcome's GeneratorSpec): the terrain worker pool
  * in the browser, a synchronous generator in tests. `done` must be called exactly once, now or
- * later, with the column's cells (CHUNK_VOLUME, index lx | lz<<4 | y<<8), which the caller then
- * owns. The source deals with its own failures (retry, main-thread fallback, an empty column as the
+ * later, with the column's cells (CHUNK_VOLUME, index lx | lz<<4 | y<<8; generated columns are
+ * full blocks only, so this is the whole content), which the caller then owns. The source deals with its own failures (retry, main-thread fallback, an empty column as the
  * last resort): a column it never answers stays out of the world.
  */
 export interface ChunkSource {
@@ -100,8 +101,8 @@ export class ClientChunks implements ReplicaColumns {
     this.drop(key, e);
   }
 
-  /** Replace the column with a snapshot: its cells (the caller hands them over) or 'pristine'. */
-  snapshot(cx: number, cz: number, cells: 'pristine' | Uint16Array): void {
+  /** Replace the column with a snapshot: its cell layers (the caller hands them over) or 'pristine'. */
+  snapshot(cx: number, cz: number, cells: 'pristine' | CellLayers): void {
     const key = chunkKey(cx, cz);
     const old = this.columns.get(key);
     if (old !== undefined) this.drop(key, old);
@@ -116,7 +117,7 @@ export class ClientChunks implements ReplicaColumns {
     this.source.generate(cx, cz, (generated) => this.generated(key, gen, generated));
   }
 
-  /** Cells of a delta ([index, cell], index ascending); queued while the column generates. */
+  /** Cells of a delta ([index, packed cell], index ascending); queued while the column generates. */
   delta(cx: number, cz: number, cells: ReadonlyArray<readonly [number, Cell]>): void {
     const e = this.columns.get(chunkKey(cx, cz));
     if (e === undefined) throw new Error(`ClientChunks: delta for column ${cx},${cz}, which is not subscribed`);
@@ -137,13 +138,16 @@ export class ClientChunks implements ReplicaColumns {
       return;
     }
     this.generatingCount--;
-    for (const d of e.queue) for (const [i, cell] of d) cells[i] = cell;
+    // The generated column is full blocks only; a queued delta may carry holes or a second part,
+    // so the other two layers are allocated when the first such cell comes.
+    const layers: CellLayers = { base: cells, holes: null, part2: null };
+    for (const d of e.queue) for (const [i, cell] of d) writeLayers(layers, i, cell);
     e.queue.length = 0;
-    this.insert(e, cells);
+    this.insert(e, layers);
   }
 
-  private insert(e: ColumnEntry, cells: Uint16Array): void {
-    const chunk = new Chunk(e.cx, e.cz, cells);
+  private insert(e: ColumnEntry, l: CellLayers): void {
+    const chunk = new Chunk(e.cx, e.cz, l.base, undefined, l.holes, l.part2);
     this.world.addChunk(chunk);
     e.present = true;
     this.onInsert(chunk);
@@ -154,4 +158,16 @@ export class ClientChunks implements ReplicaColumns {
     if (e.present) this.world.removeChunk(e.cx, e.cz);
     else this.generatingCount--;
   }
+}
+
+/** Store packed cell `c` at index i of a column's layers, allocating holes / part2 when first needed. */
+function writeLayers(l: CellLayers, i: number, c: number): void {
+  const v = c < PACK_SCALE ? c : c % PACK_SCALE;
+  const p2 = c < PACK_SCALE ? 0 : Math.floor(c / PACK_SCALE);
+  l.base[i] = v & 0xffff;
+  const h = (v >>> HOLES_SHIFT) & HOLES_MASK;
+  if (h !== 0 && l.holes === null) l.holes = new Uint8Array(CHUNK_VOLUME);
+  if (l.holes !== null) l.holes[i] = h;
+  if (p2 !== 0 && l.part2 === null) l.part2 = new Uint32Array(CHUNK_VOLUME);
+  if (l.part2 !== null) l.part2[i] = p2;
 }

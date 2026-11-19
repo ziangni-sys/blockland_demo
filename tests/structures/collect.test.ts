@@ -199,7 +199,7 @@ for (const make of HARNESSES) {
           return [...g.chunks.values()].map((ch) => ch.cells.join(',')).join('|');
         }
         const s = g as StructureGrid;
-        return `${s.version}:${s.cells.join(',')}`;
+        return `${s.version}:${s.storage().layers.base.join(',')}`;
       };
       const before = snapshot();
       const a = collectShip(g, h.glue, ...h.abs(2, 1, 1));

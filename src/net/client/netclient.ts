@@ -35,6 +35,7 @@
  */
 import { CHUNK_SHIFT } from '../../core/constants';
 import { vec3 } from '../../core/math';
+import { generatorSpecProblem } from '../../worldgen/generator';
 import { decodeServerMessage, encodeClientMessage, ProtocolError } from '../codec';
 import {
   BUILD_ID,
@@ -412,6 +413,11 @@ export class NetClient {
     switch (m.type) {
       case 'welcome':
         if (c.welcome !== null) return this.fail(c, 'protocol error: a second Welcome');
+        {
+          // A bad flat layer would otherwise only surface in the generator's constructor (docs/SHAPES.md 13.2).
+          const problem = generatorSpecProblem(m.generator);
+          if (problem !== null) return this.fail(c, `protocol error: ${problem}`);
+        }
         c.welcome = m;
         c.replica = new ClientReplica(this.opts.chunkSource(m.generator));
         c.replica.applyWelcome(m);

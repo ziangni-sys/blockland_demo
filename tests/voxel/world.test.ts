@@ -7,7 +7,7 @@ import { CHUNK_SIZE, SECTIONS_PER_CHUNK, WORLD_HEIGHT } from '../../src/core/con
 import { vec3, quat } from '../../src/core/math';
 import { AIR, makeCell } from '../../src/blocks/cell';
 import { B, CELL_BELOW_WORLD, CELL_UNLOADED } from '../../src/blocks/defs';
-import { Chunk, sectionKey, sectionKeyParts } from '../../src/voxel/chunk';
+import { cellIndex, Chunk, sectionKey, sectionKeyParts } from '../../src/voxel/chunk';
 import { SET_EXPLOSION, SET_NO_NEIGHBOR_UPDATE } from '../../src/voxel/grid';
 import { TickQueue, World, posKey } from '../../src/voxel/world';
 import { STONE, emptyWorld } from './helpers';
@@ -41,7 +41,7 @@ describe('World cells', () => {
     // The chunk holding (-1,*,-1) is chunk (-1,-1) at local (15, *, 15).
     const c = w.chunkAt(-1, -1)!;
     expect([c.cx, c.cz]).toEqual([-1, -1]);
-    expect(c.get(15, 0, 15)).toBe(makeCell(B.STONE));
+    expect(c.cells[cellIndex(15, 0, 15)]).toBe(makeCell(B.STONE));
     expect(c.modified).toBe(true);
   });
 
@@ -66,14 +66,14 @@ describe('World cells', () => {
     expect(w.getCell(1, 1, 1)).toBe(CELL_UNLOADED);
     expect(w.isLoaded(1, 1)).toBe(false);
     const fresh = new Chunk(0, 0);
-    fresh.set(1, 1, 1, makeCell(B.DIRT));
+    fresh.cells[cellIndex(1, 1, 1)] = makeCell(B.DIRT);
     w.addChunk(fresh);
     expect(w.getCell(1, 1, 1)).toBe(makeCell(B.DIRT));
     expect(w.removeChunk(5, 5)).toBeUndefined();
     // Replacing a loaded chunk in place.
     expect(w.getCell(17, 1, 1)).toBe(AIR);
     const repl = new Chunk(1, 0);
-    repl.set(1, 1, 1, STONE);
+    repl.cells[cellIndex(1, 1, 1)] = STONE;
     w.addChunk(repl);
     expect(w.getCell(17, 1, 1)).toBe(STONE);
   });

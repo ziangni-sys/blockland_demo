@@ -23,6 +23,9 @@ import { Rotor, Ship, type Structure } from '../../src/structures/structure';
 import type { GlueStore } from '../../src/structures/glue';
 import { chunkKey, chunkKeyX, chunkKeyZ } from '../../src/voxel/chunk';
 import { World } from '../../src/voxel/world';
+import { layersHash } from '../../src/voxel/fingerprint';
+import { getPacked } from '../../src/voxel/parts';
+import type { CellLayers } from '../../src/blocks/cell';
 import type { ChunkGenerator } from '../../src/worldgen/generator';
 
 export interface ColumnDigest {
@@ -67,12 +70,23 @@ export interface Scope {
   entities: Iterable<number>;
 }
 
-/** FNV-1a over the 32-bit words of a cell array. */
-export function hashCells(cells: Uint16Array): number {
+/**
+ * Hash of a column's cells: all three layers (src/voxel/fingerprint.ts layersHash), so a replica
+ * that differs from the server only in a holes byte or a second part is reported. A column of full
+ * blocks (null or all-zero extra layers) hashes as its base layer alone.
+ */
+export function hashColumn(layers: CellLayers): number {
+  return layersHash(layers);
+}
+
+/** FNV-1a over packed cells (blocks/cell.ts): the low 32 bits of each, then the bits above (second parts). */
+function hashPacked(a: readonly number[]): number {
   let h = 0x811c9dc5;
-  const n = cells.length;
-  for (let i = 0; i < n; i++) {
-    h ^= cells[i]!;
+  for (let i = 0; i < a.length; i++) {
+    const v = a[i]!;
+    h ^= v % 0x100000000 | 0;
+    h = Math.imul(h, 0x01000193);
+    h ^= Math.floor(v / 0x100000000);
     h = Math.imul(h, 0x01000193);
   }
   return h >>> 0;
@@ -106,7 +120,7 @@ export class DigestContext {
     const key = chunkKey(cx, cz);
     let h = this.pristine.get(key);
     if (h === undefined) {
-      h = hashCells(this.generator.generate(cx, cz));
+      h = hashColumn({ base: this.generator.generate(cx, cz), holes: null, part2: null });
       this.pristine.set(key, h);
     }
     return h;
@@ -122,10 +136,10 @@ export function serverDigest(ctx: DigestContext, sim: Simulation, scope: Scope, 
     const cz = chunkKeyZ(key);
     const chunk = sim.world.getChunk(cx, cz);
     let hash: number;
-    if (chunk !== undefined) hash = hashCells(chunk.cells);
+    if (chunk !== undefined) hash = hashColumn(chunk.layers());
     else {
       const stashed = sim.chunks.stashedCells(cx, cz);
-      hash = stashed !== null ? hashCells(stashed) : ctx.pristineHash(cx, cz);
+      hash = stashed !== null ? hashColumn(stashed) : ctx.pristineHash(cx, cz);
     }
     d.columns.set(key, { hash, glue: columnGlue(sim.worldGlue, cx, cz) });
   }
@@ -147,7 +161,7 @@ export function replicaDigest(state: ReplicaState, columns?: ReadonlySet<number>
   const d: Digest = { tick: state.tick, columns: new Map(), structures: new Map(), entities: new Map() };
   for (const [key, chunk] of state.world.chunks) {
     if (columns !== undefined && !columns.has(key)) continue;
-    d.columns.set(key, { hash: hashCells(chunk.cells), glue: columnGlue(state.worldGlue, chunk.cx, chunk.cz) });
+    d.columns.set(key, { hash: hashColumn(chunk.layers()), glue: columnGlue(state.worldGlue, chunk.cx, chunk.cz) });
   }
   for (const [id, rs] of state.structures) {
     const s = rs.structure;
@@ -192,7 +206,7 @@ function structureDigest(s: Structure, angle: number, pos: Vec3, rot: Quat): Str
   const box = b === null ? 'empty' : `${b.minX},${b.minY},${b.minZ},${b.maxX},${b.maxY},${b.maxZ}`;
   const cells: number[] = [];
   if (b !== null) {
-    for (let y = b.minY; y < b.maxY; y++) for (let z = b.minZ; z < b.maxZ; z++) for (let x = b.minX; x < b.maxX; x++) cells.push(g.getCell(x, y, z));
+    for (let y = b.minY; y < b.maxY; y++) for (let z = b.minZ; z < b.maxZ; z++) for (let x = b.minX; x < b.maxX; x++) cells.push(getPacked(g, x, y, z));
   }
   let fields: string;
   if (s instanceof Rotor) {
@@ -206,7 +220,7 @@ function structureDigest(s: Structure, angle: number, pos: Vec3, rot: Quat): Str
     kind: s.kind,
     parentId: s.parent?.id ?? 0,
     box,
-    cells: hashInts(cells),
+    cells: hashPacked(cells),
     glue: hashInts(s.glue.toArray()),
     fields,
     pivot: { ...g.pivot },

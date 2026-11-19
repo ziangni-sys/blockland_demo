@@ -30,7 +30,7 @@ import { BLOCKS, LIQUID, SOLID } from '../blocks/registry';
 import { vec3, type Vec3 } from '../core/math';
 import { Player, type Entity } from '../entities/entity';
 import { CellSet } from '../structures/collect';
-import { isDryCell, type HullInfo } from '../structures/hull';
+import { isDryHalf, type HullInfo } from '../structures/hull';
 import { Ship, type Structure } from '../structures/structure';
 import { SET_EXPLOSION, type VoxelGrid } from '../voxel/grid';
 import { raycastGrids, type CellPredicate } from '../voxel/raycast';
@@ -196,7 +196,7 @@ function markCells(sim: Simulation, x: number, y: number, z: number, power: numb
           tg.lz = lz;
           cost += cellCost(c);
           if (SOLID[c & ID_MASK] === 1) displaced = true;
-        } else if (tg.hull !== null && isDryCell(tg.hull, lx, ly, lz)) {
+        } else if (tg.hull !== null && isDryHalf(tg.hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) {
           displaced = true;
         }
       }

@@ -44,7 +44,7 @@ const RULES: Record<string, Rule> = {
   // from package 2's movement report and correction (entities/drive.ts) and the GeneratorSpec
   // (worldgen/generator.ts). No DOM.
   'net': {
-    runtime: (t) => t.startsWith('core/') || t.startsWith('blocks/') || t === 'save/bytes' || isNetBase(t),
+    runtime: (t) => t.startsWith('core/') || t.startsWith('blocks/') || t === 'save/bytes' || t === 'save/cells' || isNetBase(t),
     types: (t) => t === 'sim/view' || t === 'entities/drive' || t === 'worldgen/generator',
     forbiddenGlobals: NO_DOM_OR_TIME,
   },

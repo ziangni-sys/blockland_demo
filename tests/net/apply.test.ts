@@ -58,7 +58,7 @@ function ship(id: number, extra: Partial<StructureRecord> = {}): StructureRecord
     sx: 1,
     sy: 1,
     sz: 1,
-    cells: new Uint16Array([STONE]),
+    cells: { base: new Uint16Array([STONE]), holes: null, part2: null },
     pivot: { x: 0.5, y: 0.5, z: 0.5 },
     position: { x: 0.5, y: 40.5, z: 0.5 },
     rotation: IDENTITY,
@@ -83,7 +83,7 @@ function rotor(id: number, parentId: number, extra: Partial<StructureRecord> = {
     sx: 1,
     sy: 1,
     sz: 1,
-    cells: new Uint16Array([STONE]),
+    cells: { base: new Uint16Array([STONE]), holes: null, part2: null },
     pivot: { x: 0.5, y: 0.5, z: 0.5 },
     position: { x: 0.5, y: 2.5, z: 0.5 },
     rotation: IDENTITY,
@@ -156,10 +156,10 @@ describe('applyBatch refuses invalid batches with a ReplicaError', () => {
   for (const [name, fill] of cases) {
     it(name, () => {
       const st = scene();
-      const before = st.structures.get(3)!.structure.grid.cells.length;
+      const before = st.structures.get(3)!.structure.grid.storage().layers.base.length;
       expect(apply(st, batch(2, fill))).toMatch(/^ReplicaError: /);
       // Nothing was allocated in proportion to the input's coordinates.
-      expect(st.structures.get(3)?.structure.grid.cells.length ?? before).toBeLessThan(1000);
+      expect(st.structures.get(3)?.structure.grid.storage().layers.base.length ?? before).toBeLessThan(1000);
     });
   }
 });

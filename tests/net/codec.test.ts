@@ -1,12 +1,16 @@
 /**
  * The protocol codec (docs/NETCODE.md section 14, tests of package 3 in section 16): every message
- * round-trips with random content, the basic types quantise as specified, Cell refuses values the
- * M2.1 replica cannot store, CellVolume is no larger than the save encoding on real terrain, and
- * the size limits are the same on both ends.
+ * round-trips with random content, the basic types quantise as specified, Cell carries both parts
+ * of a cell and refuses invalid layouts on both ends (docs/SHAPES.md 13.1), CellVolume is no larger
+ * than the save encoding on real terrain and carries the holes and second-part layers, and the size
+ * limits are the same on both ends.
  */
 import { describe, expect, it } from 'vitest';
 import { CHUNK_VOLUME, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../../src/core/constants';
 import { Chunk } from '../../src/voxel/chunk';
+import { CELL_MULTI_BIT, makeCell, makePart, PACK_SCALE, type CellLayers } from '../../src/blocks/cell';
+import { B } from '../../src/blocks/defs';
+import { canonCell } from '../../src/blocks/shapes';
 import { encodeChunk } from '../../src/save/codec';
 import { ByteReader, ByteWriter, SaveFormatError } from '../../src/save/bytes';
 import { TerrainGenerator } from '../../src/worldgen/generator';
@@ -19,6 +23,7 @@ import {
   encodeClientMessage,
   encodeServerMessage,
   packSamples,
+  cellSize,
   readAng16,
   readCell,
   readHelloBuild,
@@ -58,6 +63,11 @@ import {
 } from '../../src/net/protocol';
 import { RELIABLE, UNRELIABLE } from '../../src/net/transport';
 import { Gen } from './gen';
+
+/** Fills of the lower and upper half, and the holes of a lower half slab. */
+const LOWER = 0x33;
+const UPPER = 0xcc;
+const LOWER_HOLES = ~LOWER & 0xff;
 
 function roundTripClient(m: ClientMessage): Uint8Array {
   const bytes = encodeClientMessage(m);
@@ -141,29 +151,112 @@ describe('every message round-trips with random content', () => {
 });
 
 describe('basic types', () => {
-  it('Cell: 1 byte for air and for stateless ids below 128; M2.1 refuses values >= 2^16 on both ends', () => {
+  it('Cell: full blocks keep their 1-3 bytes; parts with holes and two-part cells round-trip', () => {
     const size = (v: number): number => {
       const w = new ByteWriter();
       writeCell(w, v);
       return w.length;
     };
+    const rt = (v: number): number => readCell(reader((w) => writeCell(w, v)));
     expect(size(0)).toBe(1);
     expect(size(127)).toBe(1);
     expect(size(128)).toBe(2);
     expect(size(0xffff)).toBe(3);
-    expect(() => size(0x10000)).toThrow(RangeError);
-    expect(() => size(-1)).toThrow(RangeError);
-    expect(() => size(1.5)).toThrow(RangeError);
-    expect(readCell(reader((w) => w.varuint(0xffff)))).toBe(0xffff);
-    expect(() => readCell(reader((w) => w.varuint(0x10000)))).toThrow(SaveFormatError);
-    expect(() => readCell(reader((w) => w.varuint((1 << 24) | 5)))).toThrow(SaveFormatError);
+    const holed = makePart(B.STONE, 0, LOWER_HOLES);
+    // A part with holes: 3 bytes while the holes byte is below 0x20, else 4.
+    expect(size(makePart(B.STONE, 0, 0x1f))).toBe(3);
+    expect(size(holed)).toBe(4);
+    expect(size(makePart(B.PLANKS_OAK, 63, 0xfe))).toBe(4);
+    // A two-part cell: the first number has bit 24 (4 bytes), the second part takes 3 or 4.
+    const two = canonCell(makePart(B.STONE, 0, UPPER), makePart(B.PLANKS_OAK, 0, LOWER));
+    expect(two).toBeGreaterThan(2 ** 25);
+    expect(size(two)).toBe(4 + 4);
+    expect(size(canonCell(makePart(B.STONE, 0, 0xfe), makePart(B.DIRT, 0, 0x01)))).toBe(4 + 3);
+    for (const v of [0, 127, 0xffff, holed, two, makePart(1023, 63, 0xfe), (makePart(1, 0, 1) | CELL_MULTI_BIT) + makePart(1023, 63, 0xfe) * PACK_SCALE]) {
+      expect(rt(v)).toBe(v);
+      expect(size(v)).toBe(cellSize(v));
+    }
+  });
+
+  it('a lone holed cell in a chunk delta costs at most 7 bytes, a lone two-part cell at most 11 (section 15)', () => {
+    // Worst values: holes >= 0x20 make a part >= 2^21 (a 4-byte varuint), and the first value of
+    // a two-part cell carries CELL_MULTI_BIT (4 bytes) before its second part (4 bytes); the index
+    // difference of a lone cell is at most 3 bytes (any index >= 16384, i.e. y >= 64).
+    const holed = makePart(B.STONE, 0, 0xfe);
+    const two = canonCell(makePart(B.STONE, 0, 0xfe), makePart(B.PLANKS_OAK, 0, 0x21)); // fills 0x01 and 0xde
+    const size = (cells: Array<[number, number]>): number => {
+      const b = emptyTickBatch(9);
+      b.chunkDeltas = [{ cx: -3, cz: 7, cells, glue: [] }];
+      return encodeServerMessage(b).length;
+    };
+    const empty = size([]);
+    for (const index of [0, 16384, 32767]) {
+      const idx = index === 0 ? 1 : 3;
+      expect(size([[index, holed]]) - empty, `holed at ${index}`).toBe(idx + 4);
+      expect(size([[index, two]]) - empty, `two-part at ${index}`).toBe(idx + 8);
+      expect(size([[index, holed]]) - empty).toBeLessThanOrEqual(7);
+      expect(size([[index, two]]) - empty).toBeLessThanOrEqual(11);
+    }
+  });
+
+  it('Cell: the encoder refuses every invalid layout (RangeError), never truncating', () => {
+    const write = (v: number): void => writeCell(new ByteWriter(), v);
+    expect(() => write(-1)).toThrow(RangeError);
+    expect(() => write(1.5)).toThrow(RangeError);
+    expect(() => write(2 ** 49)).toThrow(RangeError);
+    expect(() => write(CELL_MULTI_BIT | 5)).toThrow(/CELL_MULTI_BIT but no second part/); // the tripwire: bit 24 without a second part
+    expect(() => write(makePart(1, 0, 0xff))).toThrow(RangeError); // a part without octants
+    expect(() => write((1 | CELL_MULTI_BIT) + makePart(2, 0, 0xff) * PACK_SCALE)).toThrow(RangeError); // second part without octants
+    expect(() => write((1 | CELL_MULTI_BIT) + makePart(0, 3, 0x0f) * PACK_SCALE)).toThrow(RangeError); // second part with id 0
+    expect(() => write(5 + 7 * PACK_SCALE)).toThrow(RangeError); // a second part without bit 24
+  });
+
+  it('Cell: the decoder refuses every invalid layout (SaveFormatError; a ProtocolError in a message)', () => {
+    expect(() => readCell(reader((w) => w.varuint(2 ** 25)))).toThrow(SaveFormatError);
+    expect(() => readCell(reader((w) => w.varuint(2 ** 25 + 5).varuint(makePart(B.STONE, 0, 0x0f))))).toThrow(/not below 2\^25/);
+    expect(() => readCell(reader((w) => w.varuint(makePart(1, 0, 0xff))))).toThrow(SaveFormatError);
+    expect(() => readCell(reader((w) => w.varuint(CELL_MULTI_BIT | 5).varuint(0)))).toThrow(SaveFormatError);
+    expect(() => readCell(reader((w) => w.varuint(CELL_MULTI_BIT | 5).varuint(2 ** 24)))).toThrow(SaveFormatError);
+    expect(() => readCell(reader((w) => w.varuint(CELL_MULTI_BIT | 5).varuint(2 ** 24 + makePart(B.DIRT, 0, 0x0f))))).toThrow(/not below 2\^24/);
+    expect(() => readCell(reader((w) => w.varuint(CELL_MULTI_BIT | 5).varuint(makePart(2, 0, 0xff))))).toThrow(SaveFormatError);
+    expect(() => readCell(reader((w) => w.varuint(CELL_MULTI_BIT | 5).varuint(makePart(0, 1, 0x0f))))).toThrow(SaveFormatError);
+    expect(() => readCell(reader((w) => w.varuint(CELL_MULTI_BIT | 5)))).toThrow(SaveFormatError); // the second part is missing
     // In a message: a protocol error, never a truncated cell.
     const batch = emptyTickBatch(1);
-    batch.events = [{ type: 'blockPlaced', gridId: 0, x: 1, y: 2, z: 3, cell: 0xffff }];
+    batch.chunkDeltas = [{ cx: 0, cz: 0, cells: [[3, 0xffff]], glue: [] }];
     const bytes = encodeServerMessage(batch);
     const w = new ByteWriter();
-    w.raw(bytes.subarray(0, bytes.length - 3)).varuint(0x10000);
+    w.raw(bytes.subarray(0, bytes.length - 4)).varuint(2 ** 25).varuint(0);
     expect(() => decodeServerMessage(w.finish(), RELIABLE)).toThrow(ProtocolError);
+  });
+
+  it('a falling block and a flat generator layer carry a full block, a block event one part: both ends check', () => {
+    const holed = makePart(B.STONE, 0, LOWER_HOLES);
+    const two = canonCell(makePart(B.STONE, 0, UPPER), makePart(B.PLANKS_OAK, 0, LOWER));
+    const falling = (cell: number): TickBatchMsg => ({ ...emptyTickBatch(2), entitySpawns: [{ id: 4, kind: 'falling', carrierId: 0, pos: { x: 1, y: 2, z: 3 }, yaw: 0, cell }] });
+    roundTripServer(falling(makeCell(B.SAND)));
+    expect(() => encodeServerMessage(falling(holed))).toThrow(RangeError);
+    const event = (cell: number): TickBatchMsg => ({ ...emptyTickBatch(2), events: [{ type: 'blockBroken', gridId: 0, x: 1, y: 2, z: 3, cell }] });
+    roundTripServer(event(holed));
+    expect(() => encodeServerMessage(event(two))).toThrow(RangeError);
+    const flat = (cell: number): ServerMessage => ({
+      type: 'welcome', entityId: 1, generator: { kind: 'flat', seed: 1, layers: [{ cell, thickness: 3 }] }, worldTime: 0, dayOffset: 0,
+      rules: { defaultMode: 'creative', dropsEnabled: false }, isHost: true, roomOpen: false, players: [],
+    });
+    roundTripServer(flat(makeCell(B.STONE)));
+    expect(() => encodeServerMessage(flat(holed))).toThrow(RangeError);
+    // The decoders refuse what the encoders refuse: patch the last Cell of a valid message.
+    // (In both messages the Cell is the last field.)
+    const patch = (bytes: Uint8Array, tail: number, cell: (w: ByteWriter) => void): Uint8Array => {
+      const w = new ByteWriter();
+      w.raw(bytes.subarray(0, bytes.length - tail));
+      cell(w);
+      return w.finish();
+    };
+    const fb = encodeServerMessage(falling(makeCell(B.SAND)));
+    expect(() => decodeServerMessage(patch(fb, 1, (w) => w.varuint(holed)), RELIABLE)).toThrow(/not a full block/);
+    const ev = encodeServerMessage(event(1));
+    expect(() => decodeServerMessage(patch(ev, 1, (w) => writeCell(w, two)), RELIABLE)).toThrow(/not one part/);
   });
 
   it('i8 and i16 never use -128 / -32768', () => {
@@ -230,15 +323,17 @@ describe('basic types', () => {
 });
 
 describe('CellVolume', () => {
+  const full = (base: Uint16Array): CellLayers => ({ base, holes: null, part2: null });
+
   it('on real terrain is no larger than the save encoding + 4 bytes, and round-trips', () => {
     const gen = new TerrainGenerator(12345);
     for (let cx = -6; cx < 6; cx++) {
       for (let cz = -6; cz < 6; cz++) {
         const cells = gen.generate(cx, cz);
-        const net = encodeCellVolume(cells);
+        const net = encodeCellVolume(full(cells));
         const save = encodeChunk(new Chunk(cx, cz, cells));
         expect(net.length, `chunk ${cx},${cz}`).toBeLessThanOrEqual(save.length + 4);
-        expect(decodeCellVolume(net, CHUNK_VOLUME)).toEqual(cells);
+        expect(decodeCellVolume(net, CHUNK_VOLUME)).toEqual(full(cells));
       }
     }
   });
@@ -246,35 +341,37 @@ describe('CellVolume', () => {
   it('falls back to raw cells when run-length would not be smaller, and above PALETTE_LIMIT values', () => {
     const noise = new Uint16Array(CHUNK_VOLUME);
     for (let i = 0; i < noise.length; i++) noise[i] = (i * 2654435761) % 120; // all 1-byte cells, no runs
-    const raw = encodeCellVolume(noise);
+    const raw = encodeCellVolume(full(noise));
     expect(raw[0]).toBe(1);
     expect(raw.length).toBe(1 + CHUNK_VOLUME);
-    expect(decodeCellVolume(raw, CHUNK_VOLUME)).toEqual(noise);
+    expect(decodeCellVolume(raw, CHUNK_VOLUME)).toEqual(full(noise));
 
     const many = new Uint16Array(CHUNK_VOLUME);
     for (let i = 0; i < many.length; i++) many[i] = Math.floor(i / 7) % (PALETTE_LIMIT + 1); // runs of 7, 4097 values
-    const enc = encodeCellVolume(many);
+    const enc = encodeCellVolume(full(many));
     expect(enc[0]).toBe(1);
-    expect(decodeCellVolume(enc, CHUNK_VOLUME)).toEqual(many);
+    expect(decodeCellVolume(enc, CHUNK_VOLUME)).toEqual(full(many));
     many.fill(0, 7 * PALETTE_LIMIT); // now exactly 4096 values: run-length again
-    expect(encodeCellVolume(many)[0]).toBe(0);
-    expect(decodeCellVolume(encodeCellVolume(many), CHUNK_VOLUME)).toEqual(many);
+    expect(encodeCellVolume(full(many))[0]).toBe(0);
+    expect(decodeCellVolume(encodeCellVolume(full(many)), CHUNK_VOLUME)).toEqual(full(many));
   });
 
   it('handles run tokens above 2^32 (structure boxes up to MAX_STRUCTURE_BOX_CELLS)', () => {
     const cells = new Uint16Array(MAX_STRUCTURE_BOX_CELLS);
     for (let i = 0; i < 4096; i++) cells[i * 13] = i; // palette of 4096: B = 12
     cells.fill(5, 4096 * 13); // one run of ~2 million cells: token ~ 2^33
-    const enc = encodeCellVolume(cells);
+    const enc = encodeCellVolume(full(cells));
     expect(enc[0]).toBe(0);
     expect(enc.length).toBeLessThan(40_000);
     const back = decodeCellVolume(enc, MAX_STRUCTURE_BOX_CELLS);
     // (toEqual over 2 million elements is slow: compare the bytes.)
-    expect(Buffer.from(back.buffer).equals(Buffer.from(cells.buffer))).toBe(true);
+    expect(Buffer.from(back.base.buffer).equals(Buffer.from(cells.buffer))).toBe(true);
+    expect(back.holes).toBeNull();
+    expect(back.part2).toBeNull();
   });
 
   it('a whole column of one value is 6 bytes', () => {
-    expect(encodeCellVolume(new Uint16Array(CHUNK_VOLUME)).length).toBe(1 + 1 + 1 + 3);
+    expect(encodeCellVolume(full(new Uint16Array(CHUNK_VOLUME))).length).toBe(1 + 1 + 1 + 3);
   });
 });
 
@@ -351,7 +448,7 @@ describe('limits are the same on both ends', () => {
     // 2^21 + 1 = 3 x 699051.
     const [sx, sy, sz] = [699051, 3, 1];
     expect(sx * sy * sz).toBe(MAX_STRUCTURE_BOX_CELLS + 1);
-    const over = { ...rec, minX: 0, minY: 0, minZ: 0, sx, sy, sz, cells: new Uint16Array(sx * sy * sz) } as StructureRecord;
+    const over = { ...rec, minX: 0, minY: 0, minZ: 0, sx, sy, sz, cells: { base: new Uint16Array(sx * sy * sz), holes: null, part2: null } } as StructureRecord;
     expect(() => encodeServerMessage({ ...emptyTickBatch(1), structureSpawns: [over] })).toThrow(/structure box volume/);
     // The same header by hand, followed by a CellVolume of one run that would cover it.
     const w = new ByteWriter();
@@ -365,7 +462,7 @@ describe('limits are the same on both ends', () => {
   it('a structure box above MAX_STRUCTURE_BOX_CELLS is refused before anything is allocated', () => {
     const g = new Gen(1);
     const rec = g.structureRecord();
-    const huge = { ...rec, minX: 0, minY: 0, minZ: 0, sx: 4096, sy: 4096, sz: 2, cells: new Uint16Array(0) } as StructureRecord;
+    const huge = { ...rec, minX: 0, minY: 0, minZ: 0, sx: 4096, sy: 4096, sz: 2, cells: { base: new Uint16Array(0), holes: null, part2: null } } as StructureRecord;
     const batch = { ...emptyTickBatch(1), structureSpawns: [huge] };
     expect(() => encodeServerMessage(batch)).toThrow(RangeError);
     // The same box crafted by hand: kind, id, parent, min, then a 2^60 cell box.
@@ -384,7 +481,7 @@ describe('limits are the same on both ends', () => {
     expect(hull.length).toBe(SHIP_MAX_CELLS);
     let rec = g.structureRecord();
     while (rec.kind !== 'ship') rec = g.structureRecord();
-    const ship: StructureRecord = { ...rec, minX: -10, minY: 60, minZ: 4000, sx: 20, sy: 10, sz: 20, cells: hull };
+    const ship: StructureRecord = { ...rec, minX: -10, minY: 60, minZ: 4000, sx: 20, sy: 10, sz: 20, cells: { base: hull, holes: null, part2: null } };
     roundTripServer({ ...emptyTickBatch(9), structureSpawns: [ship] });
 
     // A thin frame (an x arm, a z arm, a y mast) whose box is exactly MAX_STRUCTURE_BOX_CELLS.
@@ -394,13 +491,14 @@ describe('limits are the same on both ends', () => {
     for (let x = 0; x < sx; x++) cells[x] = 3;
     for (let z = 0; z < sz; z++) cells[z * sx] = 4;
     for (let y = 0; y < sy; y++) cells[y * sx * sz] = 5;
-    const frame: StructureRecord = { ...ship, sx, sy, sz, cells };
+    const frame: StructureRecord = { ...ship, sx, sy, sz, cells: { base: cells, holes: null, part2: null } };
     const batch = { ...emptyTickBatch(9), structureSpawns: [frame] };
     const bytes = encodeServerMessage(batch);
     const back = decodeServerMessage(bytes, RELIABLE) as TickBatchMsg;
     const got = back.structureSpawns[0]!;
     // (toEqual over 2 million cells is slow: compare the bytes, then the rest.)
-    expect(Buffer.from(got.cells.buffer).equals(Buffer.from(cells.buffer))).toBe(true);
+    expect(Buffer.from(got.cells.base.buffer).equals(Buffer.from(cells.buffer))).toBe(true);
+    expect([got.cells.holes, got.cells.part2]).toEqual([null, null]);
     expect({ ...got, cells: null }).toEqual({ ...frame, cells: null });
     expect(encodeServerMessage(back)).toEqual(bytes);
   });
@@ -451,7 +549,7 @@ describe('limits are the same on both ends', () => {
 
   it(`all CellVolumes of one TickBatch describe at most MAX_BATCH_CELLS cells (${MAX_BATCH_CELLS / CHUNK_VOLUME} columns)`, () => {
     const columns = MAX_BATCH_CELLS / CHUNK_VOLUME;
-    const one = encodeCellVolume(new Uint16Array(CHUNK_VOLUME).fill(1));
+    const one = encodeCellVolume({ base: new Uint16Array(CHUNK_VOLUME).fill(1), holes: null, part2: null });
     const craft = (n: number): Uint8Array => {
       const w = new ByteWriter();
       w.u8(MSG.tickBatch).varuint(1).u16(1 << 1).varuint(n);
@@ -461,7 +559,7 @@ describe('limits are the same on both ends', () => {
     const fits = decodeServerMessage(craft(columns), RELIABLE) as TickBatchMsg;
     expect(fits.snapshots.length).toBe(columns);
     expect(() => decodeServerMessage(craft(columns + 1), RELIABLE)).toThrow(/exceeds what one message may carry/);
-    const cells = new Uint16Array(CHUNK_VOLUME).fill(1);
+    const cells: CellLayers = { base: new Uint16Array(CHUNK_VOLUME).fill(1), holes: null, part2: null };
     const batch = { ...emptyTickBatch(1), snapshots: Array.from({ length: columns + 1 }, (_, i) => ({ cx: i, cz: 0, cells, glue: [] })) };
     expect(() => encodeServerMessage(batch)).toThrow(/MAX_BATCH_CELLS/);
   });

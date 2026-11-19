@@ -192,7 +192,7 @@ describe('must-send and may-defer (package 4)', () => {
     rig.ctrl('b').player.flying = true;
     rig.tick(40);
     const snapSizes: number[] = [];
-    for (const chunk of sim.world.chunks.values()) snapSizes.push(encodeSnapshotPiece({ cx: chunk.cx, cz: chunk.cz, cells: chunk.cells, glue: [] }).bytes.length);
+    for (const chunk of sim.world.chunks.values()) snapSizes.push(encodeSnapshotPiece({ cx: chunk.cx, cz: chunk.cz, cells: chunk.layers(), glue: [] }).bytes.length);
     snapSizes.sort((p, q) => p - q);
     const maxSnap = snapSizes.at(-1)!;
     const perBatch = a.batches.filter((x) => x.batch.snapshots.length > 0).map((x) => x.bytes);

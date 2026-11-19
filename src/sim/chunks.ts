@@ -15,10 +15,11 @@
  * it has no light data, e.g. above the world or in an unloaded column), which saves 32 KB a column.
  */
 import { CHUNK_SHIFT, CHUNK_VOLUME } from '../core/constants';
+import type { CellLayers } from '../blocks/cell';
 import { Chunk, chunkKey } from '../voxel/chunk';
 import type { World } from '../voxel/world';
 import type { Fluids } from '../liquid/fluids';
-import { decodeChunk, encodeChunk } from '../save/codec';
+import { decodeChunk, encodeChunk, type DecodedChunk } from '../save/codec';
 import type { ChunkGenerator } from '../worldgen/generator';
 
 export interface ChunkRequest {
@@ -118,14 +119,15 @@ export class ChunkManager {
     const bytes = this.stash.get(key);
     if (!bytes) return null;
     this.stash.delete(key);
-    let dec: { cx: number; cz: number; cells: Uint16Array };
+    let dec: DecodedChunk;
     try {
       dec = decodeChunk(bytes);
     } catch {
       this.corrupted.push(key);
       return null;
     }
-    const chunk = new Chunk(dec.cx, dec.cz, dec.cells, this.light);
+    const l = dec.layers;
+    const chunk = new Chunk(dec.cx, dec.cz, l.base, this.light, l.holes, l.part2);
     chunk.modified = true;
     return this.insert(chunk);
   }
@@ -194,16 +196,16 @@ export class ChunkManager {
   }
 
   /**
-   * The cells of a stashed (modified, unloaded) column, decoded without restoring it; null when
-   * the column is not stashed or its bytes cannot be decoded (it is then regenerated when it
+   * The cell layers of a stashed (modified, unloaded) column, decoded without restoring it; null
+   * when the column is not stashed or its bytes cannot be decoded (it is then regenerated when it
    * loads, so its cells are the generator's). The network replication answers a subscription to
    * an unloaded column with this (NETCODE section 6).
    */
-  stashedCells(cx: number, cz: number): Uint16Array | null {
+  stashedCells(cx: number, cz: number): CellLayers | null {
     const bytes = this.stash.get(chunkKey(cx, cz));
     if (bytes === undefined) return null;
     try {
-      return decodeChunk(bytes).cells;
+      return decodeChunk(bytes).layers;
     } catch {
       return null;
     }
