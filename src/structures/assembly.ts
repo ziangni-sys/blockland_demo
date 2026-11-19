@@ -19,8 +19,9 @@
  * STRUCTURE MOVES NEVER CREATE GLUE JOINTS. Glue joins two blocks only when a player places a
  * block against a glued face, or when both blocks travel together. Blockify and dock write
  * structure cells into a grid that already holds blocks, so afterwards every face between a
- * written cell and a neighbour the move did not write loses its glue when that neighbour could
- * hold glue (settlePlacedGlue), whether the glue came with the structure or was already there.
+ * written cell and a neighbour the move did not write loses its glue when that neighbour is on the
+ * face (glueSideAt: it holds glue and has material on that face; settlePlacedGlue), whether the
+ * glue came with the structure or was already there.
  * The one exception is the glue already on the face between a stopping rotor's bearing and the
  * cell in front of it (the hub's place), so the hub and the bearing stay glued across a start
  * and a stop.
@@ -38,10 +39,10 @@ import type { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
 import { boxCellsWith, CellSet, inBounds } from './collect';
 import type { GlueStore } from './glue';
-import { isDryCell, type HullInfo } from './hull';
+import { isDryHalf, type HullInfo } from './hull';
 import { nearestRot, rotCell, rotCellPos, rotToQuat, rotVec, type GridRot } from './orient';
 import { applyRotorPose } from './rotor';
-import { glueFaceKept, holdsGlue, pruneGlueAt } from './stick';
+import { glueFaceKept, glueSideAt, holdsGlue, pruneGlueAt } from './stick';
 import type { Rotor, Ship, StructureHost } from './structure';
 
 /** Flags of every bulk write made while assembling, blockifying or docking. */
@@ -163,7 +164,11 @@ function landCell(host: StructureHost, grid: VoxelGrid, x: number, y: number, z:
  * grid `dst`, keeping their coordinates, and their glue from `srcGlue` into `dstGlue`. Every
  * cell is copied first and only then are all of them cleared from `src`: a torch must not see
  * its base leave before it left itself. A glued face between a moved cell and a glueable block
- * that stays behind stays in `srcGlue` (DESIGN 强力胶; e.g. the hub of a rotor and its bearing).
+ * that stays behind stays in `srcGlue` when the block left behind is on that face (glueSideAt:
+ * DESIGN 强力胶; e.g. the hub of a rotor and its bearing). When the block left behind has no
+ * material on the face (a slab on the far half of its cell), the face is the moved cell's exposed
+ * face and travels with it, exactly as if the cell across were air (docs/SHAPES.md 10.2: a part
+ * that does not reach a glued face leaves the glue alone).
  */
 export function transferCells(
   src: VoxelGrid,
@@ -186,10 +191,44 @@ export function transferCells(
   }
   if (srcGlue.size > 0) {
     const inSet = CellSet.fromCells(cells, count);
+    takeOffFaceGlue(src, srcGlue, dstGlue, inSet);
+    // Every face left with one end outside the set has a glueable end there that is on the face
+    // (or an end that holds no glue at all, which moveTo moves with the cell).
     srcGlue.moveTo(dstGlue, (x, y, z) => inSet.has(x, y, z), identityMap(), (x, y, z) => holdsGlue(src.getCell(x, y, z)));
   }
   for (let i = 0; i < count; i++) src.setCell(cells[i * 3]!, cells[i * 3 + 1]!, cells[i * 3 + 2]!, AIR, MOVE_FLAGS);
   pruneGlueAround(dst, dstGlue, cells, count);
+}
+
+/**
+ * Part of transferCells' glue move (same coordinates in both stores): every glued face of `srcGlue`
+ * with exactly one end in `inSet` whose other end holds glue but is not on the face (glueSideAt is
+ * false: its material lies away from the face) moves to `dstGlue` now. GlueStore.moveTo's `stays`
+ * sees only the end cell, not the face, so it cannot tell such a face from one the cell left behind
+ * is on; left in `srcGlue`, the face would lose its last side when the moved cell is cleared, and
+ * the source's hook would delete it although the moved cell still carries it.
+ */
+function takeOffFaceGlue(src: VoxelGrid, srcGlue: GlueStore, dstGlue: GlueStore, inSet: CellSet): void {
+  const faces: number[] = []; // moved end x, y, z, direction towards the end left behind
+  srcGlue.forEach((x, y, z, axis) => {
+    const x1 = axis === 0 ? x + 1 : x;
+    const y1 = axis === 1 ? y + 1 : y;
+    const z1 = axis === 2 ? z + 1 : z;
+    const inA = inSet.has(x, y, z);
+    if (inA === inSet.has(x1, y1, z1)) return;
+    // d: from the moved end towards the end left behind (Dir = axis * 2 is the positive direction).
+    const d = (inA ? axis << 1 : (axis << 1) | 1) as Dir;
+    const q = inA ? getPacked(src, x1, y1, z1) : getPacked(src, x, y, z);
+    if (holdsGlue(q) && !glueSideAt(q, (d ^ 1) as Dir)) {
+      if (inA) faces.push(x, y, z, d);
+      else faces.push(x1, y1, z1, d);
+    }
+  });
+  for (let i = 0; i < faces.length; i += 4) {
+    const d = faces[i + 3]! as Dir;
+    srcGlue.remove(faces[i]!, faces[i + 1]!, faces[i + 2]!, d);
+    dstGlue.add(faces[i]!, faces[i + 1]!, faces[i + 2]!, d);
+  }
 }
 
 /** `{x,y,z} -> same {x,y,z}` mapping for GlueStore.moveTo (returns one reused object). */
@@ -232,11 +271,13 @@ export interface GridFace {
  * with Q the cell across it:
  *  - Q written by the move too: the face travelled with both blocks; the state rule of the glue
  *    lifetime applies (removed unless glueFaceKept: one side is still on the face);
- *  - Q not written and holdsGlue(Q) (a glueable block, or an unloaded cell that may be one):
- *    removed, wherever the glue came from — a move never joins a structure block to a block it
- *    did not bring along (DESIGN 强力胶: 结构体移动不会产生新的胶连接) — unless the face is `keep`
- *    (then the state rule);
- *  - Q not written and not holdsGlue(Q): the state rule (an exposed face on P stays when P is on it).
+ *  - Q not written and on the face (glueSideAt(Q): a glueable block with material on the face, or
+ *    an unloaded cell that may be one): removed, wherever the glue came from — a move never joins
+ *    a structure block to a block it did not bring along (DESIGN 强力胶: 结构体移动不会产生新的胶连接)
+ *    — unless the face is `keep` (then the state rule);
+ *  - Q not written and not on the face (air, a soft block, or a glueable block whose material lies
+ *    away from the face): the state rule. The face is P's exposed face, as beside air: it stays
+ *    when P is on it (docs/SHAPES.md 10.2: a part that does not reach a glued face leaves it).
  * `keep` is the bearing face of a stopping rotor when the destination store held its glue
  * before the move (see blockifyGrid), else null.
  */
@@ -261,7 +302,7 @@ function settlePlacedGlue(
       const qy = y + DIR_Y[d]!;
       const qz = z + DIR_Z[d]!;
       const q = getPacked(grid, qx, qy, qz);
-      const dropForeign = !written.has(qx, qy, qz) && holdsGlue(q) && (keep === null || !isFace(keep, x, y, z, d));
+      const dropForeign = !written.has(qx, qy, qz) && glueSideAt(q, (d ^ 1) as Dir) && (keep === null || !isFace(keep, x, y, z, d));
       if (dropForeign || !glueFaceKept(p, q, d as Dir)) glue.remove(x, y, z, d as Dir);
     }
   }
@@ -613,11 +654,29 @@ export interface DockOutcome {
 }
 
 /**
+ * Does the ship cell (x,y,z) have at least one dry octant (sealed, or bilge while the hull floats)?
+ * For a cell that is air in the ship this is the dry counterpart of hullCavityCells (no hard
+ * octant, at least one cavity octant), so every cell that took water when the ship was assembled
+ * is cleared again when it docks (docs/SHAPES.md 11.3, 19.5). An air cell is dry only in part when
+ * the spill line runs through its middle (lower half bilge, upper half open): its water level is
+ * half a layer, which only a path through octants of cells with parts can give (docs/SHAPES.md
+ * 12.3). Liquids never enter cells with parts, so once docked the sea cannot reach such a cell
+ * from the side, and clearing it removes no water the sea could refill. isDryCell (all eight
+ * octants dry) would leave that water inside the docked hull, to drain into the hold.
+ */
+function hasDryOctant(h: HullInfo, x: number, y: number, z: number): boolean {
+  for (let o = 0; o < 8; o++) {
+    if (isDryHalf(h, 2 * x + (o & 1), 2 * y + ((o >> 1) & 1), 2 * z + (o >> 2))) return true;
+  }
+  return false;
+}
+
+/**
  * Write a ship's cells into the world with transform `t`, each landing as landing() decides
  * (the caller has checked with planDock that none is blocked; should one have become blocked
  * since, that cell drops, one drop per part, like a rotor cell would). Cells that meet parts
  * without overlapping merge with them. Overwritten soft non-liquid blocks drop (if the world drops); liquids at the
- * destinations of the hull's dry cells are removed (DESIGN: 方块化时，清掉密封舱位置里的液体);
+ * destinations of the hull's dry air cells (hasDryOctant) are removed (DESIGN: 方块化时，清掉密封舱位置里的液体);
  * the ship's glue moves to the world like a rotor's on blockify: every face with a placed end,
  * re-keyed by the rotation, then the glue rules of settlePlacedGlue where it landed (no face
  * joins a ship cell to a world block the ship did not bring); faces with no placed end stay in
@@ -662,7 +721,7 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
     for (let y = oy; y < oy + sy; y++) {
       for (let z = oz; z < oz + sz; z++) {
         for (let x = ox; x < ox + sx; x++) {
-          if (!isDryCell(hull, x, y, z) || grid.getCell(x, y, z) !== AIR) continue;
+          if (grid.getCell(x, y, z) !== AIR || !hasDryOctant(hull, x, y, z)) continue;
           snapCell(t, x, y, z, d);
           if (!isLiquidCell(world.getCell(d.x, d.y, d.z))) continue;
           if (world.setCell(d.x, d.y, d.z, AIR, MOVE_FLAGS)) touched.push(d.x, d.y, d.z);

@@ -13,7 +13,7 @@
  * fill that had to look at an unloaded cell reports 'unloaded' (ok = false): assembling it
  * would leave the rest of the structure behind and delete the glue across the chunk border.
  */
-import { CELL_MULTI_BIT, cellState, ID_MASK, PACK_SCALE, stateFacing } from '../blocks/cell';
+import { CELL_MULTI_BIT, cellState, FULL_LIMIT, ID_MASK, PACK_SCALE, stateFacing } from '../blocks/cell';
 import { cellsTouch } from '../blocks/shapes';
 import { CELL_UNLOADED } from '../blocks/defs';
 import { ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
@@ -416,9 +416,10 @@ export function collectShip(
  * front of the bearing's plane (转子范围：只收轴承所在平面前方的格子). The bearing itself and
  * every functional block (helm, bearing, propeller) are never included and stop the fill.
  *
- * Reasons: 'not_a_bearing'; 'no_hub' (the hub cannot join a structure, or is functional, or does
- * not touch the bearing's front face: cellsTouch, so a slab on the far half of the hub cell
- * would not spin across half a cell of air; docs/SHAPES.md 11.1);
+ * Reasons: 'not_a_bearing'; 'no_hub' (the hub cannot join a structure, or is functional, or is
+ * a cell with parts that does not touch the bearing's front face: cellsTouch, so a slab on the
+ * far half of the hub cell would not spin across half a cell of air; docs/SHAPES.md 11.1. A full
+ * block hub is judged as in M1: a soft one — torch, plant, snow cover — is a hub);
  * 'too_big' (more than maxCells cells); 'too_spread' (a tight box of more than maxBoxCells
  * cells); 'unloaded' (the hub, or a cell the rotor touches,
  * lies in an unloaded chunk; checked before the sails, which may be in the missing part);
@@ -447,10 +448,12 @@ export function collectRotor(
   const hub = grid.getCell(hx, hy, hz);
   if ((hub & ID_MASK) === UNLOADED_ID) return failure('unloaded'); // a hub may well be there
   if (!canJoinStructure(hub) || isFunctionalCell(hub)) return failure('no_hub');
-  // The bearing cannot be cut: its front face is fully covered, so this asks whether the hub's
-  // face towards the bearing has hard material on it.
+  // A hub with parts must touch the bearing: the bearing cannot be cut, its front face is fully
+  // covered, so this asks whether the hub's face towards the bearing has hard material on it. Only
+  // for cells with parts: a full hard block always touches, and a full soft block (torch, plant,
+  // snow cover: no hard material) stays a hub as in M1 (full-block worlds unchanged, SHAPES 15).
   const hubPacked = hub < CELL_MULTI_BIT ? hub : hub + grid.getPart2(hx, hy, hz) * PACK_SCALE;
-  if (!cellsTouch(bearing, hubPacked, facing)) return failure('no_hub');
+  if (hub >= FULL_LIMIT && !cellsTouch(bearing, hubPacked, facing)) return failure('no_hub');
   const axis = facing >> 1;
   const plane = axis === 0 ? bx : axis === 1 ? by : bz;
   const f = flood(grid, glue, hx, hy, hz, hubPacked, maxCells, maxBoxCells, axis, plane, dirSign(facing), true);

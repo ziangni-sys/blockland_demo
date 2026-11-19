@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { canonCell } from '../../src/blocks/shapes';
-import { NZ, PX, PZ, type Dir } from '../../src/core/dirs';
+import { NZ, PX, PY, PZ, type Dir } from '../../src/core/dirs';
 import { collectRotor, collectShip } from '../../src/structures/collect';
 import { GlueStore } from '../../src/structures/glue';
 import { Chunk } from '../../src/voxel/chunk';
@@ -124,6 +124,24 @@ describe('collect: the rotor hub must touch the bearing (SHAPES 11.1)', () => {
         } else {
           expect(r.count).toBe(0);
         }
+      }
+    });
+
+    it(`[${name}] a full soft block in front of the bearing (torch, plant, snow cover) is still a hub, as in M1: the rotor is refused for its sails, or starts when no sails are needed`, () => {
+      // The touch test is for cells with parts only; a soft full block has no hard material, so
+      // applying it there would turn M1's 'not_enough_sails' into 'no_hub' (SHAPES 15: full-block
+      // worlds unchanged). Results taken from c20ea8e.
+      for (const soft of [c(B.TORCH), c(B.TALL_GRASS), c(B.SNOW_LAYER, 1)]) {
+        const h = make();
+        h.set(0, -1, 0, c(B.PLANKS_OAK));
+        h.set(0, 0, 0, facing(B.BEARING, PY)); // facing up: the hub stands on the bearing
+        h.set(0, 1, 0, soft);
+        const r = collectRotor(h.grid, h.glue, ...h.abs(0, 0, 0));
+        expect(r.reason, `hub ${soft}`).toBe('not_enough_sails');
+        expect(r.count).toBe(1);
+        const free = collectRotor(h.grid, h.glue, ...h.abs(0, 0, 0), 400, 0);
+        expect(free.reason, `hub ${soft}`).toBe('ok');
+        expect(cellKeys(h, free.cells, free.count)).toEqual(new Set(['0,1,0']));
       }
     });
   }

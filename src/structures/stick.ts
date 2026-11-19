@@ -175,9 +175,11 @@ export function glueFaceKept(a: number, b: number, dirAtoB: Dir): boolean {
  *     content does not (cellsTouch): the material that touched was chiselled away or removed
  *     with its part while the cell itself stayed (ACCEPTANCE 42). A cell that became air is not
  *     this case: then rule 1 keeps the glue on N's face (ACCEPTANCE 27).
- * Returns the number of faces removed. The grids' change hooks call it on every change, with the
- * listener's oldCell; a stale oldPacked (another listener changed the cell first) can at worst
- * skip rule 2 once. Assembly calls it with the current content (rule 1 only).
+ * Returns the number of faces removed. The grids' change hooks call it on every change in which
+ * the old or the new content holds glue (a change between two contents that hold none, such as a
+ * liquid level, cannot remove a face), with the listener's oldCell; a stale oldPacked (another
+ * listener changed the cell first) can at worst skip rule 2 once. Assembly calls it with the
+ * current content (rule 1 only).
  * Cost: one size check on an empty store; six lookups when the cell carries no glue; nothing
  * more when the cell is a full glueable block (both rules keep every face then).
  */

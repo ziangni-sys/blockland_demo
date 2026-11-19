@@ -13,7 +13,8 @@
  *  - glue: when a cell's content changes (a part chiselled, added or removed counts), by whatever
  *    path (bulk structure moves included), the glue lifetime rules run on its faces (pruneGlueAt:
  *    a glued face stays while one side is still on it, and goes when the cell stopped touching the
- *    neighbour across it; docs/SHAPES.md 10.2); when a chunk is added to the world, the state rule
+ *    neighbour across it; docs/SHAPES.md 10.2; skipped when neither the old nor the new content
+ *    holds glue, which cannot change any face: mayPruneGlue); when a chunk is added to the world, the state rule
  *    runs on the world's faces in and on the border of that chunk (pruneGlueInBox), whose cells
  *    were unknown until then;
  *  - bearings: when the bearing of a running rotor is removed or replaced, by whatever path
@@ -57,7 +58,7 @@ import type { GlueStore } from './glue';
 import { analyzeHull, hullCavityCells, type HullInfo } from './hull';
 import { advanceRotor, applyRotorPose, holdRotor, measureSweep, type RotorSweep } from './rotor';
 import { readStructures, writeStructures } from './serialize';
-import { cellFunc, pruneGlueAt, pruneGlueInBox, sailVolume8 } from './stick';
+import { cellFunc, holdsGlue, pruneGlueAt, pruneGlueInBox, sailVolume8 } from './stick';
 import { Rotor, Ship, type ShipDynamics, type Structure, type StructureHost } from './structure';
 
 export type { BlockifyReport } from './assembly';
@@ -126,6 +127,19 @@ interface Entry {
 type ShipEntry = Entry & { readonly s: Ship };
 
 function noop(): void {}
+
+/**
+ * Can a change of a cell from `oldCell` to `newCell` (the listener's values, packed) remove glue
+ * from its faces in `glue` (pruneGlueAt)? Not when the store is empty (one size check, as before),
+ * and not when neither content holds glue (air, liquids, plants, torches): the cell was on no face
+ * before and is on none after, so the state rule gives what it gave before the change, and the
+ * lost-contact rule needs a cell that still holds glue. A liquid level changing beside glued faces
+ * then costs two table reads instead of six glue lookups. Any change out of a glue-holding content
+ * is an event whose oldCell holds glue, so no change that can remove a face is skipped.
+ */
+function mayPruneGlue(glue: GlueStore, oldCell: number, newCell: number): boolean {
+  return glue.size !== 0 && (holdsGlue(oldCell) || holdsGlue(newCell));
+}
 
 function fail<T>(reason: AssembleFailure): AssembleResult<T> {
   return { ok: false, reason };
@@ -548,7 +562,7 @@ export class StructureManager {
 
   private readonly onWorldCell = (x: number, y: number, z: number, oldCell: number, newCell: number): void => {
     // Called only for a real change (the grids fire no event for an unchanged cell).
-    pruneGlueAt(this.world, this.host.worldGlue, x, y, z, oldCell);
+    if (mayPruneGlue(this.host.worldGlue, oldCell, newCell)) pruneGlueAt(this.world, this.host.worldGlue, x, y, z, oldCell);
     if ((oldCell & ID_MASK) === BEARING_ID && this.worldRotors.length > 0) this.bearingChanged(this.worldRotors, x, y, z, oldCell, newCell);
     const dyn = this.dynamics;
     if (dyn !== null) {
@@ -584,14 +598,14 @@ export class StructureManager {
 
   private watchShip(ship: Ship): () => void {
     return ship.grid.onCellChange((x, y, z, oldCell, newCell) => {
-      pruneGlueAt(ship.grid, ship.glue, x, y, z, oldCell);
+      if (mayPruneGlue(ship.glue, oldCell, newCell)) pruneGlueAt(ship.grid, ship.glue, x, y, z, oldCell);
       if ((oldCell & ID_MASK) === BEARING_ID && ship.children.length > 0) this.bearingChanged(ship.children, x, y, z, oldCell, newCell);
     });
   }
 
   private watchRotor(rotor: Rotor): () => void {
     return rotor.grid.onCellChange((x, y, z, oldCell, newCell) => {
-      pruneGlueAt(rotor.grid, rotor.glue, x, y, z, oldCell);
+      if (mayPruneGlue(rotor.glue, oldCell, newCell)) pruneGlueAt(rotor.grid, rotor.glue, x, y, z, oldCell);
       // Sails by volume: a chiselled felt cell loses an eighth of a sail per octant.
       const d8 = sailVolume8(newCell) - sailVolume8(oldCell);
       if (d8 !== 0) rotor.sails += d8 / 8;

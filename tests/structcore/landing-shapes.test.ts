@@ -27,6 +27,7 @@ import {
   type SnapTransform,
 } from '../../src/structures/assembly';
 import { rotCell, rotDir, type GridRot } from '../../src/structures/orient';
+import { applyRotorPose } from '../../src/structures/rotor';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import { getPacked } from '../../src/voxel/parts';
 import { LOWER, NORTH, slab, SOUTH, stairFill, UPPER, WEST, EAST } from '../shapes';
@@ -217,6 +218,45 @@ describe('docking onto parts: preview and commit agree (SHAPES 11.3)', () => {
   });
 });
 
+describe('a merged cell counts as written by the dock (SHAPES 11.3)', () => {
+  it('a ship cell merging into a world part keeps its glue to the neighbouring ship cell', () => {
+    const s = scene();
+    const ship = raftShip(s);
+    // The log slab (lower, glued to the deck plank below it) lands on an upper bricks slab: merge.
+    s.world.setCell(-2, 61, 0, slab(B.BRICKS, UPPER));
+    const res = s.mgr.dockShip(ship);
+    expect(res.ok && res.report).toEqual({ placed: RAFT_CELLS, dropped: 0, overwritten: 0 });
+    expect(getPacked(s.world, -2, 61, 0)).toBe(canonCell(slab(B.LOG_OAK, LOWER, axisState(0)), slab(B.BRICKS, UPPER)));
+    // Seen from the deck plank, the merged cell was written by this dock (the glue travelled with
+    // both cells), not a world block the ship did not bring: the face keeps its glue.
+    expect(s.host.worldGlue.has(-2, 60, 0, PY)).toBe(true);
+    expect(s.host.worldGlue.size).toBe(1);
+  });
+});
+
+describe('a dock commit after a turn drops a blocked cell as it lands, rotated (SHAPES 19.4)', () => {
+  it('a quarter yaw: the blocked two-part cell drops each part at the DROP_POINT of its rotated fill', () => {
+    const s = scene();
+    const ship = raftShip(s);
+    const r = YAWS[1]!; // +X -> -Z
+    const t: SnapTransform = { r, pivot: vec3(ship.grid.pivot.x, ship.grid.pivot.y, ship.grid.pivot.z), target: vec3(4.3, 90.6, -5.2) };
+    // planks on the west half, stone on the east half; turned, the stone lies north (-Z), the planks south.
+    const two = canonCell(slab(B.PLANKS_OAK, WEST), slab(B.STONE, EAST));
+    expect(getPacked(ship.grid, -1, 61, -2)).toBe(two);
+    expect(rotCell(r, two)).toBe(canonCell(slab(B.STONE, NORTH), slab(B.PLANKS_OAK, SOUTH)));
+    const d = snapCell(t, -1, 61, -2);
+    s.world.setCell(d.x, d.y, d.z, c(B.STONE)); // the only blocked destination
+    const out = commitDock(s.host, ship, t, null);
+    expect(out.report).toEqual({ placed: RAFT_CELLS - 1, dropped: 1, overwritten: 0 });
+    // First part first: the stone (north half, octant 0) drops cobble at octant 0's centre, the
+    // planks (south half) at octant 4's centre.
+    expect(s.host.drops.map((q) => [q.item, q.x - d.x, q.y - d.y, q.z - d.z])).toEqual([
+      [B.COBBLE, 0.25, 0.25, 0.25],
+      [B.PLANKS_OAK, 0.25, 0.25, 0.75],
+    ]);
+  });
+});
+
 describe('the glue rules where the cells landed use the faces cells are on (SHAPES 11.3 settlePlacedGlue)', () => {
   it('an exposed glued face of a landed cell stays while the cell is on that face, and goes when it is not', () => {
     const s = scene();
@@ -258,6 +298,30 @@ describe('a rotor stopping onto parts (SHAPES 11.3)', () => {
       [B.WOOL_BLUE, 1.25, 65.75, 1.25],
       [B.WOOL_WHITE, 0.25, 66.25, 1.25],
     ]);
+  });
+});
+
+describe('a rotor stopping after a quarter turn drops a blocked cell as it lands, rotated (SHAPES 19.4)', () => {
+  it('the two-part arm cell, turned to point up, drops each part at the DROP_POINT of its rotated fill', () => {
+    const s = scene();
+    windmill(s.world, 0, 65, 0, 2); // bearing facing +Z, hub (0,65,1), arms of 2 felt cells in the plane z = 1
+    // The first cell of the +X arm: white felt below, blue felt above.
+    s.world.setCell(1, 65, 1, canonCell(slab(B.WOOL_WHITE, LOWER), slab(B.WOOL_BLUE, UPPER)));
+    const r = s.mgr.startRotor(s.world, 0, 65, 0);
+    if (!r.ok) throw new Error(r.reason);
+    const rotor: Rotor = r.structure;
+    rotor.angle = Math.PI / 2; // a quarter turn about +Z: the +X arm points up
+    applyRotorPose(rotor);
+    s.world.setCell(0, 66, 1, c(B.STONE)); // where that cell lands
+    const rep = s.mgr.stopRotor(rotor);
+    expect(rep).toEqual({ placed: 8, dropped: 1, overwritten: 0 });
+    // Turned a quarter about +Z, the lower half lies on +X and the upper half on -X: blue (west,
+    // octant 0) is the first part now, white (east) the second.
+    expect(s.host.drops.map((q) => [q.item, q.x, q.y, q.z])).toEqual([
+      [B.WOOL_BLUE, 0.25, 66.25, 1.25],
+      [B.WOOL_WHITE, 0.75, 66.25, 1.25],
+    ]);
+    expect(getPacked(s.world, 0, 66, 1)).toBe(c(B.STONE));
   });
 });
 
