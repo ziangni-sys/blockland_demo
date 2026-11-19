@@ -134,7 +134,9 @@ export function dirOfQuad(q: Quad): number {
 /**
  * Structural invariants every MeshData must satisfy: sizes consistent, each quad's 6
  * indices address its own 4 vertices, every triangle counter-clockwise around the normal,
- * normals unit-length, finite positions, uv in [0,1].
+ * normals unit-length, finite positions, uv in [0,1]. The one exception to "every triangle has
+ * positive area": a triangle emitted as a quad whose last two corners coincide (a clipped liquid
+ * side piece, docs/SHAPES.md 8.4) has one zero-area triangle; its other triangle must be CCW.
  */
 export function checkInvariants(m: MeshData): void {
   for (const name of GROUPS) {
@@ -187,9 +189,23 @@ export function checkInvariants(m: MeshData): void {
       const cy = e1z * e2x - e1x * e2z;
       const cz = e1x * e2y - e1y * e2x;
       const area = cx * N[a]! + cy * N[a + 1]! + cz * N[a + 2]!;
+      if (area === 0 && isPaddedTriangleQuad(P, (g.indices[t]! >> 2) * 4)) continue;
       if (!(area > 0)) throw new Error(`${name}: triangle ${t / 3} not CCW around its normal (area ${area})`);
     }
   }
+}
+
+/**
+ * The quad starting at vertex v0 is a triangle padded to four corners: exactly one pair of
+ * corners coincides, and they are neighbours in the corner order (the front copy repeats its last
+ * corner; the back copy, written 0,3,2,1, then has the pair at 1 and 2).
+ */
+function isPaddedTriangleQuad(P: Float32Array, v0: number): boolean {
+  const same = (i: number, j: number): boolean =>
+    P[(v0 + i) * 3] === P[(v0 + j) * 3] && P[(v0 + i) * 3 + 1] === P[(v0 + j) * 3 + 1] && P[(v0 + i) * 3 + 2] === P[(v0 + j) * 3 + 2];
+  let pairs = 0;
+  for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) if (same(i, j)) pairs++;
+  return pairs === 1 && !same(0, 2) && !same(1, 3);
 }
 
 /** Throw unless every vertex lies inside [lo, hi]^3. */

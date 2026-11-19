@@ -49,8 +49,13 @@ const Dispatched = {
 } as const;
 type Dispatched = (typeof Dispatched)[keyof typeof Dispatched];
 
-/** True when nothing in the padded box can produce a visible face (all air, or all opaque cubes). */
+/**
+ * True when nothing in the padded box can produce a visible face (all air, or all opaque cubes).
+ * A box with a holes or second-part layer never is: one chiselled octant in buried stone has only
+ * opaque ids in the base layer, but its hole must be drawn (docs/SHAPES.md 8.1).
+ */
 export function isTriviallyEmpty(input: MeshInput): boolean {
+  if (input.holes !== null || input.part2 !== null) return false;
   const cells = input.cells;
   const first = cells[0]! & ID_MASK;
   if (first === AIR) {

@@ -1,18 +1,28 @@
 /**
  * Shared emission machinery for every shape: growable output arrays per draw group, the
- * per-quad scratch, smooth light + AO sampling and the generic axis-aligned box face.
+ * per-quad scratch, smooth light + AO sampling, the generic axis-aligned box face and, for jobs
+ * that carry partial cells, the octant-level quarter face (docs/SHAPES.md 8.2, 8.3).
  *
  * Shape emitters fill the quad scratch (positions, uvs, light) and call commit(); nothing
  * allocates per face. All state lives on instances — one MeshContext per Mesher.
+ *
+ * LAYERED JOBS. A job whose input has a holes or a second-part layer (MeshInput.holes / part2 not
+ * null) is "layered": begin() then fills three per-padded-cell scratch tables (opq, partial,
+ * nearPartial) that the shape emitters read. A job without those layers never touches them
+ * and runs exactly the code M1 ran.
  */
 import * as cellBits from '../../blocks/cell';
+import * as registry from '../../blocks/registry';
+import * as shapes from '../../blocks/shapes';
 import { VFLAG_LIQUID_SURFACE, type GeometryData, type MeshInput } from '../types';
 import * as tables from './tables';
 
 // Hot-path imports are bound to module-local constants once, at module init. Module
 // runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
 // would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
-const { ID_MASK } = cellBits;
+const { ID_MASK, HOLES_SHIFT } = cellBits;
+const { OPAQUE } = registry;
+const { FACE_COVER } = shapes;
 const {
   AO_BYTE,
   AVG_LIGHT,
@@ -117,6 +127,43 @@ function rotV(r: number, u: number, v: number): number {
 }
 
 const EMPTY_CELLS = new Uint16Array(0);
+const EMPTY_BYTES = new Uint8Array(0);
+
+/** AO byte of a fully open vertex (level 3). */
+const AO_OPEN = 255;
+
+/**
+ * Octant references used by the octant sampling: padded cell index * 8 + octant (docs/SHAPES.md
+ * 1.1). The largest padded box a job can have (a structure's tight box, at most 2^21 cells, plus
+ * its margin) keeps this far below 2^31, so `r >> 3` and `r & 7` split it exactly.
+ */
+const OCT = 8;
+
+/**
+ * Corner k of the quarter face of octant h toward Dir d, index (d * 8 + h) * 4 + k, precomputed:
+ * QF_POS[i * 3 + a] = cell-local coordinate on axis a (0, 0.5 or 1); QF_RU[i * 2] / [i * 2 + 1] =
+ * the coordinate along the face's R / U axis; QF_SIGN[i] = bit 0: the corner lies toward +R from
+ * the quarter's centre, bit 1: toward +U; bit 2: the R coordinate is whole, bit 3: the U one is.
+ */
+const QF_POS = new Float64Array(6 * 8 * 4 * 3);
+const QF_RU = new Float64Array(6 * 8 * 4 * 2);
+const QF_SIGN = new Uint8Array(6 * 8 * 4);
+for (let d = 0; d < 6; d++) {
+  const ra = FACE_R_AXIS[d]!;
+  const ua = FACE_U_AXIS[d]!;
+  for (let h = 0; h < 8; h++) {
+    for (let k = 0; k < 4; k++) {
+      const i = (d * 8 + h) * 4 + k;
+      const hi = FACE_CORNER_HI[d * 4 + k]!;
+      for (let a = 0; a < 3; a++) QF_POS[i * 3 + a] = ((h >> a) & 1) * 0.5 + (((hi >> a) & 1) !== 0 ? 0.5 : 0);
+      const cr = QF_POS[i * 3 + ra]!;
+      const cu = QF_POS[i * 3 + ua]!;
+      QF_RU[i * 2] = cr;
+      QF_RU[i * 2 + 1] = cu;
+      QF_SIGN[i] = ((hi >> ra) & 1) | (((hi >> ua) & 1) << 1) | (cr !== 0.5 ? 4 : 0) | (cu !== 0.5 ? 8 : 0);
+    }
+  }
+}
 
 export class MeshContext {
   // ---- current job
@@ -142,7 +189,7 @@ export class MeshContext {
   /** Smooth light bytes per corner. */
   readonly qsky = new Uint8Array(4);
   readonly qblock = new Uint8Array(4);
-  /** AO level 0..3 per corner (3 = open). */
+  /** AO byte per corner: linear openness 0..255 (AO_BYTE[level] for a sampled level, or an average of such bytes). */
   readonly qao = new Uint8Array(4);
 
   // ---- box-face parameters (cell-local, set by shapes before boxFace)
@@ -151,6 +198,40 @@ export class MeshContext {
   /** Explicit uv rectangle (u0, v0, u1, v1) used instead of position-derived uvs when useUvRect. */
   readonly uvRect = new Float64Array(4);
   useUvRect = false;
+
+  // ---- layered jobs (docs/SHAPES.md 8.2): valid between begin() and end() when `layered`
+  /** The job has a holes or a second-part layer; the tables below describe it. */
+  layered = false;
+  holes: Uint8Array | null = null;
+  part2: Uint32Array | null = null;
+  /** Per padded cell: octants held by opaque material (blocks/shapes.ts opaqueFill). */
+  opq: Uint8Array = EMPTY_BYTES;
+  /** Per padded cell: 1 when the cell has holes or a second part (cell value >= FULL_LIMIT). */
+  partial: Uint8Array = EMPTY_BYTES;
+  /** Per padded cell: 1 when the cell or one of its 26 neighbours is partial. */
+  nearPartial: Uint8Array = EMPTY_BYTES;
+  /** Capacity-sized backing stores of the three tables, kept across jobs. */
+  private opqStore = EMPTY_BYTES;
+  private partialStore = EMPTY_BYTES;
+  private nearStore = EMPTY_BYTES;
+
+  /** Result of sampleOctants(): AO byte, sky byte, block byte, and whether a sampled cell is partial. */
+  private sAo = 0;
+  private sSky = 0;
+  private sBlock = 0;
+  private sPartial = false;
+  /**
+   * Cache of the four cell-corner values of one cell face (the face of padded cell `cornerP` in Dir
+   * `cornerD`), filled lazily by quarterFace: bit k of cornerValid = corner k (index cu * 2 + cr) known.
+   */
+  private cornerP = -1;
+  private cornerD = -1;
+  private cornerValid = 0;
+  /**
+   * The cached corner values: AO bytes at [k], sky bytes at [4 + k], block bytes at [8 + k].
+   * Allocated with the layer tables (a job without layers never needs it).
+   */
+  private corners = EMPTY_BYTES;
 
   begin(input: MeshInput): void {
     const px = input.sx + 2;
@@ -174,12 +255,107 @@ export class MeshContext {
     this.axisStride[2] = px;
     for (const g of this.groups) g.reset();
     this.useUvRect = false;
+    this.holes = input.holes;
+    this.part2 = input.part2;
+    this.layered = input.holes !== null || input.part2 !== null;
+    this.cornerP = -1;
+    if (this.layered) this.buildLayerTables();
   }
 
   /** Drop references to the job's input so a long-lived context does not pin it. */
   end(): void {
     this.cells = EMPTY_CELLS;
     this.light = null;
+    this.holes = null;
+    this.part2 = null;
+    this.layered = false;
+  }
+
+  /**
+   * Fill opq, partial and nearPartial for the current (layered) job. opq follows
+   * blocks/shapes.ts opaqueFill bit for bit: the union of the occupied octants of every part whose
+   * material is OPAQUE (a cell without layers: 0xff or 0 by its id).
+   */
+  private buildLayerTables(): void {
+    const cells = this.cells;
+    const holes = this.holes;
+    const part2 = this.part2;
+    const n = cells.length;
+    if (this.corners.length === 0) this.corners = new Uint8Array(12);
+    if (this.opqStore.length < n) {
+      this.opqStore = new Uint8Array(n);
+      this.partialStore = new Uint8Array(n);
+      this.nearStore = new Uint8Array(n);
+    }
+    const opq = (this.opq = this.opqStore);
+    const partial = (this.partial = this.partialStore);
+    const near = (this.nearPartial = this.nearStore);
+    near.fill(0, 0, n);
+    for (let i = 0; i < n; i++) {
+      const h = holes !== null ? holes[i]! : 0;
+      const q = part2 !== null ? part2[i]! : 0;
+      let o = OPAQUE[cells[i]! & ID_MASK] !== 0 ? ~h & 0xff : 0;
+      if (q !== 0 && OPAQUE[q & ID_MASK] !== 0) o |= ~(q >>> HOLES_SHIFT) & 0xff;
+      opq[i] = o;
+      partial[i] = (h | q) !== 0 ? 1 : 0;
+    }
+    // nearPartial: mark the 3x3x3 block around every partial cell (clamped to the padded box).
+    const px = this.px;
+    const py = this.py;
+    const pz = this.pz;
+    const layer = px * pz;
+    for (let y = 0; y < py; y++) {
+      for (let z = 0; z < pz; z++) {
+        let i = z * px + y * layer;
+        for (let x = 0; x < px; x++, i++) {
+          if (partial[i] === 0) continue;
+          for (let dy = y > 0 ? -1 : 0; dy <= (y < py - 1 ? 1 : 0); dy++) {
+            for (let dz = z > 0 ? -1 : 0; dz <= (z < pz - 1 ? 1 : 0); dz++) {
+              const row = i + dy * layer + dz * px;
+              for (let dx = x > 0 ? -1 : 0; dx <= (x < px - 1 ? 1 : 0); dx++) near[row + dx] = 1;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * True when the cell at padded index q completely and opaquely covers its own face `face`:
+   * for a partial cell, opaqueCover(cell, face) === 15 (docs/SHAPES.md 3.2); otherwise the id's
+   * INFO cover bit (every opaque cube; a snow-like slab its bottom). For jobs without layers this
+   * is exactly M1's INFO test.
+   */
+  covers(q: number, face: number): boolean {
+    if (this.layered && this.partial[q] !== 0) return ((FACE_COVER[this.opq[q]!]! >>> (face * 4)) & 15) === 15;
+    return (INFO[this.cells[q]! & ID_MASK]! & (1 << face)) !== 0;
+  }
+
+  /**
+   * Occupied octants of the cell at padded index q, both parts together (fills only: a part's
+   * occupancy is ~holes whatever its material, as in blocks/shapes.ts). Layered jobs only.
+   */
+  partsFill(q: number): number {
+    const h = this.holes !== null ? this.holes[q]! : 0;
+    let f = (this.cells[q]! & ID_MASK) !== 0 ? ~h & 0xff : 0;
+    const p2 = this.part2 !== null ? this.part2[q]! : 0;
+    if (p2 !== 0) f |= ~(p2 >>> HOLES_SHIFT) & 0xff;
+    return f;
+  }
+
+  /**
+   * Block id of the part that holds octant o of the cell at padded index q, or 0 when that octant
+   * is empty (blocks/shapes.ts partAt, reduced to the id). A cell without layers answers its id for
+   * every octant, like partAt does for a whole block or a model. Layered jobs only.
+   */
+  idAt(q: number, o: number): number {
+    const c = this.cells[q]!;
+    const id1 = c & ID_MASK;
+    const h = this.holes !== null ? this.holes[q]! : 0;
+    if (id1 !== 0 && ((h >> o) & 1) === 0) return id1;
+    const p2 = this.part2 !== null ? this.part2[q]! : 0;
+    if (p2 !== 0 && (((p2 >>> HOLES_SHIFT) >> o) & 1) === 0) return p2 & ID_MASK;
+    return 0;
   }
 
   setBox(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {
@@ -213,14 +389,30 @@ export class MeshContext {
    * 3 - (side1 + side2 + corner). Light: average of the touching cells that are not
    * occluders; the diagonal corner is ignored when both sides are blocked, because no light
    * can reach the vertex through it (prevents leaks through diagonal walls).
+   *
+   * An occluder is a cell that is opaque as a whole: an OPAQUE id (INFO_OCCLUDER), or in a
+   * layered job a cell whose eight octants are all opaque (opq === 0xff, the same thing for a
+   * cell without parts). A partial cell is never a whole-cell occluder (docs/SHAPES.md 8.3, 8.4).
    */
   sampleVertex(k: number, base: number, s1: number, s2: number, ao: boolean): void {
     const cells = this.cells;
-    const o1 = s1 !== 0 && (INFO[cells[base + s1]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
-    const o2 = s2 !== 0 && (INFO[cells[base + s2]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
-    const oc = s1 !== 0 && s2 !== 0 && (INFO[cells[base + s1 + s2]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
-    if (ao) this.qao[k] = o1 && o2 ? 0 : 3 - ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (oc ? 1 : 0));
-    else this.qao[k] = 3;
+    const opq = this.layered ? this.opq : null;
+    let o1: boolean;
+    let o2: boolean;
+    let oc: boolean;
+    let ob: boolean;
+    if (opq === null) {
+      o1 = s1 !== 0 && (INFO[cells[base + s1]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
+      o2 = s2 !== 0 && (INFO[cells[base + s2]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
+      oc = s1 !== 0 && s2 !== 0 && (INFO[cells[base + s1 + s2]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
+      ob = (INFO[cells[base]! & ID_MASK]! & INFO_OCCLUDER) !== 0;
+    } else {
+      o1 = s1 !== 0 && opq[base + s1] === 0xff;
+      o2 = s2 !== 0 && opq[base + s2] === 0xff;
+      oc = s1 !== 0 && s2 !== 0 && opq[base + s1 + s2] === 0xff;
+      ob = opq[base] === 0xff;
+    }
+    this.qao[k] = ao ? AO_BYTE[o1 && o2 ? 0 : 3 - ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (oc ? 1 : 0))]! : AO_OPEN;
 
     const light = this.light;
     if (light === null) {
@@ -232,7 +424,7 @@ export class MeshContext {
     let sky = 0;
     let blk = 0;
     let raw: number;
-    if ((INFO[cells[base]! & ID_MASK]! & INFO_OCCLUDER) === 0) {
+    if (!ob) {
       raw = light[base]!;
       sky += raw >> 4;
       blk += raw & 15;
@@ -281,7 +473,7 @@ export class MeshContext {
     for (let k = 0; k < 4; k++) {
       this.qsky[k] = sky;
       this.qblock[k] = blk;
-      this.qao[k] = 3;
+      this.qao[k] = AO_OPEN;
     }
   }
 
@@ -305,6 +497,13 @@ export class MeshContext {
     ao: boolean,
     twoSided = false,
   ): void {
+    this.boxFaceCorners(p, x, y, z, d, rot, ao);
+    if (twoSided) this.commitDoubleSided(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO);
+    else this.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO, false);
+  }
+
+  /** The scratch quad of boxFace (positions, uvs, light, AO) without committing it. */
+  boxFaceCorners(p: number, x: number, y: number, z: number, d: number, rot: number, ao: boolean): void {
     const box = this.box;
     const na = d >> 1;
     const boundary = (d & 1) === 0 ? box[3 + na] === 1 : box[na] === 0;
@@ -342,8 +541,190 @@ export class MeshContext {
       quv[k * 2] = rotU(rot, u, v);
       quv[k * 2 + 1] = rotV(rot, u, v);
     }
-    if (twoSided) this.commitDoubleSided(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO);
-    else this.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO, false);
+  }
+
+  // ------------------------------------------------------------------ octant path (layered jobs)
+
+  /**
+   * The octant one half-cell step from octant reference r (padded cell * 8 + octant) along axis a,
+   * toward + (s > 0) or - (s < 0): inside the same cell, or into the neighbour cell.
+   */
+  private step(r: number, a: number, s: number): number {
+    const bit = 1 << a;
+    if (s > 0) return (r & bit) !== 0 ? r + this.axisStride[a]! * OCT - bit : r + bit;
+    return (r & bit) !== 0 ? r - bit : r - this.axisStride[a]! * OCT + bit;
+  }
+
+  /** The octant of reference r is held by opaque material. */
+  private opaqueAt(r: number): boolean {
+    return ((this.opq[r >> 3]! >> (r & 7)) & 1) !== 0;
+  }
+
+  /**
+   * The octant formula O(V) of docs/SHAPES.md 8.3 for a vertex whose quarter face looks into the
+   * front octant f, the vertex lying toward sign su along axis ua0 and sv along axis va0. Samples
+   * side1 = f + su, side2 = f + sv, corner = f + su + sv (half-cell steps). An octant is an
+   * occluder when opaque material holds it. AO: both sides = 0, else 3 - (side1 + side2 + corner).
+   * Light: average of the cells of the four octants, occluders skipped, the corner skipped when
+   * both sides are occluders, F's cell when nothing is left; octants in the same cell each count.
+   * Results in sAo / sSky / sBlock; sPartial = one of the four octants lies in a partial cell.
+   */
+  private sampleOctants(f: number, ua0: number, su: number, va0: number, sv: number): void {
+    const s1 = this.step(f, ua0, su);
+    const s2 = this.step(f, va0, sv);
+    const c = this.step(s1, va0, sv);
+    const fc = f >> 3;
+    const c1 = s1 >> 3;
+    const c2 = s2 >> 3;
+    const cc = c >> 3;
+    const of = this.opaqueAt(f);
+    const o1 = this.opaqueAt(s1);
+    const o2 = this.opaqueAt(s2);
+    const oc = this.opaqueAt(c);
+    const partial = this.partial;
+    this.sPartial = (partial[fc]! | partial[c1]! | partial[c2]! | partial[cc]!) !== 0;
+    this.sAo = AO_BYTE[o1 && o2 ? 0 : 3 - ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (oc ? 1 : 0))]!;
+    const light = this.light;
+    if (light === null) {
+      this.sSky = NO_LIGHT_SKY;
+      this.sBlock = NO_LIGHT_BLOCK;
+      return;
+    }
+    let n = 0;
+    let sky = 0;
+    let blk = 0;
+    let raw: number;
+    if (!of) {
+      raw = light[fc]!;
+      sky += raw >> 4;
+      blk += raw & 15;
+      n++;
+    }
+    if (!o1) {
+      raw = light[c1]!;
+      sky += raw >> 4;
+      blk += raw & 15;
+      n++;
+    }
+    if (!o2) {
+      raw = light[c2]!;
+      sky += raw >> 4;
+      blk += raw & 15;
+      n++;
+    }
+    if (!oc && !(o1 && o2)) {
+      raw = light[cc]!;
+      sky += raw >> 4;
+      blk += raw & 15;
+      n++;
+    }
+    if (n === 0) {
+      raw = light[fc]!;
+      sky = raw >> 4;
+      blk = raw & 15;
+      n = 1;
+    }
+    this.sSky = AVG_LIGHT[n * 61 + sky]!;
+    this.sBlock = AVG_LIGHT[n * 61 + blk]!;
+  }
+
+  /**
+   * O(V) at cell corner (cr, cu) (each 0 or 1, along the face's R and U axes) of face d of the
+   * cell at padded index p: the vertex of the quadrant touching that corner. Cached per cell face.
+   */
+  private cornerValue(p: number, d: number, cr: number, cu: number): number {
+    if (this.cornerP !== p || this.cornerD !== d) {
+      this.cornerP = p;
+      this.cornerD = d;
+      this.cornerValid = 0;
+    }
+    const k = cu * 2 + cr;
+    if ((this.cornerValid & (1 << k)) === 0) {
+      const na = d >> 1;
+      const ra = FACE_R_AXIS[d]!;
+      const ua = FACE_U_AXIS[d]!;
+      const positive = (d & 1) === 0;
+      const h = (positive ? 1 << na : 0) | (cr << ra) | (cu << ua);
+      const f = this.step(p * OCT + h, na, positive ? 1 : -1);
+      this.sampleOctants(f, ra, cr === 1 ? 1 : -1, ua, cu === 1 ? 1 : -1);
+      this.corners[k] = this.sAo;
+      this.corners[4 + k] = this.sSky;
+      this.corners[8 + k] = this.sBlock;
+      this.cornerValid |= 1 << k;
+    }
+    return k;
+  }
+
+  /**
+   * Emit the quarter face of octant h (0..7) of the cell at padded index p, toward Dir d: a
+   * 0.5 x 0.5 quad on the octant's face (on the cell boundary or on the cell's middle plane).
+   * Positions and uvs follow boxFace (uv from the cell-local position, then `rot` quarter
+   * turns). Light and AO per vertex follow docs/SHAPES.md 8.3: the octant formula O(V), except
+   * that a vertex on a cell face that is an edge midpoint or the face centre takes the average of
+   * the cell-corner values ((a + b + 1) >> 1, (a + b + c + e + 2) >> 2 per byte) when none of the
+   * cells its O(V) would sample is partial. Culling is the caller's job.
+   */
+  quarterFace(g: GeometryBuilder, p: number, x: number, y: number, z: number, h: number, d: number, tile: number, rot: number, flags: number): void {
+    const na = d >> 1;
+    const positive = (d & 1) === 0;
+    const f = this.step(p * OCT + h, na, positive ? 1 : -1);
+    const ra = FACE_R_AXIS[d]!;
+    const ua = FACE_U_AXIS[d]!;
+    const rPos = FACE_R_SIGN[d]! > 0;
+    const uPos = FACE_U_SIGN[d]! > 0;
+    const qpos = this.qpos;
+    const quv = this.quv;
+    for (let k = 0; k < 4; k++) {
+      const i = (d * 8 + h) * 4 + k;
+      qpos[k * 3] = x + QF_POS[i * 3]!;
+      qpos[k * 3 + 1] = y + QF_POS[i * 3 + 1]!;
+      qpos[k * 3 + 2] = z + QF_POS[i * 3 + 2]!;
+      const cr = QF_RU[i * 2]!;
+      const cu = QF_RU[i * 2 + 1]!;
+      const u = rPos ? cr : 1 - cr;
+      const v = uPos ? cu : 1 - cu;
+      quv[k * 2] = rotU(rot, u, v);
+      quv[k * 2 + 1] = rotV(rot, u, v);
+      const sign = QF_SIGN[i]!;
+      const su = (sign & 1) !== 0 ? 1 : -1;
+      const sv = (sign & 2) !== 0 ? 1 : -1;
+      this.sampleOctants(f, ra, su, ua, sv);
+      const rInt = (sign & 4) !== 0;
+      const uInt = (sign & 8) !== 0;
+      // A quarter face on the cell's middle plane looks into its own (partial) cell, so sPartial
+      // always holds there: inner faces use O(V) at every vertex (8.3).
+      if ((rInt && uInt) || this.sPartial) {
+        this.qao[k] = this.sAo;
+        this.qsky[k] = this.sSky;
+        this.qblock[k] = this.sBlock;
+      } else if (rInt) {
+        // Midpoint of the cell edge at R = cr: average of its two cell corners.
+        const a = this.cornerValue(p, d, cr, 0);
+        const b = this.cornerValue(p, d, cr, 1);
+        this.average2(k, a, b);
+      } else if (uInt) {
+        const a = this.cornerValue(p, d, 0, cu);
+        const b = this.cornerValue(p, d, 1, cu);
+        this.average2(k, a, b);
+      } else {
+        const a = this.cornerValue(p, d, 0, 0);
+        const b = this.cornerValue(p, d, 1, 0);
+        const c = this.cornerValue(p, d, 0, 1);
+        const e = this.cornerValue(p, d, 1, 1);
+        const v = this.corners;
+        this.qao[k] = (v[a]! + v[b]! + v[c]! + v[e]! + 2) >> 2;
+        this.qsky[k] = (v[4 + a]! + v[4 + b]! + v[4 + c]! + v[4 + e]! + 2) >> 2;
+        this.qblock[k] = (v[8 + a]! + v[8 + b]! + v[8 + c]! + v[8 + e]! + 2) >> 2;
+      }
+    }
+    this.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO, false);
+  }
+
+  private average2(k: number, a: number, b: number): void {
+    const v = this.corners;
+    this.qao[k] = (v[a]! + v[b]! + 1) >> 1;
+    this.qsky[k] = (v[4 + a]! + v[4 + b]! + 1) >> 1;
+    this.qblock[k] = (v[8 + a]! + v[8 + b]! + 1) >> 1;
   }
 
   /** Write corner k of a free quad (absolute box-space position, uv). */
@@ -440,7 +821,7 @@ export class MeshContext {
       lay[v] = tile;
       li[v * 4] = qsky[k]!;
       li[v * 4 + 1] = qblock[k]!;
-      li[v * 4 + 2] = AO_BYTE[qao[k]!]!;
+      li[v * 4 + 2] = qao[k]!;
       li[v * 4 + 3] = ((surfaceCorners >> k) & 1) !== 0 ? flags | VFLAG_LIQUID_SURFACE : flags;
     }
     const idx = g.indices;

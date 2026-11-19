@@ -6,7 +6,9 @@
  * --------------------------------------------------------
  * Space      Box space of the MeshInput: interior cell (x,y,z) spans [x,x+1]^3. Every
  *            vertex of a cell lies inside that cell's box.
- * Quads      Everything is quads: 4 vertices + 6 indices, no shared vertices. Triangles
+ * Quads      Everything is quads: 4 vertices + 6 indices, no shared vertices. (A clipped liquid
+ *            side piece that is a triangle is a quad whose last two corners coincide: one of
+ *            its two triangles has zero area. docs/SHAPES.md 8.4.) Triangles
  *            are COUNTER-CLOCKWISE seen from the front (outside): the renderer must cull
  *            back faces in EVERY pass (FrontSide). Double-sided parts (plants, helm wheel,
  *            propeller blades, liquid faces) are emitted twice: the front, and a back copy
@@ -73,6 +75,17 @@
  * Liquid faces (top, sides, bottom) are double-sided so they are visible from inside the
  * liquid, except where the neighbour draws its own face over the whole shared plane
  * (a full cube, another liquid, ...): only the outward copy is emitted there.
+ *
+ * PARTIAL CELLS (docs/SHAPES.md 8)
+ * --------------------------------
+ * A job whose input carries a holes or second-part layer goes through layeredCells(); any other
+ * job runs exactly M1's code. The path is chosen per face: a face whose own cell and whose nine
+ * cells in front have no parts is M1's face, byte for byte; every other face of a cube-family
+ * material is drawn per octant face as 0.5 x 0.5 quarter faces (shapes/cube.ts emitPartFace),
+ * with ambient occlusion and smooth light sampled at octant level (builder.ts quarterFace). A
+ * cell with parts never occludes as a whole: "occluder" means eight opaque octants. Models keep
+ * their shapes and test a partial neighbour by its opaque quadrant cover; liquid faces against a
+ * partial neighbour are cut per quadrant (shapes/liquid.ts).
  */
 import * as cellBits from '../blocks/cell';
 import type { MeshData, MeshInput } from './types';
@@ -85,8 +98,8 @@ import * as tables from './shapes/tables';
 // Hot-path imports are bound to module-local constants once, at module init. Module
 // runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
 // would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
-const { ID_MASK } = cellBits;
-const { emitCube } = cubeShapes;
+const { HOLES_SHIFT, ID_MASK } = cellBits;
+const { emitCube, emitCubeMixed, emitPart, isCubeShape } = cubeShapes;
 const { LiquidScratch, emitLiquid } = liquidShapes;
 const { emitCactus, emitCross, emitHelm, emitLayers, emitPropeller, emitTorch } = models;
 const {
@@ -128,9 +141,6 @@ function checkInput(input: MeshInput): void {
   if (input.light !== null && input.light.length !== n) {
     throw new RangeError(`mesh input: light has ${input.light.length} entries, expected ${n}`);
   }
-  // The holes and second-part layers are checked but not read yet: until the shape-aware mesher
-  // (docs/SHAPES.md 8.2) lands, a cell with parts meshes as a full block of its first part's
-  // material (16.3).
 }
 
 /**
@@ -148,52 +158,119 @@ export class Mesher {
     const ctx = this.ctx;
     ctx.begin(input);
     try {
-      const { sx, sy, sz, cells } = input;
-      const px = sx + 2;
-      const slab = px * (sz + 2);
-      for (let y = 0; y < sy; y++) {
-        for (let z = 0; z < sz; z++) {
-          let p = 1 + (z + 1) * px + (y + 1) * slab;
-          for (let x = 0; x < sx; x++, p++) {
-            const cell = cells[p]!;
-            const id = cell & ID_MASK;
-            const shape = SHAPE[id]!;
-            if (shape === SH_NONE) continue;
-            switch (shape) {
-              case SH_CUBE:
-              case SH_AXIS:
-              case SH_BEARING:
-                emitCube(ctx, p, x, y, z, cell, id, shape);
-                break;
-              case SH_LIQUID:
-                emitLiquid(ctx, this.liquid, p, x, y, z, id);
-                break;
-              case SH_CROSS:
-                emitCross(ctx, p, x, y, z, id);
-                break;
-              case SH_TORCH:
-                emitTorch(ctx, p, x, y, z, id);
-                break;
-              case SH_LAYERS:
-                emitLayers(ctx, p, x, y, z, cell, id);
-                break;
-              case SH_CACTUS:
-                emitCactus(ctx, p, x, y, z, id);
-                break;
-              case SH_HELM:
-                emitHelm(ctx, p, x, y, z, cell, id);
-                break;
-              case SH_PROPELLER:
-                emitPropeller(ctx, p, x, y, z, cell, id);
-                break;
-            }
-          }
-        }
-      }
+      if (ctx.layered) this.layeredCells(input);
+      else this.wholeCells(input);
       const g = ctx.groups;
       return { opaque: g[G_OPAQUE]!.finish(), cutout: g[G_CUTOUT]!.finish(), translucent: g[G_TRANSLUCENT]!.finish() };
     } finally {
       ctx.end();
+    }
+  }
+
+  /** A job without holes and second parts: M1's loop, one emitter per cell by its id's shape. */
+  private wholeCells(input: MeshInput): void {
+    const ctx = this.ctx;
+    const { sx, sy, sz, cells } = input;
+    const px = sx + 2;
+    const slab = px * (sz + 2);
+    for (let y = 0; y < sy; y++) {
+      for (let z = 0; z < sz; z++) {
+        let p = 1 + (z + 1) * px + (y + 1) * slab;
+        for (let x = 0; x < sx; x++, p++) {
+          const cell = cells[p]!;
+          const id = cell & ID_MASK;
+          const shape = SHAPE[id]!;
+          if (shape === SH_NONE) continue;
+          // The switch is inlined here rather than going through model(): this is the loop every
+          // terrain job runs, and an ocean section dispatches thousands of liquid cells.
+          switch (shape) {
+            case SH_CUBE:
+            case SH_AXIS:
+            case SH_BEARING:
+              emitCube(ctx, p, x, y, z, cell, id, shape);
+              break;
+            case SH_LIQUID:
+              emitLiquid(ctx, this.liquid, p, x, y, z, id);
+              break;
+            default:
+              this.model(p, x, y, z, cell, id, shape);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * A job with a holes or second-part layer (docs/SHAPES.md 8.2). A partial cell emits each of its
+   * cube-family parts through the octant path. A whole cube is M1's emitCube unless a partial cell
+   * is among its 26 neighbours; then the path is chosen face by face (emitCubeMixed). Models and
+   * liquids keep their emitters, which read the job's opaque-octant table for their neighbour tests.
+   * A model or liquid given holes (never a valid cell) is drawn whole; a second part that is not a
+   * cube-family material (never valid either) is not drawn.
+   */
+  private layeredCells(input: MeshInput): void {
+    const ctx = this.ctx;
+    const { sx, sy, sz, cells } = input;
+    const holes = input.holes;
+    const part2 = input.part2;
+    const partial = ctx.partial;
+    const near = ctx.nearPartial;
+    const opq = ctx.opq;
+    const px = sx + 2;
+    const slab = px * (sz + 2);
+    for (let y = 0; y < sy; y++) {
+      for (let z = 0; z < sz; z++) {
+        let p = 1 + (z + 1) * px + (y + 1) * slab;
+        for (let x = 0; x < sx; x++, p++) {
+          const cell = cells[p]!;
+          const id = cell & ID_MASK;
+          const shape = SHAPE[id]!;
+          const cube = shape === SH_CUBE || shape === SH_AXIS || shape === SH_BEARING;
+          if (partial[p] !== 0) {
+            // Buried: every octant of this cell and of its six neighbours is opaque, so no face
+            // of either part can show (the octant path's rule 1 would cull each one).
+            if (opq[p] === 0xff && (opq[p + 1]! & opq[p - 1]! & opq[p + px]! & opq[p - px]! & opq[p + slab]! & opq[p - slab]!) === 0xff) continue;
+            if (cube) emitPart(ctx, p, x, y, z, cell | ((holes !== null ? holes[p]! : 0) << HOLES_SHIFT));
+            else if (shape !== SH_NONE) this.model(p, x, y, z, cell, id, shape);
+            const second = part2 !== null ? part2[p]! : 0;
+            if (second !== 0 && isCubeShape(SHAPE[second & ID_MASK]!)) emitPart(ctx, p, x, y, z, second);
+            continue;
+          }
+          if (shape === SH_NONE) continue;
+          if (cube) {
+            if (near[p] !== 0) emitCubeMixed(ctx, p, x, y, z, cell, id, shape);
+            else emitCube(ctx, p, x, y, z, cell, id, shape);
+          } else this.model(p, x, y, z, cell, id, shape);
+        }
+      }
+    }
+  }
+
+  /** Every shape that is not a cube: liquids and the block models. */
+  private model(p: number, x: number, y: number, z: number, cell: number, id: number, shape: number): void {
+    const ctx = this.ctx;
+    switch (shape) {
+      case SH_LIQUID:
+        emitLiquid(ctx, this.liquid, p, x, y, z, id);
+        break;
+      case SH_CROSS:
+        emitCross(ctx, p, x, y, z, id);
+        break;
+      case SH_TORCH:
+        emitTorch(ctx, p, x, y, z, id);
+        break;
+      case SH_LAYERS:
+        emitLayers(ctx, p, x, y, z, cell, id);
+        break;
+      case SH_CACTUS:
+        emitCactus(ctx, p, x, y, z, id);
+        break;
+      case SH_HELM:
+        emitHelm(ctx, p, x, y, z, cell, id);
+        break;
+      case SH_PROPELLER:
+        emitPropeller(ctx, p, x, y, z, cell, id);
+        break;
     }
   }
 }

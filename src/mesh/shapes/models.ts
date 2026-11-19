@@ -1,6 +1,11 @@
 /**
  * Non-cube block models: cross plants, torch, snow-like layers, cactus, helm, propeller.
  *
+ * Models are never cut: a model block is always a whole cell (docs/SHAPES.md 1.4). Their own
+ * shapes do not change with M2.3; what changes is the test "does the neighbour cover my face on
+ * the cell boundary", which is MeshContext.covers: a partial neighbour covers a face only when its
+ * opaque octants cover all four quadrants (8.2).
+ *
  * Every vertex stays inside its cell's [0,1]^3 box. Box parts use the generic box face
  * (position-derived uvs, smooth light, AO where the part touches the cell boundary);
  * thin decal parts (plant planes, helm wheel, propeller blades) are double-sided quads lit
@@ -15,7 +20,7 @@ import * as tables from './tables';
 // runners that implement ES live bindings as getter calls (the Vite/Vitest SSR transform)
 // would otherwise pay a call per table read inside the meshing loops; bundles are unaffected.
 const { ID_MASK, STATE_MASK, STATE_SHIFT, stateFacing, stateLayers } = cellBits;
-const { BASE_FLAGS, CORNER_U, CORNER_V, G_CUTOUT, GROUP, INFO, TILE_SLOT } = tables;
+const { BASE_FLAGS, CORNER_U, CORNER_V, G_CUTOUT, GROUP, TILE_SLOT } = tables;
 
 const UP = 2;
 const DOWN = 3;
@@ -79,8 +84,7 @@ export function emitTorch(ctx: MeshContext, p: number, x: number, y: number, z: 
   for (let j = 0; j < 4; j++) ctx.boxFace(g, p, x, y, z, SIDES[j]!, tile, 0, flags, false);
   ctx.setUvRect(TORCH_LO, TORCH_TOP - 2 / 16, TORCH_HI, TORCH_TOP);
   ctx.boxFace(g, p, x, y, z, UP, tile, 0, flags, false);
-  const below = ctx.cells[p - ctx.axisStride[1]!]! & ID_MASK;
-  if ((INFO[below]! & (1 << UP)) === 0) {
+  if (!ctx.covers(p - ctx.axisStride[1]!, UP)) {
     ctx.setUvRect(TORCH_LO, 0, TORCH_HI, 2 / 16);
     ctx.boxFace(g, p, x, y, z, DOWN, tile, 0, flags, false);
   }
@@ -99,10 +103,11 @@ export function emitLayers(ctx: MeshContext, p: number, x: number, y: number, z:
   ctx.setBox(0, 0, 0, 1, h, 1);
   ctx.useUvRect = false;
   for (let d = 0; d < 6; d++) {
-    const nc = cells[p + ctx.dirStride[d]!]!;
+    const q = p + ctx.dirStride[d]!;
+    const nc = cells[q]!;
     const nid = nc & ID_MASK;
     // The top face is on the cell boundary only for a full stack.
-    if ((d !== UP || h === 1) && (INFO[nid]! & (1 << (d ^ 1))) !== 0) continue;
+    if ((d !== UP || h === 1) && ctx.covers(q, d ^ 1)) continue;
     // A side is hidden by a same-kind neighbour stacked at least as high.
     if (d !== UP && d !== DOWN && nid === id && stateLayers((nc >>> STATE_SHIFT) & STATE_MASK) / 8 >= h) continue;
     ctx.boxFace(g, p, x, y, z, d, tile, 0, flags, true);
@@ -127,11 +132,11 @@ export function emitCactus(ctx: MeshContext, p: number, x: number, y: number, z:
   ctx.useUvRect = false;
   ctx.setBox(0, 0, 0, 1, 1, 1);
   const aboveId = cells[p + up]! & ID_MASK;
-  if (aboveId !== id && (INFO[aboveId]! & (1 << DOWN)) === 0) {
+  if (aboveId !== id && !ctx.covers(p + up, DOWN)) {
     ctx.boxFace(g, p, x, y, z, UP, TILE_SLOT[id * 3 + 1]!, 0, flags, true);
   }
   const belowId = cells[p - up]! & ID_MASK;
-  if (belowId !== id && (INFO[belowId]! & (1 << UP)) === 0) {
+  if (belowId !== id && !ctx.covers(p - up, UP)) {
     ctx.boxFace(g, p, x, y, z, DOWN, TILE_SLOT[id * 3 + 2]!, 0, flags, true);
   }
   const lo = CACTUS_INSET;
@@ -170,10 +175,10 @@ export function emitHelm(ctx: MeshContext, p: number, x: number, y: number, z: n
   if (f === UP || f === DOWN) f = 0; // a helm always faces horizontally; repair bad state
   ctx.useUvRect = false;
   ctx.setBox(PEDESTAL_LO, 0, PEDESTAL_LO, PEDESTAL_HI, PEDESTAL_TOP, PEDESTAL_HI);
-  const below = ctx.cells[p - ctx.axisStride[1]!]! & ID_MASK;
+  const below = p - ctx.axisStride[1]!;
   const baseTile = TILE_SLOT[id * 3]!;
   for (let d = 0; d < 6; d++) {
-    if (d === DOWN && (INFO[below]! & (1 << UP)) !== 0) continue;
+    if (d === DOWN && ctx.covers(below, UP)) continue;
     ctx.boxFace(g, p, x, y, z, d, baseTile, 0, flags, true);
   }
 
@@ -234,7 +239,6 @@ function setPropellerBox(ctx: MeshContext, f: number, s0: number, s1: number, l0
  * u across the blade.
  */
 export function emitPropeller(ctx: MeshContext, p: number, x: number, y: number, z: number, cell: number, id: number): void {
-  const cells = ctx.cells;
   const g = ctx.groups[GROUP[id]!]!;
   const flags = BASE_FLAGS[id]!;
   const f = stateFacing((cell >>> STATE_SHIFT) & STATE_MASK);
@@ -243,9 +247,9 @@ export function emitPropeller(ctx: MeshContext, p: number, x: number, y: number,
 
   setPropellerBox(ctx, f, 0, PLATE_S1, PLATE_LO, PLATE_HI);
   const plateTile = TILE_SLOT[id * 3 + 2]!;
-  const mountId = cells[p + ctx.dirStride[back]!]! & ID_MASK;
+  const mount = p + ctx.dirStride[back]!;
   for (let d = 0; d < 6; d++) {
-    if (d === back && (INFO[mountId]! & (1 << f)) !== 0) continue;
+    if (d === back && ctx.covers(mount, f)) continue;
     ctx.boxFace(g, p, x, y, z, d, plateTile, 0, flags, true);
   }
   setPropellerBox(ctx, f, PLATE_S1, HUB_S1, HUB_LO, HUB_HI);
