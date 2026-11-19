@@ -78,7 +78,7 @@ describe('lifecycle', () => {
     be.setSectionMesh(2, 16, 0, 0, mesh());
     be.setSectionMesh(2, 16, 0, 0, null); // removed again before init: last write wins
     be.setStructureMesh(7, 0, 0, 0, mesh());
-    const dry: DryVolume = { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, mask: new Uint8Array([1]) };
+    const dry: DryVolume = { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, scale: 1, mask: new Uint8Array([1]) };
     be.setStructureDryVolume(7, dry);
     dry.mask[0] = 0; // the caller reuses its buffer: the queued copy must not change
     expect(be.stats().sections).toBe(0);
@@ -105,7 +105,7 @@ describe('lifecycle', () => {
     be.setSectionMesh(2, 0, 0, 0, mesh());
     be.setStructureMesh(9, 0, 0, 0, mesh());
     be.setStructurePose(9, pose(0, 0, 0));
-    be.setStructureDryVolume(9, { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, mask: new Uint8Array([1]) });
+    be.setStructureDryVolume(9, { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, scale: 1, mask: new Uint8Array([1]) });
     be.setEntities([{ id: 1, kind: 'rabbit', x: 0, y: 0, z: 0, yaw: 0, vx: 0, vy: 0, vz: 0, payload: 0, flash: 0, sky: 15, block: 0, headYaw: 0, headPitch: 0, held: 0, posture: 'stand', label: null }]);
     be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0 }, breakProgress: 0.5, preview: [], conflicts: [], glue: [] });
     be.render();
@@ -140,7 +140,7 @@ describe('structure records', () => {
 
   it('a dry volume may arrive before the first mesh and survives until the structure is removed', () => {
     const be = readyBackend();
-    be.setStructureDryVolume(4, { ox: 0, oy: 0, oz: 0, sx: 2, sy: 1, sz: 1, mask: new Uint8Array([1, 0]) });
+    be.setStructureDryVolume(4, { ox: 0, oy: 0, oz: 0, sx: 2, sy: 1, sz: 1, scale: 1, mask: new Uint8Array([1, 0]) });
     expect(be.stats().structures).toBe(1);
     be.setStructureMesh(4, 0, 0, 0, mesh());
     expect(be.stats().structures).toBe(1);
@@ -152,7 +152,7 @@ describe('structure records', () => {
     const be = readyBackend();
     be.setStructureMesh(4, 0, 0, 0, mesh());
     be.setStructurePose(4, pose(1048576, 47.6, -2097152));
-    be.setStructureDryVolume(4, { ox: -1, oy: -1, oz: -1, sx: 9, sy: 5, sz: 7, mask: new Uint8Array(9 * 5 * 7).fill(1) });
+    be.setStructureDryVolume(4, { ox: -1, oy: -1, oz: -1, sx: 9, sy: 5, sz: 7, scale: 1, mask: new Uint8Array(9 * 5 * 7).fill(1) });
     be.setCamera({ x: 1048570, y: 50, z: -2097150, yaw: 0, pitch: 0, fov: 70 });
     const i = internals(be);
     i.assignDrySlots();

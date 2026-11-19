@@ -448,11 +448,13 @@ export function createVoxelMaterials(
  * (uniform control flow); only the results are selected per slot.
  *
  * Filtering (mirrored and tested in drymask.ts): the mask is sampled at the CENTRE of the
- * fragment's mask layer (exact in local y) and bilinearly in local x/z. Vertical filtering would let a non-dry layer above or below
- * (the hold floor, the deck) attenuate the value of a dry cell; near an inner corner of the
- * hold that pushed it under the threshold whenever the waterline came within ~0.3 cells of
+ * fragment's mask layer (exact in local y) and bilinearly in local x/z. A texel is a cell, or an
+ * octant when the volume's scale is 2 (DryVolume; dryLayers holds the texel layers, sy * scale),
+ * so the rules below hold per texel. Vertical filtering would let a non-dry layer above or below
+ * (the hold floor, the deck) attenuate the value of a dry texel; near an inner corner of the
+ * hold that pushed it under the threshold whenever the waterline came within ~0.3 texels of
  * the floor, the normal floating position of a small boat. Horizontal filtering is kept on
- * purpose: it moves the cut ~0.3 cells into the hull walls, which removes the z-fight line
+ * purpose: it moves the cut ~0.3 texels into the hull walls, which removes the z-fight line
  * where the water plane meets the inner wall faces.
  */
 function dryVolumeFactor(

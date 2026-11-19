@@ -187,9 +187,13 @@ function makeTileTexture(data: Uint8Array, size: number, count: number): THREE.D
   return t;
 }
 
-function makeMaskTexture(data: Uint8Array, sx: number, sy: number, sz: number): THREE.Data3DTexture {
+/**
+ * The dry-volume texture: `data` holds sx * sy * sz texels per scale^3 (DryVolume byte order);
+ * the texture has sx * scale x sz * scale x sy * scale texels.
+ */
+function makeMaskTexture(data: Uint8Array, sx: number, sy: number, sz: number, scale: 1 | 2): THREE.Data3DTexture {
   // Width along local x, height along local z, depth along local y: the DryVolume byte order.
-  const t = new THREE.Data3DTexture(data, sx, sz, sy);
+  const t = new THREE.Data3DTexture(data, sx * scale, sz * scale, sy * scale);
   t.format = THREE.RedFormat;
   t.type = THREE.UnsignedByteType;
   t.colorSpace = THREE.NoColorSpace;
@@ -368,7 +372,7 @@ export class ThreeBackend implements RenderBackend {
     for (let i = 0; i < DRY_SLOTS; i++) {
       // Distinct textures per slot: three merges texture bindings by texture identity at
       // compile time, so identical placeholders would collapse the slots into one binding.
-      this.dryPlaceholders.push(makeMaskTexture(new Uint8Array(1), 1, 1, 1));
+      this.dryPlaceholders.push(makeMaskTexture(new Uint8Array(1), 1, 1, 1, 1));
     }
     this.scene.name = 'blocklands';
     this.sectionsRoot.name = 'sections';
@@ -828,9 +832,10 @@ export class ThreeBackend implements RenderBackend {
       rec.dry = null;
       return;
     }
-    const n = dry.sx * dry.sy * dry.sz;
+    const sc = dry.scale;
+    const n = dry.sx * dry.sy * dry.sz * sc * sc * sc;
     const old = rec.dry;
-    const sameSize = rec.dryTex !== null && old !== null && old.sx === dry.sx && old.sy === dry.sy && old.sz === dry.sz;
+    const sameSize = rec.dryTex !== null && old !== null && old.sx === dry.sx && old.sy === dry.sy && old.sz === dry.sz && old.scale === sc;
     // The contract marks dry cells with any non-zero byte; an R8 unorm texture would sample a
     // 1 as 1/255, so normalize to 0 / 255 while copying (we never keep the caller's buffer).
     const data = sameSize ? (rec.dryTex!.image.data as Uint8Array) : new Uint8Array(n);
@@ -842,10 +847,10 @@ export class ThreeBackend implements RenderBackend {
       rec.dryTex!.needsUpdate = true;
     } else {
       rec.dryTex?.dispose();
-      rec.dryTex = makeMaskTexture(data, dry.sx, dry.sy, dry.sz);
+      rec.dryTex = makeMaskTexture(data, dry.sx, dry.sy, dry.sz, sc);
     }
     // Keep our own copy of the box (not the caller's object, which may be reused).
-    rec.dry = { ox: dry.ox, oy: dry.oy, oz: dry.oz, sx: dry.sx, sy: dry.sy, sz: dry.sz, mask: data };
+    rec.dry = { ox: dry.ox, oy: dry.oy, oz: dry.oz, sx: dry.sx, sy: dry.sy, sz: dry.sz, scale: sc, mask: data };
   }
 
   // ------------------------------------------------------------------ per frame state
@@ -1084,7 +1089,7 @@ export class ThreeBackend implements RenderBackend {
         const rec = list[ids[i]!]!;
         // Camera-relative: the shader feeds camera-relative positions (precise anywhere).
         dryVolumeMatrix(rec.pose, rec.dry!, this.u.dryMatrices[i]!.value.elements, cp.x, cp.y, cp.z);
-        layers.setComponent(i, rec.dry!.sy);
+        layers.setComponent(i, rec.dry!.sy * rec.dry!.scale);
         if (node.value !== rec.dryTex) node.value = rec.dryTex!;
       } else {
         layers.setComponent(i, 1);

@@ -36,13 +36,15 @@
 import { DIR_X, DIR_Y, DIR_Z } from '../../core/dirs';
 import type { Body } from './body';
 import { mat3MulTransA, type Mat3 } from './mat3';
-import { PF_SOLID as PF_SOLID_IMPORT } from './patch';
+import { PF_PARTIAL as PF_PARTIAL_IMPORT, PF_SOLID as PF_SOLID_IMPORT } from './patch';
 import type { RotorView } from './rotorview';
-import { OCC_SOLID as OCC_SOLID_IMPORT, type GridShape, type ProbeTarget } from './shape';
+import { OCC_PARTIAL as OCC_PARTIAL_IMPORT, OCC_SOLID as OCC_SOLID_IMPORT, type GridShape, type ProbeTarget } from './shape';
 
 // Module constants (not imported bindings) in the hot loops; see solver.ts.
 const PF_SOLID = PF_SOLID_IMPORT;
+const PF_PARTIAL = PF_PARTIAL_IMPORT;
 const OCC_SOLID = OCC_SOLID_IMPORT;
+const OCC_PARTIAL = OCC_PARTIAL_IMPORT;
 
 export const KIND_TERRAIN = 0;
 export const KIND_ROTOR = 1;
@@ -84,11 +86,12 @@ export const F_LP = 69;
 export const F_BIAS = 70;
 export const F_MU = 71;
 export const F_CELL = 72; // hull cell (A-local) known exactly
-export const F_HASCELL = 75; // 1 = F_CELL valid, 2 = owner must be resolved from F_LOC / F_OBS
+export const F_HASCELL = 75; // 1 = F_CELL and F_OCTANT valid, 2 = owner must be resolved from F_LOC / F_OBS
 export const F_LOC = 76; // hull-local sample point (owner resolution)
 export const F_OBS = 79; // obstacle cell centre in hull-local coordinates
 export const F_FIX = 82; // ship/ship: FIX_* (a side the solver treats as immovable)
-export const STRIDE = 83;
+export const F_OCTANT = 83; // octant of F_CELL the contact lies in (names the part to destroy)
+export const STRIDE = 84;
 
 /** F_FIX values: which body of a ship/ship contact gets no impulse from it this sub-step. */
 export const FIX_NONE = 0;
@@ -154,13 +157,15 @@ export class ContactSet {
 
 /** Accept a face only if it is within ~60 degrees of opposing one of the intruder's normals. */
 export const ALIGN_MIN = 0.5;
-/** Fallback: cells walked through hard material along the best-aligned axis. */
+/** Fallback: cells walked through hard material along the best-aligned axis (twice as many half cells near partial cells). */
 const WALK_MAX = 2;
 /**
  * Rotor contacts: depth penalty (blocks) of an exit face pointing along the blade's relative
  * sweep. A hull edge overlapping the swept band by less than about this is slid out across the
- * band instead of being pushed along it. Below the spacing of the surface sample points (0.5),
- * so a hull that overlaps the band by half a block or more is always pushed.
+ * band instead of being pushed along it. Below the spacing of the surface sample points of full
+ * blocks (0.5), so a hull that overlaps the band by half a block or more is always pushed. It
+ * stays the same next to partial cells, where quarter faces put points 0.5 apart as well (their
+ * corners; no centres): tests/shipphys/shapes-rotor.test.ts drives a blade into a slab hull.
  */
 const GRAZE_PENALTY = 0.35;
 /**
@@ -187,15 +192,23 @@ const STALE_RANK = 1e6;
  * Picks the exit face of a penetrated cell. Works in the TARGET's local frame (the grid whose
  * hard cell the point is in). setFrame() takes the rotation from the intruder's frame (where
  * its normal mask is expressed) to the target's frame.
+ *
+ * When neither the penetrated cell nor any of its 6 neighbours is partial, the M1 integer
+ * algorithm runs unchanged. Otherwise the same algorithm runs on the half-cell grid
+ * (docs/SHAPES.md 12.6): the point's octant must be hard, the candidate faces are those of the
+ * octant towards its 6 neighbouring octants that are open (neither hard nor sealed), depths are
+ * measured to the octant's faces, and the fallback walks up to 2 * WALK_MAX half cells.
  */
 export class Prober {
   dir = 0;
   depth = 0;
   /** Alignment of the chosen face with the intruder's normals (1 for an intruder without normals). */
   faceAlign = 1;
+  /** The penetrated cell and the octant of it the point lies in. */
   cellX = 0;
   cellY = 0;
   cellZ = 0;
+  octant = 0;
   /** align[g*6 + d] = (target face normal g) . (-intruder normal d). */
   private readonly align = new Float64Array(36);
   /**
@@ -242,6 +255,18 @@ export class Prober {
     const cx = Math.floor(x);
     const cy = Math.floor(y);
     const cz = Math.floor(z);
+    if (
+      t.hasPartial &&
+      (t.isPartial(cx, cy, cz) ||
+        t.isPartial(cx + 1, cy, cz) ||
+        t.isPartial(cx - 1, cy, cz) ||
+        t.isPartial(cx, cy + 1, cz) ||
+        t.isPartial(cx, cy - 1, cz) ||
+        t.isPartial(cx, cy, cz + 1) ||
+        t.isPartial(cx, cy, cz - 1))
+    ) {
+      return this.probeHalf(t, x, y, z, mask, sx, sy, sz, walk);
+    }
     if (!t.isSolid(cx, cy, cz)) return false;
     const sweep = sx !== 0 || sy !== 0 || sz !== 0;
     let best = -1;
@@ -276,6 +301,7 @@ export class Prober {
     this.cellX = cx;
     this.cellY = cy;
     this.cellZ = cz;
+    this.octant = (x - cx >= 0.5 ? 1 : 0) | (y - cy >= 0.5 ? 2 : 0) | (z - cz >= 0.5 ? 4 : 0);
     if (best >= 0) {
       this.dir = best;
       this.depth = bestDepth;
@@ -297,6 +323,69 @@ export class Prober {
         return true;
       }
       if (!t.isSolid(nx, ny, nz)) break; // sealed cavity: no way out along this axis
+    }
+    return false;
+  }
+
+  /** probe() on the half-cell grid, next to partial cells (same rules, octants for cells). */
+  private probeHalf(t: ProbeTarget, x: number, y: number, z: number, mask: number, sx: number, sy: number, sz: number, walk: boolean): boolean {
+    const hx = Math.floor(x * 2);
+    const hy = Math.floor(y * 2);
+    const hz = Math.floor(z * 2);
+    if (!t.isSolidHalf(hx, hy, hz)) return false;
+    const sweep = sx !== 0 || sy !== 0 || sz !== 0;
+    let best = -1;
+    let bestScore = Infinity;
+    let bestDepth = 0;
+    let bestAlign = 1;
+    let fallback = 0;
+    let fallbackAlign = -Infinity;
+    const tab = this.byMask;
+    const row = (mask & 63) * 6;
+    for (let g = 0; g < 6; g++) {
+      const al = tab[row + g]!;
+      if (al > fallbackAlign) {
+        fallbackAlign = al;
+        fallback = g;
+      }
+      if (al < ALIGN_MIN) continue;
+      if (!t.isOpenHalf(hx + DIR_X[g]!, hy + DIR_Y[g]!, hz + DIR_Z[g]!)) continue;
+      const depth = halfFaceDepth(g, x, y, z, hx, hy, hz);
+      let score = depth;
+      if (sweep) {
+        const s = g === 0 ? sx : g === 1 ? -sx : g === 2 ? sy : g === 3 ? -sy : g === 4 ? sz : -sz;
+        if (s > 0) score += GRAZE_PENALTY * s;
+      }
+      if (score < bestScore) {
+        bestScore = score;
+        best = g;
+        bestDepth = depth;
+        bestAlign = al;
+      }
+    }
+    this.cellX = hx >> 1;
+    this.cellY = hy >> 1;
+    this.cellZ = hz >> 1;
+    this.octant = (hx & 1) | ((hy & 1) << 1) | ((hz & 1) << 2);
+    if (best >= 0) {
+      this.dir = best;
+      this.depth = bestDepth;
+      this.faceAlign = bestAlign;
+      return true;
+    }
+    if (!walk) return false;
+    const g = fallback;
+    for (let k = 1; k <= WALK_MAX * 2; k++) {
+      const nx = hx + DIR_X[g]! * k;
+      const ny = hy + DIR_Y[g]! * k;
+      const nz = hz + DIR_Z[g]! * k;
+      if (t.isOpenHalf(nx, ny, nz)) {
+        this.dir = g;
+        this.depth = halfFaceDepth(g, x, y, z, hx, hy, hz) + (k - 1) * 0.5;
+        this.faceAlign = fallbackAlign;
+        return true;
+      }
+      if (!t.isSolidHalf(nx, ny, nz)) break; // sealed cavity: no way out along this axis
     }
     return false;
   }
@@ -329,6 +418,25 @@ function sweepWeight(b: Body, vel: Float64Array, wx: number, wy: number, wz: num
   return w < 1 ? w : 1;
 }
 
+/** Distance from (x,y,z) to face g of the octant at half-cell coordinates (hx, hy, hz). */
+function halfFaceDepth(g: number, x: number, y: number, z: number, hx: number, hy: number, hz: number): number {
+  switch (g) {
+    case 0:
+      return (hx + 1) * 0.5 - x;
+    case 1:
+      return x - hx * 0.5;
+    case 2:
+      return (hy + 1) * 0.5 - y;
+    case 3:
+      return y - hy * 0.5;
+    case 4:
+      return (hz + 1) * 0.5 - z;
+    default:
+      return z - hz * 0.5;
+  }
+}
+
+/** Distance from (x,y,z) to face g of the unit cell (cx, cy, cz). */
 function faceDepth(g: number, x: number, y: number, z: number, cx: number, cy: number, cz: number): number {
   switch (g) {
     case 0:
@@ -344,6 +452,11 @@ function faceDepth(g: number, x: number, y: number, z: number, cx: number, cy: n
     default:
       return z - cz;
   }
+}
+
+/** Does local point (x,y,z) lie in one of the hard octants `hard` of the partial cell holding it? */
+function inHardOctant(hard: number, x: number, y: number, z: number): boolean {
+  return ((hard >> ((Math.floor(x * 2) & 1) | ((Math.floor(y * 2) & 1) << 1) | ((Math.floor(z * 2) & 1) << 2))) & 1) !== 0;
 }
 
 /** Column `axis` of R, signed by the direction (world image of local Dir g), written to out. */
@@ -427,8 +540,14 @@ export class ContactGenerator {
       const iy = Math.floor(wy) - poy;
       const iz = Math.floor(wz) - poz;
       if (ix >= 0 && iy >= 0 && iz >= 0 && ix < psx && iy < psy && iz < psz) {
-        if ((flags[(iz * psx + ix) * psy + iy]! & PF_SOLID) === 0) continue;
-      } else if (!patch.isSolid(ix + pox, iy + poy, iz + poz)) {
+        const pi = (iz * psx + ix) * psy + iy;
+        const fl = flags[pi]!;
+        if ((fl & PF_SOLID) === 0) {
+          // a partial cell: only a point in one of its hard octants is inside it
+          if ((fl & PF_PARTIAL) === 0) continue;
+          if (((patch.partial[pi]! >> ((Math.floor(wx * 2) & 1) | ((Math.floor(wy * 2) & 1) << 1) | ((Math.floor(wz * 2) & 1) << 2))) & 1) === 0) continue;
+        }
+      } else if (!patch.isSolidHalf(Math.floor(wx * 2), Math.floor(wy * 2), Math.floor(wz * 2))) {
         continue;
       }
       if (!pr.probe(patch, wx, wy, wz, pm[i]!, 0, 0, 0, true)) continue;
@@ -485,7 +604,9 @@ export class ContactGenerator {
         const hy = Math.floor(qy) - soy;
         const hz = Math.floor(qz) - soz;
         if (hx < 0 || hy < 0 || hz < 0 || hx >= ssx || hy >= ssy || hz >= ssz) continue;
-        if (occ[hx + hz * ssx + hy * ssx * ssz] !== OCC_SOLID) continue;
+        const si = hx + hz * ssx + hy * ssx * ssz;
+        const oc = occ[si]!;
+        if (oc !== OCC_SOLID && (oc !== OCC_PARTIAL || !inHardOctant(s.solidMask[si]!, qx, qy, qz))) continue;
         if (!pr.probe(s, qx, qy, qz, cms[j]!, 0, 0, 0, true)) continue;
         const base = f.push();
         const a = f.f;
@@ -674,7 +795,9 @@ export class ContactGenerator {
       const iy = Math.floor(ly) - roy;
       const iz = Math.floor(lz) - roz;
       if (ix < 0 || iy < 0 || iz < 0 || ix >= rsx || iy >= rsy || iz >= rsz) continue;
-      if (rocc[ix + iz * rsx + iy * rsx * rsz] !== OCC_SOLID) continue;
+      const ri2 = ix + iz * rsx + iy * rsx * rsz;
+      const roc = rocc[ri2]!;
+      if (roc !== OCC_SOLID && (roc !== OCC_PARTIAL || !inHardOctant(rs.solidMask[ri2]!, lx, ly, lz))) continue;
       const wx = R[0]! * plx + R[1]! * ply + R[2]! * plz + tsx;
       const wy = R[3]! * plx + R[4]! * ply + R[5]! * plz + tsy;
       const wz = R[6]! * plx + R[7]! * ply + R[8]! * plz + tsz;
@@ -754,7 +877,9 @@ export class ContactGenerator {
       const iy = Math.floor(qy) - soy;
       const iz = Math.floor(qz) - soz;
       if (ix < 0 || iy < 0 || iz < 0 || ix >= ssx || iy >= ssy || iz >= ssz) continue;
-      if (occ[ix + iz * ssx + iy * ssx * ssz] !== OCC_SOLID) continue;
+      const si = ix + iz * ssx + iy * ssx * ssz;
+      const oc = occ[si]!;
+      if (oc !== OCC_SOLID && (oc !== OCC_PARTIAL || !inHardOctant(s.solidMask[si]!, qx, qy, qz))) continue;
       const wx = R0[0]! * plx + R0[1]! * ply + R0[2]! * plz + t0x;
       const wy = R0[3]! * plx + R0[4]! * ply + R0[5]! * plz + t0y;
       const wz = R0[6]! * plx + R0[7]! * ply + R0[8]! * plz + t0z;
@@ -812,6 +937,7 @@ export class ContactGenerator {
       a[base + F_CELL] = pr.cellX;
       a[base + F_CELL + 1] = pr.cellY;
       a[base + F_CELL + 2] = pr.cellZ;
+      a[base + F_OCTANT] = pr.octant;
     }
   }
 
@@ -867,7 +993,9 @@ export class ContactGenerator {
       const iy = Math.floor(ly) - toy;
       const iz = Math.floor(lz) - toz;
       if (ix < 0 || iy < 0 || iz < 0 || ix >= tsx || iy >= tsy || iz >= tsz) continue;
-      if (occ[ix + iz * tsx + iy * tsx * tsz] !== OCC_SOLID) continue;
+      const ti = ix + iz * tsx + iy * tsx * tsz;
+      const oc = occ[ti]!;
+      if (oc !== OCC_SOLID && (oc !== OCC_PARTIAL || !inHardOctant(t.solidMask[ti]!, lx, ly, lz))) continue;
       if (!pr.probe(t, lx, ly, lz, s.pmask[i]!, 0, 0, 0, true)) continue;
       const base = set.push();
       const f = set.f;
