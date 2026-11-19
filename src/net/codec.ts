@@ -58,14 +58,20 @@ import {
   MAX_RELIABLE_BYTES,
   MAX_STRUCTURE_BOX_CELLS,
   MAX_UNRELIABLE_BYTES,
+  MAX_SLAB_MODE,
   MAX_VIEW_RADIUS,
   MESSAGE_CHANNEL,
+  MINING_ONE_OCTANT,
+  MINING_SUB_OCTANT,
   MODES,
   MSG,
   REFUSE_REASONS,
   SECTION,
   STRUCTURE_KINDS,
+  TARGET_SUB_LIMIT,
   TOAST_KINDS,
+  USE_FLAG_SNEAK,
+  USE_SLAB_SHIFT,
   type Cell,
   type CellVolume,
   type ChunkDelta,
@@ -392,13 +398,14 @@ function readMode(r: ByteReader): Mode {
   return readEnum(r, MODES, 'game mode');
 }
 
-/** Target: vu gridId, vi x, vi y, vi z, u8 face, u8 sub, Cell cell. */
+/** Target: vu gridId, vi x, vi y, vi z, u8 face, u8 sub (the octant hit: 0..7, the high 5 bits 0), Cell cell. */
 export function writeTarget(w: ByteWriter, t: Target): void {
   w.varuint(t.gridId);
   writeCoord(w, t.x);
   writeCoord(w, t.y);
   writeCoord(w, t.z);
   writeDir(w, t.face, 'face');
+  if (!isUint(t.sub, TARGET_SUB_LIMIT - 1)) bad('target octant', t.sub);
   w.u8(t.sub);
   writeCell(w, t.cell);
 }
@@ -409,6 +416,7 @@ export function readTarget(r: ByteReader): Target {
   const z = readCoord(r);
   const face = readDir(r, 'face');
   const sub = r.u8();
+  if (sub >= TARGET_SUB_LIMIT) r.fail(`target octant ${sub} out of range`);
   const cell = readCell(r);
   return { gridId, x, y, z, face, sub, cell };
 }
@@ -745,7 +753,9 @@ function writeClientPayload(w: ByteWriter, m: ClientMessage): void {
     case 'use':
       w.varuint(m.seq).varuint(m.moveSeq);
       writeSlot(w, m.slot);
-      w.u8(m.sneak ? 1 : 0);
+      const slabMode = m.slabMode ?? 0;
+      if (!isUint(slabMode, MAX_SLAB_MODE)) bad('slab mode', slabMode);
+      w.u8((m.sneak ? USE_FLAG_SNEAK : 0) | (slabMode << USE_SLAB_SHIFT));
       writeOptTarget(w, m.target);
       return;
     case 'attack':
@@ -820,8 +830,14 @@ function readClientPayload(r: ByteReader, id: number): ClientMessage {
       const seq = r.varuint();
       const moveSeq = r.varuint();
       const slot = readSlot(r);
-      const sneak = (readFlags(r, 1, 'use flag') & 1) !== 0;
-      return { type: 'use', seq, moveSeq, slot, sneak, target: readOptTarget(r) };
+      // Bit 0 sneak, bits 1..3 the slab mode 0..6 (7 is no mode); higher bits are errors.
+      const flags = readFlags(r, USE_FLAG_SNEAK | (7 << USE_SLAB_SHIFT), 'use flag');
+      const slabMode = flags >> USE_SLAB_SHIFT;
+      if (slabMode > MAX_SLAB_MODE) r.fail(`slab mode ${slabMode} out of range`);
+      const target = readOptTarget(r);
+      const sneak = (flags & USE_FLAG_SNEAK) !== 0;
+      // slabMode 0 decodes as absent (as a Message without parameters has no params).
+      return slabMode === 0 ? { type: 'use', seq, moveSeq, slot, sneak, target } : { type: 'use', seq, moveSeq, slot, sneak, slabMode, target };
     }
     case MSG.attack: {
       const seq = r.varuint();
@@ -1363,12 +1379,22 @@ function readVitals(r: ByteReader): NetVitals {
   return { health, maxHealth, air, maxAir, dead, mode: readMode(r) };
 }
 
+/**
+ * Mining: vu gridId, vi x, y, z, u8 sub (bits 0..2 the octant, bit 3 "this one octant only",
+ * bits 4..7 zero), u8 progress. Gluing: the same with u8 face before sub, which must be 0
+ * (docs/SHAPES.md 6.3).
+ */
 function writeMining(w: ByteWriter, m: MiningView | GluingView, face: boolean): void {
   w.varuint(m.gridId);
   writeCoord(w, m.x);
   writeCoord(w, m.y);
   writeCoord(w, m.z);
-  if (face) writeDir(w, (m as GluingView).face, 'face');
+  if (face) {
+    writeDir(w, (m as GluingView).face, 'face');
+    if (m.sub !== 0) bad('gluing sub', m.sub);
+  } else if (!isUint(m.sub, MINING_ONE_OCTANT | MINING_SUB_OCTANT)) {
+    bad('mining sub', m.sub);
+  }
   w.u8(m.sub);
   writeProgress(w, m.progress);
 }
@@ -1377,7 +1403,7 @@ function readMining(r: ByteReader): MiningView {
   const x = readCoord(r);
   const y = readCoord(r);
   const z = readCoord(r);
-  const sub = r.u8();
+  const sub = readFlags(r, MINING_ONE_OCTANT | MINING_SUB_OCTANT, 'mining sub');
   return { gridId, x, y, z, sub, progress: readProgress(r) };
 }
 function readGluing(r: ByteReader): GluingView {
@@ -1386,7 +1412,7 @@ function readGluing(r: ByteReader): GluingView {
   const y = readCoord(r);
   const z = readCoord(r);
   const face = readDir(r, 'face');
-  const sub = r.u8();
+  const sub = readFlags(r, 0, 'gluing sub');
   return { gridId, x, y, z, face, sub, progress: readProgress(r) };
 }
 

@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
+import { quadrantOctant } from '../../src/blocks/shapes';
 import { NX, NZ, PX, PY, PZ, type Dir } from '../../src/core/dirs';
 import type { PlayerControl } from '../../src/sim/players';
 import type { Simulation } from '../../src/sim/simulation';
@@ -17,8 +18,9 @@ import { EventLog, FLAT_TOP, flatSim, idAt, items } from './helpers';
 
 const T = FLAT_TOP;
 
+/** What a client claims for face `face` of a cell: the octant hit is one behind that face (as a ray entering through it reports). */
 function aim(sim: Simulation, x: number, y: number, z: number, face: Dir, gridId = 0): AimTarget {
-  return { gridId, x, y, z, face, cell: sim.structures.gridById(gridId)!.getCell(x, y, z) };
+  return { gridId, x, y, z, face, sub: quadrantOctant(face, 0), cell: sim.structures.gridById(gridId)!.getCell(x, y, z) };
 }
 
 /** A client-driven player (its client would move it; here it just stands) looking at the sky. */
@@ -38,8 +40,8 @@ describe('the claimed aim (client-driven players)', () => {
     sim.world.setCell(-2, T, 0, makeCell(B.DIRT));
     // Looking at the sky: no ray would hit anything.
     me.claimAim(aim(sim, 2, T, 0, PY), aim(sim, -2, T, 0, PY));
-    expect(me.targetCell()).toEqual({ gridId: 0, x: 2, y: T, z: 0, face: PY });
-    expect(me.mineTargetCell()).toEqual({ gridId: 0, x: -2, y: T, z: 0, face: PY });
+    expect(me.targetCell()).toEqual({ gridId: 0, x: 2, y: T, z: 0, face: PY, octant: quadrantOctant(PY, 0) });
+    expect(me.mineTargetCell()).toEqual({ gridId: 0, x: -2, y: T, z: 0, face: PY, octant: quadrantOctant(PY, 0) });
     me.hold(B.PLANKS_OAK);
     me.use();
     sim.tick();
@@ -52,7 +54,8 @@ describe('the claimed aim (client-driven players)', () => {
     expect(me.mineTargetCell()).toBeNull();
     // A scripted look claims what its client would claim (the rays from its eyes).
     me.lookAtCell(2, T + 1, 0, NX);
-    expect(me.targetCell()).toEqual({ gridId: 0, x: 2, y: T + 1, z: 0, face: NX });
+    expect(me.targetCell()).toEqual({ gridId: 0, x: 2, y: T + 1, z: 0, face: NX, octant: expect.any(Number) });
+    expect(me.targetCell()!.octant & 1, 'entered through -X: a -X octant').toBe(0);
   });
 
   it('a claimed cell whose id changed is no target: a helm replaced by cobble is not clicked, nothing is placed against it', () => {
@@ -136,7 +139,7 @@ describe('the claimed aim (client-driven players)', () => {
     me.player.input.attack = true;
     me.attack();
     sim.advance(10);
-    expect(me.view.mining).toEqual({ gridId: 0, x: 2, y: T, z: 0, sub: 0, progress: expect.closeTo(10 / 30, 5) });
+    expect(me.view.mining).toEqual({ gridId: 0, x: 2, y: T, z: 0, sub: quadrantOctant(PY, 0), progress: expect.closeTo(10 / 30, 5) });
     // Claimed elsewhere: the mining stops.
     me.claimAim(null, null);
     sim.tick();

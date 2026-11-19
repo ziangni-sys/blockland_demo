@@ -37,7 +37,8 @@ describe('choosing the target (net/client/intents.ts)', () => {
     const eye = vec3(0.5, T + 1.5, 0.5);
     const dir = vec3(0, 0, -1);
     const t = chooseTarget(scene, 'plain', { eye, origin: eye, dir });
-    expect(t).toEqual({ gridId: 0, x: 0, y: T + 1, z: -4, face: PZ, sub: 0, cell: makeCell(B.STONE) });
+    // sub: the octant hit (docs/SHAPES.md 6.1, 6.3): entered through +Z moving -Z (oz 1); x and y exactly on the middle, not moving there (1).
+    expect(t).toEqual({ gridId: 0, x: 0, y: T + 1, z: -4, face: PZ, sub: 7, cell: makeCell(B.STONE) });
     // A camera 4 blocks behind the eyes: the same block is hit (3.5 from the eyes)...
     const cam = vec3(0.5, T + 1.5, 4.5);
     expect(sameTarget(chooseTarget(scene, 'plain', { eye, origin: cam, dir }), t)).toBe(true);
@@ -60,6 +61,8 @@ describe('choosing the target (net/client/intents.ts)', () => {
     expect(sameTarget(a, { ...a })).toBe(true);
     expect(sameTarget(a, { ...a, cell: makeCell(B.COBBLE) })).toBe(false);
     expect(sameTarget(a, { ...a, face: PZ })).toBe(false);
+    // Another octant of the same face of the same cell is another target (docs/SHAPES.md 6.3).
+    expect(sameTarget(a, { ...a, sub: 1 })).toBe(false);
     expect(sameTarget(null, null)).toBe(true);
     expect(sameTarget(a, null)).toBe(false);
   });

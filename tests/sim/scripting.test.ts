@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
+import { isCellFace } from '../../src/blocks/shapes';
 import { NZ, PY, PZ } from '../../src/core/dirs';
 import { FLAT_TOP, flatSim, idAt } from './helpers';
 
@@ -19,7 +20,8 @@ describe('scripted control', () => {
     sim.soloPlayer.lookAtCell(0, T, -2, PY);
     sim.tick();
     expect(sim.soloPlayer.view.target).toEqual({ gridId: 0, x: 0, y: T, z: -2, face: PY });
-    expect(sim.soloPlayer.targetCell()).toEqual({ gridId: 0, x: 0, y: T, z: -2, face: PY });
+    expect(sim.soloPlayer.targetCell()).toEqual({ gridId: 0, x: 0, y: T, z: -2, face: PY, octant: expect.any(Number) });
+    expect(isCellFace(sim.soloPlayer.targetCell()!.octant, PY), 'the octant hit lies behind the face entered').toBe(true);
   });
 
   it('useOn places only when the aimed cell is really the one hit; mine holds until it breaks', () => {

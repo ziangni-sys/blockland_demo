@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
+import { isCellFace } from '../../src/blocks/shapes';
 import { I } from '../../src/blocks/items';
 import { BLOCKS } from '../../src/blocks/registry';
 import { CHUNK_SHIFT } from '../../src/core/constants';
@@ -46,7 +47,8 @@ function dropsNear(sim: Simulation, x: number, z: number, r: number, item?: numb
 
 function aimMine(c: PlayerControl, x: number, y: number, z: number, face: Dir): void {
   c.lookAtCell(x, y, z, face);
-  expect(c.mineTargetCell()).toEqual({ gridId: 0, x, y, z, face });
+  expect(c.mineTargetCell()).toEqual({ gridId: 0, x, y, z, face, octant: expect.any(Number) });
+  expect(isCellFace(c.mineTargetCell()!.octant, face), 'the octant hit lies behind the face entered').toBe(true);
 }
 
 function rabbits(sim: Simulation): Rabbit[] {

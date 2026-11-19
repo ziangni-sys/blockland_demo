@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
+import { quadrantOctant } from '../../src/blocks/shapes';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NZ, PY, type Dir } from '../../src/core/dirs';
@@ -75,8 +76,9 @@ function tick(w: World, n = 1): void {
   }
 }
 
+/** The target a client sends for face `face` of a world cell: the octant hit lies behind that face (docs/SHAPES.md 6.3). */
 function target(w: World, x: number, y: number, z: number, face: Dir = PY): Target {
-  return { gridId: 0, x, y, z, face, sub: 0, cell: w.sim.world.getCell(x, y, z) };
+  return { gridId: 0, x, y, z, face, sub: quadrantOctant(face, 0), cell: w.sim.world.getCell(x, y, z) };
 }
 
 let intentSeq = 0;

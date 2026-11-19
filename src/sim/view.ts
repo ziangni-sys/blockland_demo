@@ -20,18 +20,26 @@ export interface GridCell {
 }
 
 /**
- * A cell a player aims at (docs/NETCODE.md section 10): grid-local cell, the face the ray entered
- * by, and the cell value seen there. What the client of a client-driven player claims
- * (PlayerControl.claimAim), and what its intents carry (the protocol's Target, without `sub`).
+ * A cell a player aims at (docs/NETCODE.md section 10, docs/SHAPES.md 6.3): grid-local cell, the
+ * face the ray entered the hit octant by (an inner face of a partial cell included), the octant
+ * hit, and the whole (packed) cell seen there. The part aimed at is the one containing that octant
+ * (blocks/shapes.ts partAt(cell, sub)). What the client of a client-driven player claims
+ * (PlayerControl.claimAim), and what its intents carry (the protocol's Target).
  */
 export interface AimTarget extends GridCell {
   face: Dir;
+  /** The octant hit, 0..7 (voxel/raycast.ts GridHit.octant). */
+  sub: number;
   cell: number;
 }
 
-/** The cell being mined in survival and its progress (NETCODE section 9). */
+/** The part being mined in survival and its progress (NETCODE section 9, docs/SHAPES.md 6.2, 6.3). */
 export interface MiningState extends GridCell {
-  /** Part or octant (M2.3, M2.4); 0 in M2.1. */
+  /**
+   * Bits 0..2: the octant of the mined part the mining ray hit when this mining started (it stays
+   * while the crosshair moves over the same part). Bit 3: the progress is for that one octant only
+   * (the M2.4 chisel); always 0 in M2.3. Bits 4..7 are 0.
+   */
   sub: number;
   /** 0..1. */
   progress: number;
@@ -40,6 +48,8 @@ export interface MiningState extends GridCell {
 /** The face of the timed survival glue operation and its progress (NETCODE section 9). */
 export interface GluingState extends MiningState {
   face: Dir;
+  /** Always 0: glue belongs to a cell face, not to a part (docs/SHAPES.md 6.2, 6.3). */
+  sub: number;
 }
 
 /** What one player's actions look like right now. Rebuilt by the simulation every tick, per joined player. */
@@ -98,6 +108,7 @@ export type SimEvent =
   /** The player let go of a ship's wheel; cause = 'stopped' | 'death' | 'removed' | 'respawn' | 'pushed' | ... (EntityManager). */
   | { type: 'helmReleased'; player: PlayerKey; cause: string }
   // ---- world
+  /** One part was mined away (or placed): `cell` is that PART's value (blocks/cell.ts; < 2^24, no second part). */
   | { type: 'blockBroken'; gridId: number; x: number; y: number; z: number; cell: number }
   | { type: 'blockPlaced'; gridId: number; x: number; y: number; z: number; cell: number }
   | { type: 'explosion'; x: number; y: number; z: number; power: number }
