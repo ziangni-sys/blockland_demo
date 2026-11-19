@@ -1,18 +1,21 @@
 /**
  * The three rays as pure functions (src/sim/rays.ts; NETCODE section 10): the plain ray, the glue
  * ray through soft blocks, the bucket ray and the water a hull displaces, cellDisplaced; and that
- * a server-driven player's hands cast exactly these.
+ * a server-driven player's hands cast exactly these. With partial cells (docs/SHAPES.md 6.1, 4.4):
+ * the rays pass through empty octants, and what a hull displaces is decided per octant.
  */
 import { describe, expect, it } from 'vitest';
-import { facingState, makeCell } from '../../src/blocks/cell';
+import { facingState, liquidState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NZ, PY, PZ } from '../../src/core/dirs';
-import { vec3 } from '../../src/core/math';
-import { REACH, castRay, cellDisplaced, glueTargetable, isBucket, lookDir, rayKindOf, rayPredicate, type RayScene } from '../../src/sim/rays';
+import { qidentity, vec3 } from '../../src/core/math';
+import { REACH, castRay, cellDisplaced, displacedByHull, glueTargetable, isBucket, lookDir, rayKindOf, rayPredicate, type RayScene, type RayShip } from '../../src/sim/rays';
 import { analyzeHull } from '../../src/structures/hull';
 import type { Ship } from '../../src/structures/structure';
 import { targetable, targetableOrLiquidSource } from '../../src/voxel/raycast';
+import { LOWER, slab } from '../shapes';
+import { emptyWorld, structure } from '../voxel/helpers';
 import { FLAT_TOP, SEA_TOP, fill, flatSim, seaSim } from './helpers';
 
 const T = FLAT_TOP;
@@ -108,5 +111,49 @@ describe('rays (sim/rays.ts)', () => {
     expect(me.mineTargetCell()).toEqual({ gridId: 0, x: plain!.x, y: plain!.y, z: plain!.z, face: plain!.face });
     expect(glue!.z).toBe(-3);
     expect(plain!.z).toBe(-2);
+  });
+
+  it('plain and glue rays pass over a lower slab to the block behind it; below the mid-plane they stop at the slab', () => {
+    const sim = flatSim();
+    const s = slab(B.STONE, LOWER);
+    sim.world.setCell(0, T, -3, makeCell(B.STONE));
+    sim.world.setCell(0, T, -2, s);
+    const scene = sim.interaction.rayScene();
+    const dir = vec3(0, 0, -1);
+    const high = vec3(0.5, T + 0.75, 0.5);
+    for (const kind of ['plain', 'glue'] as const) {
+      expect(castRay(scene, high, dir, kind)).toMatchObject({ x: 0, y: T, z: -3, face: PZ, octant: 7, part: makeCell(B.STONE) });
+      expect(castRay(scene, vec3(0.5, T + 0.25, 0.5), dir, kind)).toMatchObject({ x: 0, y: T, z: -2, face: PZ, octant: 5, part: s, cell: s });
+    }
+  });
+
+  it('displacedByHull decides by octant: the empty half above a hull slab is not displaced (bucket ray, cellDisplaced)', () => {
+    const world = emptyWorld();
+    const WATER = makeCell(B.WATER, liquidState(0, false));
+    const ship = structure(world, 1, vec3(0, 0, 0), qidentity()); // local = world coordinates
+    // A lower slab and a full block of the hull, each in the same place as a world water source.
+    world.setCell(0, 40, 0, WATER);
+    world.setCell(2, 40, 0, WATER);
+    ship.setCell(0, 40, 0, slab(B.PLANKS_OAK, LOWER));
+    ship.setCell(2, 40, 0, makeCell(B.PLANKS_OAK));
+    const ships: RayShip[] = [{ grid: ship, hull: null }];
+    expect(displacedByHull(ships, vec3(0.5, 40.25, 0.5))).toBe(true);
+    expect(displacedByHull(ships, vec3(0.5, 40.75, 0.5))).toBe(false);
+    expect(displacedByHull(ships, vec3(0.9, 40.49, 0.1))).toBe(true);
+    expect(displacedByHull(ships, vec3(0.9, 40.5, 0.1))).toBe(false); // the mid-plane belongs to the upper half
+    expect(displacedByHull(ships, vec3(2.5, 40.75, 0.5))).toBe(true);
+    expect(displacedByHull(ships, vec3(1.5, 40.25, 0.5))).toBe(false); // outside every hull cell
+    // The water above the slab is visible: the bucket ray stops at the world source there; above
+    // the full block the hull hides all of it and the ray stops at the hull.
+    const scene: RayScene = { grids: [world, ship], ships };
+    const down = vec3(0, -1, 0);
+    const a = castRay(scene, vec3(0.5, 42, 0.5), down, 'bucket')!;
+    expect([a.grid, a.x, a.y, a.z, a.face, a.dist, a.part]).toEqual([world, 0, 40, 0, PY, 1, WATER]);
+    const b = castRay(scene, vec3(2.5, 42, 0.5), down, 'bucket')!;
+    expect([b.grid, b.x, b.y, b.z, b.face, b.dist]).toEqual([ship, 2, 40, 0, PY, 1]);
+    // cellDisplaced (the server's check of a claimed bucket target): only the cell all of whose
+    // octants the hull covers.
+    expect(cellDisplaced(ships, 0, 40, 0)).toBe(false);
+    expect(cellDisplaced(ships, 2, 40, 0)).toBe(true);
   });
 });

@@ -22,11 +22,11 @@ import {
   emptyWorld,
   fill,
   randomQuat,
-  referenceRay,
   solidCells,
   structure,
   unit,
 } from './helpers';
+import { referenceRay } from './ray-helpers';
 
 const WATER_SOURCE = makeCell(B.WATER, liquidState(0, false));
 const WATER_FLOW = makeCell(B.WATER, liquidState(3, false));

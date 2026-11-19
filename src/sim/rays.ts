@@ -8,14 +8,18 @@
  *  - plain: the nearest targetable cell of any grid (voxel/raycast.ts `targetable`: every non-air,
  *    non-liquid cell, soft blocks included);
  *  - glue (glue in the main hand): passes through soft blocks (torches, plants, snow cover), which
- *    can carry no glue, and stops at the first HARD targetable cell, so every glued face shown as
- *    exposed (DESIGN 强力胶: 露出的胶面) can be clicked from its open side;
+ *    can carry no glue, and stops at the first octant of a HARD targetable part, so every glued
+ *    face shown as exposed (DESIGN 强力胶: 露出的胶面) can be clicked from its open side, including
+ *    a face seen through the empty octants of a partial cell in front of it;
  *  - bucket (a bucket in the main hand): stops at liquid SOURCES too, except world liquid displaced
- *    by a ship's hull (inside one of its HARD cells or its dry hold; LESSONS 船舱里冒出水面: that
+ *    by a ship's hull (inside one of its HARD octants or its dry hold; LESSONS 船舱里冒出水面: that
  *    water is never deleted, only hidden) — DESIGN 结构体里没有液体: a bucket never reaches world
  *    water inside or behind a structure. Structures hold no liquid: for them it is the plain ray.
  *    Where a structure block and world liquid start at the same distance, the structure wins;
  *    world blocks keep the tie rule of raycastGrids (the world first).
+ *
+ * All three hit OCTANTS (voxel/raycast.ts, docs/SHAPES.md 6.1): they pass through the empty octants
+ * of partial cells, and their predicates are applied to the part an octant belongs to.
  *
  * Every function here only reads the grids it is given; scratch vectors are allocated per call
  * (ARCHITECTURE rule 5: no shared temporaries).
@@ -27,6 +31,7 @@ import { NX, NY, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
 import { vec3, type Vec3 } from '../core/math';
 import { isDryHalf, type HullInfo } from '../structures/hull';
 import type { VoxelGrid } from '../voxel/grid';
+import { solidAtHalf } from '../voxel/parts';
 import { raycastGrid, raycastGrids, targetable, targetableOrLiquidSource, type CellPredicate, type GridHit } from '../voxel/raycast';
 
 /** Reach of the player's hands, in blocks from the eye. */
@@ -37,8 +42,8 @@ export type RayKind = 'plain' | 'glue' | 'bucket';
 
 /**
  * Spacing (blocks) of the points at which the bucket ray tests whether the world liquid it
- * crosses is displaced by a hull. Hull cells are a block wide, so a sliver of visible water
- * thinner than this is the most that can be missed.
+ * crosses is displaced by a hull. What displaces water is decided per octant (half a block
+ * wide), so a sliver of visible water thinner than this is the most that can be missed.
  */
 const HULL_SAMPLE = 1 / 16;
 /** Hidden liquid cells the bucket ray may skip; a REACH-long ray crosses far fewer cells. */
@@ -68,10 +73,10 @@ export function rayKindOf(item: number): RayKind {
   return isBucket(item) ? 'bucket' : item === I.GLUE ? 'glue' : 'plain';
 }
 
-/** The glue ray's cells: targetable and HARD (soft blocks carry no glue and are passed through). */
-export const glueTargetable: CellPredicate = (cell) => targetable(cell) && SOLID[cell & ID_MASK] === 1;
+/** The glue ray's parts: targetable and HARD (soft blocks carry no glue and are passed through). */
+export const glueTargetable: CellPredicate = (part) => targetable(part) && SOLID[part & ID_MASK] === 1;
 
-/** The cells ray `kind` stops at (the bucket ray's hull rule aside: see displacedByHull). */
+/** The parts ray `kind` stops at (the bucket ray's hull rule aside: see displacedByHull). */
 export function rayPredicate(kind: RayKind): CellPredicate {
   return kind === 'bucket' ? targetableOrLiquidSource : kind === 'glue' ? glueTargetable : targetable;
 }
@@ -86,8 +91,8 @@ export function lookDir(yaw: number, pitch: number, out: Vec3 = vec3()): Vec3 {
 }
 
 /**
- * The nearest cell ray `kind` stops at, from `origin` along the unit vector `dir`, within `reach`
- * (default REACH), or null.
+ * The nearest octant ray `kind` stops at, from `origin` along the unit vector `dir`, within
+ * `reach` (default REACH), or null.
  */
 export function castRay(scene: RayScene, origin: Vec3, dir: Vec3, kind: RayKind, reach: number = REACH): GridHit | null {
   if (kind === 'bucket') return bucketRay(scene, origin, dir, reach);
@@ -95,8 +100,11 @@ export function castRay(scene: RayScene, origin: Vec3, dir: Vec3, kind: RayKind,
 }
 
 /**
- * Is the world point inside a HARD cell or a dry cell of a ship (where the hull keeps world
- * liquid out)? The same rule as for bodies (entities/fluids) and blast rays (explosion).
+ * Is the world point inside a HARD octant or a dry octant of a ship (where the hull keeps world
+ * liquid out)? Decided by the octant the point is in (docs/SHAPES.md 4.4: the point's local
+ * coordinates times 2, floored, are its half-grid coordinates), so the empty half above a slab
+ * of the hull is not displaced. The same rule as for bodies (entities/fluids) and blast rays
+ * (explosion).
  */
 export function displacedByHull(ships: readonly RayShip[], p: Vec3): boolean {
   const l = vec3();
@@ -106,14 +114,17 @@ export function displacedByHull(ships: readonly RayShip[], p: Vec3): boolean {
     const b = g.cellBounds();
     if (b === null) continue;
     g.toLocal(p, l);
-    const x = Math.floor(l.x);
-    const y = Math.floor(l.y);
-    const z = Math.floor(l.z);
+    const hx = Math.floor(l.x * 2);
+    const hy = Math.floor(l.y * 2);
+    const hz = Math.floor(l.z * 2);
+    const x = hx >> 1;
+    const y = hy >> 1;
+    const z = hz >> 1;
     // Dry cells lie inside the hull's box, so nothing outside it is displaced.
     if (x < b.minX || y < b.minY || z < b.minZ || x >= b.maxX || y >= b.maxY || z >= b.maxZ) continue;
-    if (SOLID[g.getCell(x, y, z) & ID_MASK] === 1) return true;
+    if (solidAtHalf(g, hx, hy, hz)) return true;
     const hull = ship.hull;
-    if (hull !== null && isDryHalf(hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) return true;
+    if (hull !== null && isDryHalf(hull, hx, hy, hz)) return true;
   }
   return false;
 }
@@ -124,7 +135,8 @@ const CELL_SAMPLE_INSET = 0.1;
 /**
  * Is ALL of world cell (x, y, z) displaced by hulls (its centre and its eight corners, inset by
  * CELL_SAMPLE_INSET)? The bucket ray may stop at a liquid cell a hull covers only in part; this is
- * true only when no part a ray could stop at is left.
+ * true only when no part a ray could stop at is left. displacedByHull decides by octant; when a
+ * hull's grid is aligned with the world's, the eight inset corners lie in eight different octants.
  */
 export function cellDisplaced(ships: readonly RayShip[], x: number, y: number, z: number): boolean {
   if (ships.length === 0) return false;
@@ -182,7 +194,7 @@ function bucketRay(scene: RayScene, eye: Vec3, dir: Vec3, reach: number): GridHi
       w.point.y = eye.y + dir.y * w.dist;
       w.point.z = eye.z + dir.z * w.dist;
     }
-    if (LIQUID[w.cell & ID_MASK] === 0) return w;
+    if (LIQUID[w.part & ID_MASK] === 0) return w;
     cellExit(eye, dir, w.x, w.y, w.z, w.dist, exit);
     const end = best !== null && best.dist < exit.t ? best.dist : exit.t;
     if (liquidVisible(scene.ships, eye, dir, w.dist, end)) return w;
