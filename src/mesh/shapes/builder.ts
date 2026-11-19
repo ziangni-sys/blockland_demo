@@ -148,10 +148,18 @@ const OCT = 8;
 const QF_POS = new Float64Array(6 * 8 * 4 * 3);
 const QF_RU = new Float64Array(6 * 8 * 4 * 2);
 const QF_SIGN = new Uint8Array(6 * 8 * 4);
+/**
+ * QF_SLOT[i]: the corner's slot in the per-cell-face vertex cache (MeshContext.quarterFace): plane
+ * (0 the cell's middle plane, 1 the cell boundary) * 9 + position on the face's 3 x 3 grid of
+ * half-cell points (2 * R coordinate) * 3 + 2 * U coordinate.
+ */
+const QF_SLOT = new Uint8Array(6 * 8 * 4);
 for (let d = 0; d < 6; d++) {
   const ra = FACE_R_AXIS[d]!;
   const ua = FACE_U_AXIS[d]!;
+  const na = d >> 1;
   for (let h = 0; h < 8; h++) {
+    const boundary = ((h >> na) & 1) === ((d & 1) === 0 ? 1 : 0);
     for (let k = 0; k < 4; k++) {
       const i = (d * 8 + h) * 4 + k;
       const hi = FACE_CORNER_HI[d * 4 + k]!;
@@ -161,9 +169,12 @@ for (let d = 0; d < 6; d++) {
       QF_RU[i * 2] = cr;
       QF_RU[i * 2 + 1] = cu;
       QF_SIGN[i] = ((hi >> ra) & 1) | (((hi >> ua) & 1) << 1) | (cr !== 0.5 ? 4 : 0) | (cu !== 0.5 ? 8 : 0);
+      QF_SLOT[i] = (boundary ? 9 : 0) + cr * 2 * 3 + cu * 2;
     }
   }
 }
+/** Slots of the per-cell-face vertex cache: two planes of 3 x 3 points. */
+const VSLOTS = 18;
 
 export class MeshContext {
   // ---- current job
@@ -221,17 +232,15 @@ export class MeshContext {
   private sBlock = 0;
   private sPartial = false;
   /**
-   * Cache of the four cell-corner values of one cell face (the face of padded cell `cornerP` in Dir
-   * `cornerD`), filled lazily by quarterFace: bit k of cornerValid = corner k (index cu * 2 + cr) known.
+   * Cache of the vertex values (AO, sky, block) quarterFace has computed for the faces toward Dir
+   * `vertD` of padded cell `vertP`, by QF_SLOT: bit s of vertValid = slot s known. Values at [s],
+   * [VSLOTS + s], [2 * VSLOTS + s]. The four cell-corner slots of the boundary plane also serve as
+   * the corner values the averaging of 8.3 reads (cornerValue). Allocated with the layer tables.
    */
-  private cornerP = -1;
-  private cornerD = -1;
-  private cornerValid = 0;
-  /**
-   * The cached corner values: AO bytes at [k], sky bytes at [4 + k], block bytes at [8 + k].
-   * Allocated with the layer tables (a job without layers never needs it).
-   */
-  private corners = EMPTY_BYTES;
+  private vertP = -1;
+  private vertD = -1;
+  private vertValid = 0;
+  private verts = EMPTY_BYTES;
 
   begin(input: MeshInput): void {
     const px = input.sx + 2;
@@ -258,7 +267,7 @@ export class MeshContext {
     this.holes = input.holes;
     this.part2 = input.part2;
     this.layered = input.holes !== null || input.part2 !== null;
-    this.cornerP = -1;
+    this.vertP = -1;
     if (this.layered) this.buildLayerTables();
   }
 
@@ -281,7 +290,7 @@ export class MeshContext {
     const holes = this.holes;
     const part2 = this.part2;
     const n = cells.length;
-    if (this.corners.length === 0) this.corners = new Uint8Array(12);
+    if (this.verts.length === 0) this.verts = new Uint8Array(3 * VSLOTS);
     if (this.opqStore.length < n) {
       this.opqStore = new Uint8Array(n);
       this.partialStore = new Uint8Array(n);
@@ -567,9 +576,10 @@ export class MeshContext {
    * occluder when opaque material holds it. AO: both sides = 0, else 3 - (side1 + side2 + corner).
    * Light: average of the cells of the four octants, occluders skipped, the corner skipped when
    * both sides are occluders, F's cell when nothing is left; octants in the same cell each count.
-   * Results in sAo / sSky / sBlock; sPartial = one of the four octants lies in a partial cell.
+   * Results in sAo / sSky / sBlock; sPartial = one of the four octants lies in a partial cell. With
+   * `onlyIfPartial`, AO and light are left alone when sPartial is false (the caller then averages).
    */
-  private sampleOctants(f: number, ua0: number, su: number, va0: number, sv: number): void {
+  private sampleOctants(f: number, ua0: number, su: number, va0: number, sv: number, onlyIfPartial: boolean): void {
     const s1 = this.step(f, ua0, su);
     const s2 = this.step(f, va0, sv);
     const c = this.step(s1, va0, sv);
@@ -583,6 +593,7 @@ export class MeshContext {
     const oc = this.opaqueAt(c);
     const partial = this.partial;
     this.sPartial = (partial[fc]! | partial[c1]! | partial[c2]! | partial[cc]!) !== 0;
+    if (onlyIfPartial && !this.sPartial) return;
     this.sAo = AO_BYTE[o1 && o2 ? 0 : 3 - ((o1 ? 1 : 0) + (o2 ? 1 : 0) + (oc ? 1 : 0))]!;
     const light = this.light;
     if (light === null) {
@@ -630,29 +641,28 @@ export class MeshContext {
 
   /**
    * O(V) at cell corner (cr, cu) (each 0 or 1, along the face's R and U axes) of face d of the
-   * cell at padded index p: the vertex of the quadrant touching that corner. Cached per cell face.
+   * cell at padded index p: the vertex of the quadrant touching that corner. Returns its slot in the
+   * vertex cache (which quarterFace has keyed to this cell face), computing it when not yet known:
+   * the quarter face of that quadrant, if drawn, takes O(V) at that corner, so the slot holds the
+   * same value either way.
    */
   private cornerValue(p: number, d: number, cr: number, cu: number): number {
-    if (this.cornerP !== p || this.cornerD !== d) {
-      this.cornerP = p;
-      this.cornerD = d;
-      this.cornerValid = 0;
-    }
-    const k = cu * 2 + cr;
-    if ((this.cornerValid & (1 << k)) === 0) {
+    const slot = 9 + cr * 6 + cu * 2;
+    if (((this.vertValid >> slot) & 1) === 0) {
       const na = d >> 1;
       const ra = FACE_R_AXIS[d]!;
       const ua = FACE_U_AXIS[d]!;
       const positive = (d & 1) === 0;
       const h = (positive ? 1 << na : 0) | (cr << ra) | (cu << ua);
       const f = this.step(p * OCT + h, na, positive ? 1 : -1);
-      this.sampleOctants(f, ra, cr === 1 ? 1 : -1, ua, cu === 1 ? 1 : -1);
-      this.corners[k] = this.sAo;
-      this.corners[4 + k] = this.sSky;
-      this.corners[8 + k] = this.sBlock;
-      this.cornerValid |= 1 << k;
+      this.sampleOctants(f, ra, cr === 1 ? 1 : -1, ua, cu === 1 ? 1 : -1, false);
+      const v = this.verts;
+      v[slot] = this.sAo;
+      v[VSLOTS + slot] = this.sSky;
+      v[2 * VSLOTS + slot] = this.sBlock;
+      this.vertValid |= 1 << slot;
     }
-    return k;
+    return slot;
   }
 
   /**
@@ -662,7 +672,19 @@ export class MeshContext {
    * turns). Light and AO per vertex follow docs/SHAPES.md 8.3: the octant formula O(V), except
    * that a vertex on a cell face that is an edge midpoint or the face centre takes the average of
    * the cell-corner values ((a + b + 1) >> 1, (a + b + c + e + 2) >> 2 per byte) when none of the
-   * cells its O(V) would sample is partial. Culling is the caller's job.
+   * cells its O(V) would sample is partial. Culling is the caller's job; it must not call this for a
+   * quarter face whose front octant is opaque (8.2 rule 1 never draws one).
+   *
+   * Vertex values are cached per cell face (padded cell p, Dir d): a vertex shared by several drawn
+   * quarter faces of the same cell and direction on the same plane gets the same value from each of
+   * them, so it is computed once. Why they agree: two such quarter faces' front octants F1, F2 are
+   * both open (rule 1), and from either one O(V) samples the same four octants, the two front octants
+   * and the two beyond them along the face (for faces meeting only at the face centre, the four
+   * octants around the centre, whose cells are the same). An open octant in the side1 / side2 /
+   * corner roles adds no AO, and the "corner skipped when both sides occlude" rule cannot apply
+   * when a side is an open front octant; where it does apply (diagonal faces with both sides opaque)
+   * F1 and F4 lie in the same cell, so the remaining light is the same. The corner averages and the
+   * "a sampled cell is partial" test depend only on the vertex position.
    */
   quarterFace(g: GeometryBuilder, p: number, x: number, y: number, z: number, h: number, d: number, tile: number, rot: number, flags: number): void {
     const na = d >> 1;
@@ -674,6 +696,12 @@ export class MeshContext {
     const uPos = FACE_U_SIGN[d]! > 0;
     const qpos = this.qpos;
     const quv = this.quv;
+    if (this.vertP !== p || this.vertD !== d) {
+      this.vertP = p;
+      this.vertD = d;
+      this.vertValid = 0;
+    }
+    const verts = this.verts;
     for (let k = 0; k < 4; k++) {
       const i = (d * 8 + h) * 4 + k;
       qpos[k * 3] = x + QF_POS[i * 3]!;
@@ -685,12 +713,19 @@ export class MeshContext {
       const v = uPos ? cu : 1 - cu;
       quv[k * 2] = rotU(rot, u, v);
       quv[k * 2 + 1] = rotV(rot, u, v);
+      const slot = QF_SLOT[i]!;
+      if (((this.vertValid >> slot) & 1) !== 0) {
+        this.qao[k] = verts[slot]!;
+        this.qsky[k] = verts[VSLOTS + slot]!;
+        this.qblock[k] = verts[2 * VSLOTS + slot]!;
+        continue;
+      }
       const sign = QF_SIGN[i]!;
       const su = (sign & 1) !== 0 ? 1 : -1;
       const sv = (sign & 2) !== 0 ? 1 : -1;
-      this.sampleOctants(f, ra, su, ua, sv);
       const rInt = (sign & 4) !== 0;
       const uInt = (sign & 8) !== 0;
+      this.sampleOctants(f, ra, su, ua, sv, !(rInt && uInt));
       // A quarter face on the cell's middle plane looks into its own (partial) cell, so sPartial
       // always holds there: inner faces use O(V) at every vertex (8.3).
       if ((rInt && uInt) || this.sPartial) {
@@ -711,20 +746,24 @@ export class MeshContext {
         const b = this.cornerValue(p, d, 1, 0);
         const c = this.cornerValue(p, d, 0, 1);
         const e = this.cornerValue(p, d, 1, 1);
-        const v = this.corners;
-        this.qao[k] = (v[a]! + v[b]! + v[c]! + v[e]! + 2) >> 2;
-        this.qsky[k] = (v[4 + a]! + v[4 + b]! + v[4 + c]! + v[4 + e]! + 2) >> 2;
-        this.qblock[k] = (v[8 + a]! + v[8 + b]! + v[8 + c]! + v[8 + e]! + 2) >> 2;
+        this.qao[k] = (verts[a]! + verts[b]! + verts[c]! + verts[e]! + 2) >> 2;
+        this.qsky[k] = (verts[VSLOTS + a]! + verts[VSLOTS + b]! + verts[VSLOTS + c]! + verts[VSLOTS + e]! + 2) >> 2;
+        this.qblock[k] = (verts[2 * VSLOTS + a]! + verts[2 * VSLOTS + b]! + verts[2 * VSLOTS + c]! + verts[2 * VSLOTS + e]! + 2) >> 2;
       }
+      verts[slot] = this.qao[k]!;
+      verts[VSLOTS + slot] = this.qsky[k]!;
+      verts[2 * VSLOTS + slot] = this.qblock[k]!;
+      this.vertValid |= 1 << slot;
     }
     this.commit(g, FACE_NX[d]!, FACE_NY[d]!, FACE_NZ[d]!, tile, flags, DIAG_AUTO, false);
   }
 
+  /** Corner k of the scratch quad = the rounded average of the vertex-cache slots a and b. */
   private average2(k: number, a: number, b: number): void {
-    const v = this.corners;
+    const v = this.verts;
     this.qao[k] = (v[a]! + v[b]! + 1) >> 1;
-    this.qsky[k] = (v[4 + a]! + v[4 + b]! + 1) >> 1;
-    this.qblock[k] = (v[8 + a]! + v[8 + b]! + 1) >> 1;
+    this.qsky[k] = (v[VSLOTS + a]! + v[VSLOTS + b]! + 1) >> 1;
+    this.qblock[k] = (v[2 * VSLOTS + a]! + v[2 * VSLOTS + b]! + 1) >> 1;
   }
 
   /** Write corner k of a free quad (absolute box-space position, uv). */

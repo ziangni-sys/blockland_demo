@@ -33,12 +33,14 @@
  *                  so an inside copy would be coplanar with it). For a neighbour without parts the
  *                  seal mask is 15 or 0 by SEALS_LIQUID / sealsFace, exactly as before.
  * The bottom and a flat (full-height) top are cut into their four quadrants. A side face is the
- * area under the line through its two top corners: it is split at its horizontal midpoint (the
- * midpoint height interpolated) and each half is clipped at y = 0.5. No existing vertex moves; new
- * vertices lie on u = 0.5 or y = 0.5 and take linearly interpolated attributes (position, uv,
- * light; a new vertex on the top edge is wave-flagged when both top corners are). A clipped piece
- * with three corners is emitted as a quad whose last two corners coincide (one zero-area triangle),
- * since all geometry is quads.
+ * area under the line through its two top corners. When both of its halves keep the same quadrants
+ * (a lower or an upper slab beside it) it is clipped once, at y = 0.5; otherwise it is split at its
+ * horizontal midpoint (the midpoint height interpolated) and each half is clipped at y = 0.5 where
+ * only one of its quadrants is kept (see clipSide). No existing vertex moves; new vertices lie on
+ * u = 0.5 or y = 0.5 and take linearly interpolated attributes (position, uv, light; a new vertex on
+ * the top edge is wave-flagged when both top corners are). A clipped piece with three corners is
+ * emitted as a quad whose last two corners coincide (one zero-area triangle), since all geometry is
+ * quads.
  */
 import * as cellBits from '../../blocks/cell';
 import * as registry from '../../blocks/registry';
@@ -239,8 +241,16 @@ function restoreQuad(ctx: MeshContext, ls: ClipScratch, u0: number, v0: number, 
 /**
  * A side face whose whole quad is saved in `ls` (frame: u along R, v up; top corner heights hl at
  * u = 0 and hr at u = 1, cell-local): emit the part of it lying in the quadrants of `mask`, as the
- * front copy or the back copy (`reverse`). Each half u in [0, 0.5], [0.5, 1] is the trapezoid under
- * the top line, clipped at y = 0.5 when only one of its two quadrants is drawn.
+ * front copy or the back copy (`reverse`).
+ *
+ * When the two halves u in [0, 0.5] and [0.5, 1] keep the same quadrants (a lower or an upper slab
+ * beside the liquid: lower quadrants only, or upper quadrants only), the whole face, the area under
+ * its top line, is clipped once at y = 0.5. Its top edge then keeps exactly its two original
+ * corners (plus, where the top line crosses y = 0.5, the end of the clip), as the unclipped face
+ * and the top surface have: a vertex in the middle of the top edge would stay put while the
+ * surface beside it waves when only one top corner is wave-flagged. Otherwise each half is the
+ * trapezoid under the top line (the midpoint height interpolated), clipped at y = 0.5 when only one
+ * of its two quadrants is drawn.
  */
 function clipSide(ctx: MeshContext, ls: ClipScratch, g: GeometryBuilder, d: number, mask: number, reverse: boolean, hl: number, hr: number, tile: number, flags: number): void {
   if (mask === 0) return;
@@ -253,33 +263,43 @@ function clipSide(ctx: MeshContext, ls: ClipScratch, g: GeometryBuilder, d: numb
     return;
   }
   const rPos = FACE_R_SIGN[d]! > 0;
+  // Lower and upper quadrant of each half (half 0 is u in [0, 0.5]; u runs along R).
+  const lower0 = (mask >> quadrantOf(d, rPos ? 0 : 1, 0)) & 1;
+  const upper0 = (mask >> quadrantOf(d, rPos ? 0 : 1, 1)) & 1;
+  const lower1 = (mask >> quadrantOf(d, rPos ? 1 : 0, 0)) & 1;
+  const upper1 = (mask >> quadrantOf(d, rPos ? 1 : 0, 1)) & 1;
+  if (lower0 === lower1 && upper0 === upper1) {
+    // Equal halves and a mask that is neither 0 nor 15: lower quadrants only, or upper only.
+    trapezoid(ls, 0, 1, hl, hr);
+    emitPolygon(ctx, ls, g, clipAtHalf(ls, 4, lower0 === 1), hl, hr, nx, ny, nz, tile, flags, reverse);
+    return;
+  }
   const hm = (hl + hr) / 2;
   for (let half = 0; half < 2; half++) {
-    const hrHalf = rPos ? half : 1 - half;
-    const lower = (mask >> quadrantOf(d, hrHalf, 0)) & 1;
-    const upper = (mask >> quadrantOf(d, hrHalf, 1)) & 1;
+    const lower = half === 0 ? lower0 : lower1;
+    const upper = half === 0 ? upper0 : upper1;
     if ((lower | upper) === 0) continue;
     const u0 = half * 0.5;
-    const u1 = u0 + 0.5;
-    const ha = half === 0 ? hl : hm;
-    const hb = half === 0 ? hm : hr;
-    // The half's trapezoid, counter-clockwise seen from the front.
-    let n = 4;
-    ls.pu[0] = u0;
-    ls.py[0] = 0;
-    ls.ptop[0] = 0;
-    ls.pu[1] = u1;
-    ls.py[1] = 0;
-    ls.ptop[1] = 0;
-    ls.pu[2] = u1;
-    ls.py[2] = hb;
-    ls.ptop[2] = 1;
-    ls.pu[3] = u0;
-    ls.py[3] = ha;
-    ls.ptop[3] = 1;
-    if (lower !== upper) n = clipAtHalf(ls, n, lower === 1);
+    trapezoid(ls, u0, u0 + 0.5, half === 0 ? hl : hm, half === 0 ? hm : hr);
+    const n = lower !== upper ? clipAtHalf(ls, 4, lower === 1) : 4;
     emitPolygon(ctx, ls, g, n, hl, hr, nx, ny, nz, tile, flags, reverse);
   }
+}
+
+/** The trapezoid u in [u0, u1] under the top line (heights ha at u0, hb at u1) into ls.pu/py/ptop, counter-clockwise seen from the front. */
+function trapezoid(ls: ClipScratch, u0: number, u1: number, ha: number, hb: number): void {
+  ls.pu[0] = u0;
+  ls.py[0] = 0;
+  ls.ptop[0] = 0;
+  ls.pu[1] = u1;
+  ls.py[1] = 0;
+  ls.ptop[1] = 0;
+  ls.pu[2] = u1;
+  ls.py[2] = hb;
+  ls.ptop[2] = 1;
+  ls.pu[3] = u0;
+  ls.py[3] = ha;
+  ls.ptop[3] = 1;
 }
 
 /**

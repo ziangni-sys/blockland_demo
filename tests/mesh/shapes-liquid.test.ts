@@ -9,7 +9,7 @@ import { liquidState, makeCell } from '../../src/blocks/cell';
 import { LIQUID_FULL_HEIGHT, buildMesh } from '../../src/mesh/mesher';
 import { VFLAG_LIQUID_SURFACE, type MeshData, type MeshInput } from '../../src/mesh/types';
 import { LOWER, UPPER, WEST, slab } from '../shapes';
-import { allQuads, checkInvariants, dirOfQuad, makeInput, put, putLight, type Quad } from './helpers';
+import { allQuads, checkInvariants, cornerAt, dirOfQuad, makeInput, put, putLight, type Quad, type V3 } from './helpers';
 import { putParts, quadArea } from './shape-helpers';
 
 const water = (level = 0, falling = false) => makeCell(B.WATER, liquidState(level, falling));
@@ -28,7 +28,7 @@ function besideSide(a: number, b = 0, waterCell = water()): MeshData {
   put(input, 0, 0, 0, waterCell);
   putParts(input, 1, 0, 0, a, b);
   const m = buildMesh(input);
-  checkInvariants(m);
+  checkInvariants(m, { paddedTriangles: true });
   return m;
 }
 
@@ -70,7 +70,7 @@ describe('liquid side faces beside partial cells', () => {
       for (let y = 0; y < 1; y++) for (let z = -1; z <= 3; z++) putLight(input, 2, y, z, 6 + z, z + 2);
       if (neighbour !== 'air') putParts(input, 2, 0, 1, slab(neighbour === 'stone' ? B.STONE : B.GLASS, fill));
       const m = buildMesh(input);
-      checkInvariants(m);
+      checkInvariants(m, { paddedTriangles: true });
       return { m, input };
     };
     const z1 = (h(1) + h(4)) / 2;
@@ -90,12 +90,14 @@ describe('liquid side faces beside partial cells', () => {
     const glass = build('glass').m;
     expect(area(face(glass, 0))).toBeCloseTo(total, 9);
     expect(area(face(glass, 1))).toBeCloseTo(above, 5);
-    // An upper stone slab leaves the lower quadrants: the half that crosses y = 0.5 is a pentagon
-    // (a quad and a triangle).
+    // An upper stone slab leaves the lower quadrants of both halves: the face is clipped once (not
+    // split at z = 1.5), and since its top line crosses y = 0.5 the part below is a pentagon (a quad and
+    // a padded triangle).
     const upper = build('stone', UPPER).m;
     expect(area(face(upper, 0))).toBeCloseTo(total - above, 5);
     expect(area(face(upper, 1))).toBeCloseTo(total - above, 5);
-    expect(face(upper, 0).length).toBe(3);
+    expect(face(upper, 0).length).toBe(2);
+    expect(face(stone, 0).length).toBe(1);
 
     // The whole face of the M1 path (neighbour = air) gives the original corners.
     const whole = face(build('air').m, 0);
@@ -105,9 +107,10 @@ describe('liquid side faces beside partial cells', () => {
       for (const q of pieces) {
         for (let k = 0; k < 4; k++) {
           const p = q.p[k]!;
-          // New vertices only on the midpoint line z = 1.5 or on y = 0.5.
+          // Every neighbour here keeps the same quadrants in both halves of the face, so new vertices
+          // lie only on y = 0.5 (none on the midpoint line z = 1.5).
           const original = w.p.findIndex((o) => near(o.x, p.x) && near(o.y, p.y) && near(o.z, p.z));
-          if (original < 0) expect(near(p.z, 1.5) || near(p.y, 0.5)).toBe(true);
+          if (original < 0) expect(near(p.y, 0.5)).toBe(true);
           else {
             // An original corner keeps its light and wave flag.
             expect([q.sky[k], q.block[k], q.flags[k]]).toEqual([w.sky[original], w.block[original], w.flags[original]]);
@@ -165,7 +168,7 @@ describe('liquid on and under partial cells', () => {
     put(input, 0, 1, 0, water());
     putParts(input, 0, 0, 0, a, b);
     const m = buildMesh(input);
-    checkInvariants(m);
+    checkInvariants(m, { paddedTriangles: true });
     return m;
   }
 
@@ -203,7 +206,7 @@ describe('liquid on and under partial cells', () => {
     put(input, 1, 1, 0, makeCell(B.STONE));
     put(input, 1, 1, 2, makeCell(B.STONE));
     const m = buildMesh(input);
-    checkInvariants(m);
+    checkInvariants(m, { paddedTriangles: true });
     return m;
   }
   const topOfMiddle = (m: MeshData, d: number) => liquidOn(m, 'y', 1, d).filter((q) => q.p.every((p) => p.x >= 1 && p.x <= 2 && p.z >= 1 && p.z <= 2));
@@ -282,7 +285,7 @@ describe('no two coplanar faces in any quadrant (8.4: all three cases)', () => {
       put(input, 0, 1, 0, water());
       putParts(input, 0, 0, 0, slab(id, 0x04), slab(B.STONE, 0x40));
       const m = buildMesh(input);
-      checkInvariants(m);
+      checkInvariants(m, { paddedTriangles: true });
       const q = facesPerQuadrant(m, 'y', 1);
       // Quadrants of the plane y = 1 at (x, z): octant 2 -> (0.25, 0.25), 3 -> (0.75, 0.25), 6 -> (0.25, 0.75), 7 -> (0.75, 0.75).
       expect(q[0]).toEqual([`${g}:2`, 'translucent:3'].sort());
@@ -291,4 +294,214 @@ describe('no two coplanar faces in any quadrant (8.4: all three cases)', () => {
       expect(q[3]).toEqual(['translucent:2', 'translucent:3']);
     });
   }
+});
+
+describe('attributes of clipped liquid pieces (docs/SHAPES.md 19.6)', () => {
+  /** Every padded cell gets a different-looking light byte, so the corners of a face all differ. */
+  function patternLight(input: MeshInput): void {
+    for (let i = 0; i < input.light!.length; i++) input.light![i] = ((i * 7) % 16 << 4) | ((i * 11 + 3) % 16);
+  }
+
+  /**
+   * The value an attribute of the whole face `w` (four corners) takes at a point, bilinear in the
+   * face's own frame: `s` along the horizontal axis `h` (0..1 inside the cell) and, for a side
+   * face, along the vertical line at s from the bottom edge (t = 0) to the top edge (t = 1).
+   */
+  function sideValue(w: Quad, h: 'x' | 'z', y0: number, h0: number, p: V3, get: (k: number) => number): number {
+    const s = p[h] - h0;
+    const at = (top: boolean, side: number): number => w.p.findIndex((q) => near(q[h] - h0, side) && (top ? q.y > y0 + 1e-6 : near(q.y, y0)));
+    const lerp = (a: number, b: number) => a + (b - a) * s;
+    const bottom = lerp(get(at(false, 0)), get(at(false, 1)));
+    const top = lerp(get(at(true, 0)), get(at(true, 1)));
+    const height = lerp(w.p[at(true, 0)]!.y, w.p[at(true, 1)]!.y) - y0;
+    return bottom + (top - bottom) * ((p.y - y0) / height);
+  }
+
+  /** Water cells with sloped amounts along z in column x = 1 (y = 0), the given parts at (2, 0, 1) or air. */
+  function sloped(a: number, b = 0): MeshData {
+    const input = makeInput(3, 1, 3, true);
+    put(input, 1, 0, 0, water(7));
+    put(input, 1, 0, 1, water(4));
+    put(input, 1, 0, 2, water(0));
+    patternLight(input);
+    if (a !== 0) putParts(input, 2, 0, 1, a, b);
+    const m = buildMesh(input);
+    checkInvariants(m, { paddedTriangles: true });
+    return m;
+  }
+
+  it('side pieces: u from the horizontal position, v equal to the height, light linear in the whole face', () => {
+    const inCell = (qs: Quad[]) => qs.filter((q) => q.p.every((p) => p.z >= 1 - 1e-9 && p.z <= 2 + 1e-9));
+    const whole = inCell(liquidOn(sloped(0), 'x', 2, 0));
+    expect(whole.length).toBe(1);
+    const w = whole[0]!;
+    let checked = 0;
+    let newVertices = 0;
+    // Lower and upper slabs (the face clipped once), a quarter and a three-quarter cover (split halves).
+    for (const [a, b] of [
+      [slab(B.STONE, LOWER), 0],
+      [slab(B.STONE, UPPER), 0],
+      [slab(B.GLASS, LOWER), 0],
+      [slab(B.STONE, 0x01), slab(B.GLASS, 0x10)],
+      [slab(B.STONE, 0x15), 0],
+    ] as const) {
+      const m = sloped(a, b);
+      for (const d of [0, 1]) {
+        for (const q of inCell(liquidOn(m, 'x', 2, d))) {
+          for (let k = 0; k < 4; k++) {
+            const p = q.p[k]!;
+            expect(q.uv[k]![0]).toBeCloseTo(sideValue(w, 'z', 0, 1, p, (j) => w.uv[j]![0]), 6);
+            expect(q.uv[k]![1]).toBeCloseTo(p.y, 6);
+            expect(Math.abs(q.sky[k]! - sideValue(w, 'z', 0, 1, p, (j) => w.sky[j]!))).toBeLessThanOrEqual(0.5 + 1e-3);
+            expect(Math.abs(q.block[k]! - sideValue(w, 'z', 0, 1, p, (j) => w.block[j]!))).toBeLessThanOrEqual(0.5 + 1e-3);
+            expect(q.ao[k]).toBe(255);
+            checked++;
+            if (cornerAt(w, p.x, p.y, p.z) < 0) newVertices++;
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(40);
+    expect(newVertices).toBeGreaterThan(20);
+  });
+
+  /**
+   * The middle water cell (1, 0, 1) of a 3x2x3 box: full height (falling water above the columns x = 0
+   * and x = 2 forces every corner to 1), with the given parts above it at (1, 1, 1), or air; a patterned
+   * light field. `below` puts the parts under a water cell instead: the water at (1, 1, 1), the parts at
+   * (1, 0, 1).
+   */
+  function flatScene(a: number, below: boolean): MeshData {
+    const input = makeInput(3, 2, 3, true);
+    if (below) put(input, 1, 1, 1, water());
+    else {
+      for (let x = 0; x < 3; x++) {
+        for (let z = 0; z < 3; z++) {
+          put(input, x, 0, z, water());
+          if (x !== 1) put(input, x, 1, z, water(0, true));
+        }
+      }
+      put(input, 1, 1, 0, makeCell(B.STONE));
+      put(input, 1, 1, 2, makeCell(B.STONE));
+    }
+    patternLight(input);
+    if (a !== 0) putParts(input, 1, below ? 0 : 1, 1, a);
+    const m = buildMesh(input);
+    checkInvariants(m);
+    return m;
+  }
+
+  /** Bilinear value of a flat whole face's corner attribute at (x, z) inside the cell [1, 2]^2. */
+  function flatValue(w: Quad, p: V3, get: (k: number) => number): number {
+    let v = 0;
+    for (let k = 0; k < 4; k++) {
+      const c = w.p[k]!;
+      v += (near(c.x, 2) ? p.x - 1 : 2 - p.x) * (near(c.z, 2) ? p.z - 1 : 2 - p.z) * get(k);
+    }
+    return v;
+  }
+
+  for (const below of [false, true]) {
+    it(`${below ? 'a bottom over a partial cell' : 'a full-height top under a partial cell'}: each quadrant shows its part of the tile and the interpolated light`, () => {
+      // Quadrants on the plane y = 1: the top of the lower water cell, or the bottom of the upper one.
+      const plane = (m: MeshData, d: number) => liquidOn(m, 'y', 1, d).filter((q) => q.p.every((p) => p.x >= 1 && p.x <= 2 && p.z >= 1 && p.z <= 2));
+      const front = below ? 3 : 2;
+      const whole = plane(flatScene(0, below), front);
+      expect(whole.length).toBe(1);
+      const w = whole[0]!;
+      // Four different corner lights, so that a quadrant cannot pass with the whole face's corner values.
+      expect(new Set(w.sky.map((s, k) => s * 256 + w.block[k]!)).size).toBe(4);
+      let quadrants = 0;
+      // A stone octant over (under) one quadrant leaves three quadrants of both copies; a glass one the
+      // whole outward copy (drawn as the whole face) and three inside quadrants; a west slab two of each.
+      const one = below ? 0x04 : 0x01;
+      const west = below ? 0x44 : 0x11;
+      for (const [fill, id] of [
+        [one, B.STONE],
+        [one, B.GLASS],
+        [west, B.STONE],
+      ] as const) {
+        const m = flatScene(slab(id, fill), below);
+        for (const d of [front, front ^ 1]) {
+          for (const q of plane(m, d)) {
+            const a = quadArea(q);
+            expect(near(a, 0.25) || near(a, 1)).toBe(true);
+            quadrants += Math.round(a / 0.25);
+            for (let k = 0; k < 4; k++) {
+              const p = q.p[k]!;
+              expect(q.uv[k]![0]).toBeCloseTo(flatValue(w, p, (j) => w.uv[j]![0]), 6);
+              expect(q.uv[k]![1]).toBeCloseTo(flatValue(w, p, (j) => w.uv[j]![1]), 6);
+              expect(q.sky[k]).toBe(Math.round(flatValue(w, p, (j) => w.sky[j]!)));
+              expect(q.block[k]).toBe(Math.round(flatValue(w, p, (j) => w.block[j]!)));
+              expect(q.flags[k]! & VFLAG_LIQUID_SURFACE).toBe(0);
+            }
+          }
+        }
+      }
+      expect(quadrants).toBe(3 + 3 + 4 + 3 + 2 + 2);
+    });
+  }
+
+  /**
+   * Water at (1, 0, 1) and (1, 0, 0), a falling column above (1, 0, 0): the +X face of (1, 0, 1) has
+   * its top corner at z = 1 pinned at full height (no wave flag) and the one at z = 2 free (flagged).
+   * The cell east of it, (2, 0, 1), holds the given parts or air.
+   */
+  function pinnedScene(a: number): Quad[] {
+    const input = makeInput(3, 2, 3, true);
+    put(input, 1, 0, 1, water());
+    put(input, 1, 0, 0, water());
+    put(input, 1, 1, 0, water(0, true));
+    if (a !== 0) putParts(input, 2, 0, 1, a);
+    const m = buildMesh(input);
+    checkInvariants(m, { paddedTriangles: true });
+    return [0, 1].flatMap((d) => liquidOn(m, 'x', 2, d).filter((q) => q.p.every((p) => p.z >= 1 && p.z <= 2)));
+  }
+  const waves = (q: Quad, k: number) => (q.flags[k]! & VFLAG_LIQUID_SURFACE) !== 0;
+
+  it('a new top-edge vertex between a pinned and a free corner carries no wave flag; the corners keep theirs', () => {
+    const [w] = pinnedScene(0);
+    const pinned = w!.p.findIndex((p) => near(p.z, 1) && near(p.y, 1));
+    const free = w!.p.findIndex((p) => near(p.z, 2) && near(p.y, LIQUID_FULL_HEIGHT));
+    expect(waves(w!, pinned)).toBe(false);
+    expect(waves(w!, free)).toBe(true);
+    // A stone octant in the lower low-z quadrant of the neighbour's face: the halves differ, the face is
+    // split at z = 1.5 and gets a vertex on its top edge there.
+    let mid = 0;
+    for (const q of pinnedScene(slab(B.STONE, 0x01))) {
+      for (let k = 0; k < 4; k++) {
+        const p = q.p[k]!;
+        if (near(p.z, 1.5) && p.y > 0.5 + 1e-6) {
+          expect(p.y).toBeCloseTo((1 + LIQUID_FULL_HEIGHT) / 2, 6);
+          expect(waves(q, k)).toBe(false);
+          mid++;
+        }
+        if (near(p.z, 1) && near(p.y, 1)) expect(waves(q, k)).toBe(false);
+        if (near(p.z, 2) && near(p.y, LIQUID_FULL_HEIGHT)) expect(waves(q, k)).toBe(true);
+      }
+    }
+    // Front and back copy of the upper piece of the low-z half, and of the high-z half: 2 + 2.
+    expect(mid).toBe(4);
+  });
+
+  it('a lower or upper slab beside the liquid clips the face once: its top edge keeps only its two original corners', () => {
+    const [w] = pinnedScene(0);
+    for (const fill of [LOWER, UPPER]) {
+      const pieces = pinnedScene(slab(B.STONE, fill));
+      // Lower slab: one quad above y = 0.5 per copy; upper slab: one quad below it per copy.
+      expect(pieces.length).toBe(2);
+      for (const q of pieces) {
+        for (let k = 0; k < 4; k++) {
+          const p = q.p[k]!;
+          if (p.y > 0.5 + 1e-6) {
+            // A vertex above the clip line is one of the whole face's top corners, with its flag.
+            const o = cornerAt(w!, p.x, p.y, p.z);
+            expect(o).toBeGreaterThanOrEqual(0);
+            expect(waves(q, k)).toBe(waves(w!, o));
+          } else expect(near(p.y, 0.5) || near(p.y, 0)).toBe(true);
+          expect(near(p.z, 1) || near(p.z, 2)).toBe(true);
+        }
+      }
+    }
+  });
 });

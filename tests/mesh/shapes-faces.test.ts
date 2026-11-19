@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
-import { cellPrimary, cellSecond, ID_MASK, makeCell, makePart, PART_MASK, partHoles } from '../../src/blocks/cell';
+import { axisState, cellPrimary, cellSecond, ID_MASK, makeCell, makePart, PACK_SCALE, PART_MASK, partHoles, STATE_MASK, STATE_SHIFT, stateAxis, stateFacing } from '../../src/blocks/cell';
 import { BLOCKS, OPAQUE, blockDef } from '../../src/blocks/registry';
 import { opaqueFill, partAt } from '../../src/blocks/shapes';
 import { NY, PX, PY } from '../../src/core/dirs';
@@ -13,7 +13,7 @@ import { Rng } from '../../src/core/rng';
 import { Mesher, buildMesh } from '../../src/mesh/mesher';
 import type { MeshData, MeshInput } from '../../src/mesh/types';
 import { LOWER, UPPER, WEST, slab, stairFill } from '../shapes';
-import { allQuads, checkInsideBox, checkInvariants, dirOfQuad, idx, makeInput, put, quadsOf, type GroupName, type Quad } from './helpers';
+import { allQuads, checkInsideBox, checkInvariants, cross, dirOfQuad, dot, idx, makeInput, put, quadsOf, uvFrame, type GroupName, type Quad } from './helpers';
 import { boxFaceKey, CUTTABLE_IDS, faceKey, isPartial, ownerCell, packedAt, putParts, quadArea, randomPartialCell } from './shape-helpers';
 
 const OFF: ReadonlyArray<readonly [number, number, number]> = [
@@ -159,38 +159,107 @@ describe('octant path: brute-force comparison, quarter face by quarter face (8.2
     const rng = new Rng(4242);
     for (let t = 0; t < 60; t++) {
       const input = randomScene(rng, 6);
-      checkInvariants(buildMesh(input));
+      // Water beside partial cells: clipped side pieces may be padded triangles (8.4).
+      checkInvariants(buildMesh(input), { paddedTriangles: true });
       const m = buildMesh(withoutLiquids(input));
       expect(emittedCubeFaces(input, m)).toEqual(reference(input));
     }
   });
 
-  it('every quarter face is a 0.5 x 0.5 axis-aligned square, the tile of the material in that direction', () => {
+  it('every quarter face is a 0.5 x 0.5 square; every cube-family face has the tile of its material in that direction and the uv of the whole tile at its position', () => {
+    // Enough scenes that logs of every axis occur as first and as second parts, and as whole cubes
+    // beside partial cells (octant path of a whole cube).
     const rng = new Rng(77);
-    for (let t = 0; t < 10; t++) {
+    let quarter = 0;
+    let logQuarter = 0;
+    let secondLog = 0;
+    for (let t = 0; t < 40; t++) {
       const input = randomScene(rng, 5);
       for (const q of allQuads(buildMesh(withoutLiquids(input)))) {
         const d = dirOfQuad(q);
         if (d < 0) continue;
         const [x, y, z] = ownerCell(q);
         const c = packedAt(input, x, y, z);
-        if (!isPartial(c)) continue;
-        const area = quadArea(q);
-        expect(area).toBeCloseTo(0.25, 9);
+        if (!isCubeFamily(c & ID_MASK)) continue;
         // The part behind the quad: the octant just behind its centre.
-        const cx = (q.p[0]!.x + q.p[2]!.x) / 2 - (OFF[d]![0] * 0.25);
-        const cy = (q.p[0]!.y + q.p[2]!.y) / 2 - (OFF[d]![1] * 0.25);
-        const cz = (q.p[0]!.z + q.p[2]!.z) / 2 - (OFF[d]![2] * 0.25);
+        const cx = (q.p[0]!.x + q.p[2]!.x) / 2 - OFF[d]![0] * 0.25;
+        const cy = (q.p[0]!.y + q.p[2]!.y) / 2 - OFF[d]![1] * 0.25;
+        const cz = (q.p[0]!.z + q.p[2]!.z) / 2 - OFF[d]![2] * 0.25;
         const o = (Math.floor((cx - x) * 2) & 1) | ((Math.floor((cy - y) * 2) & 1) << 1) | ((Math.floor((cz - z) * 2) & 1) << 2);
-        const id = partAt(c, o) & ID_MASK;
-        const def = blockDef(id);
-        if (def.stateKind === 'none') expect(q.tile).toBe(def.tileIds[Math.min(d, def.tileIds.length - 1)]);
-        else expect(def.tileIds).toContain(q.tile);
-        expect(q.group).toBe(def.layer);
+        const part = partAt(c, o);
+        const id = part & ID_MASK;
+        const state = (part >>> STATE_SHIFT) & STATE_MASK;
+        if (isPartial(c)) {
+          expect(quadArea(q)).toBeCloseTo(0.25, 9);
+          quarter++;
+          if (blockDef(id).stateKind === 'axis') {
+            logQuarter++;
+            if (part === cellSecond(c)) secondLog++;
+          }
+        }
+        expect(q.tile).toBe(expectedTile(id, state, d));
+        expect(q.group).toBe(blockDef(id).layer);
+        for (let k = 0; k < 4; k++) {
+          const [u, v] = wholeFaceUv(id, state, d, q.p[k]!.x - x, q.p[k]!.y - y, q.p[k]!.z - z);
+          expect(q.uv[k]![0]).toBeCloseTo(u, 6);
+          expect(q.uv[k]![1]).toBeCloseTo(v, 6);
+        }
       }
     }
+    expect(quarter).toBeGreaterThan(2000);
+    expect(logQuarter).toBeGreaterThan(200);
+    expect(secondLog).toBeGreaterThan(20);
   });
 });
+
+/**
+ * The tile a cube-family block shows on face d (docs/SHAPES.md 8.2: the material's tile for that
+ * direction), written from the block table: a log (stateKind 'axis') shows its end tile (tileIds[1])
+ * on the two faces of its axis and its side tile (tileIds[0]) elsewhere; a bearing its front tile on
+ * the facing, its back tile opposite and its side tile elsewhere; any other block tileIds[d] (the
+ * last one repeated).
+ */
+function expectedTile(id: number, state: number, d: number): number {
+  const def = blockDef(id);
+  if (def.stateKind === 'axis') return def.tileIds[d >> 1 === stateAxis(state) ? 1 : 0]!;
+  if (def.shape === 'bearing') {
+    const f = stateFacing(state);
+    return def.tileIds[d === f ? 0 : d === (f ^ 1) ? 1 : 2]!;
+  }
+  return def.tileIds[Math.min(d, def.tileIds.length - 1)]!;
+}
+
+const wholeFaces = new Map<string, Quad>();
+/**
+ * The uv a cut face must show at cell-local position (lx, ly, lz) on face d (8.2: the matching part
+ * of the whole tile, the log's rotation applied): the uv of a lone whole block of the same id and
+ * state at that position, bilinear in the corners of its face d (whole-block output is M1's, pinned
+ * in shapes-path.test.ts).
+ */
+function wholeFaceUv(id: number, state: number, d: number, lx: number, ly: number, lz: number): [number, number] {
+  const key = `${id}/${state}/${d}`;
+  let face = wholeFaces.get(key);
+  if (face === undefined) {
+    const input = makeInput(1, 1, 1);
+    put(input, 0, 0, 0, makeCell(id, state));
+    face = allQuads(buildMesh(input)).find((q) => dirOfQuad(q) === d)!;
+    wholeFaces.set(key, face);
+  }
+  const a = d >> 1;
+  const [ta, tb] = a === 0 ? (['y', 'z'] as const) : a === 1 ? (['x', 'z'] as const) : (['x', 'y'] as const);
+  const local = { x: lx, y: ly, z: lz };
+  const s = local[ta];
+  const t = local[tb];
+  let u = 0;
+  let v = 0;
+  for (let k = 0; k < 4; k++) {
+    const p = face.p[k]!;
+    const w = (p[ta] === 1 ? s : 1 - s) * (p[tb] === 1 ? t : 1 - t);
+    u += w * face.uv[k]![0];
+    v += w * face.uv[k]![1];
+  }
+  return [u, v];
+}
 
 describe('the rules of 8.2 on named cases', () => {
   /** Quads of the cell at (x, y, z). */
@@ -287,6 +356,37 @@ describe('the rules of 8.2 on named cases', () => {
     expect(sideDrawn(slab(B.STONE, WEST))).toBe(false);
     expect(sideDrawn(slab(B.GLASS, WEST), slab(B.STONE, 0xaa))).toBe(true);
     expect(sideDrawn(slab(B.STONE, LOWER), slab(B.PLANKS_OAK, UPPER))).toBe(false);
+  });
+
+  it('a cut log keeps its axis and grain as first and as second part: end tile on the axis faces, side tile with the grain along the axis elsewhere', () => {
+    for (const axis of [0, 1, 2] as const) {
+      for (const asSecond of [false, true]) {
+        const input = makeInput(1, 1, 1);
+        // Upper log slab over a lower stone slab (the stone holds octant 0, so the log is the second part),
+        // or a lower log slab under an upper stone slab (the log is the first part).
+        const log = slab(B.LOG_OAK, asSecond ? UPPER : LOWER, axisState(axis));
+        putParts(input, 0, 0, 0, log, slab(B.STONE, asSecond ? LOWER : UPPER));
+        expect(packedAt(input, 0, 0, 0) >= PACK_SCALE).toBe(true);
+        expect(cellSecond(packedAt(input, 0, 0, 0)) === log).toBe(asSecond);
+        const def = blockDef(B.LOG_OAK);
+        const logQuads = allQuads(buildMesh(input)).filter((q) => q.tile === def.tileIds[0] || q.tile === def.tileIds[1]);
+        expect(logQuads.length).toBe(12); // 4 on the outer horizontal face, 2 on each side
+        for (const q of logQuads) {
+          const d = dirOfQuad(q);
+          expect(q.tile).toBe(def.tileIds[d >> 1 === axis ? 1 : 0]);
+          for (let k = 0; k < 4; k++) {
+            const [u, v] = wholeFaceUv(B.LOG_OAK, axisState(axis), d, q.p[k]!.x, q.p[k]!.y, q.p[k]!.z);
+            expect(q.uv[k]![0]).toBeCloseTo(u, 6);
+            expect(q.uv[k]![1]).toBeCloseTo(v, 6);
+          }
+          // Not mirrored: (dP/du x dP/dv) points out of the face. On a side face the tile's v (the grain)
+          // runs along the log's axis.
+          const { du, dv } = uvFrame(q);
+          expect(dot(cross(du, dv), q.n)).toBeGreaterThan(0.9);
+          if (d >> 1 !== axis) expect(Math.abs([dv.x, dv.y, dv.z][axis]!)).toBeCloseTo(1, 6);
+        }
+      }
+    }
   });
 
   it('a stair and a lone corner octant expose exactly their outer surface', () => {
