@@ -2,7 +2,7 @@
 
 Original voxel sandbox in the browser. Core gameplay: multi-block structures (physical ships, kinematic rotors) held together by auto-sticking rules and glue.
 
-Read before changing code: `docs/ARCHITECTURE.md` (code conventions, layering, tick order), `docs/DESIGN.md` (gameplay rules), `docs/LESSONS.md` (bugs the prototype had), `docs/ACCEPTANCE.md` (scenarios, automated in `tests/acceptance/`), `docs/ROADMAP.md` (milestones). For anything under `src/net/` or touching multiplayer, `docs/NETCODE.md` is the specification.
+Read before changing code: `docs/ARCHITECTURE.md` (code conventions, layering, tick order), `docs/DESIGN.md` (gameplay rules), `docs/LESSONS.md` (bugs the prototype had), `docs/ACCEPTANCE.md` (scenarios, automated in `tests/acceptance/`), `docs/ROADMAP.md` (milestones). For anything under `src/net/` or touching multiplayer, `docs/NETCODE.md` is the specification. For anything that reads, writes or interprets cells (shapes, parts, octants; Milestone 2.3 and 2.4), `docs/SHAPES.md` is the specification.
 
 ## Tracking
 
