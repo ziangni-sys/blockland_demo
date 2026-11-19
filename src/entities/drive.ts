@@ -69,12 +69,13 @@
  * pushes and a carrier switch allow) draws the excess from the slack once: the overshoot is
  * carried on in envRise, and a later report is charged only for an increase of it (envPaid),
  * so the slack pays for a small departure from the arc once and a sustained climb all the way.
- * A report that ends standing (held up at the server's poses) may be a step higher than the arc,
+ * A report that ends held up at the server's poses (whether it says it stands or, a hair above a
+ * tread of a heeled deck, that it is in the air: heldEnd) may be a step higher than the arc,
  * and, where a staircase lies between its two places (the staircase path passes), sqrt(2) times
  * its horizontal displacement more: a staircase on the half-cell lattice climbs at most one step
  * per riser crossed, and the risers are at most |dx| + |dz| <= sqrt(2) h apart (several lost
- * reports in a row on a staircase; docs/SHAPES.md 5.8). A report ending in the air, or onto a wall
- * or terraces in open air, gets nothing of that.
+ * reports in a row on a staircase; docs/SHAPES.md 5.8); the envelope then starts again there. A
+ * report ending in the air, or onto a wall or terraces in open air, gets nothing of that.
  *
  * LANDINGS. Every report counts the landings of the client's body so far (mod 256). A report
  * that counts more landings than the last applied one, beyond its own (the first on the ground
@@ -235,6 +236,12 @@ export function reportLag(tick: number, viewTick: number): number {
 
 /** Footprint inset steps (blocks) of standsOn(): how finely a wall beside the body is cut off its support probe. */
 const SUPPORT_INSET_STEP = 0.05;
+
+/**
+ * Risers (blocks) the staircase path may still have below the higher end when its samples reach
+ * it, besides the path's depth limit (stairClear's last leg): three half-block risers.
+ */
+const STAIR_LAST_RISERS = 1.5;
 
 /** Tangent of a structure's tilt: how far its local vertical leans from the world's (Infinity when it lies on its side or lower). */
 function leanOf(r: StructRec): number {
@@ -548,6 +555,8 @@ export class ReportJudge {
   private readonly gb: AABB = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
   /** Scratch box of standsOn(): the body above its feet. */
   private readonly ab: AABB = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
+  /** Scratch box of clearOfLeaningWalls(): a strip beside or under the footprint. */
+  private readonly wb: AABB = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
   // path test (pathClear): frame, body, depth limits, scratch
   private pathRec: StructRec | undefined = undefined;
   private pathBody: Player | null = null;
@@ -568,6 +577,12 @@ export class ReportJudge {
   slackUsed = 0;
   /** The report stands on something: it says so, and the world or a structure holds up its feet at the server's poses. */
   groundOk = false;
+  /**
+   * The world or a structure holds up the report's feet at the server's poses, whether or not the
+   * report says it stands (groundOk is this and the claim): the vertical envelope starts again
+   * there (see VERTICAL ENVELOPE). Its fall goes on all the same unless it claims to stand.
+   */
+  heldEnd = false;
   /** The vertical envelope advanced to the report (ClientDrive.envRise ... envPaid). */
   envRise = 0;
   envTop = 0;
@@ -658,6 +673,7 @@ export class ReportJudge {
     this.switchSpeed = 0;
     this.slackUsed = 0;
     this.groundOk = false;
+    this.heldEnd = false;
     this.landedUnseen = false;
     // Garbage.
     if (!finite3(rep.pos) || !finite3(rep.vel) || !Number.isFinite(rep.yaw) || !Number.isFinite(rep.pitch)) return 'garbage';
@@ -765,21 +781,29 @@ export class ReportJudge {
     this.stairs = 0;
     const pathFrom = sameFrame && rec !== undefined ? d.pos : p.pos;
     const pathTo = sameFrame && rec !== undefined ? rep.pos : w1;
-    // Standing on something: claimed, and true at the server's poses (else it keeps falling).
-    this.groundOk = rep.onGround && this.supported(nb, rec, 0);
+    // Held up at the server's poses. For the vertical envelope that is standing, claimed or not: a
+    // body on a heeled deck walks down every tread that slopes away from it and leaves it for a tick
+    // now and then (the mover does not snap down), a few hundredths above it and in the air by its
+    // own flag; its climb is a staircase's all the same. A client gains nothing by it: claiming to
+    // stand there it would be believed (the same probe), and the envelope would start again just
+    // the same. Standing proper (groundOk, which ends a fall) also needs the claim.
+    this.heldEnd = this.supported(nb, rec, 0);
+    this.groundOk = rep.onGround && this.heldEnd;
     // A report that claims to land (the previous accepted one was in the air; not the first of an
     // epoch) where nothing holds up its end: the body landed on the way and walked off again (it
     // moves vertically first, then horizontally, and a stair tread is half a block deep): treated
     // as a landing no report showed (LANDINGS; docs/SHAPES.md 5.8 item 4).
     const edgeLanding = rep.onGround && !this.groundOk && !d.reportedOnGround && !d.fresh;
     if (edgeLanding) unseen = true;
-    // Ending on something, the body may have climbed a staircase on the way: one step up per
-    // riser it crossed, and the risers of a staircase on the half-cell lattice are at most
-    // |dx| + |dz| <= sqrt(2) h apart, whatever the staircase's heading (docs/SHAPES.md 5.8 item 1).
-    // Only where a staircase lies between the two places: the terrain on the way can be climbed
-    // a step at a time (stairClear). Else a report could hop onto a wall sqrt(2) h higher than a
-    // jump in open air, where the vertical-first dog-leg passes the path check.
-    const stairRise = this.groundOk && h > 0 && this.stairPath(pathFrom, pathTo) ? Math.SQRT2 * h : 0;
+    // Ending held up, or on the ground of a landing no report showed, the body may have climbed a
+    // staircase on the way: one step up per riser it crossed, and the risers of a staircase on the
+    // half-cell lattice are at most |dx| + |dz| <= sqrt(2) h apart, whatever the staircase's
+    // heading (docs/SHAPES.md 5.8 item 1). Only where a staircase lies between the two places: the
+    // terrain on the way can be climbed a step at a time (stairClear). Else a report could hop
+    // onto a wall sqrt(2) h higher than a jump in open air, where the vertical-first dog-leg
+    // passes the path check.
+    const stairClimb = (this.heldEnd || unseen) && h > 0 && this.stairPath(pathFrom, pathTo) ? Math.SQRT2 * h : 0;
+    const stairRise = this.heldEnd ? stairClimb : 0;
     // The vertical envelope over the report's movement time (VERTICAL ENVELOPE): rising needs
     // something that lifted the body. A flying body is bound by the speed limits alone (the
     // envelope starts again when the report is accepted).
@@ -789,8 +813,10 @@ export class ReportJudge {
     // A landing no report showed (LANDINGS) needs ground the body can have reached in the gap
     // below the lower of its two places (a client cannot end a fall early by counting landings).
     // The envelope then starts again on the highest ground under either place that the body can
-    // have come down on (no higher than its arcs got in the gap, plus a step), with a jump from
-    // there in any tick of the gap.
+    // have come down on (no higher than its arcs got in the gap, plus a step and what a staircase
+    // between the two places climbs), with a jump from there in any tick of the gap. (A body that
+    // climbed a staircase, landed on it unseen and ends not held up at the server's poses, the
+    // deck rolling under it, came down on a tread of that staircase.)
     if (unseen) {
       const ob = boxAt(p, p.pos.x, p.pos.y, p.pos.z, this.oldBox);
       const reach = (Math.max(0, -d.envVy) + GRAVITY * allow) * allow;
@@ -802,7 +828,7 @@ export class ReportJudge {
       // server and charge a sprint down a staircase as one long fall.
       const drop = ob.minY - nb.minY;
       if (this.supported(ob.minY <= nb.minY ? ob : nb, rec, reach) || (edgeLanding && drop >= 0 && this.supported(ob, rec, drop))) {
-        const highest = p.pos.y - d.envRise + d.envPaid + spanPeak + STEP_HEIGHT + stairRise + extra + switchSlack;
+        const highest = p.pos.y - d.envRise + d.envPaid + spanPeak + STEP_HEIGHT + stairClimb + extra + switchSlack;
         const ground = Math.max(this.groundUnder(ob, rec, reach, highest), this.groundUnder(nb, rec, reach, highest));
         if (ground > -Infinity) {
           this.landedUnseen = true;
@@ -828,10 +854,10 @@ export class ReportJudge {
       // Where the arcs are now: the peak when it lies between the two take-offs, else the later
       // take-off's while both fall, the earlier one's while both rise.
       const nowPeak = rising(this.envVyLate) ? (rising(this.envVy) ? this.envTop : this.envPeak) : this.envTopLate;
-      // Ending on something, the body may have come down on it at any tick of the report (a
-      // step up included); ending in liquid, the liquid may have slowed its fall; ending in the
-      // air, it is where gravity has it by now at the highest.
-      const bound = this.groundOk ? spanPeak + STEP_HEIGHT + stairRise : this.inLiquid(p, w1) ? spanPeak : nowPeak;
+      // Ending held up, the body may have come down on it at any tick of the report (a step up
+      // included); ending in liquid, the liquid may have slowed its fall; ending in the air, it
+      // is where gravity has it by now at the highest.
+      const bound = this.heldEnd ? spanPeak + STEP_HEIGHT + stairRise : this.inLiquid(p, w1) ? spanPeak : nowPeak;
       const top = bound + extra + switchSlack;
       // Overshoot is drawn from the slack once: the part already paid for (carried on in envRise)
       // is not charged again while the body goes on along the arc.
@@ -1031,10 +1057,12 @@ export class ReportJudge {
    * body that dips deeper into a wall than REPORT_HARD_TOLERANCE is held up by nothing there.
    *
    * `lean`: the tangent of the grid's tilt (0 for the world). A wall of a tilted structure leans,
-   * and may reach a sliver deeper under the feet than beside the body (by its lean times the
-   * height from the probe's bottom to where the body's part starts): where the wall was cut off
-   * the body, the footprint below is inset by that much more (at most one step). On the world
-   * and on upright structures walls are vertical: what clears the body clears the feet.
+   * and its foot may reach under the footprint although the wall stays clear of the body above
+   * the feet: clearOfLeaningWalls leaves out what such a foot can reach, the reach being the lean
+   * times the height from the probe's bottom to where the body's part starts (for a probe deeper
+   * than the standing one, the ground under a landing nobody saw, as for the standing probe: a
+   * reach that grew with the depth would leave nothing under a body on a heeled staircase). On
+   * the world and on upright structures walls are vertical: what clears the body clears the feet.
    */
   private standsOn(grid: VoxelGrid, b: AABB, gap: number, inset: number, lean: number): boolean {
     const a = this.ab;
@@ -1045,17 +1073,84 @@ export class ReportJudge {
     a.minY = a.maxY = b.maxY;
     // (The probe of hasSupportBelow is the box's footprint from its minY down by the depth.)
     const above = b.maxY - b.minY - REPORT_SUPPORT_REACH;
+    const reach = lean * (Math.min(gap, SUPPORT_GAP + REPORT_SUPPORT_REACH) + REPORT_SUPPORT_REACH) + 1e-6;
     for (let k = 0; ; k++) {
       const i = inset + k * SUPPORT_INSET_STEP;
       if (i > REPORT_HARD_TOLERANCE + 1e-9) return false;
       // The probe only shrinks as the inset grows: nothing under this footprint, nothing under a smaller one.
       if (!hasSupportBelow(grid, b, gap, i)) return false;
-      if (!(above > 0) || !hasSupportBelow(grid, a, above, i)) {
-        if (k === 0 || lean === 0) return true;
-        const sliver = Math.min(SUPPORT_INSET_STEP, lean * (gap + REPORT_SUPPORT_REACH) + 1e-6);
-        return hasSupportBelow(grid, b, gap, i + sliver);
-      }
+      if (!(above > 0)) return true;
+      if (!hasSupportBelow(grid, a, above, i)) return lean === 0 || this.clearOfLeaningWalls(grid, b, gap, i, above, reach);
     }
+  }
+
+  /**
+   * standsOn on a tilted grid, once the footprint inset by `i` is clear of hard cells above the
+   * feet (from REPORT_SUPPORT_REACH up, `above` high): is there support under the part of that
+   * footprint that no leaning wall reaches into?
+   *
+   * The grid's solid material continues along its local up, which leans from the world's up by
+   * the grid's tilt. A point of a column under the feet whose solid material goes on up past
+   * REPORT_SUPPORT_REACH above them (a wall, not a tread) meets that height within `reach`
+   * (the lean times the height between) of where it was, horizontally; it is not inside the
+   * footprint there (the footprint is clear above the feet), so it is outside, within `reach`.
+   * Hence: where hard cells above the feet lie within `reach` outside a side of the footprint,
+   * that side's strip `reach` deep is left out; where they lie only beyond a corner, that corner's
+   * square. What lies under the rest is a tread or step whose top is below that height, however
+   * narrow the strip of it under the feet (a body that has just stepped up stands on a few
+   * thousandths of a tread, with the next riser at its corner). This holds for the footprint
+   * widened by the probe's reach too (a wall a little beyond the body leans into the widening).
+   */
+  private clearOfLeaningWalls(grid: VoxelGrid, b: AABB, gap: number, i: number, above: number, reach: number): boolean {
+    const x0 = b.minX + i;
+    const x1 = b.maxX - i;
+    const z0 = b.minZ + i;
+    const z1 = b.maxZ - i;
+    const r = reach;
+    if (!this.hardAbove(grid, b, above, x0 - r, x1 + r, z0 - r, z1 + r)) return true;
+    const wx0 = this.hardAbove(grid, b, above, x0 - r, x0, z0, z1);
+    const wx1 = this.hardAbove(grid, b, above, x1, x1 + r, z0, z1);
+    const wz0 = this.hardAbove(grid, b, above, x0, x1, z0 - r, z0);
+    const wz1 = this.hardAbove(grid, b, above, x0, x1, z1, z1 + r);
+    // A corner whose sides are both clear (else a side's strip covers its square).
+    const c00 = !wx0 && !wz0 && this.hardAbove(grid, b, above, x0 - r, x0, z0 - r, z0);
+    const c01 = !wx0 && !wz1 && this.hardAbove(grid, b, above, x0 - r, x0, z1, z1 + r);
+    const c10 = !wx1 && !wz0 && this.hardAbove(grid, b, above, x1, x1 + r, z0 - r, z0);
+    const c11 = !wx1 && !wz1 && this.hardAbove(grid, b, above, x1, x1 + r, z1, z1 + r);
+    const sx0 = wx0 ? x0 + r : x0;
+    const sx1 = wx1 ? x1 - r : x1;
+    const sz0 = wz0 ? z0 + r : z0;
+    const sz1 = wz1 ? z1 - r : z1;
+    // Without the corners' squares: the union of two crossing rectangles (when two opposite
+    // corners are left out, so are the other two: on the safe side).
+    const cz0 = c00 || c10 ? r : 0;
+    const cz1 = c01 || c11 ? r : 0;
+    const cx0 = c00 || c01 ? r : 0;
+    const cx1 = c10 || c11 ? r : 0;
+    return this.hardUnder(grid, b, gap, sx0, sx1, sz0 + cz0, sz1 - cz1) || this.hardUnder(grid, b, gap, sx0 + cx0, sx1 - cx1, sz0, sz1);
+  }
+
+  /** Hard cells of `grid` over x0..x1, z0..z1 from REPORT_SUPPORT_REACH above the feet of `b` up to its top (`above` high)? */
+  private hardAbove(grid: VoxelGrid, b: AABB, above: number, x0: number, x1: number, z0: number, z1: number): boolean {
+    const a = this.wb;
+    a.minX = x0;
+    a.maxX = x1;
+    a.minZ = z0;
+    a.maxZ = z1;
+    a.minY = a.maxY = b.maxY;
+    return hasSupportBelow(grid, a, above, 0);
+  }
+
+  /** Hard cells of `grid` over x0..x1, z0..z1 within `gap` below the feet of `b` (none when the area is empty)? */
+  private hardUnder(grid: VoxelGrid, b: AABB, gap: number, x0: number, x1: number, z0: number, z1: number): boolean {
+    if (!(x0 < x1) || !(z0 < z1)) return false;
+    const a = this.wb;
+    a.minX = x0;
+    a.maxX = x1;
+    a.minZ = z0;
+    a.maxZ = z1;
+    a.minY = a.maxY = b.minY;
+    return hasSupportBelow(grid, a, gap, 0);
   }
 
   /**
@@ -1127,10 +1222,32 @@ export class ReportJudge {
    * The staircase path from the lower end `lo` to the higher end `hi` (docs/SHAPES.md 5.8 item 3):
    * along the horizontal line from lo to below hi in samples of REPORT_PATH_STEP, starting at
    * lo.y; a blocked sample lifts the height by the smallest multiple of REPORT_PATH_STEP that
-   * clears it, at most STEP_HEIGHT and never above hi.y; the height never comes down; then
-   * straight up to hi. So only a climb of at most one step at a time passes, under a ceiling
+   * clears it, at most STEP_HEIGHT and never above hi.y (stepUp); the height never comes down;
+   * then straight up to hi. So only a climb of at most one step at a time passes, under a ceiling
    * parallel to the treads too (where the vertical-first dog-leg hits the ceiling); walls and
    * cages do not. Not applicable (false) when the ends are level or one is right above the other.
+   *
+   * A sample that one step does not clear may still be reached round the corner, one horizontal
+   * axis of the path frame at a time with a step on each leg: x first, then z, or z first, then x.
+   * A line along or near the diagonal of a diagonal staircase (height 0.5 (i + j) on the
+   * half-cell lattice) crosses an x riser and a z riser at the same sample, and the tread beyond
+   * both is two steps above the one before them; the mover climbs them one riser at a time.
+   * Without the corner no line within a few hundredths of that diagonal passed, nor about one in
+   * eight walkable lines of any heading across such a staircase; an honest player whose path
+   * follows the diagonal (as on a deck heeling about the staircase's other diagonal) got no
+   * staircase allowance and was refused for check:rise after a few lost reports. The corner (x
+   * of this sample and z of the previous one, or the other way round) must be clear at most a
+   * step above the height so far, and the sample at most a step above the corner: a riser along
+   * one axis is crossed by one leg, so a wall or the corner of a block needs as much as before.
+   *
+   * The last leg, straight up to hi, is at most STAIR_LAST_RISERS plus the depth limit: a sample
+   * may overlap a tread by up to that limit without being lifted, so the samples may graze the
+   * tread at hi (a body that has just stepped up stands on a few thousandths of it) and the
+   * corners of the treads before it and arrive a few risers below hi (no walkable line of an
+   * adversarial fuzz of 37458 lines needed more than 1.7 with the limit at 0.2). Without the
+   * bound the path passed a report that ends beside a wall, or on its rim, with the feet at its
+   * top: nothing on the way to climb, then the leg up the wall's face, and the staircase
+   * allowance let a report hop onto a wall eight blocks high.
    */
   private stairClear(lo: Vec3, hi: Vec3): boolean {
     const dx = hi.x - lo.x;
@@ -1138,24 +1255,43 @@ export class ReportJudge {
     const n = Math.ceil(Math.sqrt(dx * dx + dz * dz) / REPORT_PATH_STEP);
     if (n === 0 || !(hi.y > lo.y)) return false;
     let y = lo.y;
+    let px = lo.x;
+    let pz = lo.z;
     for (let k = 1; k <= n; k++) {
       const t = k / n;
       const x = lo.x + dx * t;
       const z = lo.z + dz * t;
-      if (this.sampleClear(x, y, z)) continue;
-      let lifted = false;
-      for (let j = 1; j * REPORT_PATH_STEP <= STEP_HEIGHT + 1e-9; j++) {
-        const y2 = y + j * REPORT_PATH_STEP < hi.y ? y + j * REPORT_PATH_STEP : hi.y;
-        if (this.sampleClear(x, y2, z)) {
-          y = y2;
-          lifted = true;
-          break;
-        }
-        if (y2 === hi.y) break;
+      let y2 = this.stepUp(x, y, z, hi.y);
+      if (Number.isNaN(y2)) {
+        const xFirst = this.stepUp(x, y, pz, hi.y);
+        if (!Number.isNaN(xFirst)) y2 = this.stepUp(x, xFirst, z, hi.y);
       }
-      if (!lifted) return false;
+      if (Number.isNaN(y2)) {
+        const zFirst = this.stepUp(px, y, z, hi.y);
+        if (!Number.isNaN(zFirst)) y2 = this.stepUp(x, zFirst, z, hi.y);
+      }
+      if (Number.isNaN(y2)) return false;
+      y = y2;
+      px = x;
+      pz = z;
     }
-    return this.legClear(hi.x, y, hi.z, hi.x, hi.y, hi.z, false);
+    const lim = this.pathRec !== undefined && this.limCarrier > this.limWorld ? this.limCarrier : this.limWorld;
+    return hi.y - y <= STAIR_LAST_RISERS + lim && this.legClear(hi.x, y, hi.z, hi.x, hi.y, hi.z, false);
+  }
+
+  /**
+   * The lowest height from `y` up, in multiples of REPORT_PATH_STEP and at most STEP_HEIGHT above
+   * it (never above `top`), at which the body sample at (x, z) is clear (stairClear); NaN when
+   * none is.
+   */
+  private stepUp(x: number, y: number, z: number, top: number): number {
+    if (this.sampleClear(x, y, z)) return y;
+    for (let j = 1; j * REPORT_PATH_STEP <= STEP_HEIGHT + 1e-9; j++) {
+      const y2 = y + j * REPORT_PATH_STEP < top ? y + j * REPORT_PATH_STEP : top;
+      if (this.sampleClear(x, y2, z)) return y2;
+      if (y2 === top) break;
+    }
+    return NaN;
   }
 
   /** The path from `a` to `b` by way of the corner (cx, cy, cz). */

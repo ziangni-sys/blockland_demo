@@ -975,9 +975,10 @@ export class EntityManager {
       // on a moving deck counts from where it began: both ends at the server's present poses).
       body.sampleFluids(p);
       sampled = true;
-      // Held up where the report put it: the envelope starts again there. Else it goes on (after an
-      // unseen landing, from the ground the body came down on: drive.ts VERTICAL ENVELOPE).
-      if (d.onGround || p.wet > 0 || p.inLava || p.flying) d.resetEnvelope(JUMP_SPEED, true);
+      // Held up where the report put it (claimed to stand or not: drive.ts heldEnd): the envelope
+      // starts again there. Else it goes on (after an unseen landing, from the ground the body came
+      // down on: drive.ts VERTICAL ENVELOPE).
+      if (judge.heldEnd || p.wet > 0 || p.inLava || p.flying) d.resetEnvelope(JUMP_SPEED, true);
       else {
         d.envRise = judge.envRise;
         d.envTop = judge.envTop;

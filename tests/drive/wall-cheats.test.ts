@@ -152,3 +152,119 @@ describe('on a deck: its mast is not ground either', () => {
     });
   }
 });
+
+describe('on a heeled deck: its mast is not ground either, however the mast leans', () => {
+  /**
+   * A raft at sea (planks deck at SEA_TOP - 1, x -3..6, z -3..6) with a mast at x 2, z 2 up 20
+   * blocks and planks stacked on its -x edge (`load`: x -3..-1, 4 high, or x -3..-2, 2 high),
+   * which heel it toward that edge;
+   * the liar on the deck beside the mast's `side` face, `gap` from it. A wall of a tilted structure
+   * leans, and its foot reaches under the feet of a body that stays clear of it above them
+   * (drive.ts clearOfLeaningWalls): on the side it leans over the body and on the side it leans
+   * away, the mast holds up nothing.
+   */
+  function raft(load: 'heavy' | 'light', side: string, gap: number): { l: Liar; heel: number; x: number; z: number } {
+    const at: Record<string, [number, number]> = {
+      '-x': [1.7 - gap, 2.5],
+      '+x': [3.3 + gap, 2.5],
+      '-z': [2.5, 1.7 - gap],
+      '+z': [2.5, 3.3 + gap],
+      // At a corner of the mast (diagonally beside it): only the footprint's corner square is in reach.
+      '-x-z': [1.7 - gap, 1.7 - gap],
+      '+x+z': [3.3 + gap, 3.3 + gap],
+      '-x+z': [1.7 - gap, 3.3 + gap],
+      '+x-z': [3.3 + gap, 1.7 - gap],
+    };
+    const [x, z] = at[side]!;
+    const run = seaRun('survival', vec3(0.5, SEA_TOP, 2.5), null);
+    const sim = run.sim;
+    fill(sim.world, -3, SEA_TOP - 1, -3, 6, SEA_TOP - 1, 6, B.PLANKS_OAK);
+    fill(sim.world, 2, SEA_TOP, 2, 2, SEA_TOP + 19, 2, B.PLANKS_OAK);
+    if (load === 'heavy') fill(sim.world, -3, SEA_TOP, -3, -1, SEA_TOP + 3, 6, B.PLANKS_OAK);
+    else fill(sim.world, -3, SEA_TOP, -3, -2, SEA_TOP + 1, 6, B.PLANKS_OAK);
+    sim.world.setCell(5, SEA_TOP, 5, makeCell(B.HELM, facingState(NZ)));
+    const ship = assemble(sim, vec3(5, SEA_TOP, 5));
+    for (let t = 0; t < 200; t++) sim.tick();
+    const q = ship.grid.rotation;
+    const heel = (Math.acos(Math.min(1, 1 - 2 * (q.x * q.x + q.z * q.z))) * 180) / Math.PI;
+    const w = ship.grid.toWorld(vec3(x, SEA_TOP, z));
+    sim.soloPlayer.teleport(w.x, w.y + 0.02, w.z);
+    for (let t = 0; t < 20; t++) sim.tick();
+    const l = new Liar(run);
+    expect(l.carrierId).toBe(ship.id);
+    l.send(x, SEA_TOP, z);
+    return { l, heel, x, z };
+  }
+
+  for (const [load, least] of [
+    ['heavy', 15],
+    ['light', 4],
+  ] as const) {
+    for (const stand of [true, false]) {
+      it(`heeling ${least} degrees or more: climbing the mast at 0.6 per tick on each side and at each corner, ${stand ? 'claiming to stand' : 'claiming to be in the air'}: refused once above a jump`, () => {
+        for (const side of ['-x', '+x', '-z', '+z', '-x-z', '+x+z', '-x+z', '+x-z'])
+          for (const gap of [0, 0.05, 0.1, 0.12, -0.05, -0.15]) {
+            const { l, heel, x, z } = raft(load, side, gap);
+            expect(heel).toBeGreaterThan(least);
+            let y = SEA_TOP;
+            let best = 0;
+            for (let t = 0; t < 30; t++) {
+              if (l.send(x, y + 0.6, z, stand)) y += 0.6;
+              else y = SEA_TOP;
+              best = Math.max(best, y - SEA_TOP);
+            }
+            const what = `${side} side, ${gap} from the mast: ${best.toFixed(1)} up, causes ${JSON.stringify(l.causes)}`;
+            expect(best, what).toBeLessThan(1.8);
+            // (Dipping into a mast that leans over the body is the hull check's.)
+            for (const c of l.causes) expect(['check:rise', 'check:hull'], what).toContain(c);
+          }
+      });
+    }
+  }
+
+  it('an honest body on the deck beside the mast, heeling 4 degrees or more, on each side: still stands', () => {
+    // (On the -x side the mast leans over the body: a quarter block short of its foot the body
+    // clears it up to its head.)
+    for (const [side, gaps] of [
+      ['-x', [0.25, 0.4]],
+      ['+x', [0, 0.05, 0.1]],
+      ['-z', [0, 0.05, 0.1]],
+      ['+z', [0, 0.05, 0.1]],
+    ] as const)
+      for (const gap of gaps) {
+        const { l, heel } = raft('light', side, gap);
+        expect(heel).toBeGreaterThan(4);
+        expect(l.causes, `${side} ${gap}`).toEqual([]);
+        expect(l.player.remote!.onGround, `${side} ${gap}`).toBe(true);
+      }
+  });
+
+  it('an honest body on the deck standing on the edge of a step, a wall touching its other side: still stands', () => {
+    // A step (x 4, z 0..1, one block) and beside it a wall (x 4..5, z 2, three blocks); the body's
+    // footprint reaches 0.02 over the step's -x edge and touches the wall's face z = 2. The heel
+    // tilts x, not z: the wall's lean reaches under the feet on the wall's side only, and the strip
+    // of step lies along another side.
+    const run = seaRun('survival', vec3(0.5, SEA_TOP, 2.5), null);
+    const sim = run.sim;
+    fill(sim.world, -3, SEA_TOP - 1, -3, 6, SEA_TOP - 1, 6, B.PLANKS_OAK);
+    fill(sim.world, -3, SEA_TOP, -3, -2, SEA_TOP + 1, 6, B.PLANKS_OAK);
+    fill(sim.world, 4, SEA_TOP, 0, 4, SEA_TOP, 1, B.PLANKS_OAK);
+    fill(sim.world, 4, SEA_TOP, 2, 5, SEA_TOP + 2, 2, B.PLANKS_OAK);
+    sim.world.setCell(5, SEA_TOP, 5, makeCell(B.HELM, facingState(NZ)));
+    const ship = assemble(sim, vec3(5, SEA_TOP, 5));
+    for (let t = 0; t < 200; t++) sim.tick();
+    const q = ship.grid.rotation;
+    expect((Math.acos(Math.min(1, 1 - 2 * (q.x * q.x + q.z * q.z))) * 180) / Math.PI).toBeGreaterThan(4);
+    const w = ship.grid.toWorld(vec3(3, SEA_TOP, 1.5));
+    sim.soloPlayer.teleport(w.x, w.y + 0.02, w.z);
+    for (let t = 0; t < 20; t++) sim.tick();
+    const l = new Liar(run);
+    expect(l.carrierId).toBe(ship.id);
+    l.send(3, SEA_TOP, 1.5, true);
+    // Up onto the step's edge (feet x 3.72: 0.02 of the footprint over the step), ten ticks later.
+    l.wait(10);
+    l.send(3.72, SEA_TOP + 1, 1.7, true, 10);
+    expect(l.causes).toEqual([]);
+    expect(l.player.remote!.onGround).toBe(true);
+  });
+});
