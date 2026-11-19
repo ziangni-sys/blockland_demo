@@ -34,6 +34,8 @@
 //   the other player, with the right name, where the server has them in the raft's frame (the
 //   server's own view comes from the host page's Worker: debug.serverProbe); the host docks; both
 //   replicas must then equal the server. Over the same-browser channel (?signal=broadcast).
+//   Then scenario 37: the host page is slowed down (CPU throttling x10 for 12 s): the guest is
+//   told, stays connected, the world goes on, and the notice goes once the host is fast again.
 // ship-cloud: the same through the real public signalling service (0.peerjs.com); when the room
 //   cannot open there (no network), the step says so plainly and passes.
 // offline: the single-file build says it cannot go online.
@@ -362,7 +364,7 @@ async function runGame(browser) {
   const waitReady = (p, timeout = 180_000) =>
     p.waitForFunction(() => {
       const s = window.__blocklands.game.debug.state();
-      return s.sessionState === 'ready' && s.screen === 'none';
+      return s.sessionState === 'ready' && s.screen === 'none' && s.player !== null;
     }, undefined, { timeout, polling: 250 });
   const waitScreen = (p, screen, timeout = 30_000) => p.waitForFunction((sc) => window.__blocklands.game.screen === sc, screen, { timeout, polling: 100 });
   /** The join's end on the loading screen: its message. */
@@ -498,8 +500,8 @@ async function runGame(browser) {
     const ps = await st(guest);
     check(ps.paused === false, 'the guest page paused');
     await guest.click(`${ROOM} [data-act="diagnostics"]`);
-    await guest.waitForFunction(() => (document.querySelector('.bl-copy--diag textarea')?.value ?? '').includes('last error'), undefined, { timeout: 20_000 });
-    const diag = await guest.inputValue('.bl-copy--diag textarea');
+    await guest.waitForFunction(() => (document.querySelector('.bl-screen[data-screen="room"] .bl-copy--diag textarea')?.value ?? '').includes('last error'), undefined, { timeout: 20_000 });
+    const diag = await guest.inputValue('.bl-screen[data-screen="room"] .bl-copy--diag textarea');
     log(`diagnostics:\n      ${diag.split('\n').join('\n      ')}`);
     check(/role: guest/.test(diag) && /signalling: broadcast/.test(diag) && /webrtc host: (host|srflx|prflx|relay|\?) -> (host|srflx|prflx|relay|\?) \((udp|tcp|\?)\)/.test(diag), 'the diagnostics lack the role, the signalling or the candidate pair');
     check(!/\b\d{1,3}(\.\d{1,3}){3}\b/.test(diag) && !diag.includes('Gus') && !diag.includes('Hester') && !diag.includes(code.replace('-', '')), 'the diagnostics carry an address, a name or the code');
@@ -525,8 +527,8 @@ async function runGame(browser) {
     log(`the host's row of the guest: ${linkText}`);
     check(/^\d+(\.\d)? (B|KB|MB)\/s · backlog \d+(\.\d)? (B|KB|MB) · rtt (\d+|–) ms$/.test(linkText), `not the guest's connection: ${linkText}`);
     await host.click(`${ROOM} [data-act="diagnostics"]`);
-    await host.waitForFunction(() => (document.querySelector('.bl-copy--diag textarea')?.value ?? '').includes('last error'), undefined, { timeout: 20_000 });
-    const hostDiag = await host.inputValue('.bl-copy--diag textarea');
+    await host.waitForFunction(() => (document.querySelector('.bl-screen[data-screen="room"] .bl-copy--diag textarea')?.value ?? '').includes('last error'), undefined, { timeout: 20_000 });
+    const hostDiag = await host.inputValue('.bl-screen[data-screen="room"] .bl-copy--diag textarea');
     log(`host diagnostics:\n      ${hostDiag.split('\n').join('\n      ')}`);
     check(/role: host \(room open, 1 guest\)/.test(hostDiag) && /guest 1: (host|srflx|prflx|relay|\?) -> (host|srflx|prflx|relay|\?) \((udp|tcp|\?)\), rtt [^;]*; out [^;]*, in [^;]*; server sends [^,]+, backlog [^,]+, rtt/.test(hostDiag), "the host's diagnostics lack the guest's line");
     check(!hostDiag.includes('Gus') && !hostDiag.includes('Hester') && !/\b\d{1,3}(\.\d{1,3}){3}\b/.test(hostDiag), "the host's diagnostics carry a name or an address");
@@ -680,6 +682,14 @@ async function runGame(browser) {
     log(`unknown room after ${((Date.now() - tu) / 1000).toFixed(1)} s: "${unknown}"`);
     check(/No room has this code/.test(unknown) && (await twin.isVisible('[data-act="retry"]')), 'an unknown room was not told, with "Try again"');
     await shot(twin, '15-unknown-room');
+    // A guest that never got in can copy diagnostics from the failure screen: how far its dial got.
+    const LOADING = '.bl-screen[data-screen="loading"]';
+    await twin.click(`${LOADING} [data-act="diagnostics"]`);
+    await twin.waitForFunction((sel) => (document.querySelector(sel)?.value ?? '').includes('last dial'), `${LOADING} .bl-copy--diag textarea`, { timeout: 20_000 });
+    const failDiag = await twin.inputValue(`${LOADING} .bl-copy--diag textarea`);
+    log(`diagnostics on the failure screen:\n      ${failDiag.split('\n').join('\n      ')}`);
+    check(/role: guest/.test(failDiag) && /signalling: broadcast/.test(failDiag) && /last error: join\.unknown/.test(failDiag) && /last dial: unknown; no webrtc handshake/.test(failDiag), 'the failure screen\'s diagnostics lack the failure');
+    check(!failDiag.includes('ZZZZ') && !failDiag.includes('Hester'), 'the failure screen\'s diagnostics carry the code or a name');
     await twin.click('[data-act="retry"]');
     await waitFailed(twin, BROADCAST_KNOCK_MS + 20_000);
     await twin.click('[data-act="menu"]');
@@ -1008,9 +1018,27 @@ async function runShip(browser, signal) {
   await context.addInitScript(() => {
     localStorage.setItem('playerName', 'Hester');
     localStorage.setItem('playerName:guest', 'Gus');
+    // The page's frame gaps (a page that draws no frame for 2 s sends no movement report: the
+    // helmsman is let go of the wheel, by design), for the log.
+    const gaps = { longest: 0, over2s: 0, last: 0 };
+    window.__e2eGaps = gaps;
+    const frame = (t) => {
+      if (gaps.last > 0) {
+        const d = t - gaps.last;
+        gaps.longest = Math.max(gaps.longest, d);
+        if (d >= 2000) gaps.over2s++;
+      }
+      gaps.last = t;
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
   });
   const pages = [];
   const tag = signal === 'cloud' ? 'ship-cloud' : 'ship';
+  const gapsOf = async (g) => {
+    const x = await g.G(() => window.__e2eGaps ?? null);
+    return x === null ? 'no frame record' : `longest frame gap ${(x.longest / 1000).toFixed(1)} s, ${x.over2s} of 2 s or more`;
+  };
   const shot = async (g, what) => {
     const size = g.p.viewportSize();
     await g.p.setViewportSize(SHOT_VIEWPORT);
@@ -1204,14 +1232,24 @@ async function runShip(browser, signal) {
     /** The host holds the wheel; a page stalled 2 s loses it (by design): take it again. */
     const keepHelm = async () => {
       if ((await host.own()).steeringShipId === ship.id) return;
-      log('the host was let go of the wheel (no movement report for 2 s: a stalled page); taking it again');
-      for (let i = 0; i < 4; i++) {
+      log(`the host was let go of the wheel (no movement report for 2 s: a stalled page; host ${await gapsOf(host)}, guest ${await gapsOf(guest)}); taking it again`);
+      // Without a helmsman the throttle is 0 and the raft coasts. A page drawing a frame a second
+      // aims at a moving helm with a stale picture: wait for the raft to drift to a stop first.
+      let last = await serverShip();
+      await host.until(async () => {
+        const now = await serverShip();
+        const moved = now && last ? Math.hypot(now.x - last.x, now.z - last.z) : 0;
+        last = now;
+        return moved < 0.05;
+      }, 'the raft to coast', 60_000, 1000).catch(() => log('the raft is still drifting after 60 s; aiming anyway'));
+      for (let i = 0; i < 8; i++) {
         const t = await host.aim(helm, -1, ship.id);
         if (host.onTarget(t, helm, -1, ship.id)) await host.rightClick();
+        else log(`taking the wheel: the target is ${JSON.stringify(t)}, again`);
         const ok = await host.until(async () => (await host.own()).steeringShipId === ship.id, 'the wheel again', 10_000).then(() => true, () => false);
         if (ok) return;
       }
-      throw new StepError('the host cannot take the wheel again');
+      throw new StepError(`the host cannot take the wheel again (host ${await gapsOf(host)})`);
     };
     // Full ahead: the throttle follows W while it is held (the raft has no sails: it paddles slowly).
     await host.p.bringToFront();
@@ -1276,6 +1314,7 @@ async function runShip(browser, signal) {
     const p1 = { host: await shipPos(host), guest: await shipPos(guest) };
     seen.moved.host = Math.hypot(p1.host.x - p0.host.x, p1.host.z - p0.host.z);
     seen.moved.guest = Math.hypot(p1.guest.x - p0.guest.x, p1.guest.z - p0.guest.z);
+    log(`frames while sailing: host ${await gapsOf(host)}, guest ${await gapsOf(guest)}`);
     log(`while sailing (${seen.host.n} samples): the raft moved ${seen.moved.host.toFixed(2)} blocks on the host's page, ${seen.moved.guest.toFixed(2)} on the guest's`);
     log(`on the deck, page vs server (blocks, in the raft's frame): the host draws the guest within ${seen.host.max.toFixed(4)}, the guest draws the host within ${seen.guest.max.toFixed(4)}; own prediction vs server: host ${seen.ownHost.toFixed(4)}, guest ${seen.ownGuest.toFixed(4)}`);
     check(seen.moved.host > 0.5 && seen.moved.guest > 0.5, 'a page does not see the raft move');
@@ -1337,6 +1376,7 @@ async function runShip(browser, signal) {
     check(diff.length === 0, `at the end: ${diff.join('; ')}`);
     await host.lookAtPoint((await guest.own()).x, SEA_Y + 2.2, (await guest.own()).z);
     await shot(host, '04-docked');
+    if (signal === 'broadcast') await slowHost(host, guest, log);
   } catch (e) {
     problems.push(e instanceof StepError ? e.message : `error: ${e.stack ?? e}`);
     for (const [i, p] of pages.entries()) await p.screenshot({ path: join(outDir, `${tag}-failure-${i}.png`) }).catch(() => undefined);
@@ -1345,6 +1385,73 @@ async function runShip(browser, signal) {
     await site.close();
   }
   return problems;
+}
+
+/**
+ * Scenario 37 with real pages: the host's page is slowed down (CDP CPU throttling x10 for 12 s: a
+ * weak laptop, a heavy frame; headless Chromium never reports a page hidden, and pages with WebRTC
+ * are not frozen). Every guest byte passes the host page's main thread (the forwarder), so the guest
+ * stops getting batches for seconds. The world goes on (the server's clock is in the Worker); the
+ * guest is told (a notice under the context hint, section 4: either text, see NETCODE section 18
+ * "工作包 14"); the guest stays connected; once the host page is fast again the notice goes (the
+ * pill is hidden: its last text stays in the DOM while it fades) and ticks flow.
+ */
+/** How long the slow-host check throttles the host page (ms). */
+const SLOW_HOST_MS = 12_000;
+/** ... by this factor (CDP CPU throttling; the release itself waits for the slowed page, so x20 can last a minute and more). */
+const SLOW_HOST_RATE = 10;
+
+async function slowHost(host, guest, log) {
+  /** The guest's visible notice and replica tick, in one cheap call. */
+  const look = () =>
+    guest.p.evaluate(() => {
+      const pill = document.querySelector('.bl-hint[data-show="1"]');
+      const line = pill?.querySelector('.bl-hint-notice');
+      return { notice: line && !line.hidden ? line.textContent : null, tick: window.__blocklands.game.session?.replica?.state.tick ?? -1 };
+    });
+  const before = (await host.G(() => window.__blocklands.game.debug.serverProbe(0))).tick;
+  const t0 = Date.now();
+  const cdp = await host.p.context().newCDPSession(host.p);
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: SLOW_HOST_RATE });
+  // Released by the clock, whatever the pages are doing (a sample can take seconds).
+  const released = new Promise((done) => setTimeout(() => cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 }).then(done, done), SLOW_HOST_MS));
+  let releasedAt = null;
+  void released.then(() => (releasedAt = Date.now()));
+  const told = new Set();
+  let flowing = 0;
+  let samples = 0;
+  let last = (await look()).tick;
+  while (releasedAt === null) {
+    await guest.p.waitForTimeout(1000);
+    if (releasedAt !== null) break;
+    const g = await look();
+    samples++;
+    if (g.notice !== null) told.add(g.notice);
+    if (g.tick > last) flowing++;
+    last = g.tick;
+  }
+  await released;
+  log(`the host page slowed x${SLOW_HOST_RATE} for ${((releasedAt - t0) / 1000).toFixed(1)} s: the guest was told ${JSON.stringify([...told])}; ticks arrived in ${flowing} of ${samples} samples`);
+  check(told.size > 0, 'the guest was told nothing while the host page was slowed down');
+  // Back to normal: the notice goes and ticks flow again; the guest never reconnected.
+  const tr = Date.now();
+  let clear = 0;
+  last = (await look()).tick;
+  while (clear < 3 && Date.now() - tr < 90_000) {
+    await guest.p.waitForTimeout(1000);
+    const g = await look();
+    clear = g.notice === null && g.tick > last ? clear + 1 : 0;
+    last = g.tick;
+  }
+  log(`the guest's notice went and ticks flowed ${((Date.now() - tr) / 1000).toFixed(0)} s after the host page was fast again`);
+  check(clear >= 3, `the guest still shows ${JSON.stringify((await look()).notice)} (or no ticks) 90 s after the host page was fast again`);
+  const gs = await guest.state();
+  check(gs.netStatus === 'ready' && gs.sessionState === 'ready', `the guest is ${gs.netStatus} / ${gs.sessionState} after the slow host`);
+  check((await guest.G(() => window.__blocklands.game.session.net.connectionCount)) === 1, 'the guest reconnected during the slow host');
+  const after = (await host.G(() => window.__blocklands.game.debug.serverProbe(0))).tick;
+  const tps = (after - before) / ((Date.now() - t0) / 1000);
+  log(`the server ran ${after - before} ticks meanwhile (${tps.toFixed(1)} a second)`);
+  check(tps > 12, `the world did not go on while the host page was slowed (${tps.toFixed(1)} ticks a second)`);
 }
 
 // ====================================================================== screens: every new screen and panel in zh and en (dev/ui harness)

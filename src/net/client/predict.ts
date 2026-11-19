@@ -26,7 +26,8 @@
  * has them when it applies the report (the blade that pushes the player is where the server's is).
  * More than MAX_STEPS_PER_FRAME due in one frame (a long frame, a jump of rotorLead): the rest are
  * dropped, like the server's catch-up; a clock that went back (a host stall ended, the page's pause
- * reset it) starts over from where it is.
+ * reset it) starts over from where it is. Either way the first tick after the gap takes the frame's
+ * renderTick and puts the player back in its carrier's frame where the last tick left it (reanchor).
  *
  * ONE CLIENT TICK k (section 9, "在行驶的船上"), in the server's order (LESSONS 每个 tick 的顺序):
  *  1. the replica's poses for this tick: rotors at rotorTick k, ships at this tick's renderTick (the
@@ -63,7 +64,7 @@
  * alone (the server never moves the look), except the first one of a connection, which tells
  * where the player looks after joining.
  */
-import { qrotate, qrotateInv, vec3, type Vec3 } from '../../core/math';
+import { qrotate, qrotateInv, vec3, wrapAngle, type Vec3 } from '../../core/math';
 import { BodyMover, sanitizeInput, takeJumpPresses, type BodyHost, type BodyStructure } from '../../entities/body';
 import { REPORT_VIEW_RATE } from '../../entities/constants';
 import { emptyReport } from '../../entities/drive';
@@ -213,19 +214,27 @@ export class OwnPlayer implements BodyHost {
     const rotor = clock.rotorTick;
     if (!Number.isFinite(render) || !Number.isFinite(rotor)) return;
     const due = Math.floor(rotor);
-    if (this.lastTick === null || due < this.lastTick - MAX_STEPS_PER_FRAME) this.lastTick = due - 1;
-    if (due - this.lastTick > MAX_STEPS_PER_FRAME) this.lastTick = due - MAX_STEPS_PER_FRAME;
+    // Client ticks were skipped (a stall, a hidden page, a clock that went back): the body was not
+    // moved meanwhile, and the poses of the last tick run may be gone from the replica's rings.
+    let gap = false;
+    if (this.lastTick === null) this.lastTick = due - 1;
+    else if (due < this.lastTick - MAX_STEPS_PER_FRAME || due - this.lastTick > MAX_STEPS_PER_FRAME) {
+      this.lastTick = due - Math.min(MAX_STEPS_PER_FRAME, Math.max(1, due - this.lastTick));
+      gap = true;
+    }
     for (let k = this.lastTick + 1; k <= due; k++) {
       // This tick's renderTick: one tick apart from the previous one, never past the frame's, never
       // back, and catching up at most REPORT_VIEW_RATE ticks a tick (a stalled channel let the
-      // frame's run ahead: one jump would carry a rider off its deck).
+      // frame's run ahead: one jump would carry a rider off its deck). After skipped ticks it starts
+      // over from the frame's, the player re-anchored in its carrier's frame (see SKIPPED TICKS).
       let r = render - (rotor - k);
-      if (this.lastRender !== -Infinity) {
+      if (this.lastRender !== -Infinity && !gap) {
         if (r > this.lastRender + REPORT_VIEW_RATE) r = this.lastRender + REPORT_VIEW_RATE;
         if (r < this.lastRender) r = this.lastRender;
       }
       if (r > render) r = render;
-      this.step(r, k, now);
+      this.step(r, k, now, gap);
+      gap = false;
       this.lastRender = r;
       this.lastTick = k;
     }
@@ -272,12 +281,13 @@ export class OwnPlayer implements BodyHost {
 
   // ------------------------------------------------------------------ one client tick
 
-  private step(renderTick: number, rotorTick: number, now: number): void {
+  private step(renderTick: number, rotorTick: number, now: number, reanchor: boolean): void {
     const replica = this.replica;
     const body = this.body;
     const p = this.player;
     const seq = ++this.ticks;
     this.tick = rotorTick;
+    if (reanchor) this.reanchor(renderTick, rotorTick);
     replica.setPoses(renderTick, rotorTick);
     body.beginCarry();
     const vitals = replica.state.private.vitals;
@@ -333,6 +343,44 @@ export class OwnPlayer implements BodyHost {
     h.yaw += p.takeCarriedYaw();
     if (!frozen) this.report(seq, renderTick);
     this.shown();
+  }
+
+  /**
+   * SKIPPED TICKS: the player keeps its place in its carrier's frame across the gap (the server,
+   * without reports, carries it along): feet, own velocity and heading relative to the carrier, as
+   * the last client tick left them, are put back on the carrier at its pose one tick before this
+   * tick's. That pose becomes the structure cache's base (carry and velocity), so this tick carries
+   * one tick of real motion. Carrying the player from the last tick's pose instead would carry it
+   * through the whole gap at once (off the deck: MAX_CARRY_STEP), or, catching up REPORT_VIEW_RATE
+   * ticks a tick, through poses older than the replica keeps (SAMPLE_BUFFER_TICKS), which clamp.
+   */
+  private reanchor(renderTick: number, rotorTick: number): void {
+    const body = this.body;
+    const p = this.player;
+    const was = p.carrierId !== 0 ? body.record(p.carrierId) : undefined;
+    const local = this.t1;
+    const vel = this.t2;
+    let heading = 0;
+    if (was !== undefined) {
+      curToLocal(was, p.pos, local);
+      vel.x = p.vel.x - p.carrierVel.x;
+      vel.y = p.vel.y - p.carrierVel.y;
+      vel.z = p.vel.z - p.carrierVel.z;
+      qrotateInv(was.q1, vel, vel);
+      heading = headingOf(was.q1);
+    }
+    this.replica.setPoses(renderTick - 1, rotorTick - 1);
+    body.reset();
+    body.beginCarry('now');
+    body.endTick();
+    const r = was !== undefined ? body.record(p.carrierId) : undefined;
+    if (r === undefined) return; // not carried, or the carrier is gone (the carry lets go of it)
+    curToWorld(r, local, p.pos);
+    qrotate(r.q1, vel, p.vel);
+    p.carrierVel.x = p.carrierVel.y = p.carrierVel.z = 0;
+    const turned = wrapAngle(headingOf(r.q1) - heading);
+    p.yaw += turned;
+    this.input.yaw += turned;
   }
 
   /** Adopt a correction at this client tick's poses; false while its carrier is not in the replica. */

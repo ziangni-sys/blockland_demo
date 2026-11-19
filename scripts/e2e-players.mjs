@@ -229,7 +229,7 @@ async function session(renderer) {
     await page.click('.bl-newworld .bl-form-submit');
     await waitFor('play', () => {
       const s = window.__blocklands.game.debug.state();
-      return s.sessionState === 'ready' && s.screen === 'none';
+      return s.sessionState === 'ready' && s.screen === 'none' && s.player !== null;
     }, undefined, 240_000);
     let st = await state();
     check(st.renderer === (renderer === 'default' ? 'webgpu' : 'webgl2'), `renderer ${st.renderer}`);

@@ -98,20 +98,6 @@ export function pageConnectDeps(win: Window, iceServers: readonly RTCIceServer[]
   return { createPeer: () => new RTCPeerConnection({ iceServers: iceServers.map((s) => ({ ...s })) }), timers: pageTimers(win) };
 }
 
-/** `?join=<code>&signal=<kind>` of the page address (default signal: cloud), or null. */
-export function joinFromSearch(search: string | null | undefined): { code: string; signal: SignalKind } | null {
-  if (!search) return null;
-  let q: URLSearchParams;
-  try {
-    q = new URLSearchParams(search);
-  } catch {
-    return null;
-  }
-  const code = q.get('join');
-  if (code === null || code.trim() === '') return null;
-  return { code: code.trim(), signal: signalFromSearch(search) ?? 'cloud' };
-}
-
 /** `?signal=<kind>` of the page address, or null. */
 export function signalFromSearch(search: string | null | undefined): SignalKind | null {
   if (!search) return null;

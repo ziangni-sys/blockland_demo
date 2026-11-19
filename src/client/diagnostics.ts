@@ -10,9 +10,15 @@
  * keys, room or invitation codes, IP addresses or ports (the pair's types say what kind of path it
  * is, which is what matters).
  *
+ * A guest whose join failed has no link left: the text then says how far its last dial got (the
+ * failure code, the candidate types each side offered, whether the descriptions crossed, the ICE
+ * states when it failed).
+ *
  * Pure functions: the page gathers RTCStatsReports (WebRtcTransport.stats(), twice one second
  * apart for the rates) and its own numbers, and formats them here.
  */
+
+import type { IceAttempt } from '../net/webrtc/signal';
 
 /** The selected ICE candidate pair of one link, without addresses. */
 export interface PairInfo {
@@ -147,6 +153,8 @@ export interface DiagnosticsInput {
   /** The NetClient's status. */
   netStatus: string | null;
   lastError: string | null;
+  /** A guest's last failed dial: its failure code and how far the WebRTC handshake got (null when it failed before one). */
+  dialFailure: { code: string; attempt: IceAttempt | null } | null;
 }
 
 function num(v: number | null, digits: number, unit = ''): string {
@@ -186,5 +194,20 @@ export function diagnosticsText(d: DiagnosticsInput): string {
   lines.push(`server tps: ${num(d.serverTps, 1)}`);
   lines.push(`connection: ${d.netStatus ?? '-'}`);
   lines.push(`last error: ${d.lastError ?? 'none'}`);
+  if (d.dialFailure !== null) lines.push(`last dial: ${word(d.dialFailure.code)}; ${attemptText(d.dialFailure.attempt)}`);
   return lines.join('\n');
+}
+
+/** A browser state or failure code: only short lowercase words pass. */
+function word(v: string): string {
+  return /^[a-z_-]{1,16}$/.test(v) ? v : '?';
+}
+
+function attemptText(a: IceAttempt | null): string {
+  if (a === null) return 'no webrtc handshake (the signalling failed first)';
+  const types = (t: string): string => (/^(none|-|[a-z]{1,8} \d+(, [a-z]{1,8} \d+)*)$/.test(t) ? t : '?');
+  return (
+    `candidates: ours ${types(a.local)}, theirs ${types(a.remote)}; descriptions: ours ${a.sent ? 'sent' : 'not sent'}, theirs ${a.received ? 'received' : 'not received'}; ` +
+    `ice gathering ${word(a.gathering)}, connection ${word(a.connection)}`
+  );
 }

@@ -13,7 +13,8 @@
  * refused; the manual invitation codes; closing the room; a room that cannot open; the diagnostics.
  */
 import { describe, expect, it } from 'vitest';
-import { Lobby, parseJoinText, invitationLink, showRoomCode, type LobbyDeps, type LobbySession } from '../../src/client/lobby';
+import { encodeCode } from '../../src/net/webrtc/manual';
+import { Lobby, parseJoinLink, parseJoinText, invitationLink, showRoomCode, type LobbyDeps, type LobbySession } from '../../src/client/lobby';
 import { PLAYER_NAME_STORAGE, storedName, suggestedName } from '../../src/client/names';
 import { dialFailureKey, type RoomServer, type SignalKind } from '../../src/client/room';
 import { clientText } from '../../src/client/strings';
@@ -22,10 +23,10 @@ import { NetClient } from '../../src/net/client/netclient';
 import { cleanName } from '../../src/net/names';
 import { PortTransport, type PortLike } from '../../src/net/host/port';
 import type { LoopbackNet } from '../../src/net/loopback';
-import { BUILD_ID, MAX_PLAYERS } from '../../src/net/protocol';
+import { BUILD_ID, MAX_PLAYERS, type PlayerEntry, type WelcomeMsg } from '../../src/net/protocol';
 import { BroadcastSignaller } from '../../src/net/webrtc/broadcast';
 import { ManualSignaller } from '../../src/net/webrtc/manual';
-import { DialError, type DialFailure, type Signaller } from '../../src/net/webrtc/signal';
+import { candidateTypes, DialError, type DialFailure, type Signaller } from '../../src/net/webrtc/signal';
 import { generatorFromSpec } from '../../src/worldgen/generator';
 import type { Language } from '../../src/ui/model';
 import { counterRandom, FakeBroadcastHub, FakeRtcNet, netTimers } from '../net/fakertc';
@@ -288,15 +289,65 @@ const names = (l: Lobby): string[] => l.view().players.map((p) => `${p.name}${p.
 // ====================================================================== pure rules
 
 describe('what a player can paste to join', () => {
+  const LINK = 'https://someone.github.io/blocklands/?join=RXAMCDEF';
+  const INVITE = encodeCode('BL1I.', 'abcd1234', 'v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\na=candidate:1 1 udp 1 192.168.1.2 5000 typ host\r\n');
+
   it('an invitation link (its signal, the public service by default), a room code as typed, an invitation code; nothing else', () => {
     expect(parseJoinText('https://example.org/blocklands/?join=RXAMCDEF', 'broadcast')).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
     expect(parseJoinText(' http://127.0.0.1:5173/?slot=b&join=rxam-cdef&signal=broadcast#webgl2 ', 'cloud')).toEqual({ kind: 'broadcast', code: 'RXAMCDEF' });
     expect(parseJoinText('?join=RXAMCDEF', 'cloud')).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
     expect(parseJoinText('rxam cdef', 'cloud')).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
     expect(parseJoinText('RXAM-CDEF', 'broadcast')).toEqual({ kind: 'broadcast', code: 'RXAMCDEF' });
-    expect(parseJoinText('BL1I.abc\n def', 'cloud')).toEqual({ kind: 'manual', code: 'BL1I.abcdef' });
-    expect(parseJoinText('https://x/?join=BL1I.abc', 'cloud')).toEqual({ kind: 'manual', code: 'BL1I.abc' });
-    for (const bad of ['', '   ', 'hello', 'RXAMCDE', 'RXAMCDEF1', 'RXAMCDE0', 'https://x/?join=', 'https://x/?join=nope', 'BL1A.answer']) expect(parseJoinText(bad, 'cloud'), bad).toBeNull();
+    expect(parseJoinText(INVITE, 'cloud')).toEqual({ kind: 'manual', code: INVITE });
+    expect(parseJoinText(`https://x/?join=${INVITE}&signal=manual`, 'cloud')).toEqual({ kind: 'manual', code: INVITE });
+    for (const bad of ['', '   ', 'hello', 'RXAMCDE', 'RXAMCDEF1', 'RXAMCDE0', 'https://x/?join=', 'https://x/?join=nope', 'https://x/?join=RXAMCDEFG', 'BL1A.answer', 'BL1A.RXAMCDEF', 'want to play tonight?']) {
+      expect(parseJoinText(bad, 'cloud'), bad).toBeNull();
+    }
+  });
+
+  it('what surrounds a link or a code in a chat is ignored: sentences, brackets, quotes, punctuation, line breaks, invisible characters', () => {
+    const links: string[] = [
+      `${LINK}.`,
+      `${LINK},`,
+      `${LINK}!`,
+      `(${LINK})`,
+      `<${LINK}>`,
+      `join me: ${LINK}`,
+      `want to play? ${LINK}`,
+      `${LINK} see you there`,
+      `${LINK}\nsee you`,
+      `hey\n${LINK}\n`,
+      'https://someone.github.io/blocklands/?join=RXAM\nCDEF',
+      'https://someone.github.io/blocklands/?join=RXAM-CDEF.',
+      `${LINK}#x`,
+      `<${LINK}|${LINK}>`,
+      `"${LINK}"`,
+      `${LINK}\u200B`,
+      'https://someone.github.io/blocklands/?join=RX\u200BAMCDEF',
+    ];
+    for (const t of links) expect(parseJoinText(t, 'broadcast'), JSON.stringify(t)).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
+    const codes: string[] = ['RXAM-CDEF.', 'the code is RXAM-CDEF', '"RXAM-CDEF"', 'RXAM\u200B-CDEF', 'RXAM\u00A0CDEF', 'code: rxamcdef!', '(RXAMCDEF)', 'just meet: RXAM-CDEF', 'standard code RXAMCDEF'];
+    for (const t of codes) expect(parseJoinText(t, 'cloud'), JSON.stringify(t)).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
+    // Two different codes written alike: no guess.
+    expect(parseJoinText('RXAM-CDEF or RXAM-CDEG', 'cloud')).toBeNull();
+    const wrapped = INVITE.replace(/(.{60})/g, '$1\n');
+    const invites: string[] = [wrapped, `${INVITE}.`, `here: ${INVITE}`, `${INVITE} thanks`, `"${INVITE}"`, `here:\n${wrapped}\nthanks!`, `${INVITE}\u200B`];
+    for (const t of invites) expect(parseJoinText(t, 'cloud'), JSON.stringify(t)).toEqual({ kind: 'manual', code: INVITE });
+    // A truncated invitation is still one (the join then says it is not valid).
+    expect(parseJoinText(INVITE.slice(0, 40), 'cloud')).toEqual({ kind: 'manual', code: INVITE.slice(0, 40) });
+  });
+
+  it('the page address is read like a link: punctuation after the code is cut; a code that is not one is kept for the join to refuse', () => {
+    expect(parseJoinLink('?join=RXAM-CDEF')).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
+    expect(parseJoinLink('?join=RXAMCDEF.')).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
+    expect(parseJoinLink('?slot=b&join=rxamcdef&signal=broadcast')).toEqual({ kind: 'broadcast', code: 'RXAMCDEF' });
+    expect(parseJoinLink(`?join=${INVITE}&signal=manual`)).toEqual({ kind: 'manual', code: INVITE });
+    expect(parseJoinLink(`?join=${INVITE}.`)).toEqual({ kind: 'manual', code: INVITE });
+    expect(parseJoinLink('?join=RXAMCDEF&signal=carrier-pigeon')).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
+    expect(parseJoinLink('?join=nope')).toEqual({ kind: 'cloud', code: null });
+    expect(parseJoinLink('?join=')).toEqual({ kind: 'cloud', code: null });
+    expect(parseJoinLink('?slot=RXAMCDEF')).toBeNull();
+    expect(parseJoinLink('')).toBeNull();
   });
 
   it('the invitation link is the page address with ?join=<code> (and &signal= when not the public service); a code shows in two groups', () => {
@@ -305,6 +356,31 @@ describe('what a player can paste to join', () => {
     expect(showRoomCode('RXAMCDEF')).toBe('RXAM-CDEF');
     expect(parseJoinText(invitationLink(BASE, 'RXAMCDEF', 'broadcast'), 'cloud')).toEqual({ kind: 'broadcast', code: 'RXAMCDEF' });
     expect(parseJoinText(showRoomCode('RXAMCDEF'), 'cloud')).toEqual({ kind: 'cloud', code: 'RXAMCDEF' });
+  });
+});
+
+describe('the lobby view', () => {
+  it('follows the session adopting its replica: a view made between the Welcome and the adopt does not keep an empty list', () => {
+    const h = new NetHarness();
+    const lobby = new Lobby(deps({ h, rtc: new FakeRtcNet(h.net), hub: new FakeBroadcastHub(h.net) }, 'k0', []));
+    let players: Map<number, PlayerEntry> | null = null;
+    const welcome = { entityId: 9, isHost: false } as unknown as WelcomeMsg;
+    lobby.attach({
+      welcome,
+      get players() {
+        return players;
+      },
+      rules: null,
+      hostCommand: () => false,
+    });
+    const before = lobby.view();
+    expect(before.players).toEqual([]);
+    expect(lobby.view()).toBe(before); // nothing changed: the same object
+    players = new Map([
+      [1, { entityId: 1, name: 'Hester', host: true, mode: 'creative' }],
+      [9, { entityId: 9, name: 'Bo', host: false, mode: 'creative' }],
+    ]);
+    expect(lobby.view().players.map((p) => `${p.name}${p.you ? ' (you)' : ''}`)).toEqual(['Hester', 'Bo (you)']);
   });
 });
 
@@ -390,6 +466,7 @@ describe('connection diagnostics', () => {
       serverTps: 19.96,
       netStatus: 'ready',
       lastError: null,
+      dialFailure: null,
     });
     expect(text).toContain('build: abc1234');
     expect(text).toContain('role: guest');
@@ -419,12 +496,41 @@ describe('connection diagnostics', () => {
       serverTps: 20,
       netStatus: 'ready',
       lastError: null,
+      dialFailure: null,
     });
     expect(host).toContain('role: host (room open, 3 guests)');
     expect(host).toContain('guest 1: srflx -> host (udp), rtt 42 ms; out 4.2 KB/s, in 2.8 KB/s; server sends 4.3 KB/s, backlog 0 B, rtt 48 ms');
     expect(host).toContain('guest 2: no webrtc link; server sends 812 B/s, backlog 3.0 KB, rtt -');
     expect(host).toContain('guest 3: no candidate pair yet; out -, in -; server: no report yet');
     expect(host).not.toContain('webrtc host');
+    // A guest whose join failed: how far its last dial got, types and states only.
+    const sdp = 'v=0\r\na=candidate:1 1 udp 2122260223 192.168.1.20 61000 typ host generation 0\r\na=candidate:2 1 udp 1686052607 203.0.113.7 50123 typ srflx raddr 192.168.1.20 rport 61000\r\na=candidate:3 1 tcp 1518280447 192.168.1.20 9 typ host tcptype active\r\n';
+    expect(candidateTypes(sdp)).toBe('host 2, srflx 1');
+    expect(candidateTypes('v=0\r\n')).toBe('none');
+    expect(candidateTypes(null)).toBe('-');
+    const failed = diagnosticsText({
+      build: 'abc1234',
+      role: 'guest',
+      signal: 'cloud',
+      roomOpen: null,
+      link: null,
+      guests: [],
+      rttMs: null,
+      loss: null,
+      delayTicks: null,
+      inPerSec: null,
+      outPerSec: null,
+      serverTps: null,
+      netStatus: null,
+      lastError: 'join.ice (ice)',
+      dialFailure: { code: 'ice', attempt: { local: candidateTypes(sdp), remote: 'host 1', sent: true, received: true, gathering: 'complete', connection: 'failed' } },
+    });
+    expect(failed).toContain('webrtc host: no link');
+    expect(failed).toContain('last error: join.ice (ice)');
+    expect(failed).toContain('last dial: ice; candidates: ours host 2, srflx 1, theirs host 1; descriptions: ours sent, theirs received; ice gathering complete, connection failed');
+    expect(failed).not.toMatch(/\d+\.\d+\.\d+\.\d+|:\d{4,5}\b/);
+    const early = diagnosticsText({ ...{ build: 'b', role: 'guest', signal: 'cloud', roomOpen: null, link: null, guests: [], rttMs: null, loss: null, delayTicks: null, inPerSec: null, outPerSec: null, serverTps: null, netStatus: null, lastError: 'join.unknown (unknown)' }, dialFailure: { code: 'unknown', attempt: null } });
+    expect(early).toContain('last dial: unknown; no webrtc handshake (the signalling failed first)');
   });
 });
 
@@ -667,6 +773,9 @@ describe('playing together, headless (package 11)', { timeout: 120_000 }, () => 
     expect(w.hostLobby.acceptAnswer(answer)).toBe(true);
     expect(w.hostLobby.view().room).toMatchObject({ invitation: null, answered: true });
     await waitFor(w, () => ann.ready);
+    // The friend is in: the host's "connecting this friend" hint goes.
+    await waitFor(w, () => w.hostLobby.view().players.length === 2);
+    expect(w.hostLobby.view().room).toMatchObject({ invitation: null, answered: false });
     // Reading an invitation code needs no service: the stage passes within the same tick.
     expect(ann.stages).toEqual(['host', 'world']);
   });
@@ -696,6 +805,26 @@ describe('playing together, headless (package 11)', { timeout: 120_000 }, () => 
     const r = await down.hostLobby.openRoom('service');
     expect(r).toMatchObject({ ok: false, error: 'unreachable' });
     expect(down.hostLobby.view().room).toMatchObject({ status: 'closed', error: clientText('en', 'join.unreachable') });
+  });
+
+  it('diagnostics after a failed join: how far the WebRTC handshake got (candidate types, descriptions, ICE states); no addresses', async () => {
+    const w = await world();
+    const code = await openRoom(w);
+    w.rtc.blockIce = true;
+    w.rtc.failIceAfterMs = 500;
+    const ann = new GuestPage(w, 'ann', 'Ann');
+    ann.join(w.hostLobby.view().room!.link!);
+    await waitFor(w, () => ann.lobby.view().join?.stage === 'failed', 30_000);
+    expect(ann.lobby.view().join).toMatchObject({ error: clientText('en', 'join.ice'), canRetry: true });
+    let text: string | null = null;
+    void ann.lobby.diagnostics(() => ({ rttMs: null, loss: null, delayTicks: null, serverTps: null, netStatus: null, traffic: null })).then((t) => (text = t));
+    await waitFor(w, () => text !== null, 5000);
+    expect(text).toContain('role: guest');
+    expect(text).toContain('signalling: broadcast');
+    expect(text).toContain('last error: join.ice (ice)');
+    expect(text).toContain('last dial: ice; candidates: ours host 1, theirs host 1; descriptions: ours sent, theirs received; ice gathering complete, connection failed');
+    expect(text).not.toContain('10.0.0.');
+    for (const secret of ['Ann', 'Hester', code, showRoomCode(code)]) expect(text).not.toContain(secret);
   });
 
   it('diagnostics on a live link: role, signalling, the link line, numbers; no names, keys or codes', async () => {

@@ -5,7 +5,7 @@
  * forwarders ended with the world).
  */
 import { describe, expect, it } from 'vitest';
-import { END_GRACE_MS, dialFailureKey, joinFromSearch, kickKey, refuseKey, RELISTEN_MS, RoomHost, signalFromSearch, type RoomServer, type RoomState } from '../../src/client/room';
+import { END_GRACE_MS, dialFailureKey, kickKey, refuseKey, RELISTEN_MS, RoomHost, signalFromSearch, type RoomServer, type RoomState } from '../../src/client/room';
 import { clientText } from '../../src/client/strings';
 import { LoopbackNet } from '../../src/net/loopback';
 import { KICK_REASONS, REFUSE_REASONS } from '../../src/net/protocol';
@@ -31,16 +31,11 @@ async function advance(loop: LoopbackNet, ms: number): Promise<void> {
 }
 
 describe('address parameters', () => {
-  it('?join=<code>&signal=<kind>, cloud by default; anything else is no join', () => {
-    expect(joinFromSearch('?join=ABCD-EFGH')).toEqual({ code: 'ABCD-EFGH', signal: 'cloud' });
-    expect(joinFromSearch('?slot=b&join=XYZXYZXY&signal=broadcast')).toEqual({ code: 'XYZXYZXY', signal: 'broadcast' });
-    expect(joinFromSearch('?join=BL1I.abc&signal=manual')).toEqual({ code: 'BL1I.abc', signal: 'manual' });
-    expect(joinFromSearch('?join=ABCDEFGH&signal=carrier-pigeon')).toEqual({ code: 'ABCDEFGH', signal: 'cloud' });
-    expect(joinFromSearch('?join=')).toBeNull();
-    expect(joinFromSearch('?slot=b')).toBeNull();
-    expect(joinFromSearch('')).toBeNull();
+  it('?signal=<kind>, or null (?join= is read like a pasted link: lobby.test.ts)', () => {
     expect(signalFromSearch('?signal=manual')).toBe('manual');
+    expect(signalFromSearch('?slot=b&signal=broadcast')).toBe('broadcast');
     expect(signalFromSearch('?signal=x')).toBeNull();
+    expect(signalFromSearch('')).toBeNull();
   });
 });
 

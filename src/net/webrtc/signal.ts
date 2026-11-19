@@ -38,7 +38,24 @@ export type DialFailure =
   /** The direct connection could not be made (ICE failed, or found no way through in time). */
   | 'ice';
 
+/**
+ * How a WebRTC handshake that failed had got on (for the connection diagnostics): the ICE candidate
+ * types in each description ("host 2, srflx 1"; never an address), whether each description went
+ * out and came in, and the peer connection's gathering and connection states when it failed.
+ */
+export interface IceAttempt {
+  local: string;
+  remote: string;
+  sent: boolean;
+  received: boolean;
+  gathering: string;
+  connection: string;
+}
+
 export class DialError extends Error {
+  /** The handshake's state when it failed (connectPeer), or null (a signalling failure). */
+  attempt: IceAttempt | null = null;
+
   constructor(
     readonly code: DialFailure,
     message: string,
@@ -46,6 +63,15 @@ export class DialError extends Error {
     super(message);
     this.name = 'DialError';
   }
+}
+
+/** The ICE candidate types an SDP description offers, as "host 2, srflx 1" ("none" when it has none). Types only: never an address. */
+export function candidateTypes(sdp: string | null): string {
+  if (sdp === null) return '-';
+  const counts = new Map<string, number>();
+  for (const m of sdp.matchAll(/^a=candidate:.*?\styp\s+([a-z]{1,8})(?:\s|$)/gm)) counts.set(m[1]!, (counts.get(m[1]!) ?? 0) + 1);
+  if (counts.size === 0) return 'none';
+  return [...counts].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([k, n]) => `${k} ${n}`).join(', ');
 }
 
 /** The signalling between the host and one guest. */

@@ -157,12 +157,31 @@ function online(): void {
   });
 }
 
+/**
+ * Every toast a page pushed, in order. The page's own list drops a toast after a few seconds (and
+ * keeps five at most): on a loaded machine one is gone before the test looks.
+ */
+const toastLog = new WeakMap<Game, string[]>();
+
+function recordToasts(game: Game): void {
+  const seen: string[] = [];
+  toastLog.set(game, seen);
+  const push = game.toasts.push.bind(game.toasts);
+  game.toasts.push = (text, kind, now, lifeMs) => {
+    seen.push(text);
+    push(text, kind, now, lifeMs);
+  };
+}
+
+const toasted = (game: Game, test: (text: string) => boolean): boolean => toastLog.get(game)!.some(test);
+
 /** The host: a world created from the menu and played; its name chosen before. */
 async function hostGame(): Promise<{ game: Game; host: () => ServerHost }> {
   const storage = new MemoryStorage();
   server.storage = storage;
   const game = new Game(fakeEnv('?signal=broadcast', { playerName: 'Hester' }));
   games.push(game);
+  recordToasts(game);
   const g = internals(game);
   g.storage = storage;
   g.storageReady = Promise.resolve(storage);
@@ -178,6 +197,7 @@ async function hostGame(): Promise<{ game: Game; host: () => ServerHost }> {
 function page(search: string, stored: Record<string, string> = {}): Game {
   const game = new Game(fakeEnv(search, stored));
   games.push(game);
+  recordToasts(game);
   const g = internals(game);
   const storage = new MemoryStorage();
   g.storage = storage;
@@ -225,7 +245,7 @@ describe('playing together with the real Game (package 11)', { timeout: 180_000 
     await until(() => rules() === 'creative' && host.session?.mode === 'creative');
     const link = await openRoom(host);
     expect(link).toMatch(/^http:\/\/blocklands\.test\/\?join=[A-Z2-9]{8}&signal=broadcast$/);
-    expect(host.toasts.list.some((t) => t.text.startsWith('The room is open'))).toBe(true);
+    expect(toasted(host, (t) => t.startsWith('The room is open'))).toBe(true);
     // The pause menu no longer pauses the world.
     internals(host).actions.closeScreen();
     expect(host.screen).toBe('pause');
@@ -247,7 +267,7 @@ describe('playing together with the real Game (package 11)', { timeout: 180_000 
     expect(names(host)).toEqual(['Hester (host) (you)', 'Gus']);
     expect(names(guest)).toEqual(['Hester (host)', 'Gus (you)']);
     expect(guest.lobby.view().role).toBe('guest');
-    expect(host.toasts.list.some((t) => t.text === '\u2068Gus\u2069 joined the world')).toBe(true);
+    expect(toasted(host, (t) => t === '\u2068Gus\u2069 joined the world')).toBe(true);
     expect(guest.debug.state().isHost).toBe(false);
 
     // The host sets the guest's mode from the room screen.
@@ -274,7 +294,7 @@ describe('playing together with the real Game (package 11)', { timeout: 180_000 
     expect(guest.session).toBeNull();
     expect(guest.lobby.view().join).toMatchObject({ error: clientText('en', 'kick.kicked'), canRetry: false, wasIn: true });
     await until(() => host.lobby.view().players.length === 1);
-    expect(host.toasts.list.some((t) => t.text === '\u2068Gus\u2069 left the world')).toBe(true);
+    expect(toasted(host, (t) => t === '\u2068Gus\u2069 left the world')).toBe(true);
     internals(guest).actions.abandonJoin();
     expect(guest.screen).toBe('mainMenu');
     expect(guest.lobby.view().join).toBeNull();
@@ -309,7 +329,7 @@ describe('playing together with the real Game (package 11)', { timeout: 180_000 
     internals(ann).actions.leaveRoom();
     expect(ann.screen).toBe('mainMenu');
     expect(ann.session).toBeNull();
-    await until(() => host.toasts.list.some((t) => t.text === '\u2068Ann\u2069 left the world'));
+    await until(() => toasted(host, (t) => t === '\u2068Ann\u2069 left the world'));
 
     const bob = page('?signal=broadcast', { playerName: 'Bob' });
     internals(bob).actions.openJoinScreen();

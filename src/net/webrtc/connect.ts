@@ -23,7 +23,7 @@
  * No globals: the peer connection comes from `createPeer` (the page: new RTCPeerConnection with
  * its ICE servers), timers from `timers`.
  */
-import { DialError, type DialFailure, type SignalMessage, type SignalPath, type Signaller } from './signal';
+import { candidateTypes, DialError, type DialFailure, type SignalMessage, type SignalPath, type Signaller } from './signal';
 import { RELIABLE_ID, RELIABLE_LABEL, UNRELIABLE_ID, UNRELIABLE_LABEL, WebRtcTransport, type Timers } from './transport';
 
 /** Longest wait for ICE gathering before the description goes out with the candidates found so far, ms. */
@@ -98,6 +98,8 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
     let done = false;
     let sent = false;
     let received = false;
+    /** The other side's description, once received (its candidate types go into a failure's attempt). */
+    let theirSdp: string | null = null;
     /**
      * Our description went out and theirs came in: the path is no longer needed. The other side
      * closes it ('bye') as soon as its channels open, which can reach us before our own
@@ -127,11 +129,20 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
       done = true;
       clearTimer();
       detach();
+      const err = new DialError(code, message);
+      err.attempt = {
+        local: candidateTypes(pc.localDescription?.sdp ?? null),
+        remote: candidateTypes(theirSdp),
+        sent,
+        received,
+        gathering: String(pc.iceGatheringState),
+        connection: String(pc.connectionState),
+      };
       path.close();
       safely(() => r.close());
       safely(() => u.close());
       safely(() => pc.close());
-      reject(new DialError(code, message));
+      reject(err);
     };
     const wait = (ms: number, code: DialFailure, message: string): void => {
       clearTimer();
@@ -191,6 +202,7 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
       const expected = offering ? 'answer' : 'offer';
       if (m.t !== expected || received) return; // out of place: ignored
       received = true;
+      theirSdp = m.sdp;
       clearTimer();
       try {
         await pc.setRemoteDescription({ type: m.t, sdp: m.sdp });

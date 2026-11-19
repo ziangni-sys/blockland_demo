@@ -41,8 +41,8 @@ import type { GuestTraffic } from '../net/host/control';
 import { cleanName } from '../net/names';
 import type { ConnectDeps } from '../net/webrtc/connect';
 import { worldRulesFor, type WorldRules } from '../sim/rules';
-import { ManualSignaller } from '../net/webrtc/manual';
-import { DialError, newRoomCode, parseRoomCode, type Signaller } from '../net/webrtc/signal';
+import { decodeCode, ManualSignaller } from '../net/webrtc/manual';
+import { DialError, newRoomCode, parseRoomCode, ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH, type Signaller } from '../net/webrtc/signal';
 import type { WebRtcTransport } from '../net/webrtc/transport';
 import { isolate } from '../ui/format';
 import type { GameMode, JoinView, Language, OnlineView, PlayerRow, RoomView } from '../ui/model';
@@ -108,34 +108,115 @@ export interface JoinTarget {
 }
 
 const INVITE_PREFIX = 'BL1I.';
+const ANSWER_PREFIX = 'BL1A.';
+/** Characters a chat program or an editor may slip into pasted text that draw nothing (zero-width spaces, joiners, bidi marks, BOM, soft hyphen). */
+const INVISIBLE = /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
+const BASE64URL_RUN = /^[A-Za-z0-9_-]+/;
 
 /**
- * What a player pasted to join: an invitation link (any address with ?join=<code>; its &signal=
- * or, by default, the public service), a manual invitation code (BL1I.), or a room code as typed
- * (the page's service). Null when it is none of these.
+ * What a player pasted to join: an invitation link (an address with ?join=<code>; its &signal=
+ * or, by default, the public service), a manual invitation code (BL1I.), or a room code (the page's
+ * service). Text around it, as chats and people write it, is ignored: a sentence before or after,
+ * brackets or quotes, punctuation after it, a line break inside it, invisible characters. Null when
+ * there is none of these, or the link's code is not a code.
  */
 export function parseJoinText(text: string, service: 'cloud' | 'broadcast'): JoinTarget | null {
-  const t = text.trim();
-  if (t === '') return null;
-  const compact = t.replace(/\s+/g, '');
-  if (compact.startsWith(INVITE_PREFIX)) return { kind: 'manual', code: compact };
-  const q = t.indexOf('?');
-  if (q >= 0 && /[?&]join=/.test(t)) {
-    let params: URLSearchParams;
-    try {
-      params = new URLSearchParams(t.slice(q + 1).split('#')[0]);
-    } catch {
-      return null;
-    }
-    const join = (params.get('join') ?? '').trim();
-    const signal = params.get('signal');
-    if (join.replace(/\s+/g, '').startsWith(INVITE_PREFIX)) return { kind: 'manual', code: join.replace(/\s+/g, '') };
-    const code = parseRoomCode(join);
-    if (code === null) return null;
-    return { kind: signal === 'broadcast' || signal === 'manual' ? signal : 'cloud', code };
-  }
-  const code = parseRoomCode(t);
+  const t = text.replace(INVISIBLE, '');
+  const invitation = findInvitation(t);
+  if (invitation !== null) return { kind: 'manual', code: invitation };
+  // An answer code is the host's to paste, never a way to join (and its base64 could hold a code-like run).
+  if (t.includes(ANSWER_PREFIX)) return null;
+  const link = parseJoinLink(t);
+  if (link !== null) return link.code === null ? null : { kind: link.kind, code: link.code };
+  const code = findRoomCode(t);
   return code === null ? null : { kind: service, code };
+}
+
+/**
+ * The first invitation link in `text` (its first ?join= or &join=, as in the page address): the
+ * signalling (an invitation code: manual; else &signal=, by default the public service) and the
+ * code, cut where the code ends (dashes and white space inside a room code are skipped: a link
+ * broken across lines; anything after it is not part of it). `code` is null when what follows
+ * join= is no code. Null when there is no join= at all.
+ */
+export function parseJoinLink(text: string): { kind: SignalKind; code: string | null } | null {
+  const t = text.replace(INVISIBLE, '');
+  const m = /[?&]join=/i.exec(t);
+  if (m === null) return null;
+  const rest = t.slice(m.index + m[0].length);
+  const invitation = findInvitation(rest);
+  if (invitation !== null && rest.replace(/\s+/g, '').startsWith(INVITE_PREFIX)) return { kind: 'manual', code: invitation };
+  const signal = /[?&]signal=(broadcast|manual|cloud)\b/i.exec(t)?.[1]?.toLowerCase();
+  const kind: SignalKind = signal === 'broadcast' || signal === 'manual' ? signal : 'cloud';
+  return { kind, code: leadingRoomCode(rest) };
+}
+
+/**
+ * A room code at the very start of `text`: ROOM_CODE_LENGTH characters of the alphabet (any case),
+ * dashes and white space between them skipped, not followed straight away by another letter or
+ * digit (then it is longer than a code). Null otherwise.
+ */
+function leadingRoomCode(text: string): string | null {
+  let code = '';
+  let i = 0;
+  for (; i < text.length && code.length < ROOM_CODE_LENGTH; i++) {
+    const ch = text[i]!;
+    if (ch === '-' || /\s/.test(ch)) {
+      if (code.length === 0) return null;
+      continue;
+    }
+    const up = ch.toUpperCase();
+    if (!ROOM_CODE_ALPHABET.includes(up)) return null;
+    code += up;
+  }
+  if (code.length < ROOM_CODE_LENGTH) return null;
+  return i < text.length && /[A-Za-z0-9]/.test(text[i]!) ? null : code;
+}
+
+/**
+ * A room code standing alone in `text`: a word of 8 code characters, or two of 4 joined by a dash
+ * (one joined by a space only when that is the whole text, as typed: "abcd efgh"; in a sentence two
+ * words of four would be read as a code). Several different candidates: the one written in capitals
+ * (codes are shown so), else none.
+ */
+function findRoomCode(text: string): string | null {
+  const whole = parseRoomCode(text.trim());
+  if (whole !== null) return whole;
+  const found = new Set<string>();
+  const capitals = new Set<string>();
+  for (const m of text.matchAll(/(?<![A-Za-z0-9_-])([A-Za-z0-9]{8}|[A-Za-z0-9]{4}-[A-Za-z0-9]{4})(?![A-Za-z0-9_-])/g)) {
+    const code = parseRoomCode(m[1]!);
+    if (code === null) continue;
+    found.add(code);
+    if (m[1] === m[1]!.toUpperCase()) capitals.add(code);
+  }
+  if (found.size === 1) return [...found][0]!;
+  return capitals.size === 1 ? [...capitals][0]! : null;
+}
+
+/**
+ * A manual invitation code in `text`: BL1I. and the base64url after it. A code wrapped across lines
+ * goes on in the following words; the first length that decodes is the code (a word after it, or
+ * punctuation, is not part of it). When no length decodes (a truncated copy), the first run, so the
+ * join says the code is not valid. Null when there is no BL1I. in the text.
+ */
+function findInvitation(text: string): string | null {
+  const at = text.indexOf(INVITE_PREFIX);
+  if (at < 0) return null;
+  let rest = text.slice(at + INVITE_PREFIX.length);
+  let code = INVITE_PREFIX;
+  const first = BASE64URL_RUN.exec(rest)?.[0] ?? '';
+  for (;;) {
+    const run = BASE64URL_RUN.exec(rest)?.[0];
+    if (run === undefined) break;
+    code += run;
+    if (decodeCode(INVITE_PREFIX, code) !== null) return code;
+    rest = rest.slice(run.length);
+    const gap = /^\s+/.exec(rest)?.[0];
+    if (gap === undefined) break;
+    rest = rest.slice(gap.length);
+  }
+  return INVITE_PREFIX + first;
 }
 
 /** The invitation link to room `code` on signalling `kind` from the page at `baseUrl`. */
@@ -200,7 +281,12 @@ export class Lobby {
   private diag: string | null = null;
   private diagBusy = false;
   private version = 0;
-  private cached: { version: number; lang: Language; view: OnlineView } | null = null;
+  /**
+   * The last view and what it was made from: besides the version, the session's Welcome, player
+   * table and rules by identity (the page's session adopts a new replica at its next frame, after the
+   * batch the lobby saw: a view made in between would keep the old, empty table).
+   */
+  private cached: { version: number; lang: Language; welcome: WelcomeMsg | null; players: ReadonlyMap<number, PlayerEntry> | null; rules: WorldRules | null; view: OnlineView } | null = null;
 
   constructor(private readonly d: LobbyDeps) {
     const stored = storedName(d.store, d.slot);
@@ -491,6 +577,7 @@ export class Lobby {
     }
     this.joinState = { target, join, stage: 'service', answer: null, error: null, canRetry: true, wasIn: false };
     this.lastErrorValue = null;
+    this.diag = null;
     this.changed();
     return join;
   }
@@ -585,6 +672,8 @@ export class Lobby {
       if (c.op === 'join') {
         this.known.set(c.entityId, c.name);
         if (c.entityId !== self) this.d.toast(clientText(lang, 'players.joined', { name: isolate(c.name) }), 'info');
+        // The friend whose answer the host pasted is in: "connecting this friend" is over.
+        if (c.entityId !== self) this.answered = false;
       } else if (c.op === 'leave') {
         const name = this.known.get(c.entityId);
         this.known.delete(c.entityId);
@@ -652,6 +741,7 @@ export class Lobby {
       serverTps: n1.serverTps,
       netStatus: n1.netStatus,
       lastError: this.lastErrorValue,
+      dialFailure: role === 'guest' && this.joinState?.join.failure != null ? { code: this.joinState.join.failure.code, attempt: this.joinState.join.failure.attempt } : null,
     });
     this.diag = text;
     this.diagBusy = false;
@@ -688,8 +778,12 @@ export class Lobby {
   /** The UI's view of all this (the same object while nothing changed). */
   view(): OnlineView {
     const lang = this.d.lang();
+    const s = this.session;
+    const welcome = s?.welcome ?? null;
+    const players = s?.players ?? null;
+    const rules = s?.rules ?? null;
     const c = this.cached;
-    if (c !== null && c.version === this.version && c.lang === lang) return c.view;
+    if (c !== null && c.version === this.version && c.lang === lang && c.welcome === welcome && c.players === players && c.rules === rules) return c.view;
     const view: OnlineView = {
       available: this.d.online,
       playerName: this.playerName,
@@ -702,7 +796,7 @@ export class Lobby {
       diagnostics: this.diag,
       diagnosticsBusy: this.diagBusy,
     };
-    this.cached = { version: this.version, lang, view };
+    this.cached = { version: this.version, lang, welcome, players, rules, view };
     return view;
   }
 

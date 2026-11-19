@@ -384,7 +384,7 @@ async function runMode(mode, site) {
       'loading to finish',
       () => {
         const s = window.__blocklands.game.debug.state();
-        return s.sessionState === 'ready' && s.screen === 'none';
+        return s.sessionState === 'ready' && s.screen === 'none' && s.player !== null;
       },
       undefined,
       LOAD_TIMEOUT,
@@ -488,7 +488,7 @@ async function runMode(mode, site) {
       'the world to load again',
       () => {
         const s = window.__blocklands.game.debug.state();
-        return s.sessionState === 'ready' && s.screen === 'none';
+        return s.sessionState === 'ready' && s.screen === 'none' && s.player !== null;
       },
       undefined,
       LOAD_TIMEOUT,

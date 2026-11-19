@@ -154,6 +154,89 @@ describe('31. two players stand on a raft sailing in circles (150 ms, 20 ms jitt
   }, 180_000);
 });
 
+/**
+ * A guest's page draws no frame for a while (a background tab, a stall) while it rides a sailing,
+ * turning raft: no client tick runs, then up to MAX_STEPS_PER_FRAME do, from poses far newer than
+ * those of its last tick (older ones are gone from the replica's rings). It keeps its place on the
+ * deck: the client never lets go of the raft, the server never has it off the raft, nobody corrects
+ * or hurts it, and its reported deck position does not drift. `walk`: it walks the deck meanwhile.
+ */
+const STALLS: { name: string; link: number; hiddenMs?: number; stallMs?: number; everyMs?: number; walk?: boolean }[] = [
+  { name: 'one 5 s hidden period (a background tab)', link: 1, hiddenMs: 5000 },
+  { name: 'one 5 s stall', link: 0, stallMs: 5000 },
+  { name: '2 s stalls every 3 s', link: 0, stallMs: 2000, everyMs: 3000 },
+  { name: '4 s stalls every 5 s', link: 1, stallMs: 4000, everyMs: 5000 },
+  { name: '2.5 s stalls every 4 s while walking the deck', link: 1, stallMs: 2500, everyMs: 4000, walk: true },
+];
+
+/** The first stall begins this long after the raft sets off (ms): it is at speed by then. */
+const STALL_FROM_MS = 6000;
+
+describe('31. a rider whose page skips frames stays on the sailing raft', () => {
+  for (const s of STALLS) {
+    it(`${s.name}, ${LINKS[s.link]!.name}`, async () => {
+      const link = LINKS[s.link]!;
+      const r = await ownWorld(OWN_SEA, 'survival', link.make(61));
+      await r.h.host.control({ type: 'openRoom' });
+      const b = r.h.addClient('b', link.make(62), { viewRadius: 3 });
+      r.h.runUntil(() => b.ready && b.own !== null, 30_000);
+      const sim = r.sim;
+      const ship = assemble(sim, buildRaft(sim, { x0: 10, z0: 0, x1: 18, z1: 8, y: S - 1, gunwale: true, helm: { x: 14, z: 1 } }));
+      r.h.run(1000);
+      const cb = sim.players.get('b')!;
+      cb.teleport(13.5, S, 4.5);
+      r.h.run(3000);
+      expect(cb.player.carrierId).toBe(ship.id);
+      const hurts: string[] = [];
+      sim.events.on((e) => {
+        if (e.type === 'playerHurt' && e.player === 'b') hurts.push(e.cause);
+      });
+      const t0 = r.h.net.now;
+      const frame = b.frame.bind(b);
+      b.frame = (now: number) => {
+        const t = now - t0;
+        if (s.stallMs !== undefined && t > STALL_FROM_MS) {
+          if (s.everyMs === undefined ? t < STALL_FROM_MS + s.stallMs : (t - STALL_FROM_MS) % s.everyMs < s.stallMs) return;
+        }
+        frame(now);
+      };
+      if (s.hiddenMs !== undefined) {
+        r.h.net.schedule(t0 + STALL_FROM_MS, () => {
+          b.hidden = true;
+        });
+        r.h.net.schedule(t0 + STALL_FROM_MS + s.hiddenMs, () => {
+          b.hidden = false;
+        });
+      }
+      const lost: string[] = [];
+      b.onFrame = () => {
+        const c = b.own?.player.carrierId;
+        if (c !== ship.id && lost.length < 5) lost.push(`${((r.h.net.now - t0) / 1000).toFixed(2)} s: client carrier ${c}, server ${cb.player.carrierId}`);
+      };
+      const drift = watchOwnDrift(b, ship.id);
+      let n = 0;
+      if (s.walk === true) {
+        b.onStep = () => {
+          n++;
+          b.input.forward = 0.6;
+          if (n % 40 === 0) b.input.yaw += Math.PI;
+        };
+      }
+      const since = sim.ticks;
+      ship.throttle = 1;
+      ship.rudder = 0.3;
+      r.h.run(25_000);
+      stat(`31 stalls\t${s.name}, ${link.name}: ${drift.reports} reports on the raft, drift ${drift.drift.toExponential(2)}; corrections ${JSON.stringify(b.correctionsSince(since))}`);
+      expect(lost).toEqual([]);
+      expect(cb.player.carrierId).toBe(ship.id);
+      expect(b.correctionsSince(since)).toEqual([]);
+      expect(hurts).toEqual([]);
+      expect(drift.reports).toBeGreaterThan(100);
+      if (s.walk !== true) expect(drift.drift).toBeLessThan(0.01);
+    }, 120_000);
+  }
+});
+
 describe('32. docking while another player stands on the deck (150 ms, 20 ms jitter, 5% loss)', () => {
   it('after sailing at 30 degrees: both stand on world blocks, the rider exactly where the snap took its deck spot; nobody fell or got hurt; the replicas equal the server', async () => {
     const r = await ownWorld(OWN_SEA, 'survival', LINK_150.make(32));

@@ -461,6 +461,30 @@ describe.each(LANGS)('the loading screen while joining (%s)', (lang) => {
     act(root, 'give-up').click();
     expect(calls).toEqual([['abandonJoin']]);
   });
+
+  it('a failed or reconnecting join offers "Copy diagnostics" (the text shown and copied); the stages do not', async () => {
+    const { ctx, calls, doc } = setup(lang);
+    const v = new LoadingView(ctx);
+    const root = el(v.el);
+    v.update(state(lang, online({ role: 'guest', room: null, join: join({ stage: 'host' }) }), { screen: 'loading' }));
+    expect(shown(act(root, 'diagnostics'), root)).toBe(false);
+    const failed = join({ stage: 'failed', error: 'NO DIRECT CONNECTION', canRetry: true });
+    v.update(state(lang, online({ role: 'guest', room: null, join: failed }), { screen: 'loading' }));
+    expect(shown(act(root, 'diagnostics'), root)).toBe(true);
+    expect(visibleText(root)).toContain(tr('room.copyDiagnostics'));
+    expect(visibleText(root)).toContain(tr('room.diagnosticsHint'));
+    act(root, 'diagnostics').click();
+    expect(calls).toEqual([['copyDiagnostics']]);
+    v.update(state(lang, online({ role: 'guest', room: null, join: failed, diagnosticsBusy: true }), { screen: 'loading' }));
+    expect(visibleText(root)).toContain(tr('room.measuring'));
+    const text = 'Blocklands connection diagnostics\nlast dial: ice';
+    v.update(state(lang, online({ role: 'guest', room: null, join: failed, diagnostics: text }), { screen: 'loading' }));
+    await Promise.resolve();
+    expect(visibleText(root)).toContain('last dial: ice');
+    expect(doc.copied).toEqual([text]);
+    v.update(state(lang, online({ role: 'guest', room: null, join: join({ stage: 'reconnecting', wasIn: true }) }), { screen: 'loading' }));
+    expect(shown(act(root, 'diagnostics'), root)).toBe(true);
+  });
 });
 
 describe.each(LANGS)('the pause menu, the main menu, the settings and the HUD list (%s)', (lang) => {
