@@ -46,7 +46,10 @@ export interface GridHit {
    * placementCell, is the cell above). When the ray enters exactly through an edge or corner,
    * the crossed face whose normal is most aligned with the ray. When the ray starts strictly
    * inside the hit octant, the face opposite to the ray's dominant local direction (an origin
-   * exactly on a face of the cell, moving in, reports that face).
+   * exactly on a face of the cell, moving in, reports that face). The first octant the ray is in
+   * within a cell always reports this cell-level face, as a full block in its place would: also
+   * when the ray enters the cell exactly where it crosses a mid-plane, and when it starts inside
+   * the cell exactly on a mid-plane (docs/SHAPES.md 19.9).
    */
   face: Dir;
   /**
@@ -130,8 +133,24 @@ export function raycastGrid(
   let bx1 = Infinity;
   let by1 = Infinity;
   let bz1 = Infinity;
+  // The ray in the grid's local frame. The world's transform is the identity (VoxelGrid.isWorld),
+  // so its local ray is read straight from origin and dir: the world ray then allocates nothing
+  // but its hit whether or not V8 inlines toLocal / dirToLocal here (when raycastGrid is called
+  // for the world and for structures from one call site, it often does not).
+  let ox: number;
+  let oy: number;
+  let oz: number;
+  let dx: number;
+  let dy: number;
+  let dz: number;
   if (grid.isWorld) {
     by1 = WORLD_HEIGHT;
+    ox = origin.x;
+    oy = origin.y;
+    oz = origin.z;
+    dx = dir.x;
+    dy = dir.y;
+    dz = dir.z;
   } else {
     const b = grid.cellBounds();
     if (b === null) return null; // empty structure (only the world is unbounded)
@@ -141,16 +160,15 @@ export function raycastGrid(
     bx1 = b.maxX;
     by1 = b.maxY;
     bz1 = b.maxZ;
+    const lo = grid.toLocal(origin, vec3());
+    const ld = grid.dirToLocal(dir, vec3());
+    ox = lo.x;
+    oy = lo.y;
+    oz = lo.z;
+    dx = ld.x;
+    dy = ld.y;
+    dz = ld.z;
   }
-
-  const lo = grid.toLocal(origin, vec3());
-  const ld = grid.dirToLocal(dir, vec3());
-  const ox = lo.x;
-  const oy = lo.y;
-  const oz = lo.z;
-  let dx = ld.x;
-  let dy = ld.y;
-  let dz = ld.z;
   if (!(Number.isFinite(ox) && Number.isFinite(oy) && Number.isFinite(oz))) return null;
   if (!(Number.isFinite(dx) && Number.isFinite(dy) && Number.isFinite(dz))) return null;
   if (Math.abs(dx) < DIR_ZERO) dx = 0;
@@ -335,9 +353,6 @@ export function raycastGrid(
   const negZ = stepZ < 0 ? 1 : 0;
   const fixedMask = (stepX === 0 ? 1 : 0) | (stepY === 0 ? 2 : 0) | (stepZ === 0 ? 4 : 0);
   const fixedBits = (stepX === 0 && ox >= cx + 0.5 ? 1 : 0) | (stepY === 0 && oy >= cy + 0.5 ? 2 : 0) | (stepZ === 0 && oz >= cz + 0.5 ? 4 : 0);
-  // The walk inside partial cells (cells with holes or a second part), made at the first one met:
-  // full blocks never need it.
-  let walk: OctantWalk | null = null;
   for (;;) {
     const cell = grid.getCell(cx, cy, cz);
     if (cell < FULL_LIMIT) {
@@ -364,31 +379,91 @@ export function raycastGrid(
         };
       }
     } else {
-      if (walk === null) walk = newWalk(ox, oy, oz, dx, dy, dz, t1, fixedMask, fixedBits);
-      walk.cx = cx;
-      walk.cy = cy;
-      walk.cz = cz;
-      walk.t = t;
-      walk.face = face;
-      walk.tMaxX = tMaxX;
-      walk.tMaxY = tMaxY;
-      walk.tMaxZ = tMaxZ;
-      const r = walkCell(walk, grid, cell, pred);
-      if (r === WALK_HIT) {
-        return {
-          grid,
-          x: cx,
-          y: cy,
-          z: cz,
-          face: walk.face,
-          octant: walk.octant,
-          cell: walk.cell,
-          part: walk.part,
-          dist: walk.t,
-          point: vec3(origin.x + dir.x * walk.t, origin.y + dir.y * walk.t, origin.z + dir.z * walk.t),
-        };
+      // A partial cell (holes or a second part): a 2x2x2 DDA on the half grid from where the ray
+      // entered it. The octants that can stop the ray are those of the parts pred accepts; the
+      // second part is read only when bit 24 says there is one (docs/SHAPES.md 19.9). The walk
+      // lives in this function's locals, so passing partial cells allocates nothing and a hit
+      // costs what a full block's does (plus one heap number for a two-part cell's packed value):
+      // in a function V8 did not inline, its fractional numbers would be boxed (4.4), and a
+      // per-ray state object costs about 400 bytes. tests/voxel/ray-alloc.test.ts pins this.
+      const p1 = cell & PART_MASK;
+      const f1 = ~(p1 >>> HOLES_SHIFT) & 0xff;
+      let mask = pred(p1) ? f1 : 0;
+      let p2 = 0;
+      if (cell >= CELL_MULTI_BIT) {
+        p2 = grid.getPart2(cx, cy, cz);
+        if (pred(p2)) mask |= ~(p2 >>> HOLES_SHIFT) & 0xff;
       }
-      if (r === WALK_END) return null;
+      if (mask !== 0) {
+        // hm* = ray parameter of the cell's mid-plane on each axis (unused on fixed axes).
+        const hmX = (cx + 0.5 - ox) * invX;
+        const hmY = (cy + 0.5 - oy) * invY;
+        const hmZ = (cz + 0.5 - oz) * invZ;
+        // The first octant: the one the ray is in just after it entered the cell (see negX above);
+        // it keeps the cell's entry face (6.1, 19.9). Later ones are entered through inner faces.
+        let oct = ((((hmX <= t ? 1 : 0) ^ negX) | (((hmY <= t ? 1 : 0) ^ negY) << 1) | (((hmZ <= t ? 1 : 0) ^ negZ) << 2)) & ~fixedMask) | fixedBits;
+        let tw = t;
+        let fw = face;
+        // At most four octants: each axis crosses the mid-plane at most once.
+        for (;;) {
+          if (((mask >> oct) & 1) !== 0) {
+            return {
+              grid,
+              x: cx,
+              y: cy,
+              z: cz,
+              face: fw,
+              octant: oct,
+              // The packed cell (6.1). For a two-part cell it is a double above 2^31: it is formed
+              // only here, in the hit object (one heap number), never passed to a function (4.4).
+              cell: cell < CELL_MULTI_BIT ? cell : cell + p2 * PACK_SCALE,
+              part: ((f1 >> oct) & 1) !== 0 ? p1 : p2,
+              dist: tw,
+              point: vec3(origin.x + dir.x * tw, origin.y + dir.y * tw, origin.z + dir.z * tw),
+            };
+          }
+          // Next crossing on each axis: the mid-plane while the ray is still in the half it
+          // entered, else the cell boundary (exit).
+          const nxMid = stepX > 0 ? (oct & 1) === 0 : (oct & 1) !== 0;
+          const nyMid = stepY > 0 ? (oct & 2) === 0 : (oct & 2) !== 0;
+          const nzMid = stepZ > 0 ? (oct & 4) === 0 : (oct & 4) !== 0;
+          const nx = stepX === 0 ? Infinity : nxMid ? hmX : tMaxX;
+          const ny = stepY === 0 ? Infinity : nyMid ? hmY : tMaxY;
+          const nz = stepZ === 0 ? Infinity : nzMid ? hmZ : tMaxZ;
+          let tn = nx < ny ? nx : ny;
+          if (nz < tn) tn = nz;
+          // The range ends before the next octant. Each crossing above is at or before the cell
+          // boundary on its axis (the same arithmetic, rounding is monotonic), so the cell walk
+          // below finds the next cell boundary beyond the range too and ends the ray.
+          if (tn > t1) break;
+          // The ray leaves the cell (on an exact tie with a mid-plane crossing too): the cell walk
+          // below steps the axes whose cell boundary is at tn.
+          if ((nx === tn && !nxMid) || (ny === tn && !nyMid) || (nz === tn && !nzMid)) break;
+          // Only mid-planes at tn: every tied axis flips at once (an octant the ray only touches
+          // along an edge or at a corner is never entered), and the entered inner face is the
+          // steepest of them (x, y, z order on equal slopes), as for cells.
+          let fa = -1;
+          let fs = -1;
+          if (nx === tn) {
+            oct ^= 1;
+            fa = 0;
+            fs = adx;
+          }
+          if (ny === tn) {
+            oct ^= 2;
+            if (ady > fs) {
+              fa = 1;
+              fs = ady;
+            }
+          }
+          if (nz === tn) {
+            oct ^= 4;
+            if (adz > fs) fa = 2;
+          }
+          fw = fa === 0 ? (stepX > 0 ? NX : PX) : fa === 1 ? (stepY > 0 ? NY : PY) : stepZ > 0 ? NZ : PZ;
+          if (tn > tw) tw = tn;
+        }
+      }
     }
     if (--budget < 0) return null;
     let tn = tMaxX < tMaxY ? tMaxX : tMaxY;
@@ -420,161 +495,6 @@ export function raycastGrid(
       if (adz > fs) fa = 2;
     }
     face = fa === 0 ? (stepX > 0 ? NX : PX) : fa === 1 ? (stepY > 0 ? NY : PY) : stepZ > 0 ? NZ : PZ;
-  }
-}
-
-/**
- * One ray's walk through the octants of partial cells, in the grid's local frame. The ray's
- * constants are set once (newWalk); the cell fields are set by raycastGrid before each partial
- * cell; walkCell writes the hit fields. A plain object per ray (ARCHITECTURE rule 5: no shared
- * temporaries); walkCell, called for every partial cell met, takes its fractional numbers from it
- * rather than as arguments (V8 boxes non-integers passed to a function it did not inline).
- */
-interface OctantWalk {
-  readonly ox: number;
-  readonly oy: number;
-  readonly oz: number;
-  readonly stepX: number;
-  readonly stepY: number;
-  readonly stepZ: number;
-  readonly invX: number;
-  readonly invY: number;
-  readonly invZ: number;
-  readonly adx: number;
-  readonly ady: number;
-  readonly adz: number;
-  /** End of the ray's range (parameter). */
-  readonly t1: number;
-  /** Octant bits fixed for the whole ray (axes it does not move along): their mask and values (see raycastGrid). */
-  readonly fixedMask: number;
-  readonly fixedBits: number;
-  /** In: the cell, where and through which face the ray entered it, its next cell boundary per axis. Out (hit): where and through which face the ray entered the hit octant. */
-  cx: number;
-  cy: number;
-  cz: number;
-  t: number;
-  face: Dir;
-  tMaxX: number;
-  tMaxY: number;
-  tMaxZ: number;
-  /** Out (hit): the octant, its part, the packed cell. */
-  octant: number;
-  part: number;
-  cell: number;
-}
-
-function newWalk(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, t1: number, fixedMask: number, fixedBits: number): OctantWalk {
-  return {
-    ox,
-    oy,
-    oz,
-    stepX: dx > 0 ? 1 : dx < 0 ? -1 : 0,
-    stepY: dy > 0 ? 1 : dy < 0 ? -1 : 0,
-    stepZ: dz > 0 ? 1 : dz < 0 ? -1 : 0,
-    invX: dx !== 0 ? 1 / dx : 0,
-    invY: dy !== 0 ? 1 / dy : 0,
-    invZ: dz !== 0 ? 1 / dz : 0,
-    adx: Math.abs(dx),
-    ady: Math.abs(dy),
-    adz: Math.abs(dz),
-    t1,
-    fixedMask,
-    fixedBits,
-    cx: 0,
-    cy: 0,
-    cz: 0,
-    t: 0,
-    face: PX,
-    tMaxX: 0,
-    tMaxY: 0,
-    tMaxZ: 0,
-    octant: 0,
-    part: 0,
-    cell: 0,
-  };
-}
-
-/** walkCell: an octant was hit (the hit fields are set). */
-const WALK_HIT = 1;
-/** walkCell: the ray leaves the cell without a hit; the cell walk goes on. */
-const WALK_ON = 0;
-/** walkCell: the range ends inside the cell. */
-const WALK_END = -1;
-
-/**
- * The 2x2x2 DDA inside one partial cell (value `cell` >= FULL_LIMIT), on the half grid, from where
- * the ray entered it. The octants that can stop the ray are those of the parts `pred` accepts
- * (the second part is read only when bit 24 says there is one). The first octant keeps the cell's
- * entry face (docs/SHAPES.md 6.1); later ones are entered through inner faces.
- */
-function walkCell(w: OctantWalk, grid: VoxelGrid, cell: number, pred: CellPredicate): number {
-  const p1 = cell & PART_MASK;
-  const f1 = ~(p1 >>> HOLES_SHIFT) & 0xff;
-  let mask = pred(p1) ? f1 : 0;
-  let p2 = 0;
-  if (cell >= CELL_MULTI_BIT) {
-    p2 = grid.getPart2(w.cx, w.cy, w.cz);
-    if (pred(p2)) mask |= ~(p2 >>> HOLES_SHIFT) & 0xff;
-  }
-  if (mask === 0) return WALK_ON;
-  const { stepX, stepY, stepZ } = w;
-  // hm* = ray parameter of the cell's mid-plane on each axis.
-  const hmX = (w.cx + 0.5 - w.ox) * w.invX;
-  const hmY = (w.cy + 0.5 - w.oy) * w.invY;
-  const hmZ = (w.cz + 0.5 - w.oz) * w.invZ;
-  // The octant the ray is in just after it entered the cell (the rule at negX in raycastGrid).
-  const t = w.t;
-  const fixedMask = w.fixedMask;
-  const fixedBits = w.fixedBits;
-  let bx = (fixedMask & 1) !== 0 ? fixedBits & 1 : (hmX <= t ? 1 : 0) ^ (stepX < 0 ? 1 : 0);
-  let by = (fixedMask & 2) !== 0 ? (fixedBits >> 1) & 1 : (hmY <= t ? 1 : 0) ^ (stepY < 0 ? 1 : 0);
-  let bz = (fixedMask & 4) !== 0 ? (fixedBits >> 2) & 1 : (hmZ <= t ? 1 : 0) ^ (stepZ < 0 ? 1 : 0);
-  // At most four octants: each axis crosses the mid-plane at most once.
-  for (;;) {
-    const oct = bx | (by << 1) | (bz << 2);
-    if (((mask >> oct) & 1) !== 0) {
-      w.octant = oct;
-      w.part = ((f1 >> oct) & 1) !== 0 ? p1 : p2;
-      w.cell = cell < CELL_MULTI_BIT ? cell : cell + p2 * PACK_SCALE;
-      return WALK_HIT;
-    }
-    // Next crossing on each axis: the mid-plane while the ray is still in the half it entered,
-    // else the cell boundary (exit).
-    const nxMid = stepX > 0 ? bx === 0 : bx === 1;
-    const nyMid = stepY > 0 ? by === 0 : by === 1;
-    const nzMid = stepZ > 0 ? bz === 0 : bz === 1;
-    const nx = stepX === 0 ? Infinity : nxMid ? hmX : w.tMaxX;
-    const ny = stepY === 0 ? Infinity : nyMid ? hmY : w.tMaxY;
-    const nz = stepZ === 0 ? Infinity : nzMid ? hmZ : w.tMaxZ;
-    let tn = nx < ny ? nx : ny;
-    if (nz < tn) tn = nz;
-    if (tn > w.t1) return WALK_END;
-    // The ray leaves the cell (on an exact tie with a mid-plane crossing too): the cell walk
-    // steps the axes whose cell boundary is at tn.
-    if ((nx === tn && !nxMid) || (ny === tn && !nyMid) || (nz === tn && !nzMid)) return WALK_ON;
-    // Only mid-planes at tn: every tied axis flips at once (an octant the ray only touches along
-    // an edge or at a corner is never entered), and the entered inner face is the steepest of
-    // them (x, y, z order on equal slopes), as for cells.
-    let fa = -1;
-    let fs = -1;
-    if (nx === tn) {
-      bx ^= 1;
-      fa = 0;
-      fs = w.adx;
-    }
-    if (ny === tn) {
-      by ^= 1;
-      if (w.ady > fs) {
-        fa = 1;
-        fs = w.ady;
-      }
-    }
-    if (nz === tn) {
-      bz ^= 1;
-      if (w.adz > fs) fa = 2;
-    }
-    w.face = fa === 0 ? (stepX > 0 ? NX : PX) : fa === 1 ? (stepY > 0 ? NY : PY) : stepZ > 0 ? NZ : PZ;
-    if (tn > w.t) w.t = tn;
   }
 }
 

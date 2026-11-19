@@ -130,6 +130,23 @@ describe('partial cells: the ray passes through empty octants', () => {
     expect(summary(raycastGrid(w, vec3(3.5, Y + 0.25, 0.5), up, 10, noStone))).toEqual({ x: 3, y: Y, z: 0, face: NY, octant: 7, part: slab(B.GLASS, UPPER), dist: 0.25 });
   });
 
+  it('starting inside a partial cell exactly on a mid-plane: the cell-level face, as a full block in its place (19.9)', () => {
+    // The literal half-grid DDA would report the mid-plane the origin lies on (PZ here); the first
+    // octant of a cell always reports the cell-level face instead: inside the cell that is the
+    // face opposite to the dominant direction, as for a full block.
+    const w = emptyWorld();
+    w.setCell(0, Y, 1, slab(B.STONE, LOWER));
+    w.setCell(3, Y, 1, STONE);
+    const d = unit(4, 0, -2);
+    const a = raycastGrid(w, vec3(0.171875, Y + 0.484375, 1.5), d, 4)!; // on z = 1.5, moving -Z into octant 0
+    expect(summary(a)).toEqual({ x: 0, y: Y, z: 1, face: NX, octant: 0, part: slab(B.STONE, LOWER), dist: 0 });
+    const f = raycastGrid(w, vec3(3.171875, Y + 0.484375, 1.5), d, 4)!;
+    expect(summary(f)).toEqual({ x: 3, y: Y, z: 1, face: NX, octant: 0, part: STONE, dist: 0 });
+    // On the mid-plane y = 0.5 moving down into the slab's lower half, and on x = 0.5 moving +X.
+    expect(summary(raycastGrid(w, vec3(0.25, Y + 0.5, 1.25), unit(0.3, -1, 0.2), 4))).toEqual({ x: 0, y: Y, z: 1, face: PY, octant: 0, part: slab(B.STONE, LOWER), dist: 0 });
+    expect(summary(raycastGrid(w, vec3(0.5, Y + 0.25, 1.25), unit(1, 0.1, -0.4), 4))).toEqual({ x: 0, y: Y, z: 1, face: NX, octant: 1, part: slab(B.STONE, LOWER), dist: 0 });
+  });
+
   it('an octant the ray only touches along an edge is never hit (two mid-planes crossed at once)', () => {
     const w = emptyWorld();
     const o = vec3(0.25, Y + 0.25, 0.25); // in octant 0, which stays empty
@@ -224,10 +241,13 @@ describe('partial cells: the ray passes through empty octants', () => {
     const ship = structure(world, 1, vec3(0, 0, 0), qidentity());
     ship.setCell(4, Y, 0, slab(B.PLANKS_OAK, LOWER));
     const grids: VoxelGrid[] = [world, ship];
+    // Grids are compared by identity: inside toEqual a failure would serialise them (minutes).
     const high = raycastGrids(grids, vec3(0.5, Y + 0.75, 0.5), vec3(1, 0, 0), 20)!;
-    expect([high.grid, high.x]).toEqual([world, 6]);
+    expect(high.grid === world).toBe(true);
+    expect(high.x).toBe(6);
     const low = raycastGrids(grids, vec3(0.5, Y + 0.25, 0.5), vec3(1, 0, 0), 20)!;
-    expect([low.grid, low.x, low.octant]).toEqual([ship, 4, 4]);
+    expect(low.grid === ship).toBe(true);
+    expect([low.x, low.octant]).toEqual([4, 4]);
   });
 
   it('liquid next to a partial cell: the bucket predicate stops at the source in front, not at the slab', () => {
@@ -353,7 +373,7 @@ function compare(g: VoxelGrid, cells: Array<[number, number, number]>, o: Vec3, 
   expect(h === null).toBe(ref === null);
   if (h === null || ref === null) return 'miss';
   expect(h.dist).toBeCloseTo(ref.t, digits);
-  expect(h.grid).toBe(g);
+  expect(h.grid === g, 'the hit grid').toBe(true); // identity, so a failure does not serialise a grid
   const own = octantEntry(g, h.x, h.y, h.z, h.octant, o, d, maxDist);
   expect(own).not.toBeNull();
   expect(own!).toBeCloseTo(ref.t, digits);
