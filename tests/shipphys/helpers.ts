@@ -4,16 +4,18 @@
  */
 import { makeCell, facingState, ID_MASK } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { SOLID } from '../../src/blocks/registry';
+import { solidFill } from '../../src/blocks/shapes';
 import { CHUNK_SHIFT, TICK_DT } from '../../src/core/constants';
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../../src/core/dirs';
 import { qfromAxisAngle, qmul, qrotate, qtoMat3, quat, vec3, type Quat, type Vec3 } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
 import { GlueStore } from '../../src/structures/glue';
-import { displacesWater } from '../../src/structures/hull';
+import { displacesWater, HULL_BILGE, HULL_MIXED, HULL_SEALED, HULL_SOLID, hullKindAt, hullOctantKind } from '../../src/structures/hull';
 import { Rotor, Ship, type StructureHost } from '../../src/structures/structure';
 import { createShipDynamics, type DynamicsOptions } from '../../src/structures/physics';
 import { Chunk, cellIndex } from '../../src/voxel/chunk';
+import type { VoxelGrid } from '../../src/voxel/grid';
+import { solidAtHalf } from '../../src/voxel/parts';
 import { World } from '../../src/voxel/world';
 
 /** Sea layout used by most tests: stone up to FLOOR_TOP (exclusive), water up to WATER_TOP (exclusive). */
@@ -263,6 +265,9 @@ export function kineticEnergy(ship: Ship): number {
  * Mechanical energy: kinetic + gravity + buoyancy potential. Buoyancy on a displacing cell is
  * rho g frac(y) with frac(y) = clamp(s + 0.5 - y, 0, 1) for a column whose surface is at s, so
  * its potential is rho g G(y) with G = 0 / u^2/2 / u - 1/2 for u = s + 0.5 - y <= 0 / < 1 / >= 1.
+ * A displacing octant of a cell that does not displace as a whole is a half cube (volume 1/8):
+ * frac = clamp(s + 0.25 - y, 0, 0.5) / 4, potential rho g G_h / 4 with G_h = 0 / u^2/2 /
+ * u/2 - 1/8 for u = s + 0.25 - y <= 0 / < 0.5 / >= 0.5 (docs/SHAPES.md 12.5).
  * `surfaceAt(x, z)` gives the water surface of a world column (-Infinity = no water).
  * With the throttle off, nothing but contacts, drag and damping act on top of these forces,
  * so this must never increase.
@@ -274,7 +279,18 @@ export function mechanicalEnergy(ship: Ship, surfaceAt: (x: number, z: number) =
   for (let y = hull.oy; y < hull.oy + hull.sy; y++) {
     for (let z = hull.oz; z < hull.oz + hull.sz; z++) {
       for (let x = hull.ox; x < hull.ox + hull.sx; x++) {
-        if (!displacesWater(hull, x, y, z)) continue;
+        if (!displacesWater(hull, x, y, z)) {
+          if (hullKindAt(hull, x, y, z) !== HULL_MIXED) continue;
+          for (let o = 0; o < 8; o++) {
+            const k = hullOctantKind(hull, x, y, z, o);
+            if (!(k === HULL_SOLID || k === HULL_SEALED || (k === HULL_BILGE && hull.floats))) continue;
+            ship.grid.toWorld(vec3(x + 0.25 + 0.5 * (o & 1), y + 0.25 + 0.5 * ((o >> 1) & 1), z + 0.25 + 0.5 * (o >> 2)), p);
+            const s = surfaceAt(Math.floor(p.x), Math.floor(p.z));
+            const u = s + 0.25 - p.y;
+            ub += (u <= 0 ? 0 : u < 0.5 ? (u * u) / 2 : u / 2 - 1 / 8) / 4;
+          }
+          continue;
+        }
         ship.grid.toWorld(vec3(x + 0.5, y + 0.5, z + 0.5), p);
         const s = surfaceAt(Math.floor(p.x), Math.floor(p.z));
         const u = s + 0.5 - p.y;
@@ -319,16 +335,30 @@ export function tilt(ship: Ship): number {
   return Math.acos(Math.max(-1, Math.min(1, up.y)));
 }
 
-/** Points sampled densely on the hard hull cells: all corners, edge midpoints and face centres. */
+/**
+ * Points sampled densely on the hard hull material: every half-lattice point (corner, edge
+ * midpoint, face centre) of a cell that touches one of its hard octants; for a cell whose 8
+ * octants are hard, all of them but the cell centre (as for M1's full blocks).
+ */
 export function hullSamplePoints(ship: Ship): Vec3[] {
   const out: Vec3[] = [];
   const seen = new Set<string>();
   ship.grid.forEachCell((x, y, z, cell) => {
-    if (SOLID[cell & ID_MASK] !== 1) return;
+    const hard = solidFill(cell);
+    if (hard === 0) return;
     for (let i = 0; i <= 2; i++) {
       for (let j = 0; j <= 2; j++) {
         for (let k = 0; k <= 2; k++) {
-          if (i === 1 && j === 1 && k === 1) continue;
+          if (hard === 0xff && i === 1 && j === 1 && k === 1) continue;
+          // octants of the cell touching the point: per axis the low half (0), the high half (2) or both (1)
+          let touch = 0;
+          for (let o = 0; o < 8; o++) {
+            if (i !== 1 && (o & 1) !== i >> 1) continue;
+            if (j !== 1 && ((o >> 1) & 1) !== j >> 1) continue;
+            if (k !== 1 && ((o >> 2) & 1) !== k >> 1) continue;
+            touch |= 1 << o;
+          }
+          if ((hard & touch) === 0) continue;
           const key = `${2 * x + i},${2 * y + j},${2 * z + k}`;
           if (seen.has(key)) continue;
           seen.add(key);
@@ -341,23 +371,25 @@ export function hullSamplePoints(ship: Ship): Vec3[] {
 }
 
 /**
- * Depth of point p inside hard cells: the distance to the nearest non-hard cell among the
- * 26 neighbours of the cell containing it (1 when they are all hard, i.e. "deep"). This is the
- * true distance to free space for overlaps below one cell, also in concave corners.
+ * Depth of point p inside hard material: the distance to the nearest octant that is not hard
+ * among the octants within two half cells of the one containing it (1 when they are all hard,
+ * i.e. "deep"). This is the true distance to free space for overlaps below one cell, also in
+ * concave corners; in a world of full blocks it is the distance to the nearest non-hard cell
+ * among the 26 neighbours of p's cell, computed with the same expressions.
  */
-function depthIn(solid: (x: number, y: number, z: number) => boolean, px: number, py: number, pz: number): number {
-  const cx = Math.floor(px);
-  const cy = Math.floor(py);
-  const cz = Math.floor(pz);
-  if (!solid(cx, cy, cz)) return 0;
+function depthIn(solidHalf: (hx: number, hy: number, hz: number) => boolean, px: number, py: number, pz: number): number {
+  const hx = Math.floor(px * 2);
+  const hy = Math.floor(py * 2);
+  const hz = Math.floor(pz * 2);
+  if (!solidHalf(hx, hy, hz)) return 0;
   let best = 1;
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dz = -1; dz <= 1; dz++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        if ((dx | dy | dz) === 0 || solid(cx + dx, cy + dy, cz + dz)) continue;
-        const ex = dx < 0 ? px - cx : dx > 0 ? cx + 1 - px : 0;
-        const ey = dy < 0 ? py - cy : dy > 0 ? cy + 1 - py : 0;
-        const ez = dz < 0 ? pz - cz : dz > 0 ? cz + 1 - pz : 0;
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        if ((dx | dy | dz) === 0 || solidHalf(hx + dx, hy + dy, hz + dz)) continue;
+        const ex = dx < 0 ? px - (hx + dx + 1) / 2 : dx > 0 ? (hx + dx) / 2 - px : 0;
+        const ey = dy < 0 ? py - (hy + dy + 1) / 2 : dy > 0 ? (hy + dy) / 2 - py : 0;
+        const ez = dz < 0 ? pz - (hz + dz + 1) / 2 : dz > 0 ? (hz + dz) / 2 - pz : 0;
         best = Math.min(best, Math.sqrt(ex * ex + ey * ey + ez * ez));
       }
     }
@@ -365,11 +397,16 @@ function depthIn(solid: (x: number, y: number, z: number) => boolean, px: number
   return best;
 }
 
-/** Deepest penetration of the hull's sample points into hard world cells (blocks). */
+/** Hard octants of any grid at half-cell coordinates. */
+function solidOctants(grid: VoxelGrid): (hx: number, hy: number, hz: number) => boolean {
+  return (hx, hy, hz) => solidAtHalf(grid, hx, hy, hz);
+}
+
+/** Deepest penetration of the hull's sample points into hard world material (blocks). */
 export function terrainPenetration(world: World, ship: Ship, pts = hullSamplePoints(ship)): number {
   let worst = 0;
   const w = vec3();
-  const solid = (x: number, y: number, z: number) => SOLID[world.getCell(x, y, z) & ID_MASK] === 1;
+  const solid = solidOctants(world);
   for (const p of pts) {
     ship.grid.toWorld(p, w);
     worst = Math.max(worst, depthIn(solid, w.x, w.y, w.z));
@@ -377,11 +414,11 @@ export function terrainPenetration(world: World, ship: Ship, pts = hullSamplePoi
   return worst;
 }
 
-/** Deepest penetration of a set of world points (e.g. post corners) into the hull's hard cells. */
+/** Deepest penetration of a set of world points (e.g. post corners) into the hull's hard material. */
 export function pointsIntoHull(ship: Ship, worldPts: readonly Vec3[]): number {
   let worst = 0;
   const l = vec3();
-  const solid = (x: number, y: number, z: number) => SOLID[ship.grid.getCell(x, y, z) & ID_MASK] === 1;
+  const solid = solidOctants(ship.grid);
   for (const p of worldPts) {
     ship.grid.toLocal(p, l);
     worst = Math.max(worst, depthIn(solid, l.x, l.y, l.z));

@@ -153,8 +153,11 @@ export interface OverlayState {
 /**
  * Space inside a floating hull where world water must not be drawn
  * (docs/LESSONS.md "船舱里冒出水面": cut the water, do not delete it).
- * A box of local cells of the structure; mask[i] != 0 marks a dry cell.
- * index = (x - ox) + (z - oz) * sx + (y - oy) * sx * sz.
+ * A box of local cells of the structure (origin ox, oy, oz; sx x sy x sz cells), sampled by a
+ * mask of `scale` texels per cell on every axis: scale 1, one texel per cell; scale 2, one texel
+ * per octant (a hull with half-filled cells, docs/SHAPES.md 12.8). mask[i] != 0 marks a dry texel,
+ * index = tx + tz * (sx * scale) + ty * (sx * scale) * (sz * scale) for texel (tx, ty, tz), texel
+ * (tx, ty, tz) covering local [ox + tx / scale, ox + (tx + 1) / scale) and likewise in y and z.
  */
 export interface DryVolume {
   ox: number;
@@ -163,6 +166,7 @@ export interface DryVolume {
   sx: number;
   sy: number;
   sz: number;
+  scale: 1 | 2;
   mask: Uint8Array;
 }
 

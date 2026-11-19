@@ -43,7 +43,7 @@ export interface ShipPhysicsStats {
    * over the sub-steps of the last step. 0 = the ship was never pinned.
    */
   pinned: number;
-  /** Hull cells destroyed by pinning during the last step. */
+  /** Hull parts destroyed by pinning during the last step. */
   destroyed: number;
   /** Submerged volume (cells) at the last sub-step. */
   submerged: number;
@@ -164,12 +164,13 @@ export class Body {
   private cMaxZ = -Infinity;
   /** minX..maxZ hold a real box (computed at least once with hard cells). */
   private hasBox = false;
-  /** Best pinned hull cell found this tick (deepest overlap); destroyed after the tick. */
+  /** Best pinned hull cell found this tick (deepest overlap) and the octant naming its part; that part is destroyed after the tick. */
   pinHas = false;
   pinDepth = 0;
   pinX = 0;
   pinY = 0;
   pinZ = 0;
+  pinOctant = 0;
 
   /** Grid pose as last written by the dynamics (external-change detection for sleepers). */
   private written = false;

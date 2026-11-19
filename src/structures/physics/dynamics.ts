@@ -22,15 +22,17 @@
  *        pinning check -> pinned (ship, rotor) pairs drop out; jammed contacts of the other pairs
  *        too (pinning.ts); re-solve
  *        split-impulse penetration recovery, then integrate the poses
- *   8. write back, destroy at most one pinned hull cell per ship, refresh, sleep bookkeeping.
+ *   8. write back, destroy at most one pinned hull part per ship, refresh, sleep bookkeeping.
  *
  * Nothing here reads a clock or a random source: identical inputs give identical results.
  * Iteration orders are those of the input arrays and of the cell storage.
  */
 import { TICK_DT } from '../../core/constants';
 import { qnormalize, qtoMat3, quat, vec3, type Vec3 } from '../../core/math';
-import { AIR, ID_MASK } from '../../blocks/cell';
+import { HOLES_SHIFT, ID_MASK } from '../../blocks/cell';
 import { BLOCKS } from '../../blocks/registry';
+import { DROP_POINT } from '../../blocks/shapes';
+import { removePartAt } from '../../voxel/parts';
 import type { Rotor, Ship, ShipDynamics, StructureHost } from '../structure';
 import { Body, MODE_ACTIVE, MODE_NONE, type ShipPhysicsStats } from './body';
 import { applyBuoyancy } from './buoyancy';
@@ -824,8 +826,11 @@ export class ShipDynamicsImpl implements ShipDynamics {
   }
 
   /**
-   * Destroy the deepest pinned hull cell of this tick: it becomes air and drops its item
-   * (BlockDef.drop: undefined = the block itself, null = nothing) when the world's drops are on.
+   * Destroy the deepest pinned hull part of this tick (docs/SHAPES.md 12.7): the part holding the
+   * pinned octant of the pinned cell is removed (a two-part cell takes two ticks) and drops its
+   * item once (BlockDef.drop: undefined = the block itself, null = nothing) when the world's drops
+   * are on, its feet at the cell corner + DROP_POINT of the part's fill (the cell centre for a full
+   * block, as in M1; docs/SHAPES.md 9.5).
    */
   private destroyPinnedCell(b: Body): void {
     const ship = b.ship;
@@ -833,17 +838,17 @@ export class ShipDynamicsImpl implements ShipDynamics {
     const x = b.pinX;
     const y = b.pinY;
     const z = b.pinZ;
-    const cell = g.getCell(x, y, z);
-    if (cell === AIR) return;
-    const c = this.cellCentre;
-    c.x = x + 0.5;
-    c.y = y + 0.5;
-    c.z = z + 0.5;
-    g.toWorld(c, c);
-    if (!g.setCell(x, y, z, AIR)) return;
+    const part = removePartAt(g, x, y, z, b.pinOctant);
+    if (part === 0) return;
     b.stats.destroyed++;
     if (!this.host.dropsEnabled) return;
-    const id = cell & ID_MASK;
+    const fill = ~(part >>> HOLES_SHIFT) & 0xff;
+    const c = this.cellCentre;
+    c.x = x + DROP_POINT[fill * 3]!;
+    c.y = y + DROP_POINT[fill * 3 + 1]!;
+    c.z = z + DROP_POINT[fill * 3 + 2]!;
+    g.toWorld(c, c);
+    const id = part & ID_MASK;
     const def = BLOCKS[id];
     const drop = def !== undefined ? def.drop : undefined;
     if (drop === null) return;

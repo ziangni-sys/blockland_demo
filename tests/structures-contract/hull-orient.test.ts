@@ -36,8 +36,9 @@ describe('hull analysis', () => {
     expect(h.mass).toBeCloseTo(h.solidCount * 0.5);
     expect(h.com.x).toBeCloseTo(-3 + 2.5);
     expect(h.com.z).toBeCloseTo(-2 + 3.5);
-    const mask = dryMask(h)!;
-    expect(mask.reduce((a, b) => a + b, 0)).toBe(30);
+    const dry = dryMask(h)!;
+    expect(dry.scale).toBe(1);
+    expect(dry.mask.reduce((a, b) => a + b, 0)).toBe(30);
   });
   it('a hole in the side floods the hold down to the hole level', () => {
     const g = boat(5, 3, 7, B.PLANKS_OAK);

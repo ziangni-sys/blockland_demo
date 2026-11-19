@@ -12,7 +12,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
-import { bigShip, fillWorld, launch, makeWorld, setup, tick } from './helpers';
+import { analyzeHull } from '../../src/structures/hull';
+import type { StructureGrid } from '../../src/voxel/sgrid';
+import { addHelm, bigShip, fillWorld, launch, makeWorld, newShip, setup, shipBox, tick } from './helpers';
 
 type Mode = 'sail' | 'wall';
 
@@ -101,6 +103,82 @@ function landing(cells: number, len: number, wid: number, hgt: number): number {
   console.log(`[shipphys perf] ${cells} cells, landing: ${best.toFixed(3)} ms/tick cpu, ${bestWall.toFixed(3)} wall (best of ${WINDOWS})`);
   return best;
 }
+
+/**
+ * The open-hold plank boat of docs/SHAPES.md section 15 (item 3): a 60 x 58 floor with a rim two
+ * blocks high, 3945 cells with the helm, about 16 thousand sample points (the sealed bigShip has
+ * only about 5 thousand). Dropped 6 blocks onto flat ground; average over the ticks with terrain
+ * contacts (at most 60 of them), best of WINDOWS runs after one warm-up run. M1 already needs
+ * about 8 ms per tick here, over the 6 ms budget: that is a known leftover, so this case has no
+ * budget of its own. It is compared against the M1 code by alternating runs instead.
+ */
+function openHoldLanding(): { ms: number; cells: number } {
+  let best = Infinity;
+  let bestWall = Infinity;
+  let cells = 0;
+  const tm: [number, number] = [0, 0];
+  for (let w = 0; w <= WINDOWS; w++) {
+    const world = makeWorld({ cx0: -4, cx1: 3, cz0: -6, cz1: 3, floorTop: 40, waterTop: 0 });
+    const { dyn } = setup(world);
+    const s = newShip(world, 1);
+    shipBox(s, -30, 43, -28, 29, 45, 29, B.PLANKS_OAK, true);
+    addHelm(s, 0, 44, 27, 5);
+    launch(s, dyn);
+    s.grid.position.y += 3;
+    cells = s.grid.count;
+    let sum = 0;
+    let sumWall = 0;
+    let count = 0;
+    for (let t = 0; t < 200 && count < 60; t++) {
+      timed(() => tick(dyn, [s]), tm);
+      const st = dyn.getStats(s)!;
+      if (st.simulated && st.terrainContacts > 0) {
+        sum += tm[0];
+        sumWall += tm[1];
+        count++;
+      }
+    }
+    expect(count).toBeGreaterThan(20);
+    if (w > 0) {
+      best = Math.min(best, sum / count);
+      bestWall = Math.min(bestWall, sumWall / count);
+    }
+  }
+  console.log(`[shipphys perf] open hold ${cells} cells, landing: ${best.toFixed(3)} ms/tick cpu, ${bestWall.toFixed(3)} wall (best of ${WINDOWS})`);
+  return { ms: best, cells };
+}
+
+/** analyzeHull of a grid: mean ms per call over `reps` calls, best of WINDOWS windows after a warm-up window. */
+function hullTime(grid: StructureGrid, reps: number, label: string): number {
+  let best = Infinity;
+  const tm: [number, number] = [0, 0];
+  for (let w = 0; w <= WINDOWS; w++) {
+    let sum = 0;
+    for (let k = 0; k < reps; k++) {
+      timed(() => analyzeHull(grid), tm);
+      sum += tm[0];
+    }
+    if (w > 0) best = Math.min(best, sum / reps);
+  }
+  console.log(`[shipphys perf] analyzeHull ${label}, ${grid.count} cells: ${best.toFixed(3)} ms/call cpu (best of ${WINDOWS})`);
+  return best;
+}
+
+describe('baselines without budgets (docs/SHAPES.md section 15, item 3)', () => {
+  it('open-hold 3945-cell plank boat landing', () => {
+    expect(openHoldLanding().cells).toBe(3945);
+  });
+
+  it('analyzeHull of 4000-cell ships (sealed decks, open hold)', () => {
+    const world = makeWorld({ cx0: -4, cx1: 3, cz0: -6, cz1: 3 });
+    const big = bigShip(world, 1, 50, 16, 8, 4000, 46, 0);
+    expect(big.grid.count).toBeGreaterThanOrEqual(4000);
+    hullTime(big.grid, 100, 'sealed bigShip');
+    const open = newShip(world, 2);
+    shipBox(open, -30, 43, -28, 29, 45, 29, B.PLANKS_OAK, true);
+    hullTime(open.grid, 60, 'open hold');
+  });
+});
 
 describe('performance budgets', () => {
   it('1000-cell ship: < 1.5 ms per tick', () => {

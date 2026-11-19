@@ -218,7 +218,10 @@ export class StructureRenderer {
     rec.hull = h;
     rec.hullVersion = h ? h.version : -1;
     rec.hullFloats = h ? h.floats : false;
-    const mask = h ? dryMask(h) : null;
-    this.backend.setStructureDryVolume(ship.id, h && mask ? { ox: h.ox, oy: h.oy, oz: h.oz, sx: h.sx, sy: h.sy, sz: h.sz, mask } : null);
+    const dry = h ? dryMask(h) : null;
+    this.backend.setStructureDryVolume(
+      ship.id,
+      h && dry ? { ox: h.ox, oy: h.oy, oz: h.oz, sx: h.sx, sy: h.sy, sz: h.sz, scale: dry.scale, mask: dry.mask } : null,
+    );
   }
 }

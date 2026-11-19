@@ -592,7 +592,7 @@ export function buildShip(): StructureDemo {
   box.set(3, 4, 3, B.HELM);
   const mesh = meshRegion({ box, x0: 0, y0: 0, z0: 0, sx: L, sy: H, sz: W, lit: false });
   // Dry volume: interior air cells below the deck (y 1..3) inside the hull walls.
-  const dry: DryVolume = { ox: 0, oy: 1, oz: 0, sx: L, sy: 3, sz: W, mask: new Uint8Array(L * 3 * W) };
+  const dry: DryVolume = { ox: 0, oy: 1, oz: 0, sx: L, sy: 3, sz: W, scale: 1, mask: new Uint8Array(L * 3 * W) };
   for (let y = 1; y <= 3; y++) for (let z = 0; z < W; z++) for (let x = 0; x < L; x++) {
     const taper = x < 2 ? 2 - x : x > L - 3 ? x - (L - 3) : 0;
     // Interior air inside the hull walls (including under the open hatch) is dry.
@@ -642,7 +642,7 @@ export function buildRaft(): StructureDemo {
   const sx = L + 2;
   const sy = 3 + 2;
   const sz = W + 2;
-  const dry: DryVolume = { ox: -1, oy: -1, oz: -1, sx, sy, sz, mask: new Uint8Array(sx * sy * sz) };
+  const dry: DryVolume = { ox: -1, oy: -1, oz: -1, sx, sy, sz, scale: 1, mask: new Uint8Array(sx * sy * sz) };
   for (let y = 1; y <= 2; y++) for (let z = 1; z < W - 1; z++) for (let x = 1; x < L - 1; x++) dry.mask[x + 1 + (z + 1) * sx + (y + 1) * sx * sz] = 1;
   return { mesh, ox: 0, oy: 0, oz: 0, pivot: [L / 2, 0, W / 2], dry };
 }

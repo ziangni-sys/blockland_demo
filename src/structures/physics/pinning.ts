@@ -39,7 +39,8 @@
  * position). A blade cutting through a wedged hull then passes through cleanly instead of
  * shoving it around with its remaining side and edge contacts. The hull cell the blade has
  * advanced deepest into (among the contacts it presses, stale ones included — contacts.ts
- * ROTOR_STALE_DEPTH) is recorded for destruction; at most one cell per ship and tick is destroyed.
+ * ROTOR_STALE_DEPTH) and the octant of it are recorded for destruction; at most one part per ship
+ * and tick is destroyed (the part holding that octant, docs/SHAPES.md 12.7).
  */
 import type { Body } from './body';
 import { MODE_ACTIVE, MODE_STATIC } from './body';
@@ -57,6 +58,7 @@ const F_KIND = CR.F_KIND;
 const F_LOC = CR.F_LOC;
 const F_NX = CR.F_NX;
 const F_OBS = CR.F_OBS;
+const F_OCTANT = CR.F_OCTANT;
 const F_PIN = CR.F_PIN;
 const F_PX = CR.F_PX;
 const F_SRC = CR.F_SRC;
@@ -228,7 +230,7 @@ function touchesSupport(A: Body, kin: ContactSet, ter: ContactSet, shipStart: nu
 }
 
 export class PinDetector {
-  private readonly cell = { x: 0, y: 0, z: 0 };
+  private readonly cell = { x: 0, y: 0, z: 0, octant: 0 };
   private readonly supports = new SupportQuery();
 
   /**
@@ -343,10 +345,12 @@ export class PinDetector {
     let x: number;
     let y: number;
     let z: number;
+    let octant: number;
     if (f[c + F_HASCELL] === 1) {
       x = f[c + F_CELL]!;
       y = f[c + F_CELL + 1]!;
       z = f[c + F_CELL + 2]!;
+      octant = f[c + F_OCTANT]!;
     } else {
       const out = this.cell;
       if (
@@ -366,6 +370,7 @@ export class PinDetector {
       x = out.x;
       y = out.y;
       z = out.z;
+      octant = out.octant;
     }
     const depth = f[c + F_DEPTH]!;
     // Deepest overlap of the tick wins; ties keep the first found (deterministic order).
@@ -375,6 +380,7 @@ export class PinDetector {
       A.pinX = x;
       A.pinY = y;
       A.pinZ = z;
+      A.pinOctant = octant;
     }
   }
 }

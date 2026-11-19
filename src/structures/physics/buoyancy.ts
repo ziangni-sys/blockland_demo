@@ -3,7 +3,9 @@
  *     F_i = waterDensity * g * submergedFraction_i   (upward, at the cell centre)
  * The submerged fraction intersects the unit cube centred on the cell (treated as upright) with
  * the world's water in that world column (WorldPatch water model). Applying each force at its
- * cell centre makes a heeled hull right itself and trims it naturally.
+ * cell centre makes a heeled hull right itself and trims it naturally. The displacing octants of
+ * cells that do not displace as a whole are half cubes (side 0.5, upright, at the octant centre),
+ * handled by a second loop with their own submerged height (docs/SHAPES.md 12.5).
  *
  * Only y and the horizontal lever arm matter for a vertical force, so the torque reduces to
  *     tau = rho g (-sum f_i rz_i, 0, sum f_i rx_i).
@@ -22,7 +24,7 @@ const TOP_FILL = 1 - WATER_SURFACE_DROP;
 export function applyBuoyancy(body: Body, rhoG: number, dt: number): void {
   const s = body.shape;
   const n = s.dispCount;
-  if (n === 0) {
+  if (n + s.halfCount === 0) {
     body.submerged = 0;
     return;
   }
@@ -100,6 +102,53 @@ export function applyBuoyancy(body: Body, rhoG: number, dt: number): void {
       sum += frac;
       sumRx += frac * (wx - px);
       sumRz += frac * (wz - pz);
+    }
+  }
+  // half cubes: [y0, y0 + 0.5] against the water in cells k0 and k0 + 1 (fy in [0, 1)); the
+  // submerged volume is the base area 1/4 times the wet height (0..0.5, continuous in y)
+  const nh = s.halfCount;
+  const hx = s.hcx;
+  const hy = s.hcy;
+  const hz = s.hcz;
+  for (let i = 0; i < nh; i++) {
+    const lx = hx[i]!;
+    const ly = hy[i]!;
+    const lz = hz[i]!;
+    const wy = r3 * lx + r4 * ly + r5 * lz + ty;
+    const y0 = wy - 0.25;
+    if (y0 >= waterTop) continue;
+    const k0 = Math.floor(y0);
+    const wx = r0 * lx + r1 * ly + r2 * lz + tx;
+    const wz = r6 * lx + r7 * ly + r8 * lz + tz;
+    const ix = Math.floor(wx) - pox;
+    const iz = Math.floor(wz) - poz;
+    const iy = k0 - poy;
+    let h0: number;
+    let h1: number;
+    if (ix >= 0 && iz >= 0 && iy >= 0 && ix < psx && iz < psz && iy + 2 < psy) {
+      const base = (iz * psx + ix) * psy + iy;
+      const f0 = f[base]! & PF_WATER;
+      const f1 = f[base + 1]! & PF_WATER;
+      const f2 = f[base + 2]! & PF_WATER;
+      h0 = f0 === 0 ? 0 : f1 !== 0 ? 1 : TOP_FILL;
+      h1 = f1 === 0 ? 0 : f2 !== 0 ? 1 : TOP_FILL;
+    } else {
+      const cx = Math.floor(wx);
+      const cz = Math.floor(wz);
+      h0 = patch.waterFill(cx, k0, cz);
+      h1 = patch.waterFill(cx, k0 + 1, cz);
+    }
+    const fy = y0 - k0;
+    const top = fy + 0.5;
+    let lo = (h0 < top ? h0 : top) - fy;
+    if (lo < 0) lo = 0;
+    let hi = (top < 1 + h1 ? top : 1 + h1) - 1;
+    if (hi < 0) hi = 0;
+    const v = 0.25 * (lo + hi);
+    if (v > 0) {
+      sum += v;
+      sumRx += v * (wx - px);
+      sumRz += v * (wz - pz);
     }
   }
   body.submerged = sum;

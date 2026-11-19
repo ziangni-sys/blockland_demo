@@ -68,7 +68,7 @@ describe('structure pose matrix', () => {
 });
 
 describe('dry volume matrix', () => {
-  const dry: DryVolume = { ox: -2, oy: 1, oz: -3, sx: 5, sy: 3, sz: 7, mask: new Uint8Array(5 * 3 * 7) };
+  const dry: DryVolume = { ox: -2, oy: 1, oz: -3, sx: 5, sy: 3, sz: 7, scale: 1, mask: new Uint8Array(5 * 3 * 7) };
 
   it('maps world points of local cells to the mask texel (x -> u, z -> v, y -> w)', () => {
     const rng = new Rng(99);
@@ -116,7 +116,7 @@ describe('camera-relative transforms', () => {
   // Review finding (float32 far from the origin): the dry-volume matrix takes camera-relative
   // positions, so its translation stays small and its float32 copy is exact enough.
   it('dry volume matrix with an origin maps (world - origin) like the plain matrix maps world', () => {
-    const dry: DryVolume = { ox: -1, oy: -1, oz: -1, sx: 9, sy: 5, sz: 7, mask: new Uint8Array(9 * 5 * 7) };
+    const dry: DryVolume = { ox: -1, oy: -1, oz: -1, sx: 9, sy: 5, sz: 7, scale: 1, mask: new Uint8Array(9 * 5 * 7) };
     const q = qfromAxisAngle(vnormalize(vec3(0.2, 1, 0.1)), 0.8);
     const ps = pose([1048576.3, 47.6, -2097152.8], q, [3.5, 1, 2.5]);
     const plain = new Float64Array(16);
