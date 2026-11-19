@@ -3,6 +3,11 @@
  * and stairs (< 5 ms), and a half-slab raft filling the 24^3 padded box that client/structures.ts
  * still meshes synchronously on the main thread (< 8 ms). Medians of many runs after warm-up; the
  * numbers are printed for the report.
+ *
+ * Most partial cells of the budget section are two-part cells below the ground, which emit nothing.
+ * A section whose partial cells are all exposed (townSection) is therefore timed as well, and the
+ * cost per quad of the octant path is held against the whole-block (M1) path on a checkerboard of
+ * whole cubes, measured alternately in the same test so that machine load cancels out.
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
@@ -10,9 +15,10 @@ import { makeCell, makePart } from '../../src/blocks/cell';
 import { HALF_FILL, canonCell } from '../../src/blocks/shapes';
 import type { Dir } from '../../src/core/dirs';
 import { Mesher, buildMesh } from '../../src/mesh/mesher';
-import type { MeshInput } from '../../src/mesh/types';
+import type { MeshData, MeshInput } from '../../src/mesh/types';
 import { LOWER, UPPER, stairFill } from '../shapes';
-import { idx, makeInput, put, quadCount } from './helpers';
+import { allQuads, idx, makeInput, put, quadCount } from './helpers';
+import { ownerCell } from './shape-helpers';
 
 
 /**
@@ -96,6 +102,58 @@ export function slabRaft(): MeshInput {
   return input;
 }
 
+/**
+ * A built-up 16^3 section in which half the cells are partial and none is buried: every fourth layer
+ * a floor of lower plank slabs, rooms walled by upright stone-brick slabs (a doorway in each wall),
+ * and a stair in a corner of every room. Sky light everywhere.
+ */
+export function townSection(): MeshInput {
+  const input = makeInput(16, 16, 16, 0xf0);
+  const part = (mat: number, fill: number) => makePart(mat, 0, ~fill & 0xff);
+  const mod4 = (v: number) => ((v % 4) + 4) % 4;
+  for (let y = -1; y <= 16; y++) {
+    for (let z = -1; z <= 16; z++) {
+      for (let x = -1; x <= 16; x++) {
+        const ly = mod4(y);
+        const lx = mod4(x);
+        const lz = mod4(z);
+        let cell = 0;
+        if (ly === 0) cell = part(B.PLANKS_OAK, LOWER);
+        else if (lx === 0 && lz !== 2) cell = part(B.STONE_BRICKS, HALF_FILL[1]!);
+        else if (lz === 0 && lx !== 2) cell = part(B.STONE_BRICKS, HALF_FILL[5]!);
+        else if (lx === 1 && lz === 1 && ly === 1) cell = part(B.COBBLE, stairFill(0));
+        put(input, x, y, z, cell);
+      }
+    }
+  }
+  return input;
+}
+
+/** A 3D checkerboard of whole stone cubes in a sky-lit 16^3 section: every face drawn, all on the M1 path. */
+function wholeCheckerboard(): MeshInput {
+  const input = makeInput(16, 16, 16, 0xf0);
+  for (let y = -1; y <= 16; y++) for (let z = -1; z <= 16; z++) for (let x = -1; x <= 16; x++) if (((x + y + z) & 1) === 0) put(input, x, y, z, makeCell(B.STONE));
+  return input;
+}
+
+/** Share of the interior cells that are partial, and the share of those that emit nothing (buried). */
+function exposure(input: MeshInput, mesh: MeshData): { partial: number; buried: number } {
+  const owners = new Set<string>();
+  for (const q of allQuads(mesh)) owners.add(ownerCell(q).join());
+  let partial = 0;
+  let buried = 0;
+  for (let y = 0; y < 16; y++) {
+    for (let z = 0; z < 16; z++) {
+      for (let x = 0; x < 16; x++) {
+        if (input.holes![idx(input, x, y, z)] === 0) continue;
+        partial++;
+        if (!owners.has(`${x},${y},${z}`)) buried++;
+      }
+    }
+  }
+  return { partial: partial / 4096, buried: buried / partial };
+}
+
 /** Share of the interior cells that are partial. */
 function partialShare(input: MeshInput): number {
   let n = 0;
@@ -139,5 +197,41 @@ describe('performance with partial cells', () => {
     expect(tSection).toBeLessThan(5);
     expect(tSectionFresh).toBeLessThan(5);
     expect(tRaft).toBeLessThan(8);
+  });
+
+  it('a section whose partial cells are all exposed: the octant path costs per quad less than 1.5 times the whole-block path', () => {
+    const town = townSection();
+    const checker = wholeCheckerboard();
+    const mesher = new Mesher();
+    const townMesh = buildMesh(town);
+    const townQuads = quadCount(townMesh);
+    const checkerQuads = quadCount(buildMesh(checker));
+    const shares = exposure(town, townMesh);
+    expect(shares.partial).toBeGreaterThanOrEqual(0.5);
+    expect(shares.buried).toBe(0);
+    // Alternate the two scenes run by run so that a change in machine load hits both alike.
+    for (let i = 0; i < 15; i++) {
+      mesher.build(town);
+      mesher.build(checker);
+    }
+    const tTown: number[] = [];
+    const tChecker: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      let t0 = performance.now();
+      mesher.build(town);
+      tTown.push(performance.now() - t0);
+      t0 = performance.now();
+      mesher.build(checker);
+      tChecker.push(performance.now() - t0);
+    }
+    const perQuadTown = (median(tTown) * 1000) / townQuads;
+    const perQuadChecker = (median(tChecker) * 1000) / checkerQuads;
+    console.log(
+      `[mesh perf, partial] exposed town section ${townQuads} quads (${(shares.partial * 100).toFixed(1)} % partial cells): ${median(tTown).toFixed(3)} ms, ` +
+        `${perQuadTown.toFixed(3)} us/quad; whole-cube checkerboard ${checkerQuads} quads: ${median(tChecker).toFixed(3)} ms, ${perQuadChecker.toFixed(3)} us/quad; ` +
+        `ratio ${(perQuadTown / perQuadChecker).toFixed(2)}`,
+    );
+    expect(townQuads).toBeGreaterThan(15000);
+    expect(perQuadTown / perQuadChecker).toBeLessThan(1.5);
   });
 });

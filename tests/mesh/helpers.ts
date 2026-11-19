@@ -133,12 +133,18 @@ export function dirOfQuad(q: Quad): number {
 
 /**
  * Structural invariants every MeshData must satisfy: sizes consistent, each quad's 6
- * indices address its own 4 vertices, every triangle counter-clockwise around the normal,
- * normals unit-length, finite positions, uv in [0,1]. The one exception to "every triangle has
- * positive area": a triangle emitted as a quad whose last two corners coincide (a clipped liquid
- * side piece, docs/SHAPES.md 8.4) has one zero-area triangle; its other triangle must be CCW.
+ * indices address its own 4 vertices, every triangle counter-clockwise around the normal (strictly
+ * positive area), normals unit-length, finite positions, uv in [0,1].
+ *
+ * `paddedTriangles` (opt-in, only for liquids beside partial cells): a clipped liquid side piece
+ * that is a triangle is emitted as a quad whose last corner is repeated (docs/SHAPES.md 8.4, 19.6).
+ * With the option, exactly that form is accepted: one pair of coinciding corners, at corners (2, 3)
+ * (the front copy) or (1, 2) (the back copy, written 0,3,2,1), so one triangle has zero area, and
+ * the quad's other triangle must have strictly positive area around the normal. Without the option
+ * no zero-area triangle is accepted at all, as in M1.
  */
-export function checkInvariants(m: MeshData): void {
+export function checkInvariants(m: MeshData, opts: { paddedTriangles?: boolean } = {}): void {
+  const padded = opts.paddedTriangles === true;
   for (const name of GROUPS) {
     const g = m[name];
     if (!g) continue;
@@ -189,23 +195,41 @@ export function checkInvariants(m: MeshData): void {
       const cy = e1z * e2x - e1x * e2z;
       const cz = e1x * e2y - e1y * e2x;
       const area = cx * N[a]! + cy * N[a + 1]! + cz * N[a + 2]!;
-      if (area === 0 && isPaddedTriangleQuad(P, (g.indices[t]! >> 2) * 4)) continue;
+      if (area === 0 && padded) {
+        // The quad's other triangle: the second one when this is the first, and the other way round.
+        const other = t % 6 === 0 ? t + 3 : t - 3;
+        if (isPaddedTriangleQuad(P, (g.indices[t]! >> 2) * 4) && triangleArea(P, N, g.indices, other) > 0) continue;
+      }
       if (!(area > 0)) throw new Error(`${name}: triangle ${t / 3} not CCW around its normal (area ${area})`);
     }
   }
 }
 
+/** Area (times two) of index triangle t of a geometry, signed around the normal of its first vertex. */
+function triangleArea(P: Float32Array, N: Int8Array, indices: Uint32Array, t: number): number {
+  const a = indices[t]! * 3;
+  const b = indices[t + 1]! * 3;
+  const c = indices[t + 2]! * 3;
+  const e1x = P[b]! - P[a]!;
+  const e1y = P[b + 1]! - P[a + 1]!;
+  const e1z = P[b + 2]! - P[a + 2]!;
+  const e2x = P[c]! - P[a]!;
+  const e2y = P[c + 1]! - P[a + 1]!;
+  const e2z = P[c + 2]! - P[a + 2]!;
+  return (e1y * e2z - e1z * e2y) * N[a]! + (e1z * e2x - e1x * e2z) * N[a + 1]! + (e1x * e2y - e1y * e2x) * N[a + 2]!;
+}
+
 /**
- * The quad starting at vertex v0 is a triangle padded to four corners: exactly one pair of
- * corners coincides, and they are neighbours in the corner order (the front copy repeats its last
- * corner; the back copy, written 0,3,2,1, then has the pair at 1 and 2).
+ * The quad starting at vertex v0 is a triangle padded to four corners in the one form the liquid
+ * emitter writes: exactly one pair of corners coincides, and it is corners 2 and 3 (the front copy
+ * repeats its last corner) or corners 1 and 2 (the back copy, written 0,3,2,1).
  */
 function isPaddedTriangleQuad(P: Float32Array, v0: number): boolean {
   const same = (i: number, j: number): boolean =>
     P[(v0 + i) * 3] === P[(v0 + j) * 3] && P[(v0 + i) * 3 + 1] === P[(v0 + j) * 3 + 1] && P[(v0 + i) * 3 + 2] === P[(v0 + j) * 3 + 2];
   let pairs = 0;
   for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) if (same(i, j)) pairs++;
-  return pairs === 1 && !same(0, 2) && !same(1, 3);
+  return pairs === 1 && (same(2, 3) || same(1, 2));
 }
 
 /** Throw unless every vertex lies inside [lo, hi]^3. */
