@@ -202,7 +202,10 @@ export class ItemEntity extends Entity {
 
 export class FallingBlockEntity extends Entity {
   readonly kind = 'falling' as const;
-  /** The cell (id + state) being carried down. */
+  /**
+   * The packed cell being carried down: always a full block (< FULL_LIMIT: only sand and gravel
+   * fall, and they cannot be cut; manager.ts asserts it where the block is spawned and placed).
+   */
   cell: number;
 
   constructor(id: number, cell: number) {

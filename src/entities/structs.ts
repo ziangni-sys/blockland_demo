@@ -27,6 +27,8 @@
 import { TICK_DT } from '../core/constants';
 import { qconj, qmul, qrotate, qrotateInv, qslerp, quat, vec3, wrapAngle, type AABB, type Quat, type Vec3 } from '../core/math';
 import type { HullInfo } from '../structures/hull';
+import type { CellBounds } from '../voxel/grid';
+import { solidFillAt } from '../voxel/parts';
 import { StructureGrid } from '../voxel/sgrid';
 
 /**
@@ -263,6 +265,52 @@ class PoseSnap {
   readonly vel = new Pose();
   /** rebuild() generation that last saw the structure. */
   seen = 0;
+  /** trimOf(): the grid and grid version it was computed for, and the result (boundsTrim bits). */
+  trimGrid: StructureGrid | null = null;
+  trimVersion = -1;
+  trim = 0;
+}
+
+/**
+ * Faces of a structure's cell bounds whose outer half holds nothing (trimOf). Bit order follows
+ * the faces -X, +X, -Y, +Y, -Z, +Z; the octants of a cell on each face's outer half are HALF_OF.
+ */
+const HALF_OF = Uint8Array.of(0x55, 0xaa, 0x33, 0xcc, 0x0f, 0xf0);
+
+/**
+ * Which faces of the cell bounds `b` of `grid` can be pulled in half a cell: every cell on that
+ * face's boundary layer is air or a solid cell whose outer half is empty (a deck of lower half
+ * slabs: its top is at y + 0.5, not y + 1). A soft cell (a torch) keeps the face where it is. Only
+ * a grid with holes or second parts can have such faces. Bits as HALF_OF.
+ */
+function boundsTrim(grid: StructureGrid, b: CellBounds): number {
+  let trim = 0;
+  for (let f = 0; f < 6; f++) {
+    const a = f >> 1;
+    // The boundary layer of face f, and the ranges of the other two axes.
+    const layer = (f & 1) === 0 ? (a === 0 ? b.minX : a === 1 ? b.minY : b.minZ) : (a === 0 ? b.maxX : a === 1 ? b.maxY : b.maxZ) - 1;
+    const u0 = a === 0 ? b.minY : b.minX;
+    const u1 = a === 0 ? b.maxY : b.maxX;
+    const v0 = a === 2 ? b.minY : b.minZ;
+    const v1 = a === 2 ? b.maxY : b.maxZ;
+    const half = HALF_OF[f]!;
+    let open = true;
+    for (let u = u0; u < u1 && open; u++) {
+      for (let v = v0; v < v1; v++) {
+        const x = a === 0 ? layer : u;
+        const y = a === 1 ? layer : a === 0 ? u : v;
+        const z = a === 2 ? layer : v;
+        if (grid.getCell(x, y, z) === 0) continue;
+        const fill = solidFillAt(grid, x, y, z);
+        if (fill === 0 || (fill & half) !== 0) {
+          open = false;
+          break;
+        }
+      }
+    }
+    if (open) trim |= 1 << f;
+  }
+  return trim;
 }
 
 export class StructureCache {
@@ -370,7 +418,7 @@ export class StructureCache {
         r.headX = 1;
         r.headZ = 0;
       }
-      this.bounds(r, b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ);
+      this.bounds(r, b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ, this.trimOf(snap, s.grid, b));
       if (used - 1 < recs.length) recs[used - 1] = r;
       else recs.push(r);
       if (this.byId.get(r.id) !== r) this.byId.set(r.id, r);
@@ -412,7 +460,34 @@ export class StructureCache {
     return wrapAngle(2 * Math.atan2(dq.y, dq.w));
   }
 
-  private bounds(r: StructRec, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {
+  /**
+   * boundsTrim() of a structure, recomputed only when its grid changed (the faces of its cell
+   * bounds scanned once per edit; a grid without holes or second-part layers has none to trim).
+   */
+  private trimOf(snap: PoseSnap, grid: StructureGrid, b: CellBounds): number {
+    if (!grid.layered) return 0;
+    if (snap.trimGrid !== grid || snap.trimVersion !== grid.version) {
+      snap.trimGrid = grid;
+      snap.trimVersion = grid.version;
+      snap.trim = boundsTrim(grid, b);
+    }
+    return snap.trim;
+  }
+
+  /**
+   * The world box of a structure's local cell bounds at its current pose. `trim` (boundsTrim bits)
+   * pulls faces in half a cell: the box bounds the structure's solid octants on the half-cell
+   * lattice, so a body standing on a deck of lower half slabs is not inside it (as a body on a
+   * deck of whole blocks is not), and the queries a body inside it asks every tick are skipped.
+   */
+  private bounds(r: StructRec, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, trim: number): void {
+    // (Integers in, fractions made here: a fraction passed to a call that is not inlined is boxed.)
+    const lx = (trim & 1) !== 0 ? x0 + 0.5 : x0;
+    const hx = (trim & 2) !== 0 ? x1 - 0.5 : x1;
+    const ly = (trim & 4) !== 0 ? y0 + 0.5 : y0;
+    const hy = (trim & 8) !== 0 ? y1 - 0.5 : y1;
+    const lz = (trim & 16) !== 0 ? z0 + 0.5 : z0;
+    const hz = (trim & 32) !== 0 ? z1 - 0.5 : z1;
     let minX = Infinity;
     let minY = Infinity;
     let minZ = Infinity;
@@ -421,9 +496,9 @@ export class StructureCache {
     let maxZ = -Infinity;
     const t = this.tmp;
     for (let c = 0; c < 8; c++) {
-      t.x = c & 1 ? x1 : x0;
-      t.y = c & 2 ? y1 : y0;
-      t.z = c & 4 ? z1 : z0;
+      t.x = c & 1 ? hx : lx;
+      t.y = c & 2 ? hy : ly;
+      t.z = c & 4 ? hz : lz;
       curToWorld(r, t, t);
       if (t.x < minX) minX = t.x;
       if (t.y < minY) minY = t.y;

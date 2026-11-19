@@ -43,10 +43,12 @@ import { aabb, vec3, type AABB, type Vec3 } from '../core/math';
 import { FULL_LIMIT, ID_MASK } from '../blocks/cell';
 import { cellProblem } from '../blocks/shapes';
 import { isItem } from '../blocks/items';
-import { BLOCKS, LIQUID, REPLACEABLE, SOLID } from '../blocks/registry';
+import { BLOCKS, LIQUID, REPLACEABLE } from '../blocks/registry';
 import type { ByteReader, ByteWriter } from '../save/bytes';
 import { snapPoint, type SnapTransform } from '../structures/assembly';
 import type { Ship, Structure } from '../structures/structure';
+import type { VoxelGrid } from '../voxel/grid';
+import { solidFillAt } from '../voxel/parts';
 import { boxOverlapsSolid, hasSupportBelow } from '../voxel/shape';
 import {
   CRUSH_DAMAGE,
@@ -309,6 +311,7 @@ export class EntityManager {
 
   /** A falling block starting in world cell (x, y, z) (the caller has already emptied that cell). */
   spawnFalling(x: number, y: number, z: number, cell: number): FallingBlockEntity {
+    assertFullBlock(cell);
     const e = new FallingBlockEntity(this.allocateId(), cell);
     e.setPosition(Math.floor(x) + 0.5, Math.floor(y), Math.floor(z) + 0.5);
     return this.add(e);
@@ -471,9 +474,9 @@ export class EntityManager {
   }
 
   /**
-   * Seat the player at a helm: feet on the floor of the cell behind the helm (helm cell minus
-   * ship.forward), or where the player stands if that cell is blocked. Returns false when the
-   * player is dead, the ship is gone or someone else holds the wheel.
+   * Seat the player at a helm, in the cell behind the helm (helm cell minus ship.forward): feet on
+   * the floor of that column (seatHeight), or where the player stands if the column is blocked.
+   * Returns false when the player is dead, the ship is gone or someone else holds the wheel.
    */
   startSteering(player: Player, ship: Ship, helmX: number, helmY: number, helmZ: number): boolean {
     if (player.dead || player.removed || ship.removed) return false;
@@ -487,10 +490,10 @@ export class EntityManager {
     const sx = helmX - DIR_X[f]!;
     const sy = helmY - DIR_Y[f]!;
     const sz = helmZ - DIR_Z[f]!;
-    const blocked = SOLID[g.getCell(sx, sy, sz) & ID_MASK] === 1 || SOLID[g.getCell(sx, sy + 1, sz) & ID_MASK] === 1;
-    if (!blocked) {
+    const h = seatHeight(g, sx, sy, sz);
+    if (h !== NO_SEAT) {
       player.seat.x = sx + 0.5;
-      player.seat.y = sy;
+      player.seat.y = h / 2;
       player.seat.z = sz + 0.5;
     } else {
       g.toLocal(player.pos, player.seat);
@@ -1170,10 +1173,12 @@ export class EntityManager {
       return;
     }
     if (this.body.unstick(p, UNSTUCK_SEARCH_RADIUS)) {
+      // (The fall goes on: a body moved to a free spot has not landed, as for a server-driven
+      // one. Ending it here let a falling client dip into a wall beside it every report and land
+      // unharmed.)
       p.vel.x = p.carrierVel.x;
       p.vel.y = p.carrierVel.y;
       p.vel.z = p.carrierVel.z;
-      p.fallDistance = 0;
       this.raise(p, 'unstick');
     } else {
       this.damage(p, 1, 'suffocate');
@@ -1440,7 +1445,15 @@ export class EntityManager {
     else if (e.age > FALLING_MAX_TICKS) this.fallingToItem(e, 'timeout');
   }
 
+  /**
+   * The falling block stopped on world ground: it becomes a block in the cell its centre is in
+   * (floor(y + 0.5)) when that cell is replaceable (a cell with parts never is: their first part is
+   * hard, docs/SHAPES.md I7) and holds no structure material, else an item drop. On a lower half
+   * slab it therefore lands in the cell above the slab, half a block above it (docs/SHAPES.md 9.3,
+   * question 7).
+   */
   private landFalling(e: FallingBlockEntity): void {
+    assertFullBlock(e.cell);
     const world = this.host.world;
     const x = Math.floor(e.pos.x);
     const y = Math.floor(e.pos.y + 0.5);
@@ -1722,6 +1735,37 @@ function byPosX(a: Entity, b: Entity): number {
 }
 
 // ====================================================================== helpers
+
+/** seatHeight's answer when the seat column is blocked. */
+const NO_SEAT = -0x40000000;
+
+/** Half layer k (half-cell coordinate along y) of column (x, z) of grid `g` holds a solid octant. */
+function halfSolid(g: VoxelGrid, x: number, k: number, z: number): boolean {
+  return (solidFillAt(g, x, k >> 1, z) & ((k & 1) === 1 ? 0xcc : 0x33)) !== 0;
+}
+
+/**
+ * Feet height of the helm seat in column (sx, sz) of a ship whose seat cell is (sx, sy, sz), as a
+ * half layer (feet at h / 2), or NO_SEAT (docs/SHAPES.md 5.9). The body (0.6 wide, 1.8 high) stands
+ * in the middle of the column and covers all four quarters of it and four half layers, so the rule
+ * reads that column's half layers only, whatever the ship's heading: the body is free at h when
+ * half layers h .. h + 3 hold no solid octant, and it has a floor when h - 1 holds one.
+ *  1. the first of h = 2 sy, 2 sy + 1, 2 sy - 1 that is free and has a floor (on a half-slab floor
+ *     the helmsman stands on the slab, not in it nor half a block above it);
+ *  2. else 2 sy when it is free (M1: a seat cell and the cell above it free, no floor needed);
+ *  3. else NO_SEAT (the caller keeps the player where it stands).
+ * On a ship of full blocks the result is M1's: the two odd candidates need one cell half solid.
+ */
+function seatHeight(g: VoxelGrid, sx: number, sy: number, sz: number): number {
+  const free = (h: number): boolean => !halfSolid(g, sx, h, sz) && !halfSolid(g, sx, h + 1, sz) && !halfSolid(g, sx, h + 2, sz) && !halfSolid(g, sx, h + 3, sz);
+  for (const h of [2 * sy, 2 * sy + 1, 2 * sy - 1]) if (free(h) && halfSolid(g, sx, h - 1, sz)) return h;
+  return free(2 * sy) ? 2 * sy : NO_SEAT;
+}
+
+/** RangeError unless a falling block's cell is a full block (packed value < FULL_LIMIT): only sand and gravel fall, and they cannot be cut. */
+function assertFullBlock(cell: number): void {
+  if (!(Number.isInteger(cell) && cell >= 0 && cell < FULL_LIMIT)) throw new RangeError(`a falling block carries ${cell}, not a full block`);
+}
 
 /** A tick counter as a non-negative integer (save fields are integers even if a caller set a fraction). */
 function uint(v: number): number {
