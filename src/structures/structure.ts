@@ -77,7 +77,10 @@ export class Rotor extends Structure {
   angle = 0;
   /** Signed angular speed in rad/s. 0 = stopped. */
   angularSpeed = 0;
-  /** Number of sail cells (wool / canvas). */
+  /**
+   * Sail volume in sails: octants of sail material (wool / canvas) divided by 8, so a full block
+   * is 1 and a slab 0.5 (docs/SHAPES.md 11.1). A multiple of 1/8; saved and sent as round(sails x 8).
+   */
   sails = 0;
 
   /** Rotating mechanical structures cannot be edited. */
@@ -120,7 +123,7 @@ export class Ship extends Structure {
   forward: Dir = 5;
 
   // ---- derived every tick
-  /** Sail cells on running rotors mounted on this ship (sets the top speed). */
+  /** Sails (by volume, see Rotor.sails) of the running rotors mounted on this ship (sets the top speed). */
   sails = 0;
   /** Resting: skipped by the dynamics until something disturbs it. */
   asleep = false;

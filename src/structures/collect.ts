@@ -14,12 +14,13 @@
  * would leave the rest of the structure behind and delete the glue across the chunk border.
  */
 import { CELL_MULTI_BIT, cellState, ID_MASK, PACK_SCALE, stateFacing } from '../blocks/cell';
+import { cellsTouch } from '../blocks/shapes';
 import { CELL_UNLOADED } from '../blocks/defs';
 import { ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, dirSign, type Dir } from '../core/dirs';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
 import type { GlueStore } from './glue';
-import { canJoinStructure, cellFunc, connectedCells, isFunctionalCell, isSailCell } from './stick';
+import { canJoinStructure, cellFunc, connectedCells, isFunctionalCell, sailVolume8 } from './stick';
 
 // ------------------------------------------------------------ CellSet
 
@@ -171,7 +172,11 @@ export interface CollectResult {
    */
   cells: Int32Array;
   count: number;
-  /** Cells whose BlockDef.sail is true (among `cells`). */
+  /**
+   * Sail volume of `cells` in sails: the octants filled by sail material (BlockDef.sail) divided
+   * by 8, so a full felt block is 1 and a felt slab 0.5 (docs/SHAPES.md 11.1). A multiple of
+   * 1/8; an integer when every sail cell is a full block.
+   */
   sails: number;
   /** Half-open bounds of `cells` (grid-local), null when `cells` is empty. */
   bounds: CellBounds | null;
@@ -253,7 +258,7 @@ class FillQueue {
 }
 
 /**
- * BFS from (sx,sy,sz) (cell value `start`, already validated) across connected faces.
+ * BFS from (sx,sy,sz) (packed cell `start`, already validated) across connected faces.
  * halfAxis >= 0 restricts the fill to cells whose coordinate along that axis is strictly
  * beyond `plane` in direction `sign` (the rotor half-space). excludeFunc rejects functional
  * blocks (rotors). Stops as soon as more than maxCells cells were found, or as soon as the
@@ -284,12 +289,11 @@ function flood(
 ): Fill {
   const q = new FillQueue(maxCells + 1);
   const visited = new CellSet(Math.min(maxCells + 1, INITIAL_CAPACITY));
-  q.push(sx, sy, sz, start < CELL_MULTI_BIT ? start : start + grid.getPart2(sx, sy, sz) * PACK_SCALE);
+  q.push(sx, sy, sz, start);
   visited.add(sx, sy, sz);
   let tooBig = maxCells < 1;
   let tooSpread = maxBoxCells < 1;
   let unloaded = false;
-  let sails = 0;
   let minX = sx;
   let minY = sy;
   let minZ = sz;
@@ -353,12 +357,14 @@ function flood(
   const n = q.n;
   const xyz = q.xyz;
   const values = q.values;
-  for (let i = 0; i < n; i++) if (isSailCell(values[i]!)) sails++;
+  // Summed in eighths (integers), divided once: exact.
+  let sails8 = 0;
+  for (let i = 0; i < n; i++) sails8 += sailVolume8(values[i]!);
 
   return {
     cells: xyz.length === n * 3 ? xyz : xyz.slice(0, n * 3),
     count: n,
-    sails,
+    sails: sails8 / 8,
     bounds: { minX, minY, minZ, maxX: maxX + 1, maxY: maxY + 1, maxZ: maxZ + 1 },
     tooBig,
     tooSpread,
@@ -391,6 +397,7 @@ export function collectShip(
   maxBoxCells = checkLimit('maxBoxCells', maxBoxCells);
   const start = grid.getCell(hx, hy, hz);
   if (cellFunc(start) !== 'helm') return failure('not_a_helm');
+  // A helm cannot be cut, so its cell value is its packed cell.
   const f = flood(grid, glue, hx, hy, hz, start, maxCells, maxBoxCells, -1, 0, 0, false);
   const reason: CollectReason = f.tooBig ? 'too_big' : f.tooSpread ? 'too_spread' : f.unloaded ? 'unloaded' : 'ok';
   return {
@@ -409,7 +416,9 @@ export function collectShip(
  * front of the bearing's plane (转子范围：只收轴承所在平面前方的格子). The bearing itself and
  * every functional block (helm, bearing, propeller) are never included and stop the fill.
  *
- * Reasons: 'not_a_bearing'; 'no_hub' (the hub cannot join a structure, or is functional);
+ * Reasons: 'not_a_bearing'; 'no_hub' (the hub cannot join a structure, or is functional, or does
+ * not touch the bearing's front face: cellsTouch, so a slab on the far half of the hub cell
+ * would not spin across half a cell of air; docs/SHAPES.md 11.1);
  * 'too_big' (more than maxCells cells); 'too_spread' (a tight box of more than maxBoxCells
  * cells); 'unloaded' (the hub, or a cell the rotor touches,
  * lies in an unloaded chunk; checked before the sails, which may be in the missing part);
@@ -438,9 +447,13 @@ export function collectRotor(
   const hub = grid.getCell(hx, hy, hz);
   if ((hub & ID_MASK) === UNLOADED_ID) return failure('unloaded'); // a hub may well be there
   if (!canJoinStructure(hub) || isFunctionalCell(hub)) return failure('no_hub');
+  // The bearing cannot be cut: its front face is fully covered, so this asks whether the hub's
+  // face towards the bearing has hard material on it.
+  const hubPacked = hub < CELL_MULTI_BIT ? hub : hub + grid.getPart2(hx, hy, hz) * PACK_SCALE;
+  if (!cellsTouch(bearing, hubPacked, facing)) return failure('no_hub');
   const axis = facing >> 1;
   const plane = axis === 0 ? bx : axis === 1 ? by : bz;
-  const f = flood(grid, glue, hx, hy, hz, hub, maxCells, maxBoxCells, axis, plane, dirSign(facing), true);
+  const f = flood(grid, glue, hx, hy, hz, hubPacked, maxCells, maxBoxCells, axis, plane, dirSign(facing), true);
   const reason: CollectReason = f.tooBig
     ? 'too_big'
     : f.tooSpread

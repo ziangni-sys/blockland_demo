@@ -23,7 +23,8 @@
  *              linearVelocity, angularVelocity
  *     glue     i32Array: GlueStore.toArray() (canonical x, y, z, axis quadruples)
  *     rotor:   varint bearing x y z, u8 axis, f64 x 4 baseRotation, f64 angle,
- *              f64 angularSpeed, varuint sails
+ *              f64 angularSpeed, varuint round(sails x 8) (sails count by volume in eighths,
+ *              docs/SHAPES.md 11.5; read back divided by 8)
  *     ship:    varint helm x y z, u8 forward, f64 throttle, f64 rudder, bool asleep,
  *              varuint restTicks
  *
@@ -49,7 +50,10 @@ import type { World } from '../voxel/world';
 import type { GlueStore } from './glue';
 import { Rotor, Ship, type Structure } from './structure';
 
-/** 4: each cell is a Cell (both parts) in runs of varuint gap, varuint length, cells (SAVE_VERSION 4). */
+/**
+ * 4: each cell is a Cell (both parts) in runs of varuint gap, varuint length, cells; rotor sails in
+ * eighths (SAVE_VERSION 4).
+ */
 export const STRUCTURES_FORMAT = 4;
 
 const KIND_SHIP = 0;
@@ -99,7 +103,7 @@ export function writeStructures(w: ByteWriter, nextId: number, structures: reado
       w.u8(s.axis);
       writeQuat(w, s.baseRotation);
       w.f64(s.angle).f64(s.angularSpeed);
-      w.varuint(s.sails);
+      w.varuint(Math.round(s.sails * 8));
     } else if (s instanceof Ship) {
       w.varint(s.helmX).varint(s.helmY).varint(s.helmZ);
       w.u8(s.forward);
@@ -204,7 +208,7 @@ export function readStructures(r: ByteReader, world: World): DecodedStructures {
       readQuat(r, s.baseRotation);
       s.angle = readFinite(r);
       s.angularSpeed = readFinite(r);
-      s.sails = r.varuint();
+      s.sails = r.varuint() / 8;
     } else if (s instanceof Ship) {
       s.helmX = readCoord(r);
       s.helmY = readCoord(r);

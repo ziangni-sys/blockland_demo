@@ -338,6 +338,14 @@ function readQuatF64(r: ByteReader): Quat {
   return { x, y, z, w: q };
 }
 
+/**
+ * A rotor's sails on the wire: round(sails x 8). Sails count by volume (a felt slab is half a
+ * sail, docs/SHAPES.md 11.5), always a multiple of 1/8, so this is exact; read back divided by 8.
+ */
+function sailsEighths(sails: number): number {
+  return Math.round(sails * 8);
+}
+
 function writeDir(w: ByteWriter, d: Dir, what: string): void {
   if (!isUint(d, 5)) bad(what, d);
   w.u8(d);
@@ -1044,7 +1052,7 @@ function writeStructureRecord(w: ByteWriter, s: StructureRecord, budget: CellBud
     writeCoord(w, s.bearing.z);
     writeDir(w, s.axis, 'rotor axis');
     writeQuatF64(w, s.baseRotation);
-    w.f64(s.angle).f64(s.angularSpeed).varuint(s.sails).bool(s.frozen);
+    w.f64(s.angle).f64(s.angularSpeed).varuint(sailsEighths(s.sails)).bool(s.frozen);
   } else {
     writeCoord(w, s.helm.x);
     writeCoord(w, s.helm.y);
@@ -1091,7 +1099,7 @@ function readStructureRecord(r: ByteReader, budget: CellBudget): StructureRecord
     const baseRotation = readQuatF64(r);
     const angle = r.f64();
     const angularSpeed = r.f64();
-    const sails = r.varuint();
+    const sails = r.varuint() / 8;
     return { kind, ...base, bearing, axis, baseRotation, angle, angularSpeed, sails, frozen: r.bool() };
   }
   const helm = readCoord3(r);
@@ -1151,7 +1159,7 @@ function writeStructureDelta(w: ByteWriter, d: StructureDelta): void {
     w.varuint(d.helm.helmsmanId);
   }
   if (d.control !== undefined) w.f32(d.control.throttle).f32(d.control.rudder);
-  if (d.rotor !== undefined) w.f64(d.rotor.angle).f64(d.rotor.angularSpeed).varuint(d.rotor.sails).bool(d.rotor.frozen);
+  if (d.rotor !== undefined) w.f64(d.rotor.angle).f64(d.rotor.angularSpeed).varuint(sailsEighths(d.rotor.sails)).bool(d.rotor.frozen);
 }
 function readStructureDelta(r: ByteReader): StructureDelta {
   const id = r.varuint();
@@ -1203,7 +1211,7 @@ function readStructureDelta(r: ByteReader): StructureDelta {
   if (mask & 32) {
     const angle = r.f64();
     const angularSpeed = r.f64();
-    const sails = r.varuint();
+    const sails = r.varuint() / 8;
     d.rotor = { angle, angularSpeed, sails, frozen: r.bool() };
   }
   return d;

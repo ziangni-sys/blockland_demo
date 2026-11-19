@@ -5,7 +5,8 @@
  *  - moving collected cells out of a grid into a new structure (copy all, then clear all),
  *  - refilling water where a hull left the sea (DESIGN "水的处理"),
  *  - snapping a structure back onto a grid with one of the 24 grid rotations (blockify),
- *    including the hard / soft destination rules and drops,
+ *    including the destination rules (write, overwrite a soft block, merge parts, conflict:
+ *    landing()) and drops,
  *  - docking a ship into the world and re-mounting its rotors.
  *
  * These functions know nothing about the StructureManager's registry, indexes or hooks; the
@@ -24,14 +25,15 @@
  * cell in front of it (the hub's place), so the hub and the bearing stay glued across a start
  * and a stop.
  */
-import { AIR, cellState, ID_MASK, isLiquidSource, liquidState, makeCell } from '../blocks/cell';
+import { AIR, cellSecond, cellState, FULL_LIMIT, HOLES_SHIFT, ID_MASK, isLiquidSource, liquidState, makeCell, PART_MASK } from '../blocks/cell';
 import { B } from '../blocks/defs';
-import { BLOCKS, isLiquidCell, isSolidCell, type DropSpec } from '../blocks/registry';
+import { BLOCKS, isLiquidCell, isSolidCell, SOLID, type DropSpec } from '../blocks/registry';
+import { DROP_POINT, MERGE_OK, MERGE_OVERLAP, mergeCells, mergeProblem, solidFill } from '../blocks/shapes';
 import { STRUCTURE_MAX_BOX_CELLS, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, NX, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
 import { qmul, vclone, vec3, vset, type Quat, type Vec3 } from '../core/math';
 import { SET_NO_NEIGHBOR_UPDATE, SET_STRUCTURE_MOVE, type CellBounds, type VoxelGrid } from '../voxel/grid';
-import { copyCell } from '../voxel/parts';
+import { copyCell, getPacked } from '../voxel/parts';
 import type { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
 import { boxCellsWith, CellSet, inBounds } from './collect';
@@ -39,7 +41,7 @@ import type { GlueStore } from './glue';
 import { isDryCell, type HullInfo } from './hull';
 import { nearestRot, rotCell, rotCellPos, rotToQuat, rotVec, type GridRot } from './orient';
 import { applyRotorPose } from './rotor';
-import { holdsGlue, pruneGlueAt } from './stick';
+import { glueFaceKept, holdsGlue, pruneGlueAt } from './stick';
 import type { Rotor, Ship, StructureHost } from './structure';
 
 /** Flags of every bulk write made while assembling, blockifying or docking. */
@@ -50,9 +52,12 @@ const WATER_SOURCE = makeCell(B.WATER, liquidState(0, false));
 
 /** Outcome counters of a blockify / dock. */
 export interface BlockifyReport {
-  /** Structure cells written into the destination grid. */
+  /** Structure cells written into the destination grid (merged into a cell with parts included). */
   placed: number;
-  /** Structure cells that hit a hard block and became drops (or vanished when drops are off). */
+  /**
+   * Structure cells that could not land (LAND_CONFLICT, LAND_LIMIT) and became drops, one per part
+   * (or vanished when drops are off). Counts cells, not parts.
+   */
   dropped: number;
   /** Soft destination blocks (plants, torches, snow cover, liquids) replaced. */
   overwritten: number;
@@ -62,30 +67,93 @@ export function emptyReport(): BlockifyReport {
   return { placed: 0, dropped: 0, overwritten: 0 };
 }
 
-/** What a displaced cell yields (BlockDef.drop; undefined = the block itself). null = nothing. */
-export function dropOf(cell: number): DropSpec | null {
-  const def = BLOCKS[cell & ID_MASK];
+/**
+ * What a displaced part (or full block) yields (BlockDef.drop of its id; undefined = the block
+ * itself; one block per part, however much of it is left). null = nothing.
+ */
+export function dropOf(part: number): DropSpec | null {
+  const def = BLOCKS[part & ID_MASK];
   if (!def || def.drop === null) return null;
   return def.drop ?? { item: def.id, count: 1 };
 }
 
-/** Spawn the drop of `cell` centred on cell (x,y,z) of `grid`. Nothing when the world's drops are off. */
-function spawnCellDrop(host: StructureHost, grid: VoxelGrid, x: number, y: number, z: number, cell: number, tmp: Vec3): void {
-  if (!host.dropsEnabled) return;
-  const d = dropOf(cell);
+/** Spawn the drop of one part value lying in cell (x,y,z) of `grid`, at its DROP_POINT. */
+function spawnPartDrop(host: StructureHost, grid: VoxelGrid, x: number, y: number, z: number, part: number, tmp: Vec3): void {
+  const d = dropOf(part);
   if (!d || d.count <= 0) return;
-  grid.toWorld(vset(tmp, x + 0.5, y + 0.5, z + 0.5), tmp);
+  const f = (~(part >>> HOLES_SHIFT) & 0xff) * 3;
+  grid.toWorld(vset(tmp, x + DROP_POINT[f]!, y + DROP_POINT[f + 1]!, z + DROP_POINT[f + 2]!), tmp);
   host.spawnDrop(tmp.x, tmp.y, tmp.z, d.item, d.count);
 }
 
 /**
- * Can nothing of a structure be placed at this cell of `grid`? HARD blocks (the 'unloaded'
- * sentinel and the deeprock below y = 0 included) and, for the world, cells above the build
- * height, where World.setCell cannot write.
+ * Spawn the drops of the packed cell `cell` lying in cell (x,y,z) of `grid`: one per part (DESIGN
+ * 一个部件对应一个物品), each at the DROP_POINT of its octants (docs/SHAPES.md 2.1, 9.5; a full
+ * block drops at the cell centre, as in M1), first part first. Nothing when the world's drops are off.
  */
-export function isHardDestination(grid: VoxelGrid, x: number, y: number, z: number): boolean {
-  if (grid.isWorld && y >= WORLD_HEIGHT) return true;
-  return isSolidCell(grid.getCell(x, y, z));
+function spawnCellDrops(host: StructureHost, grid: VoxelGrid, x: number, y: number, z: number, cell: number, tmp: Vec3): void {
+  if (!host.dropsEnabled) return;
+  spawnPartDrop(host, grid, x, y, z, cell & PART_MASK, tmp);
+  const p2 = cellSecond(cell);
+  if (p2 !== 0) spawnPartDrop(host, grid, x, y, z, p2, tmp);
+}
+
+// ------------------------------------------------------------ landing
+
+/** The destination is air: write the incoming cell. */
+export const LAND_WRITE = 0;
+/** The destination is a soft block or a liquid: overwrite it (a non-liquid soft block drops). */
+export const LAND_OVERWRITE = 1;
+/** The destination has hard parts that the incoming cell does not overlap, two parts at most together: write mergeCells(dest, incoming). */
+export const LAND_MERGE = 2;
+/** The parts overlap (any full hard block does), or the destination is above the build height or not loaded. */
+export const LAND_CONFLICT = 3;
+/** No overlap, but more than two parts together: the same consequences as LAND_CONFLICT, another message. */
+export const LAND_LIMIT = 4;
+
+/**
+ * How a structure cell lands in a grid (docs/SHAPES.md 11.3): blockify, the dock preview
+ * (planDock) and the dock commit all decide every cell with this one function. `dest` is the
+ * destination's packed cell, `incoming` the structure cell rotated into the destination grid
+ * (rotCell), `aboveBuildHeight` that the destination is a world cell at or above WORLD_HEIGHT
+ * (World.setCell cannot write there). An unloaded destination reads as the 'unloaded' sentinel and
+ * the cells below y = 0 as deeprock: hard full blocks, so conflicts. With full blocks only this is
+ * the M1 rule (hard destination: conflict; soft: overwrite; air: write). A two-part incoming cell
+ * lands or conflicts as a whole: the cell is one unit.
+ */
+export function landing(dest: number, incoming: number, aboveBuildHeight: boolean): 0 | 1 | 2 | 3 | 4 {
+  if (aboveBuildHeight) return LAND_CONFLICT;
+  // A full hard destination overlaps any incoming cell (mergeProblem would say MERGE_OVERLAP).
+  if (dest < FULL_LIMIT) return SOLID[dest & ID_MASK] !== 0 ? LAND_CONFLICT : dest === AIR ? LAND_WRITE : LAND_OVERWRITE;
+  if (solidFill(dest) === 0) return LAND_OVERWRITE; // never reached for canonical cells (I7), kept for any input
+  const problem = mergeProblem(dest, incoming);
+  return problem === MERGE_OK ? LAND_MERGE : problem === MERGE_OVERLAP ? LAND_CONFLICT : LAND_LIMIT;
+}
+
+/** Does this landing result keep the cell from landing (it drops instead)? */
+function blocked(land: number): boolean {
+  return land === LAND_CONFLICT || land === LAND_LIMIT;
+}
+
+/**
+ * Land one structure cell (`incoming`, already rotated) at (x,y,z) of `grid`, whose landing
+ * result is `land` and must not be blocked: write it, overwriting a soft block (whose drop spawns
+ * unless it is a liquid) or merging it with the parts already there, in one setCell (one change
+ * event). Returns whether a soft block was overwritten.
+ */
+function landCell(host: StructureHost, grid: VoxelGrid, x: number, y: number, z: number, incoming: number, land: number, tmp: Vec3): boolean {
+  if (land === LAND_MERGE) {
+    grid.setCell(x, y, z, mergeCells(getPacked(grid, x, y, z), incoming), MOVE_FLAGS);
+    return false;
+  }
+  let overwritten = false;
+  if (land === LAND_OVERWRITE) {
+    const prev = grid.getCell(x, y, z); // a soft block or a liquid: a full block, never multi-part
+    if (!isLiquidCell(prev)) spawnCellDrops(host, grid, x, y, z, prev, tmp);
+    overwritten = true;
+  }
+  grid.setCell(x, y, z, incoming, MOVE_FLAGS);
+  return overwritten;
 }
 
 // ------------------------------------------------------------ moving cells out
@@ -130,13 +198,16 @@ export function identityMap(): (x: number, y: number, z: number) => Vec3 {
   return (x, y, z) => vset(out, x, y, z);
 }
 
-/** The glue lifetime rule (pruneGlueAt) on every cell of a list (x,y,z triples) of `grid`. */
+/**
+ * The state rule of the glue lifetime (pruneGlueAt with the current content as the old one, so
+ * glueFaceKept only) on every cell of a list (x,y,z triples) of `grid`.
+ */
 function pruneGlueAround(grid: VoxelGrid, glue: GlueStore, cells: Int32Array, count: number): void {
   for (let i = 0; i < count && glue.size > 0; i++) {
     const x = cells[i * 3]!;
     const y = cells[i * 3 + 1]!;
     const z = cells[i * 3 + 2]!;
-    pruneGlueAt(grid, glue, x, y, z, grid.getCell(x, y, z));
+    pruneGlueAt(grid, glue, x, y, z, getPacked(grid, x, y, z));
   }
 }
 
@@ -156,14 +227,16 @@ export interface GridFace {
 /**
  * The glue rules on the destination of a blockify or dock, after the structure's cells were
  * written there (`placed`, x,y,z triples; `written` holds the same cells) and its glue was moved
- * there. For every glued face of a written cell P, with Q the cell across it:
- *  - Q written by the move too: the face travelled with both blocks; the lifetime rule applies
- *    (removed when neither side holdsGlue);
+ * there. A cell the move merged into a cell that already held a part counts as written: after
+ * the merge the cell is one unit (docs/SHAPES.md 11.3). For every glued face of a written cell P,
+ * with Q the cell across it:
+ *  - Q written by the move too: the face travelled with both blocks; the state rule of the glue
+ *    lifetime applies (removed unless glueFaceKept: one side is still on the face);
  *  - Q not written and holdsGlue(Q) (a glueable block, or an unloaded cell that may be one):
  *    removed, wherever the glue came from — a move never joins a structure block to a block it
- *    did not bring along (DESIGN 强力胶: 结构体移动不会产生新的胶连接) — unless the face is `keep`;
- *  - Q not written and not holdsGlue(Q): the lifetime rule (an exposed face on P stays when P
- *    holds glue).
+ *    did not bring along (DESIGN 强力胶: 结构体移动不会产生新的胶连接) — unless the face is `keep`
+ *    (then the state rule);
+ *  - Q not written and not holdsGlue(Q): the state rule (an exposed face on P stays when P is on it).
  * `keep` is the bearing face of a stopping rotor when the destination store held its glue
  * before the move (see blockifyGrid), else null.
  */
@@ -181,18 +254,15 @@ function settlePlacedGlue(
     const z = placed[i * 3 + 2]!;
     const mask = glue.dirMaskAt(x, y, z);
     if (mask === 0) continue;
-    const holdsP = holdsGlue(grid.getCell(x, y, z));
+    const p = getPacked(grid, x, y, z);
     for (let d = 0; d < 6; d++) {
       if ((mask & (1 << d)) === 0) continue;
       const qx = x + DIR_X[d]!;
       const qy = y + DIR_Y[d]!;
       const qz = z + DIR_Z[d]!;
-      const holdsQ = holdsGlue(grid.getCell(qx, qy, qz));
-      let remove: boolean;
-      if (written.has(qx, qy, qz)) remove = !holdsP && !holdsQ;
-      else if (holdsQ) remove = keep === null || !isFace(keep, x, y, z, d);
-      else remove = !holdsP;
-      if (remove) glue.remove(x, y, z, d as Dir);
+      const q = getPacked(grid, qx, qy, qz);
+      const dropForeign = !written.has(qx, qy, qz) && holdsGlue(q) && (keep === null || !isFace(keep, x, y, z, d));
+      if (dropForeign || !glueFaceKept(p, q, d as Dir)) glue.remove(x, y, z, d as Dir);
     }
   }
 }
@@ -360,9 +430,13 @@ function gridCells(grid: StructureGrid): { xyz: Int32Array; cells: Float64Array;
 
 /**
  * Blockify `src` in place onto `dst` (DESIGN "方块化"): every cell goes to snapCell(t, ...)
- * with its block state rotated by t.r.
- *  - destination HARD: the cell is not placed; it becomes a drop there (if the world drops);
- *  - destination soft: overwritten; a replaced non-liquid, non-air block drops (if the world drops);
+ * rotated by t.r (rotCell: block states, part shapes and their order), and lands as landing()
+ * decides (docs/SHAPES.md 11.3):
+ *  - LAND_CONFLICT / LAND_LIMIT (hard parts in the way, or more than two parts together): the cell
+ *    is not placed; each of its parts becomes a drop there, at the part's DROP_POINT (if the world
+ *    drops);
+ *  - LAND_OVERWRITE (soft destination): overwritten; a replaced non-liquid block drops (if the world drops);
+ *  - LAND_MERGE: merged with the parts already there, one write;
  *  - `inShip`: `dst` is a ship's grid, and a destination whose centre lies inside a HARD block
  *    of the WORLD is a hard conflict too (DESIGN "船上的转子"), so nothing ends up in rock and
  *    the ship is never pushed out of it;
@@ -395,10 +469,11 @@ export function blockifyGrid(
   const d = vec3();
   const tmp = vec3();
   const world = host.world;
-  // Destinations and hard conflicts first: the box limit below depends on all of them. The
-  // destinations are distinct, so a write never changes whether another destination is hard.
+  // Destinations and landings first: the box limit below depends on all of them. The
+  // destinations are distinct, so a write never changes how another cell lands.
   const dest = new Int32Array(n * 3);
-  const hardAt = new Uint8Array(n);
+  const land = new Uint8Array(n);
+  const incoming = new Float64Array(n);
   let minX = Infinity;
   let minY = Infinity;
   let minZ = Infinity;
@@ -410,18 +485,20 @@ export function blockifyGrid(
     dest[i * 3] = d.x;
     dest[i * 3 + 1] = d.y;
     dest[i * 3 + 2] = d.z;
-    let hard = isHardDestination(dst, d.x, d.y, d.z);
-    if (!hard && inShip) {
+    const rotated = rotCell(t.r, cells[i]!);
+    incoming[i] = rotated;
+    let l = landing(getPacked(dst, d.x, d.y, d.z), rotated, dst.isWorld && d.y >= WORLD_HEIGHT);
+    if (!blocked(l) && inShip) {
       // The cell is written into the ship, so only a HARD world block at its centre matters
       // (above the build height the world is air; unloaded chunks count as hard: unknown
-      // terrain might be rock, and a frozen ship must not wake up inside it).
+      // terrain might be rock, and a frozen ship must not wake up inside it). The ship is not
+      // aligned with the world, so this is conservative: any part in that world cell counts
+      // (its first part's material is hard whenever it has parts, I7).
       dst.toWorld(vset(tmp, d.x + 0.5, d.y + 0.5, d.z + 0.5), tmp);
-      hard = isSolidCell(world.getCell(Math.floor(tmp.x), Math.floor(tmp.y), Math.floor(tmp.z)));
+      if (isSolidCell(world.getCell(Math.floor(tmp.x), Math.floor(tmp.y), Math.floor(tmp.z)))) l = LAND_CONFLICT;
     }
-    if (hard) {
-      hardAt[i] = 1;
-      continue;
-    }
+    land[i] = l;
+    if (blocked(l)) continue;
     minX = Math.min(minX, d.x);
     minY = Math.min(minY, d.y);
     minZ = Math.min(minZ, d.z);
@@ -433,7 +510,7 @@ export function blockifyGrid(
     const shipBox = dst.cellBounds();
     if (boxCellsWith(grownBounds(shipBox, minX, minY, minZ), maxX, maxY, maxZ) > STRUCTURE_MAX_BOX_CELLS) {
       for (let i = 0; i < n; i++) {
-        if (shipBox === null || !inBounds(shipBox, dest[i * 3]!, dest[i * 3 + 1]!, dest[i * 3 + 2]!)) hardAt[i] = 1;
+        if (shipBox === null || !inBounds(shipBox, dest[i * 3]!, dest[i * 3 + 1]!, dest[i * 3 + 2]!)) land[i] = LAND_CONFLICT;
       }
     }
   }
@@ -441,19 +518,14 @@ export function blockifyGrid(
     const x = xyz[i * 3]!;
     const y = xyz[i * 3 + 1]!;
     const z = xyz[i * 3 + 2]!;
-    const cell = cells[i]!;
     vset(d, dest[i * 3]!, dest[i * 3 + 1]!, dest[i * 3 + 2]!);
-    if (hardAt[i] === 1) {
+    const l = land[i]!;
+    if (blocked(l)) {
       report.dropped++;
-      spawnCellDrop(host, dst, d.x, d.y, d.z, cell, tmp);
+      spawnCellDrops(host, dst, d.x, d.y, d.z, incoming[i]!, tmp);
       continue;
     }
-    const prev = dst.getCell(d.x, d.y, d.z);
-    if (prev !== AIR) {
-      report.overwritten++;
-      if (!isLiquidCell(prev)) spawnCellDrop(host, dst, d.x, d.y, d.z, prev, tmp);
-    }
-    dst.setCell(d.x, d.y, d.z, rotCell(t.r, cell), MOVE_FLAGS);
+    if (landCell(host, dst, d.x, d.y, d.z, incoming[i]!, l, tmp)) report.overwritten++;
     const o = report.placed * 3;
     placed[o] = d.x;
     placed[o + 1] = d.y;
@@ -484,34 +556,52 @@ function grownBounds(b: CellBounds | null, x: number, y: number, z: number): Cel
 
 // ------------------------------------------------------------ docking
 
+/**
+ * A WORLD cell where a docking ship cell cannot land (painted red). `limit`: the parts would not
+ * overlap, but together they would be more than two (LAND_LIMIT); otherwise they overlap or the
+ * cell is above the build height or not loaded (LAND_CONFLICT). The message tells the player
+ * which (docs/SHAPES.md 11.3).
+ */
+export interface DockPlanConflict {
+  x: number;
+  y: number;
+  z: number;
+  limit: boolean;
+}
+
 export interface DockPlan {
   /** Rejected because the ship leans more than DOCK_MAX_TILT (nothing else was evaluated). */
   readonly tilted: boolean;
   readonly t: SnapTransform;
-  /** WORLD cells holding a hard block where a ship cell would land (empty when tilted). */
-  readonly conflicts: Array<{ x: number; y: number; z: number }>;
-  /** Ship cells that would be placed. */
+  /** WORLD cells where a ship cell could not land (LAND_CONFLICT, LAND_LIMIT; empty when tilted). */
+  readonly conflicts: DockPlanConflict[];
+  /** Ship cells that would be placed (merged ones included). */
   readonly placed: number;
   /** Soft world blocks that would be overwritten. */
   readonly overwritten: number;
 }
 
-/** Evaluate docking `grid` (a ship's) into `world` without changing anything. */
+/**
+ * Evaluate docking `grid` (a ship's) into `world` without changing anything: every cell, rotated,
+ * through landing() exactly as commitDock will land it. One-off work (a dock attempt), so it may
+ * form packed cells.
+ */
 export function planDock(world: World, grid: StructureGrid): DockPlan {
   const t = dockSnap(grid);
-  const conflicts: Array<{ x: number; y: number; z: number }> = [];
+  const conflicts: DockPlanConflict[] = [];
   if (dockTilted(grid.rotation)) return { tilted: true, t, conflicts, placed: 0, overwritten: 0 };
   let placed = 0;
   let overwritten = 0;
   const d = vec3();
-  grid.forEachCell((x, y, z) => {
+  grid.forEachCell((x, y, z, packed) => {
     snapCell(t, x, y, z, d);
-    if (isHardDestination(world, d.x, d.y, d.z)) {
-      conflicts.push({ x: d.x, y: d.y, z: d.z });
+    const l = landing(getPacked(world, d.x, d.y, d.z), rotCell(t.r, packed), d.y >= WORLD_HEIGHT);
+    if (blocked(l)) {
+      conflicts.push({ x: d.x, y: d.y, z: d.z, limit: l === LAND_LIMIT });
       return;
     }
     placed++;
-    if (world.getCell(d.x, d.y, d.z) !== AIR) overwritten++;
+    if (l === LAND_OVERWRITE) overwritten++;
   });
   return { tilted: false, t, conflicts, placed, overwritten };
 }
@@ -523,9 +613,10 @@ export interface DockOutcome {
 }
 
 /**
- * Write a ship's cells into the world with transform `t` (the caller has checked that no
- * destination is hard; should one have become hard since, that cell drops like a rotor cell
- * would). Overwritten soft non-liquid blocks drop (if the world drops); liquids at the
+ * Write a ship's cells into the world with transform `t`, each landing as landing() decides
+ * (the caller has checked with planDock that none is blocked; should one have become blocked
+ * since, that cell drops, one drop per part, like a rotor cell would). Cells that meet parts
+ * without overlapping merge with them. Overwritten soft non-liquid blocks drop (if the world drops); liquids at the
  * destinations of the hull's dry cells are removed (DESIGN: 方块化时，清掉密封舱位置里的液体);
  * the ship's glue moves to the world like a rotor's on blockify: every face with a placed end,
  * re-keyed by the rotation, then the glue rules of settlePlacedGlue where it landed (no face
@@ -550,18 +641,14 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
     const y = xyz[i * 3 + 1]!;
     const z = xyz[i * 3 + 2]!;
     snapCell(t, x, y, z, d);
-    const cell = cells[i]!;
-    if (isHardDestination(world, d.x, d.y, d.z)) {
+    const rotated = rotCell(t.r, cells[i]!);
+    const l = landing(getPacked(world, d.x, d.y, d.z), rotated, d.y >= WORLD_HEIGHT);
+    if (blocked(l)) {
       report.dropped++;
-      spawnCellDrop(host, world, d.x, d.y, d.z, cell, tmp);
+      spawnCellDrops(host, world, d.x, d.y, d.z, rotated, tmp);
       continue;
     }
-    const prev = world.getCell(d.x, d.y, d.z);
-    if (prev !== AIR) {
-      report.overwritten++;
-      if (!isLiquidCell(prev)) spawnCellDrop(host, world, d.x, d.y, d.z, prev, tmp);
-    }
-    world.setCell(d.x, d.y, d.z, rotCell(t.r, cell), MOVE_FLAGS);
+    if (landCell(host, world, d.x, d.y, d.z, rotated, l, tmp)) report.overwritten++;
     placed[report.placed * 3] = d.x;
     placed[report.placed * 3 + 1] = d.y;
     placed[report.placed * 3 + 2] = d.z;

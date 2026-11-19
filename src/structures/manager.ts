@@ -10,15 +10,19 @@
  *   persist    serialize / deserialize
  *
  * HOOKS. Every cell change of every grid goes through one listener per grid:
- *  - glue: when a cell changes block id, by whatever path (bulk structure moves included), the
- *    glue lifetime rule runs on its faces (pruneGlueAt: a glued face stays while one side is a
- *    glueable block); when a chunk is added to the world, it runs on the world's faces in and on
- *    the border of that chunk (pruneGlueInBox), whose cells were unknown until then;
+ *  - glue: when a cell's content changes (a part chiselled, added or removed counts), by whatever
+ *    path (bulk structure moves included), the glue lifetime rules run on its faces (pruneGlueAt:
+ *    a glued face stays while one side is still on it, and goes when the cell stopped touching the
+ *    neighbour across it; docs/SHAPES.md 10.2); when a chunk is added to the world, the state rule
+ *    runs on the world's faces in and on the border of that chunk (pruneGlueInBox), whose cells
+ *    were unknown until then;
  *  - bearings: when the bearing of a running rotor is removed or replaced, by whatever path
  *    (mining, explosion, physics damage ...), the rotor blockifies in place — immediately, or at
  *    endBatch() inside a batch (LESSONS: 先等冲击波处理完所有结构体，再把转子方块化，最后统一重算);
  *  - world changes near a ship wake it in the dynamics;
- *  - rotor cells keep the rotor's sail count truthful (LESSONS 船上风车坏了…帆数不变).
+ *  - rotor cells keep the rotor's sail count truthful (LESSONS 船上风车坏了…帆数不变), by volume.
+ *
+ * Listeners get packed cells (both parts) as old and new values; they run once per write.
  *
  * The lists returned by all() / ships() / rotors() are immutable snapshots: the manager
  * replaces them when the set of structures changes, so it is safe to iterate one while
@@ -53,7 +57,7 @@ import type { GlueStore } from './glue';
 import { analyzeHull, hullCavityCells, type HullInfo } from './hull';
 import { advanceRotor, applyRotorPose, holdRotor, measureSweep, type RotorSweep } from './rotor';
 import { readStructures, writeStructures } from './serialize';
-import { cellFunc, isSailCell, pruneGlueAt, pruneGlueInBox } from './stick';
+import { cellFunc, pruneGlueAt, pruneGlueInBox, sailVolume8 } from './stick';
 import { Rotor, Ship, type ShipDynamics, type Structure, type StructureHost } from './structure';
 
 export type { BlockifyReport } from './assembly';
@@ -83,11 +87,16 @@ export interface AssemblyPreview extends Omit<CollectResult, 'reason'> {
   reason: CollectReason | RotorRefusal;
 }
 
-/** A world cell that blocks docking (painted red by the client). */
+/**
+ * A world cell that blocks docking (painted red by the client). `limit`: the parts there and the
+ * ship's would not overlap but would be more than two in one cell (docs/SHAPES.md 11.3: the
+ * message says so); otherwise something hard is in the way.
+ */
 export interface DockConflict {
   x: number;
   y: number;
   z: number;
+  limit: boolean;
 }
 
 export type DockResult =
@@ -538,9 +547,9 @@ export class StructureManager {
   // ------------------------------------------------------------ hooks
 
   private readonly onWorldCell = (x: number, y: number, z: number, oldCell: number, newCell: number): void => {
-    const oldId = oldCell & ID_MASK;
-    if (oldId !== (newCell & ID_MASK)) pruneGlueAt(this.world, this.host.worldGlue, x, y, z, newCell);
-    if (oldId === BEARING_ID && this.worldRotors.length > 0) this.bearingChanged(this.worldRotors, x, y, z, oldCell, newCell);
+    // Called only for a real change (the grids fire no event for an unchanged cell).
+    pruneGlueAt(this.world, this.host.worldGlue, x, y, z, oldCell);
+    if ((oldCell & ID_MASK) === BEARING_ID && this.worldRotors.length > 0) this.bearingChanged(this.worldRotors, x, y, z, oldCell, newCell);
     const dyn = this.dynamics;
     if (dyn !== null) {
       const ents = this.shipEntries;
@@ -575,17 +584,17 @@ export class StructureManager {
 
   private watchShip(ship: Ship): () => void {
     return ship.grid.onCellChange((x, y, z, oldCell, newCell) => {
-      const oldId = oldCell & ID_MASK;
-      if (oldId !== (newCell & ID_MASK)) pruneGlueAt(ship.grid, ship.glue, x, y, z, newCell);
-      if (oldId === BEARING_ID && ship.children.length > 0) this.bearingChanged(ship.children, x, y, z, oldCell, newCell);
+      pruneGlueAt(ship.grid, ship.glue, x, y, z, oldCell);
+      if ((oldCell & ID_MASK) === BEARING_ID && ship.children.length > 0) this.bearingChanged(ship.children, x, y, z, oldCell, newCell);
     });
   }
 
   private watchRotor(rotor: Rotor): () => void {
     return rotor.grid.onCellChange((x, y, z, oldCell, newCell) => {
-      if ((oldCell & ID_MASK) !== (newCell & ID_MASK)) pruneGlueAt(rotor.grid, rotor.glue, x, y, z, newCell);
-      const was = isSailCell(oldCell);
-      if (was !== isSailCell(newCell)) rotor.sails += was ? -1 : 1;
+      pruneGlueAt(rotor.grid, rotor.glue, x, y, z, oldCell);
+      // Sails by volume: a chiselled felt cell loses an eighth of a sail per octant.
+      const d8 = sailVolume8(newCell) - sailVolume8(oldCell);
+      if (d8 !== 0) rotor.sails += d8 / 8;
     });
   }
 
