@@ -179,6 +179,12 @@ export class FakePeer implements RtcPeer {
   onicecandidate: ((this: RTCPeerConnection, ev: RTCPeerConnectionIceEvent) => unknown) | null = null;
   readonly channels: FakeChannel[] = [];
   closed = false;
+  /**
+   * This peer's page is busy: what the browser does takes effect at once, but its events
+   * (setRemoteDescription resolving, the channels' open) reach the page this much later, ms.
+   * Messages from elsewhere (a BroadcastChannel) are not held up.
+   */
+  busyMs = 0;
 
   constructor(
     private readonly net: FakeRtcNet,
@@ -229,7 +235,8 @@ export class FakePeer implements RtcPeer {
     if (m === null || !this.net.peers.has(m[1]!)) return Promise.reject(new DOMException('cannot parse the description', 'OperationError'));
     this.remoteDescription = { type: d.type ?? 'offer', sdp: d.sdp! };
     this.net.tryConnect(this);
-    return Promise.resolve();
+    if (this.busyMs === 0) return Promise.resolve();
+    return new Promise((resolve) => this.net.loop.schedule(this.net.loop.now + this.busyMs, () => resolve()));
   }
 
   close(): void {
@@ -305,9 +312,15 @@ export class FakeRtcNet {
         a.peer = b;
         b.peer = a;
       }
-      p.setState('connected');
-      q.setState('connected');
-      for (const ch of [...p.channels, ...q.channels]) if (ch.peer !== null) ch.openNow();
+      for (const peer of [p, q]) {
+        const open = (): void => {
+          if (peer.closed) return;
+          peer.setState('connected');
+          for (const ch of peer.channels) if (ch.peer !== null) ch.openNow();
+        };
+        if (peer.busyMs === 0) open();
+        else this.loop.schedule(this.loop.now + peer.busyMs, open);
+      }
     });
   }
 }

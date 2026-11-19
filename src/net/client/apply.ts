@@ -727,8 +727,13 @@ function applyGlobals(state: ReplicaState, g: Globals): void {
   if (g.rules !== undefined) state.rules = { ...g.rules };
   if (g.players !== undefined) {
     for (const op of g.players) {
-      if (op.op === 'join') state.players.set(op.entityId, { entityId: op.entityId, name: op.name, host: op.host });
-      else state.players.delete(op.entityId);
+      if (op.op === 'join') state.players.set(op.entityId, { entityId: op.entityId, name: op.name, host: op.host, mode: op.mode });
+      else if (op.op === 'leave') state.players.delete(op.entityId);
+      else {
+        const p = state.players.get(op.entityId);
+        if (p === undefined) throw new ReplicaError(`mode of player ${op.entityId} the player table does not have`);
+        state.players.set(op.entityId, { ...p, mode: op.mode });
+      }
     }
   }
   if (g.tps !== undefined) state.tps = g.tps;

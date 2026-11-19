@@ -6,10 +6,11 @@
  *
  * Page -> host: create a world or load one, connect a client (one MessagePort per connection; the
  * page's own client is `local`, which makes it the host's connection), pause (single player:
- * only while the room is closed), save, open or close the room, shut down.
+ * only while the room is closed), save, open or close the room, shut down; and `probe`, a
+ * fingerprint of what the server holds, for the browser tests (debug tooling, ServerProbe).
  * Host -> page: the world is ready, a save finished, status (measured TPS, players, and each
  * guest's bytes a second, backlog and round trip), the time the ticks take (for the page's debug
- * overlay), errors, closed.
+ * overlay), the answer to a probe, errors, closed.
  *
  * THE PAGE'S STORAGE. A server Worker that cannot open IndexedDB itself saves into the storage of
  * the page that started it (pagestorage.ts), which outlives the Worker: the page starts a new
@@ -28,6 +29,9 @@
  */
 import type { WorldMeta } from '../../save/codec';
 import type { GeneratorSpec } from '../protocol';
+import type { ServerProbe } from '../server/probe';
+
+export type { ServerProbe, ServerProbePlayer } from '../server/probe';
 
 /** How a new world is made. */
 export interface CreateOptions {
@@ -45,7 +49,9 @@ export type PageToHost<P> =
   | { type: 'save' }
   | { type: 'openRoom' }
   | { type: 'closeRoom' }
-  | { type: 'shutdown'; save: boolean };
+  | { type: 'shutdown'; save: boolean }
+  /** What the server holds now (ServerProbe), answered with a `probe` of the same id; columns within `radius` of each player. */
+  | { type: 'probe'; id: number; radius: number };
 
 export type HostToPage =
   /**
@@ -65,6 +71,8 @@ export type HostToPage =
   | { type: 'status'; tps: number; players: number; guests: GuestTraffic[] }
   /** Mean and longest milliseconds of the host's clock one tick took since the last report; about once a second while ticks run. */
   | { type: 'tickTime'; meanMs: number; maxMs: number }
+  /** The answer to the page's probe `id` (null when no world is open). */
+  | { type: 'probe'; id: number; probe: ServerProbe | null }
   /** A command could not be carried out (`what` = the command, or 'tick' when the simulation threw). */
   | { type: 'error'; what: string; message: string }
   /** The server shut down. */
@@ -117,7 +125,7 @@ export type StorageResult =
   | { type: 'storageResult'; id: number; ok: true; value: unknown }
   | { type: 'storageResult'; id: number; ok: false; code: string | null; message: string };
 
-const TYPES: readonly string[] = Object.freeze(['create', 'load', 'connect', 'pause', 'save', 'openRoom', 'closeRoom', 'shutdown', 'storageResult']);
+const TYPES: readonly string[] = Object.freeze(['create', 'load', 'connect', 'pause', 'save', 'openRoom', 'closeRoom', 'shutdown', 'probe', 'storageResult']);
 
 /**
  * The page's message as a PageToHost or a StorageResult, or null when it is neither (wrong type
@@ -142,6 +150,8 @@ export function parsePageMessage(data: unknown): PageToHost<unknown> | StorageRe
       return typeof m.paused === 'boolean' ? (data as PageToHost<unknown>) : null;
     case 'shutdown':
       return typeof m.save === 'boolean' ? (data as PageToHost<unknown>) : null;
+    case 'probe':
+      return typeof m.id === 'number' && typeof m.radius === 'number' && Number.isInteger(m.radius) && m.radius >= 0 && m.radius <= 8 ? (data as PageToHost<unknown>) : null;
     default:
       return data as PageToHost<unknown>;
   }

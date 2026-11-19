@@ -230,9 +230,9 @@ export class RoomHost {
     return this.forwarders.size;
   }
 
-  /** The guests' links now (the page's connection diagnostics read their statistics). */
-  links(): WebRtcTransport[] {
-    return [...this.forwarders.values()];
+  /** The guests' links now, each with its guest's entity id once welcomed (the page's connection diagnostics read their statistics). */
+  links(): Array<{ link: WebRtcTransport; entityId: number | null }> {
+    return [...this.forwarders].map(([f, link]) => ({ link, entityId: f.entityId }));
   }
 
   /** Listen, then mark the server's room open. Rejects with the signaller's DialError. */

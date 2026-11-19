@@ -116,11 +116,18 @@ export interface PlayerRow {
   host: boolean;
   /** This page's own player. */
   you: boolean;
-  /**
-   * The host's view of a guest: the mode this host set for that guest since the world opened, or
-   * null (other players' modes are not replicated, so the page knows only what it set).
-   */
-  mode: GameMode | null;
+  /** The player's game mode (the replicated player table). */
+  mode: GameMode;
+  /** The host's view of a guest: what the server last reported of that guest's connection; null otherwise. */
+  traffic: GuestLink | null;
+}
+
+/** One guest's connection as the host's server measures it (sent per second, waiting to go out, round trip). */
+export interface GuestLink {
+  bytesPerSec: number;
+  backlogBytes: number;
+  /** 0 until the guest's client reported one. */
+  rttMs: number;
 }
 
 /**

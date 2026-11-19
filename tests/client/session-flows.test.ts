@@ -32,6 +32,27 @@ describe('WorldSession flows (against a real server)', () => {
     expect(rig.errors).toEqual([]);
   });
 
+  it('until the prediction adopted the join\'s correction, the player is shown where the server has it (never at the origin)', async () => {
+    const rig = await SessionRig.create({ viewRadius: 3 });
+    const s = rig.session;
+    // Loading ends while the client does not step (a paused page): the OwnPlayer exists, unplaced.
+    rig.paused = true;
+    rig.runUntil(() => s.state === 'ready');
+    rig.run(200);
+    const own = s.own!;
+    expect(own.placed).toBe(false);
+    const corr = s.replica!.ownState.correction!;
+    expect(corr.carrierId).toBe(0);
+    expect(s.shown.feet.x).toBeCloseTo(corr.pos.x, 6);
+    expect(s.shown.feet.z).toBeCloseTo(corr.pos.z, 6);
+    expect(Math.hypot(s.shown.feet.x, s.shown.feet.y, s.shown.feet.z)).toBeGreaterThan(1);
+    rig.paused = false;
+    rig.runUntil(() => own.placed);
+    expect(own.player.pos.x).toBeCloseTo(corr.pos.x, 6);
+    expect(s.shown.feet.x).toBeCloseTo(corr.pos.x, 3);
+    expect(rig.errors).toEqual([]);
+  });
+
   it('a far teleport reloads: loading again until the new place is in the replica and meshed, then playing there', async () => {
     const rig = await SessionRig.create({ viewRadius: 3 });
     rig.playUntilReady();

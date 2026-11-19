@@ -193,6 +193,14 @@ export class OwnPlayer implements BodyHost {
 
   // ------------------------------------------------------------------ driving
 
+  /**
+   * The first correction (the join's) has been adopted. Before that, at most until the first client
+   * tick after the OwnPlayer was made, the player's state is not where the server has it.
+   */
+  get placed(): boolean {
+    return this.adoptedAny;
+  }
+
   /** A batch was applied (NetClient.onBatch): its correction is adopted at the next client tick. */
   onBatch(b: TickBatchMsg): void {
     const c = b.private?.correction;

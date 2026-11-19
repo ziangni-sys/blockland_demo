@@ -127,6 +127,11 @@ export const STRINGS = {
   'room.rules': { zh: '世界规则', en: 'World rules' },
   'room.rulesHint': { zh: '新来的朋友以这个模式开始；生存模式下被撞掉、炸掉、冲掉的方块会掉落。你自己的模式在菜单里切换。', en: 'New friends start in this mode; in survival, blocks knocked, blown or washed loose drop. Your own mode is switched in the menu.' },
   'room.modeOf': { zh: '{name} 的模式', en: 'Mode of {name}' },
+  'room.traffic': { zh: '{rate}/秒 · 积压 {backlog} · 往返 {rtt} 毫秒', en: '{rate}/s · backlog {backlog} · rtt {rtt} ms' },
+  'room.trafficHint': {
+    zh: '服务器每秒发给这位朋友的数据、还排着没送出的数据、他的游戏量到的往返时间',
+    en: 'What the server sends this friend each second, what is still waiting to go out, and the round trip their game measures',
+  },
   'room.kick': { zh: '移出', en: 'Remove' },
   'room.kickLabel': { zh: '把 {name} 移出房间', en: 'Remove {name} from the room' },
   'room.kickConfirm': { zh: '把“{name}”移出房间？', en: 'Remove “{name}” from the room?' },

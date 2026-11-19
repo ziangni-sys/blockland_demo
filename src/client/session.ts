@@ -565,7 +565,7 @@ export class WorldSession {
     s.inventory = this.inventory;
     s.dead = this.dead;
     const own = this.own;
-    if (own !== null) {
+    if (own !== null && own.placed) {
       const p = own.player;
       own.displayPos(now, s.feet);
       s.eyeHeight = p.eyeHeight;
@@ -579,7 +579,7 @@ export class WorldSession {
       s.steeringShipId = p.steeringShipId;
       return;
     }
-    // Loading: where the server's correction has the player, looking where it says.
+    // Loading (and until the prediction adopted its first correction): where the server's correction has the player, looking where it says.
     const corr = r.ownState.correction;
     const clock = this.net.clock;
     if (corr === null || clock === null) return;

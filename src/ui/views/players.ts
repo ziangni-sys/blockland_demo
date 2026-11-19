@@ -1,11 +1,13 @@
 /**
  * The player list over the HUD (package 11), held open with Tab during play: who is in the world
- * (name, Host and You badges) and, for the host, whether the room takes new friends. Read only:
- * the host's controls (mode, remove) are on the room screen from the pause menu.
+ * (name, Host and You badges, mode) and, for the host, whether the room takes new friends and in
+ * small print each guest's connection as the server measures it. Read only: the host's controls
+ * (mode, remove) are on the room screen from the pause menu.
  */
 import type { UiContext } from '../context';
 import type { OnlineView } from '../model';
 import { h, setHidden, TextSlot } from '../dom';
+import { formatGuestLink } from '../format';
 
 export class PlayerListOverlay {
   readonly el: HTMLElement;
@@ -47,6 +49,8 @@ export class PlayerListOverlay {
           h(d, 'span', 'bl-player-name', { dir: 'auto' }, [p.name]),
           p.host ? h(d, 'span', 'bl-badge bl-badge--host', null, [ctx.t('room.host')]) : null,
           p.you ? h(d, 'span', 'bl-badge bl-badge--you', null, [ctx.t('room.you')]) : null,
+          h(d, 'span', `bl-badge bl-badge--${p.mode}`, null, [ctx.t(p.mode === 'creative' ? 'mode.creative' : 'mode.survival')]),
+          p.traffic !== null ? h(d, 'span', 'bl-plist-link', null, [formatGuestLink(p.traffic, ctx.lang)]) : null,
         ]),
       );
     }

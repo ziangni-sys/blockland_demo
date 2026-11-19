@@ -96,10 +96,15 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
     r.binaryType = 'arraybuffer';
     u.binaryType = 'arraybuffer';
     let done = false;
-    /** Our description went out and theirs is set: the path is no longer needed. */
-    let exchanged = false;
     let sent = false;
     let received = false;
+    /**
+     * Our description went out and theirs came in: the path is no longer needed. The other side
+     * closes it ('bye') as soon as its channels open, which can reach us before our own
+     * setRemoteDescription has resolved (a busy page): from here on that is not a failure; a peer
+     * that is really gone ends in the ICE timeout.
+     */
+    const exchanged = (): boolean => sent && received;
     let timer: unknown = null;
 
     const clearTimer = (): void => {
@@ -141,8 +146,7 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
       resolve(new WebRtcTransport(pc, r, u, timers));
     };
     const settled = (): void => {
-      if (!sent || !received) return;
-      exchanged = true;
+      if (!exchanged()) return;
       // The answerer's description still has to reach the offerer (a person pastes a manual
       // answer code): it waits that long on top.
       wait((offering ? 0 : patienceMs) + (deps.iceMs ?? ICE_TIMEOUT_MS), 'ice', 'no direct connection could be made in time');
@@ -180,7 +184,10 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
       gatherTimer = timers.set(go, deps.gatherMs ?? GATHER_TIMEOUT_MS);
     };
     const theirs = async (m: SignalMessage): Promise<void> => {
-      if (m.t === 'bye') return fail('left', 'the other side left');
+      if (m.t === 'bye') {
+        if (!exchanged()) fail('left', 'the other side left');
+        return;
+      }
       const expected = offering ? 'answer' : 'offer';
       if (m.t !== expected || received) return; // out of place: ignored
       received = true;
@@ -212,7 +219,7 @@ export function connectPeer(path: SignalPath, side: 'host' | 'guest', patienceMs
       if (pc.connectionState === 'failed') fail('ice', 'ICE failed');
     };
     path.onEnd = (reason) => {
-      if (!exchanged) fail(reason, reason === 'left' ? 'the other side left' : 'the signalling service went away');
+      if (!exchanged()) fail(reason, reason === 'left' ? 'the other side left' : 'the signalling service went away');
     };
     path.onMessage = (m) => void theirs(m);
     if (done) return;

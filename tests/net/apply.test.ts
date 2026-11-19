@@ -151,6 +151,7 @@ describe('applyBatch refuses invalid batches with a ReplicaError', () => {
     ['helm fields for a rotor', (b) => b.structureDeltas.push({ id: 2, control: { throttle: 1, rudder: 0 } })],
     ['an item stack for a rabbit', (b) => b.entityUpdates.push({ id: 7, stack: { item: 1, count: 2 } })],
     ['a fuse for a rabbit', (b) => b.entityUpdates.push({ id: 7, fuse: 3 })],
+    ['the mode of a player the table does not have', (b) => (b.globals = { players: [{ op: 'mode', entityId: 42, mode: 'survival' }] })],
   ];
   for (const [name, fill] of cases) {
     it(name, () => {
@@ -199,5 +200,17 @@ describe('applyBatch accepts the valid cases at the edges', () => {
     applySamples(st, { type: 'samples', tick: 2, seq: 1, ships: [], entities: [{ id: 7, ...motion(3) }] });
     expect(st.entities.get(7)!.carrierId).toBe(3);
     expect(() => applySamples(st, { type: 'samples', tick: 3, seq: 2, ships: [{ id: 2, pose: { pos: { x: 0, y: 0, z: 0 }, rot: IDENTITY } }], entities: [] })).toThrow(ReplicaError);
+  });
+});
+
+describe('the player table (globals)', () => {
+  it('a join brings the mode; a mode change changes only the mode; a leave removes the player', () => {
+    const st = fresh();
+    expect(apply(st, batch(1, (b) => (b.globals = { players: [{ op: 'join', entityId: 4, name: 'Ann', host: false, mode: 'creative' }] })))).toBe('ok');
+    expect(st.players.get(4)).toEqual({ entityId: 4, name: 'Ann', host: false, mode: 'creative' });
+    expect(apply(st, batch(2, (b) => (b.globals = { players: [{ op: 'mode', entityId: 4, mode: 'survival' }] })))).toBe('ok');
+    expect(st.players.get(4)).toEqual({ entityId: 4, name: 'Ann', host: false, mode: 'survival' });
+    expect(apply(st, batch(3, (b) => (b.globals = { players: [{ op: 'leave', entityId: 4 }] })))).toBe('ok');
+    expect(st.players.has(4)).toBe(false);
   });
 });

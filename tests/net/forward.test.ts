@@ -186,6 +186,27 @@ describe('PortForwarder (package 10)', () => {
     expect(pf.closed).toBe(true);
   });
 
+  it("knows its guest's entity id from the Welcome (the server's first reliable message); not from a Refuse or later messages", () => {
+    const h = new NetHarness();
+    const [ps, pf] = fakePorts(h.net);
+    const server = new PortTransport(ps);
+    const fwd = new PortForwarder(pf, new ScriptedLink(), netTimers(h.net));
+    expect(fwd.entityId).toBeNull();
+    server.send(UNRELIABLE, new Uint8Array([0x81, 9]));
+    h.net.advanceBy(1);
+    expect(fwd.entityId).toBeNull();
+    // Welcome: u8 0x81, vu entityId (300 = two bytes), then the rest.
+    server.send(RELIABLE, new Uint8Array([0x81, 0xac, 0x02, 0, 0]));
+    server.send(RELIABLE, new Uint8Array([0x81, 7]));
+    h.net.advanceBy(1);
+    expect(fwd.entityId).toBe(300);
+    const [ps2, pf2] = fakePorts(h.net);
+    const refused = new PortForwarder(pf2, new ScriptedLink(), netTimers(h.net));
+    new PortTransport(ps2).send(RELIABLE, new Uint8Array([0x82, 3, 0]));
+    h.net.advanceBy(1);
+    expect(refused.entityId).toBeNull();
+  });
+
   it('frames that are not frames are ignored; a message the link refuses closes both sides', () => {
     const h = new NetHarness();
     const [ps, pf] = fakePorts(h.net);

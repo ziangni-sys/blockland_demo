@@ -380,7 +380,8 @@ describe('connection diagnostics', () => {
       role: 'guest',
       signal: 'cloud',
       roomOpen: null,
-      links: [{ pair, outPerSec: 1200, inPerSec: 15000 }],
+      link: { pair, outPerSec: 1200, inPerSec: 15000 },
+      guests: [],
       rttMs: 45,
       loss: 0.012,
       delayTicks: 1.42,
@@ -398,6 +399,32 @@ describe('connection diagnostics', () => {
     expect(text).toContain('interpolation delay: 1.42 ticks');
     expect(text).toContain('server tps: 20.0');
     expect(text).not.toMatch(/\d+\.\d+\.\d+\.\d+|:\d{4,5}\b/);
+    // The host: one line per guest, its link and what the server measures of it, no names.
+    const host = diagnosticsText({
+      build: 'abc1234',
+      role: 'host',
+      signal: 'broadcast',
+      roomOpen: true,
+      link: null,
+      guests: [
+        { link: { pair, outPerSec: 4300, inPerSec: 2900 }, server: { bytesPerSec: 4405, backlogBytes: 0, rttMs: 48 } },
+        { link: null, server: { bytesPerSec: 812, backlogBytes: 3100, rttMs: 0 } },
+        { link: { pair: null, outPerSec: null, inPerSec: null }, server: null },
+      ],
+      rttMs: null,
+      loss: null,
+      delayTicks: null,
+      inPerSec: null,
+      outPerSec: null,
+      serverTps: 20,
+      netStatus: 'ready',
+      lastError: null,
+    });
+    expect(host).toContain('role: host (room open, 3 guests)');
+    expect(host).toContain('guest 1: srflx -> host (udp), rtt 42 ms; out 4.2 KB/s, in 2.8 KB/s; server sends 4.3 KB/s, backlog 0 B, rtt 48 ms');
+    expect(host).toContain('guest 2: no webrtc link; server sends 812 B/s, backlog 3.0 KB, rtt -');
+    expect(host).toContain('guest 3: no candidate pair yet; out -, in -; server: no report yet');
+    expect(host).not.toContain('webrtc host');
   });
 });
 
@@ -469,25 +496,69 @@ describe('playing together, headless (package 11)', { timeout: 120_000 }, () => 
     expect(w.h.sim.players.online()).toHaveLength(3);
   });
 
-  it("the host sets a guest's mode; the host's view shows what it set; guests have no host controls", async () => {
+  it("every list shows each player's mode (the player table carries it); the host sets a guest's; guests have no host controls", async () => {
     const w = await world();
     await openRoom(w);
     const ann = new GuestPage(w, 'ann', 'Ann');
     ann.join(w.hostLobby.view().room!.code!);
     await waitFor(w, () => ann.ready);
     const annId = ann.net!.welcome!.entityId;
+    const hostId = w.host.welcome!.entityId;
+    const modeIn = (l: Lobby, id: number): string | undefined => l.view().players.find((p) => p.entityId === id)?.mode;
     expect(w.h.sim.players.get('ann')!.player.mode).toBe('creative');
-    expect(w.hostLobby.view().players.find((p) => p.entityId === annId)!.mode).toBeNull();
+    // Before the host sets anything, its buttons show the guest's real mode, and so does the guest's list.
+    expect(modeIn(w.hostLobby, annId)).toBe('creative');
+    expect(modeIn(ann.lobby, annId)).toBe('creative');
+    expect(modeIn(ann.lobby, hostId)).toBe('creative');
+    const toastsBefore = [w.hostToasts.length, ann.toasts.length];
     expect(w.hostLobby.setPlayerMode(annId, 'survival')).toBe(true);
-    await waitFor(w, () => w.h.sim.players.get('ann')!.player.mode === 'survival', 5000);
-    await waitFor(w, () => ann.net!.replica!.ownState.vitals?.mode === 'survival', 5000);
-    expect(w.hostLobby.view().players.find((p) => p.entityId === annId)!.mode).toBe('survival');
+    // Shown only once the server says so (the next batch's player table), on every page.
+    expect(modeIn(w.hostLobby, annId)).toBe('creative');
+    await waitFor(w, () => modeIn(w.hostLobby, annId) === 'survival' && modeIn(ann.lobby, annId) === 'survival', 5000);
+    expect(w.h.sim.players.get('ann')!.player.mode).toBe('survival');
     expect(w.h.sim.players.get('host')!.player.mode).toBe('creative');
+    expect(modeIn(ann.lobby, hostId)).toBe('creative');
+    // A mode change is not a join or a leave: no toasts.
+    expect([w.hostToasts.length, ann.toasts.length]).toEqual(toastsBefore);
+    // Whatever changes a mode on the server shows (here the simulation itself, as a survival world rule would not).
+    w.h.sim.players.get('host')!.setMode('survival');
+    await waitFor(w, () => modeIn(ann.lobby, hostId) === 'survival' && modeIn(w.hostLobby, hostId) === 'survival', 5000);
     // Not the host's own player through this control; a guest's lobby has no host commands.
-    expect(w.hostLobby.setPlayerMode(w.host.welcome!.entityId, 'survival')).toBe(false);
-    expect(ann.lobby.setPlayerMode(w.host.welcome!.entityId, 'survival')).toBe(false);
-    expect(ann.lobby.kick(w.host.welcome!.entityId)).toBe(false);
-    expect(ann.lobby.view().players.every((p) => p.mode === null)).toBe(true);
+    expect(w.hostLobby.setPlayerMode(hostId, 'creative')).toBe(false);
+    expect(ann.lobby.setPlayerMode(hostId, 'creative')).toBe(false);
+    expect(ann.lobby.kick(hostId)).toBe(false);
+    // A guest who joins later gets everyone's mode in its Welcome.
+    const bob = new GuestPage(w, 'bob', 'Bob');
+    bob.join(w.hostLobby.view().room!.code!);
+    await waitFor(w, () => bob.ready);
+    expect(modeIn(bob.lobby, annId)).toBe('survival');
+    expect(modeIn(bob.lobby, hostId)).toBe('survival');
+  });
+
+  it("the host sees each guest's connection next to its row and per guest in the diagnostics; guests do not", async () => {
+    const w = await world();
+    await openRoom(w);
+    const ann = new GuestPage(w, 'ann', 'Ann');
+    ann.join(w.hostLobby.view().room!.code!);
+    await waitFor(w, () => ann.ready);
+    const annId = ann.net!.welcome!.entityId;
+    // The server's status report (host control, about once a second while guests are in).
+    w.hostLobby.guestTraffic([{ entityId: annId, name: 'Ann', bytesPerSec: 4321, backlogBytes: 12, rttMs: 57 }]);
+    const row = w.hostLobby.view().players.find((p) => p.entityId === annId)!;
+    expect(row.traffic).toEqual({ bytesPerSec: 4321, backlogBytes: 12, rttMs: 57 });
+    expect(w.hostLobby.view().players.find((p) => p.you)!.traffic).toBeNull();
+    expect(ann.lobby.view().players.every((p) => p.traffic === null)).toBe(true);
+    let text = '';
+    void w.hostLobby.diagnostics(() => ({ rttMs: null, loss: null, delayTicks: null, serverTps: 20, netStatus: 'ready', traffic: null })).then((x) => (text = x));
+    await waitFor(w, () => text !== '', 5000);
+    expect(text).toContain('role: host (room open, 1 guest)');
+    // The link is the guest's (matched through the entity id its Welcome gave); the fake peers have no statistics.
+    expect(text).toContain('guest 1: no candidate pair yet; out -, in -; server sends 4.2 KB/s, backlog 12 B, rtt 57 ms');
+    expect(text).not.toContain('guest 2');
+    expect(text).not.toContain('Ann');
+    // The next report replaces it; a guest gone from it has no numbers.
+    w.hostLobby.guestTraffic([]);
+    expect(w.hostLobby.view().players.find((p) => p.entityId === annId)!.traffic).toBeNull();
   });
 
   it('kick: the removed guest sees why (no "try again"); the lists update; the leave toast; coming back is allowed', async () => {
@@ -651,8 +722,8 @@ describe('playing together, headless (package 11)', { timeout: 120_000 }, () => 
       await waitFor(w, () => t !== null, 5000);
       return t as unknown as string;
     })();
-    expect(hostText).toContain('role: host (room open, 1 guest link)');
-    expect(hostText).toContain('webrtc guest 1:');
+    expect(hostText).toContain('role: host (room open, 1 guest)');
+    expect(hostText).toContain('guest 1: no candidate pair yet; out -, in -; server: no report yet');
   });
 
   it('the last error keeps only its key and code, never a room code, and starts afresh with each join', async () => {

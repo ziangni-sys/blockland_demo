@@ -50,7 +50,7 @@ describe('joining (package 8)', () => {
     expect(w.rules).toEqual({ defaultMode: 'survival', dropsEnabled: true });
     expect(w.isHost).toBe(true);
     expect(w.roomOpen).toBe(false);
-    expect(w.players).toEqual([{ entityId: ctrl.entityId, name: 'Alice', host: true }]);
+    expect(w.players).toEqual([{ entityId: ctrl.entityId, name: 'Alice', host: true, mode: ctrl.player.mode }]);
     expect(w.worldTime + 1).toBe(a.applied[0]); // Welcome before tick T, then the batch of T
     expect(ctrl.drive).toBe('client');
     expect(ctrl.viewRadius).toBe(SIM_RADIUS_CAP);

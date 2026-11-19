@@ -246,9 +246,11 @@ async function session(build, renderer) {
       return inv.hotbar[inv.selected]?.item === item;
     }, item);
   };
+  // Playing: loaded, no screen, and the prediction placed the player (the debug state has no player
+  // before the first client tick after loading, which a page drawing a frame a second can take a second to run).
   const playing = (fn) => waitFor('play', () => {
     const s = window.__blocklands.game.debug.state();
-    return s.sessionState === 'ready' && s.screen === 'none';
+    return s.sessionState === 'ready' && s.screen === 'none' && s.player !== null;
   }, undefined, 240_000);
 
   let result = 'PASS';
@@ -333,10 +335,14 @@ async function session(build, renderer) {
     await teleport(p0.x, p0.y, p0.z);
     await selectItem(B.PLANKS);
     let placed = null;
+    const tries = [];
     for (const [yaw, pitch] of [[0, -0.7], [1.2, -0.7], [-1.2, -0.7], [Math.PI, -0.7]]) {
       await G(([y, p]) => window.__blocklands.game.debug.look(y, p), [yaw, pitch]);
       await frames(3);
-      const t = (await state()).target;
+      const s = await state();
+      const t = s.target;
+      const pl = s.player;
+      tries.push(`yaw ${yaw.toFixed(1)}: target ${JSON.stringify(t)}, player ${pl ? `${pl.x.toFixed(2)} ${pl.y.toFixed(2)} ${pl.z.toFixed(2)} shown ${pl.shownX.toFixed(2)} ${pl.shownY.toFixed(2)} ${pl.shownZ.toFixed(2)} look ${pl.yaw.toFixed(2)} ${pl.pitch.toFixed(2)}` : null}, screen ${s.screen}, ${s.sessionState}, locked ${s.pointerLocked}`);
       if (!t || t.gridId !== 0 || t.face !== PY) continue;
       const above = { x: t.x, y: t.y + 1, z: t.z };
       await click('right');
@@ -348,6 +354,7 @@ async function session(build, renderer) {
         // another direction
       }
     }
+    if (!placed) log(`placing failed:\n      ${tries.join('\n      ')}`);
     check(placed, 'could not place a block');
     log(`placed planks at ${JSON.stringify(placed)}`);
     await shot('placed');

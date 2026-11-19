@@ -279,6 +279,8 @@ export interface PlayerEntry {
   entityId: number;
   name: string;
   host: boolean;
+  /** The player's game mode (DESIGN: per player, set by the host). */
+  mode: Mode;
 }
 
 /**
@@ -764,7 +766,7 @@ export type WorldEvent =
 
 // ---------------------------------------------------------------- globals
 
-export type PlayerListChange = ({ op: 'join' } & PlayerEntry) | { op: 'leave'; entityId: number };
+export type PlayerListChange = ({ op: 'join' } & PlayerEntry) | { op: 'leave'; entityId: number } | { op: 'mode'; entityId: number; mode: Mode };
 
 /** Absent = unchanged. */
 export interface Globals {

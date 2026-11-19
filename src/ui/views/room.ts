@@ -9,15 +9,17 @@
  *    (creative or survival: a new friend's mode, whether loosened blocks drop), shown while the
  *    world is online, where they are set here apart from the host's own mode (DESIGN
  *    联机时由房主另外设置); in single play the pause menu's mode switch carries them.
- *  - In this world (everyone): each player's name with Host / You badges; for the host, per
- *    guest, the mode (creative / survival) and Remove, which asks first in the row.
+ *  - In this world (everyone): each player's name with Host / You badges and mode; for the host,
+ *    per guest, the mode as a switch (creative / survival), Remove, which asks first in the row,
+ *    and in small print what the server measures of that guest's connection (bytes a second,
+ *    backlog, round trip; updated in place about once a second, the row is not rebuilt).
  * Under them the connection diagnostics: one button measures (about a second), and the text is
  * shown selectable and copied.
  */
 import type { UiContext } from '../context';
 import type { GameMode, OnlineView, PlayerRow, Screen, UiState } from '../model';
 import { h, setHidden, svg, TextSlot } from '../dom';
-import { isolate } from '../format';
+import { formatGuestLink, isolate } from '../format';
 import { focusInto, type ScreenView } from './screen';
 import { button, CopyField, ICON_BACK, ICON_CLOSE, ICON_LINK, ICON_PEOPLE } from './widgets';
 
@@ -59,6 +61,8 @@ export class RoomScreenView implements ScreenView {
   private listLang: string | null = null;
   private confirmKick: number | null = null;
   private diagText: string | null = null;
+  /** Each guest row's connection line (host view), by entity id. */
+  private readonly linkEls = new Map<number, HTMLElement>();
 
   constructor(private readonly ctx: UiContext) {
     const d = ctx.doc;
@@ -203,6 +207,7 @@ export class RoomScreenView implements ScreenView {
       for (const b of this.rulesSeg.querySelectorAll<HTMLElement>('[data-act="rules"]')) b.setAttribute('aria-checked', b.dataset.mode === room.rules ? 'true' : 'false');
     }
     this.renderList(o);
+    this.renderLinks(o);
     // Diagnostics: the button says when it is measuring; a new text is shown and copied.
     this.diagLabel.textContent = this.ctx.t(o.diagnosticsBusy ? 'room.measuring' : 'room.copyDiagnostics');
     this.diagBtn.disabled = o.diagnosticsBusy;
@@ -255,6 +260,7 @@ export class RoomScreenView implements ScreenView {
     const d = ctx.doc;
     this.countEl.textContent = ctx.t('room.count', { n: o.players.length, max: o.maxPlayers });
     this.list.textContent = '';
+    this.linkEls.clear();
     if (this.confirmKick !== null && !o.players.some((p) => p.entityId === this.confirmKick)) this.confirmKick = null;
     for (const p of o.players) this.list.appendChild(this.confirmKick === p.entityId ? this.confirmRow(p) : this.row(p, o.role === 'host'));
   }
@@ -266,8 +272,31 @@ export class RoomScreenView implements ScreenView {
       p.host ? h(d, 'span', 'bl-badge bl-badge--host', null, [ctx.t('room.host')]) : null,
       p.you ? h(d, 'span', 'bl-badge bl-badge--you', null, [ctx.t('room.you')]) : null,
     ]);
-    const controls = hostView && !p.host && !p.you ? this.guestControls(p) : null;
-    return h(d, 'li', 'bl-player', { 'data-id': String(p.entityId) }, [h(d, 'span', 'bl-player-name', { title: p.name, dir: 'auto' }, [p.name]), badges, controls]);
+    const guest = hostView && !p.host && !p.you;
+    // The host switches a guest's mode in the row; everyone else's mode is a badge.
+    if (!guest) badges.appendChild(h(d, 'span', `bl-badge bl-badge--${p.mode}`, null, [ctx.t(p.mode === 'creative' ? 'mode.creative' : 'mode.survival')]));
+    let link: HTMLElement | null = null;
+    if (guest) {
+      link = h(d, 'span', 'bl-player-link', { title: ctx.t('room.trafficHint'), hidden: true });
+      this.linkEls.set(p.entityId, link);
+    }
+    return h(d, 'li', 'bl-player', { 'data-id': String(p.entityId) }, [
+      h(d, 'span', 'bl-player-name', { title: p.name, dir: 'auto' }, [p.name]),
+      badges,
+      link,
+      guest ? this.guestControls(p) : null,
+    ]);
+  }
+
+  /** The guests' connection lines, in place (they change every second; rebuilding the rows would take the focus away). */
+  private renderLinks(o: OnlineView): void {
+    for (const p of o.players) {
+      const el = this.linkEls.get(p.entityId);
+      if (el === undefined) continue;
+      const text = p.traffic === null ? '' : formatGuestLink(p.traffic, this.ctx.lang);
+      if (el.textContent !== text) el.textContent = text;
+      setHidden(el, p.traffic === null);
+    }
   }
 
   private guestControls(p: PlayerRow): HTMLElement {
