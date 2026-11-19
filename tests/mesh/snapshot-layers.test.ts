@@ -80,14 +80,17 @@ describe('mesh input contract', () => {
     expect(() => buildMesh({ ...base(), holes: new Uint8Array(27), part2: new Uint32Array(27) })).not.toThrow();
   });
 
-  it('until the shape-aware mesher: a cell with parts meshes as a full block of its first part (16.3)', () => {
+  it('the mesher reads the layers: a cell with parts is not drawn as a full block of its first part (P4 ends 16.3)', () => {
     const w = world();
     w.setCell(3, 21, 4, TWO);
     const layered = snapshotSection(w, 0, 1, 0);
     const plain: MeshInput = { ...layered, holes: null, part2: null };
-    expect(buildMesh(layered)).toEqual(buildMesh(plain));
+    expect(buildMesh(layered)).not.toEqual(buildMesh(plain));
+    // A layer that is present but all zero changes nothing: the same full blocks, the same bytes.
     w.setCell(3, 21, 4, makeCell(B.STONE));
-    expect(buildMesh(snapshotSection(w, 0, 1, 0))).toEqual(buildMesh(plain));
+    const back = snapshotSection(w, 0, 1, 0);
+    const zeroLayers: MeshInput = { ...back, holes: new Uint8Array(back.cells.length), part2: new Uint32Array(back.cells.length) };
+    expect(buildMesh(zeroLayers)).toEqual(buildMesh(back));
   });
 
   it('the worker transfer list carries every layer that is not null', () => {
