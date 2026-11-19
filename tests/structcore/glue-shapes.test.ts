@@ -6,11 +6,11 @@
  * removes the glue while removing a whole block keeps it on the other side. Also: the clean-up when
  * a chunk arrives applies only the state rule, and a rotor's sail count follows chiselling.
  */
-import { describe, expect, it } from 'vitest';
-import { makeCell } from '../../src/blocks/cell';
+import { describe, expect, it, vi } from 'vitest';
+import { liquidState, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { canonCell, withoutOctant } from '../../src/blocks/shapes';
-import { NX, NZ, PX, PY, type Dir } from '../../src/core/dirs';
+import { NX, NZ, PX, PY, PZ, type Dir } from '../../src/core/dirs';
 import type { GlueStore } from '../../src/structures/glue';
 import type { Rotor } from '../../src/structures/structure';
 import { connected } from '../../src/structures/stick';
@@ -171,13 +171,43 @@ describe('the table of effects (SHAPES 10.2) on the world, a ship and a rotor', 
   });
 });
 
-describe('glue left behind by an assembly (SHAPES 11.2)', () => {
-  it('a glued face towards a cell that stays but is not on the face goes when the moved cell leaves; one the staying cell is on stays', () => {
+describe('the hooks skip changes that cannot remove glue (SHAPES 10.2, 19.4)', () => {
+  it('a water level changing above a glued floor face does not look at the glue; a block change beside it does; no face is lost', () => {
+    const s = scene();
+    const glue = s.host.worldGlue;
+    fill(s.world, 0, 60, 0, 2, 60, 0, STONE);
+    glue.add(1, 60, 0, PY); // the floor face under (1, 61, 0)
+    glue.add(0, 60, 0, PX);
+    const lookups = vi.spyOn(glue, 'dirMaskAt');
+    // Air -> water -> another level -> air: neither content holds glue, nothing to prune.
+    s.world.setCell(1, 61, 0, makeCell(B.WATER, liquidState(0, false)));
+    s.world.setCell(1, 61, 0, makeCell(B.WATER, liquidState(3, false)));
+    s.world.setCell(1, 61, 0, makeCell(B.WATER, liquidState(5, true)));
+    s.world.setCell(1, 61, 0, 0);
+    expect(lookups).not.toHaveBeenCalled();
+    // A glueable block placed there (and removed again) runs the rules.
+    s.world.setCell(1, 61, 0, BRICKS);
+    expect(lookups).toHaveBeenCalled();
+    s.world.setCell(1, 61, 0, 0);
+    expect(glue.has(1, 60, 0, PY)).toBe(true);
+    // The floor block turning into water does run them (old content holds glue): the face under
+    // (1, 61, 0) has no side left and goes; the face towards (0, 60, 0) stays on the stone.
+    lookups.mockClear();
+    s.world.setCell(1, 60, 0, makeCell(B.WATER, liquidState(0, false)));
+    expect(lookups).toHaveBeenCalled();
+    expect(glue.has(1, 60, 0, PY)).toBe(false);
+    expect(glue.has(0, 60, 0, PX)).toBe(true);
+    lookups.mockRestore();
+  });
+});
+
+describe('glue left behind by an assembly (SHAPES 10.2, 11.2)', () => {
+  it('a glued face towards a cell that stays but is not on the face travels with the moved cell (as beside air); one the staying cell is on stays in the world', () => {
     const s = scene();
     fill(s.world, -1, 60, -1, 1, 60, 1, c(B.PLANKS_OAK));
     s.world.setCell(0, 61, 0, facing(B.HELM, 5));
     // East and west of the deck: bricks slabs on the far half, behind glued deck faces (not on the
-    // faces, so not glued in).
+    // faces, so not glued in). Those faces are the deck's exposed faces: they go with the deck.
     s.world.setCell(2, 60, 0, slab(B.BRICKS, EAST));
     s.host.worldGlue.add(1, 60, 0, PX);
     s.world.setCell(-2, 60, 0, slab(B.BRICKS, WEST));
@@ -185,18 +215,79 @@ describe('glue left behind by an assembly (SHAPES 11.2)', () => {
     // North: a full stone block behind a glued face (stone never sticks to planks; the glue joins them).
     s.world.setCell(0, 60, -2, STONE);
     s.host.worldGlue.add(0, 60, -1, NZ);
+    // South: a lower planks slab that sticks to the deck (lower halves touch), glued on its south
+    // face to an upper bricks slab. The two do not touch (lower half against upper half), so the
+    // bricks stay behind; they are on the face, so the glue stays with them.
+    s.world.setCell(0, 60, 2, slab(B.PLANKS_OAK, LOWER));
+    s.world.setCell(0, 60, 3, slab(B.BRICKS, UPPER));
+    s.host.worldGlue.add(0, 60, 2, PZ);
     const r = s.mgr.assembleShip(0, 61, 0);
     if (!r.ok) throw new Error(r.reason);
     const ship = r.structure;
-    expect(ship.grid.count).toBe(9 + 1 + 1); // deck, helm, the stone glued on
+    expect(ship.grid.count).toBe(9 + 1 + 1 + 1); // deck, helm, the stone glued on, the lower slab
     expect(getPacked(ship.grid, 0, 60, -2)).toBe(STONE);
     expect(ship.glue.has(0, 60, -1, NZ)).toBe(true); // travelled with both cells
-    // The faces towards the far-half slabs stayed in the world (the slabs hold glue) and were then
-    // cleaned by the world's hook: nothing is on them any more.
-    expect(s.host.worldGlue.has(1, 60, 0, PX)).toBe(false);
-    expect(s.host.worldGlue.has(-1, 60, 0, NX)).toBe(false);
-    expect(s.host.worldGlue.size).toBe(0);
+    expect(ship.glue.has(1, 60, 0, PX)).toBe(true); // exposed faces: travelled with the deck
+    expect(ship.glue.has(-1, 60, 0, NX)).toBe(true);
+    expect(ship.glue.has(0, 60, 2, PZ)).toBe(false);
+    expect(ship.glue.size).toBe(3);
+    expect(s.host.worldGlue.has(0, 60, 2, PZ)).toBe(true); // on the bricks' face, left behind
+    expect(s.host.worldGlue.size).toBe(1);
     expect(getPacked(s.world, 2, 60, 0)).toBe(slab(B.BRICKS, EAST));
+    expect(getPacked(s.world, 0, 60, 3)).toBe(slab(B.BRICKS, UPPER));
+  });
+
+  it('only the state rule applies to the moved cells: glue between a lower and an upper slab side by side (not touching, each joined through the deck) travels and stays', () => {
+    const s = scene();
+    fill(s.world, -1, 60, -1, 1, 60, 1, c(B.PLANKS_OAK));
+    s.world.setCell(0, 61, 0, facing(B.HELM, 5));
+    s.world.setCell(2, 60, 0, slab(B.PLANKS_OAK, LOWER)); // sticks to the deck plank west of it
+    s.world.setCell(2, 60, 1, slab(B.PLANKS_OAK, UPPER)); // sticks to the deck plank west of it
+    s.host.worldGlue.add(2, 60, 0, PZ); // between the two slabs: they meet along a line only
+    const r = s.mgr.assembleShip(0, 61, 0);
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.structure.grid.count).toBe(9 + 1 + 2);
+    // The lower slab is on that face (glueFaceKept); no contact was lost by moving, so the
+    // lost-contact rule must not fire although the two do not touch.
+    expect(r.structure.glue.has(2, 60, 0, PZ)).toBe(true);
+    expect(s.host.worldGlue.size).toBe(0);
+  });
+
+  it('docking beside a slab on the far half keeps the glue on an exposed face (as beside air); a cell on the face takes it (no joint a player did not make)', () => {
+    for (const [across, kept] of [
+      [0, true],
+      [slab(B.BRICKS, EAST), true], // far half: not on the face
+      [slab(B.BRICKS, WEST), false], // near half: touches the plank
+      [slab(B.BRICKS, UPPER), false], // on the face (upper half), touches the full plank's face
+      [makeCell(B.BRICKS), false],
+    ] as const) {
+      const s = scene();
+      fill(s.world, -1, 60, -1, 1, 60, 1, c(B.PLANKS_OAK));
+      s.world.setCell(0, 61, 0, facing(B.HELM, 5));
+      s.host.worldGlue.add(1, 60, 0, PX); // the exposed east face of the deck
+      const r = s.mgr.assembleShip(0, 61, 0);
+      if (!r.ok) throw new Error(r.reason);
+      expect(r.structure.glue.has(1, 60, 0, PX)).toBe(true);
+      if (across !== 0) s.world.setCell(2, 60, 0, across);
+      const d = s.mgr.dockShip(r.structure);
+      expect(d.ok).toBe(true);
+      expect(s.host.worldGlue.has(1, 60, 0, PX), `across ${across}`).toBe(kept);
+      expect(getPacked(s.world, 2, 60, 0)).toBe(across);
+    }
+  });
+
+  it('docking a lower slab beside an upper slab it does not touch: the upper slab is on the face, so the glue the ship brought is removed', () => {
+    const s = scene();
+    fill(s.world, -1, 60, -1, 1, 60, 1, c(B.PLANKS_OAK));
+    s.world.setCell(0, 61, 0, facing(B.HELM, 5));
+    s.world.setCell(0, 60, 2, slab(B.PLANKS_OAK, LOWER));
+    s.host.worldGlue.add(0, 60, 2, PZ);
+    const r = s.mgr.assembleShip(0, 61, 0);
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.structure.glue.has(0, 60, 2, PZ)).toBe(true);
+    s.world.setCell(0, 60, 3, slab(B.BRICKS, UPPER));
+    expect(s.mgr.dockShip(r.structure).ok).toBe(true);
+    expect(s.host.worldGlue.has(0, 60, 2, PZ)).toBe(false);
   });
 });
 

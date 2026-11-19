@@ -14,18 +14,20 @@
  * places and docks through w.me.
  */
 import { describe, expect, it } from 'vitest';
-import { facingState, makeCell } from '../../src/blocks/cell';
+import { facingState, ID_MASK, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { canonCell, withoutOctant } from '../../src/blocks/shapes';
 import { NX, NZ, PX, PZ, type Dir } from '../../src/core/dirs';
 import { qfromYaw, qrotate, vec3, vsub } from '../../src/core/math';
 import { I } from '../../src/blocks/items';
 import { dockSnap, snapCell } from '../../src/structures/assembly';
+import { HULL_MIXED, hullCavityCells, hullKindAt, isDryCell } from '../../src/structures/hull';
 import { rotCell } from '../../src/structures/orient';
 import type { Ship } from '../../src/structures/structure';
 import { getPacked } from '../../src/voxel/parts';
 import { EAST, LOWER, NORTH, slab, SOUTH, stairFill, UPPER, WEST } from '../shapes';
 import { assembleShipByHand, makeWorld, T } from './g1-stick-glue-helpers';
+import { onlyShip, SEA_TOP, seaWorld } from './g2-assemble-dock-helpers';
 import { structureLabels, worldLabels } from './g8-shapes-helpers';
 import type { TestWorld } from './world';
 
@@ -219,4 +221,61 @@ describe('43. 用半砖和楼梯造的船能组装；停靠后形状不变，再
     const again = assemble(w);
     expect(again.grid.count).toBe(RAFT_CELLS);
   });
+
+  // The hold of a boat in the sea, built dry, with its rim (the top water layer) made of LOWER
+  // slabs: the cells inside the rim layer are half dry (their lower half is bilge, the spill line
+  // runs through their middle). Assembling refills water under every cavity cell (hullCavityCells);
+  // docking where it was built must take all of it out again, or the water enclosed by the slab
+  // rim (a wall for liquids in the world) drains into the hold. A rim of full planks is the M1 case.
+  for (const [name, rim] of [
+    ['full plank rim', makeCell(B.PLANKS_OAK)],
+    ['lower slab rim', slab(B.PLANKS_OAK, LOWER)],
+  ] as const) {
+    it(`停靠后船舱保持干燥 (${name}): assembled in the sea and docked where it was built, no water is left inside the hull, and none drains in later`, () => {
+      const top = SEA_TOP - 1; // the top water layer
+      const w = seaWorld({ spawn: { x: 2.5, y: SEA_TOP + 1, z: 6.5 } });
+      const { sim } = w;
+      for (let x = 1; x <= 3; x++) sim.world.setCell(x, SEA_TOP, 6, makeCell(B.STONE)); // a pier
+      for (let z = 0; z <= 4; z++) {
+        for (let x = 0; x <= 4; x++) {
+          const edge = x === 0 || x === 4 || z === 0 || z === 4;
+          sim.world.setCell(x, top - 2, z, makeCell(B.PLANKS_OAK)); // floor
+          sim.world.setCell(x, top - 1, z, edge ? makeCell(B.PLANKS_OAK) : 0); // wall, hold
+          sim.world.setCell(x, top, z, edge ? rim : 0); // rim, the space inside it
+        }
+      }
+      sim.world.setCell(2, top - 1, 3, HELM_N);
+      w.tick(20);
+      const waterInside = (y: number): number => {
+        let n = 0;
+        for (let z = 1; z <= 3; z++) for (let x = 1; x <= 3; x++) if ((sim.world.getCell(x, y, z) & ID_MASK) === B.WATER) n++;
+        return n;
+      };
+      expect(waterInside(top - 1) + waterInside(top)).toBe(0);
+      const a = sim.structures.assembleShip(2, top - 1, 3);
+      expect(a.ok).toBe(true);
+      const ship = onlyShip(sim);
+      const h = ship.hull!;
+      expect(h.floats).toBe(true);
+      // The sea closed over the footprint: sources under the hold and under the rim layer.
+      expect(waterInside(top - 1)).toBe(9);
+      expect(waterInside(top)).toBe(9);
+      const cav = hullCavityCells(h);
+      let cavRim = 0;
+      for (let i = 0; i < cav.length; i += 3) if (cav[i + 1] === top) cavRim++;
+      expect(cavRim).toBe(9);
+      if (rim !== makeCell(B.PLANKS_OAK)) {
+        // The case under test: the rim layer is half dry, not dry as a whole cell.
+        expect(hullKindAt(h, 2, top, 2)).toBe(HULL_MIXED);
+        expect(isDryCell(h, 2, top, 2)).toBe(false);
+      }
+      const res = sim.structures.dockShip(ship); // at once: the ship has not moved
+      expect(res.ok).toBe(true);
+      expect(waterInside(top - 1)).toBe(0);
+      expect(waterInside(top)).toBe(0);
+      w.tick(200);
+      expect(waterInside(top - 1)).toBe(0);
+      expect(waterInside(top)).toBe(0);
+    });
+  }
 });
