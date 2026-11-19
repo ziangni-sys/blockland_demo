@@ -762,9 +762,10 @@ export class BodyMover {
   }
 
   /**
-   * A buried passive body rises straight up to the first cell-aligned spot free of the world and
-   * of every structure, at most BURIED_RISE_LIMIT blocks (drops of a windmill blockified inside a
-   * hill pop out on top of it, ACCEPTANCE 12). Cheap: one world range test per layer.
+   * A buried passive body rises straight up to the first spot on the half-cell lattice free of
+   * the world and of every structure, at most BURIED_RISE_LIMIT blocks (drops of a windmill
+   * blockified inside a hill pop out on top of it, ACCEPTANCE 12; on top of a half slab, not half
+   * a block above it: docs/SHAPES.md 5.9). Cheap: one world range test per half layer.
    */
   private riseOut(e: Entity): boolean {
     const col = e.box(this.box1);
@@ -772,10 +773,10 @@ export class BodyMover {
     const reach = this.cache.near(col, 0, this.relocNear);
     const world = this.host.world;
     const y0 = e.pos.y;
-    const base = Math.floor(y0);
+    const base = Math.floor(y0 * 2);
     const b = this.box3;
-    for (let k = 1; k <= BURIED_RISE_LIMIT; k++) {
-      const fy = base + k;
+    for (let k = 1; k <= 2 * BURIED_RISE_LIMIT; k++) {
+      const fy = (base + k) / 2;
       boxAt(e, e.pos.x, fy, e.pos.z, b);
       if (boxOverlapsSolid(world, b)) continue;
       let free = true;

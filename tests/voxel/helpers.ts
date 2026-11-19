@@ -78,17 +78,26 @@ export function boxAround(c: Vec3, hx: number, hy: number, hz: number): AABB {
  * every face at least t* away from a common point; t* < 0 means they are disjoint; 0 touch.
  */
 export function overlapMargin(grid: VoxelGrid, worldBox: AABB, x: number, y: number, z: number): number {
+  return overlapMarginBox(grid, worldBox, x, y, z, x + 1, y + 1, z + 1);
+}
+
+/**
+ * overlapMargin for any axis-aligned box of the grid's LOCAL space, [x0,x1] x [y0,y1] x [z0,z1]
+ * (an octant, a half slab, a cell): the same linear program with that box's six planes.
+ */
+export function overlapMarginBox(grid: VoxelGrid, worldBox: AABB, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): number {
   const n: number[][] = [];
   const b: number[] = [];
-  // cell planes
-  const c = [x, y, z];
+  // local box planes
+  const lo = [x0, y0, z0];
+  const hi = [x1, y1, z1];
   for (let j = 0; j < 3; j++) {
     const e = [0, 0, 0];
     e[j] = 1;
     n.push(e);
-    b.push(c[j]! + 1);
+    b.push(hi[j]!);
     n.push([-e[0]!, -e[1]!, -e[2]!]);
-    b.push(-c[j]!);
+    b.push(-lo[j]!);
   }
   // box planes: world axes in local space, centre in local space
   const centre = grid.toLocal(

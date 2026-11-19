@@ -4,13 +4,19 @@
  * player after applying it equals the client's predicted state that the report came from, exactly:
  * the carrier, the feet in the carrier's frame, the velocity relative to it, the look, standing,
  * flying, sneaking and sprinting (velocity and look as the wire carries them, f32), and with no
- * carrier the world position too. On flat land with steps and walls, swimming at sea, and on the
- * deck of a raft sailing in circles. Nothing is ever corrected or refused.
+ * carrier the world position too. On flat land with steps and walls, on half slabs and octant
+ * staircases (docs/SHAPES.md 5.8: the server's checks must not refuse what the shared mover does on
+ * them), swimming at sea, and on the deck of a raft sailing in circles. Nothing is ever corrected or
+ * refused.
  */
 import { describe, expect, it } from 'vitest';
 import { B } from '../../src/blocks/defs';
+import { aabb } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
+import { REPORT_SUPPORT_REACH, SUPPORT_GAP } from '../../src/entities/constants';
+import { hasSupportBelow } from '../../src/voxel/shape';
 import type { MoveReport } from '../../src/entities/drive';
+import { addOctant, buildStairs } from '../drive/stairs-scenes';
 import { fill } from './e2e-scenes';
 import { assemble, buildRaft, LAND, LAND_TOP, OWN_SEA, OWN_SEA_TOP, ownWorld, SEA_FLOOR, stat, type OwnRun } from './own-scenes';
 
@@ -38,8 +44,14 @@ function randomScript(r: OwnRun, seed: number, swim: boolean): (k: number) => vo
   };
 }
 
-/** Record the predicted state behind every report, and compare the server's after every tick. */
-function agreement(r: OwnRun, what: string): { compared: number; worst: string[] } {
+/**
+ * Record the predicted state behind every report, and compare the server's after every tick.
+ * `edgeLandings`: a report whose body landed on a tread's rim and walked off it in the same tick
+ * claims to stand, and the server, finding nothing under its end, judges it not standing
+ * (docs/SHAPES.md 5.8 item 4): that one difference of `onGround` is allowed (and counted) when the
+ * server's body is indeed not held up where it ends.
+ */
+function agreement(r: OwnRun, what: string, edgeLandings = false): { compared: number; worst: string[]; edges: number } {
   const sent = new Map<number, Predicted>();
   r.c.onReport = (rep, own) => {
     const p = own.player;
@@ -49,7 +61,7 @@ function agreement(r: OwnRun, what: string): { compared: number; worst: string[]
       carrierId: p.carrierId,
     });
   };
-  const out = { compared: 0, worst: [] as string[] };
+  const out = { compared: 0, worst: [] as string[], edges: 0 };
   let last = -1;
   r.onTick(() => {
     const p = r.ctrl.player;
@@ -74,7 +86,9 @@ function agreement(r: OwnRun, what: string): { compared: number; worst: string[]
     eq('vel.z', d.vel.z, f(want.vel.z));
     eq('yaw', d.yaw, f(want.yaw));
     eq('pitch', d.pitch, Math.max(-Math.PI / 2, Math.min(Math.PI / 2, f(want.pitch))));
-    eq('onGround', d.onGround, want.onGround);
+    const box = p.box(aabb());
+    if (edgeLandings && want.onGround && !d.onGround && want.carrierId === 0 && !hasSupportBelow(r.sim.world, box, SUPPORT_GAP + REPORT_SUPPORT_REACH, -REPORT_SUPPORT_REACH)) out.edges++;
+    else eq('onGround', d.onGround, want.onGround);
     eq('flying', p.flying, want.flying);
     eq('sneaking', p.sneaking, want.sneaking);
     eq('sprinting', p.sprinting, want.sprinting);
@@ -103,6 +117,41 @@ describe('the prediction and the server agree exactly on a perfect link (package
     r.mark(randomScript(r, 101, false));
     r.runSteps(STEPS);
     stat(`agree\t${STEPS} client ticks: ${a.compared} reports compared, ${a.worst.length} differing, corrections ${JSON.stringify(r.causes())}`);
+    expect(a.worst).toEqual([]);
+    expect(a.compared).toBeGreaterThan(STEPS * 0.9);
+    expect(r.causes()).toEqual([]);
+    expect(r.rejected()).toBe(0);
+  }, 120_000);
+
+  it('on rolling land of half-block steps, with octant staircases and a stairwell: 1200 client ticks of random input', async () => {
+    const r = await ownWorld(LAND, 'survival', {}, (sim) => {
+      const T = LAND_TOP;
+      const w = sim.world;
+      // Rolling land on the half-cell lattice: columns of octants whose heights (in half blocks)
+      // change by at most one between neighbours along a row, so it is walked up and down.
+      for (let hx = -48; hx < 48; hx++)
+        for (let hz = -48; hz < 48; hz++) {
+          const top = Math.round(2 + 1.6 * Math.sin(hx * 0.21) + 1.6 * Math.cos(hz * 0.17));
+          for (let hy = 2 * T; hy < 2 * T + top; hy++) addOctant(w, hx, hy, hz, B.STONE);
+        }
+      buildStairs(w, 'straight', 10, 2 * T + 4, -12, 10, B.STONE, 6);
+      buildStairs(w, 'stairwell', 10, 2 * T + 4, 6, 10, B.STONE, 6);
+      buildStairs(w, 'diagonal', -30, 2 * T + 4, -30, 8, B.STONE);
+    });
+    const a = agreement(r, 'stairs', true);
+    // It really walked on half slabs and steps: ticks standing at a half-block height, and above y = T + 1.
+    let onHalf = 0;
+    let high = 0;
+    r.onTick(() => {
+      const p = r.ctrl.player;
+      if (p.onGround && p.pos.y - Math.floor(p.pos.y) === 0.5) onHalf++;
+      if (p.pos.y > LAND_TOP + 1.2) high++;
+    });
+    r.mark(randomScript(r, 404, false));
+    r.runSteps(STEPS);
+    expect(onHalf).toBeGreaterThan(50);
+    expect(high).toBeGreaterThan(20);
+    stat(`agree\t${STEPS} client ticks: ${a.compared} reports compared, ${a.worst.length} differing, ${a.edges} edge landings, corrections ${JSON.stringify(r.causes())}`);
     expect(a.worst).toEqual([]);
     expect(a.compared).toBeGreaterThan(STEPS * 0.9);
     expect(r.causes()).toEqual([]);

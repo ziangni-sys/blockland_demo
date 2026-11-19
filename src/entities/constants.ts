@@ -94,17 +94,30 @@ export const PUSH_SKIN = 1e-6;
 export const LAND_BIAS_SLACK = 0.02;
 /** Push iterations per structure per sub-step. */
 export const MAX_PUSH_ITERATIONS = 4;
-/** Relative motion longer than this per tick is split into sub-steps (a 1-cell deck cannot be tunnelled). */
+/**
+ * Relative motion longer than this per tick is split into sub-steps. A body passes through a floor
+ * only with a sub-step longer than the floor's thickness plus its own height, so sub-steps shorter
+ * than half a cell keep even the thinnest body (an item, ITEM_HEIGHT) on a half-slab floor or deck.
+ */
 export const MAX_SUBSTEP = 0.4;
 /** Hard cap on sub-steps (terminal velocity needs ~8). */
 export const MAX_SUBSTEPS = 32;
-/** A structure moving faster than this relative to the body biases the push toward its motion. */
+/**
+ * A structure that moved more than PREFER_MIN_SPEED * TICK_DT relative to the body this tick
+ * biases the push toward that displacement (physics.ts preferFor, docs/SHAPES.md 5.10).
+ */
 export const PREFER_MIN_SPEED = 0.5;
-/** Strength of that bias (blocks of depth per unit of alignment; see PushOptions.preferWeight). */
+/**
+ * Strength of that bias (blocks of depth per unit of alignment; see PushOptions.preferWeight), or
+ * the length of the displacement when that is larger: then the push out on the side the structure
+ * came from always wins over the far side of a thin wall.
+ */
 export const PREFER_WEIGHT = 0.3;
 /**
- * The bias only applies when the minimal push is at least this deep (a blade that jumped well
- * into the body this tick). A graze is always resolved by the minimal push: biasing it would
+ * The bias applies when the minimal push is at least this deep (a blade that jumped well into the
+ * body this tick), or, for the motion bias, when the minimal push points back against the motion
+ * (out through the far side of a wall thinner than the move; docs/SHAPES.md 5.10). A graze, whose
+ * minimal push runs across the motion, is always resolved by the minimal push: biasing it would
  * pick a face many times deeper and fling the body (LESSONS 叶片侧面擦过船时船被猛踢).
  */
 export const PREFER_MIN_DEPTH = 0.2;
@@ -150,15 +163,19 @@ export const SNEAK_SPEED = 1.3;
 export const GROUND_ACCEL = 0.6;
 /** ... in the air (reduced air control, keeps momentum). */
 export const AIR_ACCEL = 0.1;
-/** Steps a sneaking player may drop without being stopped at an edge. */
+/**
+ * Steps a sneaking player may drop without being stopped at an edge: as high as it can step up,
+ * so a sneaking player walks down the edge of a half slab (0.5) too.
+ */
 export const SNEAK_PROBE_DEPTH = 0.6;
 /** Granularity of the sneak edge guard. */
 export const SNEAK_STEP = 0.05;
 /**
  * A walking body (player, rabbit) on the ground steps up onto a WORLD ledge at most this high
  * instead of being stopped by it. Ships float at arbitrary heights and bob, so a pier built
- * "level" with a deck is practically never exactly level (ACCEPTANCE 19 走上码头). World terrain
- * steps are whole blocks, so this never lets anyone walk up terrain without jumping.
+ * "level" with a deck is practically never exactly level (ACCEPTANCE 19 走上码头). A half slab
+ * (0.5) is walked up without jumping (ACCEPTANCE 38); a whole block (1.0) still needs a jump.
+ * There is no snapping down: walking off a half slab is a short fall.
  */
 export const STEP_HEIGHT = 0.6;
 

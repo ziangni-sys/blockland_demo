@@ -11,7 +11,9 @@
  *  - Structures then push the body out of their solid cells, one axis at a time; an axis that
  *    would put the body NEWLY into the world or into ANOTHER structure is not applied
  *    (LESSONS 被风车沿船舷推时误判挤伤) — except that dipping into another structure's FLOOR
- *    (a deck that rolls a little) lifts the body onto it instead.
+ *    (a deck that rolls a little) lifts the body onto it instead. A structure that moved into the
+ *    body pushes it out on the side it came from, never through a thin (half-cell) wall: see
+ *    preferFor (docs/SHAPES.md 5.10).
  *  - If a structure still overlaps the body and the body did not overlap it before its own
  *    motion, the body walked into it by itself: that motion is taken back axis by axis.
  *    Only an overlap that remains although the body did not move into it is a crush.
@@ -22,7 +24,8 @@ import { SOLID } from '../blocks/registry';
 import { ID_MASK } from '../blocks/cell';
 import { TICK_DT } from '../core/constants';
 import { aabb, qrotateInv, vec3, type AABB, type Vec3 } from '../core/math';
-import { boxOverlapsSolid, CONTACT_EPS, deepestPenetration, hasSupportBelow, sweepAxis, type PushOptions } from '../voxel/shape';
+import { solidAtHalf } from '../voxel/parts';
+import { boxOverlapsSolid, CONTACT_EPS, deepestPenetration, hasSupportBelow, sweepAxis, type Penetration, type PushOptions } from '../voxel/shape';
 import type { World } from '../voxel/world';
 import {
   ATTACH_INSET,
@@ -170,6 +173,17 @@ export class Collider {
   private readonly ld: Vec3 = vec3();
   private readonly prefer: Vec3 = vec3();
   private readonly opts: PushOptions = { prefer: this.prefer, preferWeight: PREFER_WEIGHT };
+  /** Push options leaning toward a structure's displacement relative to the body this tick (preferFor). */
+  private readonly motionPrefer: Vec3 = vec3();
+  private readonly motionOpts: PushOptions = { prefer: this.motionPrefer, preferWeight: PREFER_WEIGHT };
+  /** Where the body was when move() began (preferFor measures the body's own displacement this tick from it). */
+  private p0x = 0;
+  private p0y = 0;
+  private p0z = 0;
+  /** deepestPenetration results (written in place: no allocation per query). */
+  private readonly penA: Penetration = { nx: 0, ny: 0, nz: 0, depth: 0, cx: 0, cy: 0, cz: 0, octant: -1 };
+  private readonly penB: Penetration = { nx: 0, ny: 0, nz: 0, depth: 0, cx: 0, cy: 0, cz: 0, octant: -1 };
+  private readonly penC: Penetration = { nx: 0, ny: 0, nz: 0, depth: 0, cx: 0, cy: 0, cz: 0, octant: -1 };
   /** Push options that pick a cell's top face whenever it is exposed (structure step-up). */
   private readonly upOpts: PushOptions = { prefer: vec3(0, 1, 0), preferWeight: 4 };
   /** Push options leaning toward the top face by the distance the body came down (see groundBias). */
@@ -203,6 +217,9 @@ export class Collider {
     let dx = d.x;
     const dy = d.y;
     let dz = d.z;
+    this.p0x = e.pos.x;
+    this.p0y = e.pos.y;
+    this.p0z = e.pos.z;
     this.onWorldGround = false;
     this.groundRec = null;
     this.collidedH = false;
@@ -433,13 +450,19 @@ export class Collider {
         for (let it = 0; it < MAX_PUSH_ITERATIONS; it++) {
           const b = e.box(this.box);
           if (!boxNearRec(b, r, 0)) break;
-          let pen = deepestPenetration(r.grid, b, this.groundBias(e, r));
+          let pen = deepestPenetration(r.grid, b, this.groundBias(e, r), this.penA);
           if (pen === null || !(pen.depth > 0)) break;
-          if (pen.depth >= PREFER_MIN_DEPTH) {
-            // Deep intrusion: lean toward the structure's motion so the body ends up in front
-            // of a fast blade, not behind it.
-            const opts = this.preferFor(e, rel, r, b);
-            if (opts !== undefined) pen = deepestPenetration(r.grid, b, opts) ?? pen;
+          // Lean toward the structure's motion so the body ends up in front of a fast blade or
+          // wall, not behind it: for a deep intrusion, and (motion only, not a fixed lean) whenever
+          // the shallowest push points back against that motion, out through the far side of a
+          // wall thinner than the distance it moved into the body (docs/SHAPES.md 5.10). A graze
+          // (push across the motion) keeps the shallowest push (LESSONS 叶片侧面擦过船时船被猛踢).
+          const opts = this.preferFor(e, r, b);
+          if (
+            opts !== undefined &&
+            (pen.depth >= PREFER_MIN_DEPTH || (opts === this.motionOpts && pen.nx * this.motionPrefer.x + pen.ny * this.motionPrefer.y + pen.nz * this.motionPrefer.z < -0.5))
+          ) {
+            pen = deepestPenetration(r.grid, b, opts, this.penB) ?? pen;
           }
           const nx = pen.nx;
           const ny = pen.ny;
@@ -624,7 +647,7 @@ export class Collider {
     for (let guard = 0; guard < 4; guard++) {
       const o = this.newOverlap(tb, b0, r);
       if (o === null) return true;
-      const pen = deepestPenetration(o.grid, tb);
+      const pen = deepestPenetration(o.grid, tb, undefined, this.penC);
       if (pen === null) return false; // embedded without an exposed face
       if (pen.ny > GROUND_NORMAL_Y) {
         const l = pen.depth / pen.ny + PUSH_SKIN;
@@ -664,7 +687,7 @@ export class Collider {
     for (let k = 0; k < 2; k++) {
       // The top face of the worst cell whenever it is exposed (a wall cell under another cell
       // has none: no stepping up walls).
-      const pen = deepestPenetration(r.grid, tb, k === 0 ? this.upOpts : undefined);
+      const pen = deepestPenetration(r.grid, tb, k === 0 ? this.upOpts : undefined, this.penC);
       if (pen === null) break;
       if (!(pen.ny > GROUND_NORMAL_Y)) return false;
       const l = pen.depth / pen.ny + PUSH_SKIN;
@@ -754,8 +777,22 @@ export class Collider {
     return this.landOpts;
   }
 
-  /** Push bias toward a structure's motion relative to the body (a blade sweeping into it). */
-  private preferFor(e: Entity, rel: Vec3, r: StructRec, b: AABB): PushOptions | undefined {
+  /**
+   * Push bias toward a structure's motion relative to the body (a blade or a wall sweeping into
+   * it). A fixed lean (setLean) applies to every structure but the carrier. Otherwise, for a
+   * structure that moved this tick and is not the carrier: its displacement this tick relative to
+   * the body, Δ = (its velocity at the body - the carrier's) * TICK_DT - (the body's own
+   * displacement so far in this move); none when |Δ| < PREFER_MIN_SPEED * TICK_DT; else toward
+   * Δ / |Δ| with weight max(PREFER_WEIGHT, |Δ|) (docs/SHAPES.md 5.10).
+   *
+   * Why the displacement and not the velocity difference: a body pushed once already carries the
+   * structure's horizontal velocity, so the velocity difference is only its own fall or jump and
+   * the lean pointed up or down; but the intrusion comes from positions (in the air the body's
+   * structure pass comes before its own horizontal move in the sub-step). With weight |Δ| the push
+   * out through the face the body was in front of scores at most 0, so it beats the far face of a
+   * wall of any thickness at any speed.
+   */
+  private preferFor(e: Entity, r: StructRec, b: AABB): PushOptions | undefined {
     const lean = this.leanDir;
     if (lean !== null) {
       if (r.id === e.carrierId) return undefined;
@@ -770,15 +807,16 @@ export class Collider {
     c.y = (b.minY + b.maxY) * 0.5;
     c.z = (b.minZ + b.maxZ) * 0.5;
     const sv = pointVelocity(r, c, this.v);
-    const vx = sv.x - rel.x - e.carrierVel.x;
-    const vy = sv.y - rel.y - e.carrierVel.y;
-    const vz = sv.z - rel.z - e.carrierVel.z;
-    const sp = Math.sqrt(vx * vx + vy * vy + vz * vz);
-    if (!(sp >= PREFER_MIN_SPEED)) return undefined;
-    this.prefer.x = vx / sp;
-    this.prefer.y = vy / sp;
-    this.prefer.z = vz / sp;
-    return this.opts;
+    const dx = (sv.x - e.carrierVel.x) * TICK_DT - (e.pos.x - this.p0x);
+    const dy = (sv.y - e.carrierVel.y) * TICK_DT - (e.pos.y - this.p0y);
+    const dz = (sv.z - e.carrierVel.z) * TICK_DT - (e.pos.z - this.p0z);
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(len >= PREFER_MIN_SPEED * TICK_DT)) return undefined;
+    this.motionPrefer.x = dx / len;
+    this.motionPrefer.y = dy / len;
+    this.motionPrefer.z = dz / len;
+    this.motionOpts.preferWeight = len > PREFER_WEIGHT ? len : PREFER_WEIGHT;
+    return this.motionOpts;
   }
 
   // ------------------------------------------------------------ own motion taken back
@@ -943,22 +981,42 @@ export class Collider {
   }
 
   /**
-   * Does any point of the disk of radius `rad` centred at the feet (x, y, z) have a solid cell
+   * Does any point of the disk of radius `rad` centred at the feet (x, y, z) have solid material
    * of the world or of a near structure within SNEAK_PROBE_DEPTH below it? The disk points are
    * laid out in each grid's own heading (see DISK_PATTERN), so the answer does not depend on
    * how far a yawing structure has turned.
+   *
+   * A point probes the column of half cells under it (docs/SHAPES.md 5.9): the octants whose
+   * horizontal quarter contains the point, from the half layer under the feet down to
+   * SNEAK_PROBE_DEPTH below them, with voxel/parts.ts solidAtHalf (integer half-cell coordinates
+   * only: it runs hundreds of times per tick per structure). Where there can be no partial cell
+   * (a world column whose chunk has no holes / second-part layers, a structure without them) the
+   * probe reads whole cells, as it always did. A half cell contains the point (Math.floor of
+   * twice the coordinate) and lies strictly below the feet, as a cell did, so "guard-supported"
+   * still implies "attach-supported" for the disk inscribed in the attach probe (constants.ts).
    */
   private diskSupported(x: number, y: number, z: number, rad: number): boolean {
     const depth = SNEAK_PROBE_DEPTH;
     const pat = DISK_PATTERN;
     const world = this.world;
-    // World: the point probe is a column of cells.
+    // World: the point probe is a column of cells (half cells where the chunk has partial cells).
     const kTop = Math.ceil(y - CONTACT_EPS) - 1;
     const kBot = Math.floor(y - depth + CONTACT_EPS);
+    const hTop = Math.ceil((y - CONTACT_EPS) * 2) - 1;
+    const hBot = Math.floor((y - depth + CONTACT_EPS) * 2);
     for (let i = 0; i < pat.length; i += 2) {
-      const ix = Math.floor(x + pat[i]! * rad);
-      const iz = Math.floor(z + pat[i + 1]! * rad);
-      for (let k = kTop; k >= kBot; k--) if (SOLID[world.getCell(ix, k, iz) & ID_MASK] === 1) return true;
+      const px = x + pat[i]! * rad;
+      const pz = z + pat[i + 1]! * rad;
+      const ix = Math.floor(px);
+      const iz = Math.floor(pz);
+      const chunk = world.chunkAt(ix, iz);
+      if (chunk === undefined || (chunk.holes === null && chunk.part2 === null)) {
+        for (let k = kTop; k >= kBot; k--) if (SOLID[world.getCell(ix, k, iz) & ID_MASK] === 1) return true;
+      } else {
+        const hx = Math.floor(px * 2);
+        const hz = Math.floor(pz * 2);
+        for (let h = hTop; h >= hBot; h--) if (solidAtHalf(world, hx, h, hz)) return true;
+      }
     }
     const near = this.near;
     for (let j = 0; j < near.length; j++) {
@@ -973,6 +1031,7 @@ export class Collider {
       const ux = r.headX;
       const uz = r.headZ;
       const grid = r.grid;
+      const layered = grid.layered;
       const lp = this.lp;
       for (let i = 0; i < pat.length; i += 2) {
         const fx = pat[i]! * rad;
@@ -983,8 +1042,12 @@ export class Collider {
         curToLocal(r, lp, lp);
         for (let t = 0; ; t += POINT_PROBE_STEP) {
           if (t > depth) t = depth;
-          const cell = grid.getCell(Math.floor(lp.x + ld.x * t), Math.floor(lp.y + ld.y * t), Math.floor(lp.z + ld.z * t));
-          if (SOLID[cell & ID_MASK] === 1) return true;
+          if (layered) {
+            if (solidAtHalf(grid, Math.floor((lp.x + ld.x * t) * 2), Math.floor((lp.y + ld.y * t) * 2), Math.floor((lp.z + ld.z * t) * 2))) return true;
+          } else {
+            const cell = grid.getCell(Math.floor(lp.x + ld.x * t), Math.floor(lp.y + ld.y * t), Math.floor(lp.z + ld.z * t));
+            if (SOLID[cell & ID_MASK] === 1) return true;
+          }
           if (t >= depth) break;
         }
       }
