@@ -10,8 +10,9 @@
  * are the player's feet as shown (OwnPlayer.displayPos) plus the eye height. The outline is drawn
  * from useTarget at once, without waiting for the server.
  *
- * AIM. When a target changes (any field, the cell value included: a block replaced under the
- * crosshair is a new target), the client sends Aim — at most one per client tick (the latest
+ * AIM. When a target changes (any field, the cell value and the octant included: a block replaced
+ * under the crosshair, or the crosshair moving from one octant of a cell to another, is a new
+ * target; docs/SHAPES.md 6.3), the client sends Aim — at most one per client tick (the latest
  * targets go in the next tick's) — on the reliable channel, so it keeps its order with the presses
  * and releases: the timed glue, hold-to-mine, the preview and the hint follow it on the server.
  *
@@ -27,6 +28,7 @@
  * the player is predicted (NetClient ready); onBatch() after every applied batch; update(view,
  * clientTick, moveSeq) every frame after OwnPlayer.frame; the press / action methods from input.
  */
+import { partAt } from '../../blocks/shapes';
 import { vec3, type Vec3 } from '../../core/math';
 import { pickBlockItem } from '../../entities/inventory';
 import type { Inventory } from '../../entities/inventory';
@@ -69,8 +71,9 @@ export function replicaScene(replica: ClientReplica): RayScene {
   return { grids, ships };
 }
 
+/** A hit as the protocol's Target: `sub` is the octant hit, `cell` the whole cell content seen (docs/SHAPES.md 6.3). */
 function targetOf(h: GridHit | null): Target | null {
-  return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face, sub: 0, cell: h.cell };
+  return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face, sub: h.octant, cell: h.cell };
 }
 
 /** Ray `kind` along `view` within REACH of the eyes (see TARGETS in the header). */
@@ -186,13 +189,13 @@ export class ClientIntents {
 
   // ------------------------------------------------------------------ presses and releases
 
-  /** Right button down: Use with the use target, the selected slot and the sneak key. */
+  /** Right button down: Use with the use target, the selected slot and the sneak key (slab mode 0: M2.3 has no slabs to place). */
   pressUse(sneak: boolean, moveSeq: number): void {
     this.retarget();
     this.useHeld = true;
     // The press's target is the server's claimed use target from then on.
     this.sentUse = this.useTarget;
-    this.send({ type: 'use', seq: ++this.seq, moveSeq, slot: this.selected, sneak, target: this.useTarget });
+    this.send({ type: 'use', seq: ++this.seq, moveSeq, slot: this.selected, sneak, slabMode: 0, target: this.useTarget });
   }
 
   releaseUse(): void {
@@ -224,12 +227,12 @@ export class ClientIntents {
     this.predicted({ type: 'selectSlot', seq: ++this.seq, slot }, { kind: 'selectSlot', slot });
   }
 
-  /** Pick block (middle click) on the use target; false (nothing sent) without one. */
+  /** Pick block (middle click) on the use target, predicted with the part aimed at (docs/SHAPES.md 6.2); false (nothing sent) without one. */
   pickBlock(moveSeq: number): boolean {
     this.retarget();
     const t = this.useTarget;
     if (t === null) return false;
-    this.predicted({ type: 'pickBlock', seq: ++this.seq, moveSeq, target: t }, { kind: 'pickBlock', item: pickBlockItem(t.cell) });
+    this.predicted({ type: 'pickBlock', seq: ++this.seq, moveSeq, target: t }, { kind: 'pickBlock', item: pickBlockItem(partAt(t.cell, t.sub)) });
     return true;
   }
 

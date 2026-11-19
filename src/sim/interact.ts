@@ -61,10 +61,11 @@
  * All state is on the instances; nothing here is saved (a timed glue operation, previews and
  * mining progress do not survive a reload or a rejoin by design).
  */
-import { AIR, ID_MASK, PART_MASK, axisState, cellPrimary, cellState, facingState, isLiquidSource, layersState, liquidState, makeCell, stateLayers } from '../blocks/cell';
+import { AIR, CELL_MULTI_BIT, FULL_LIMIT, HOLES_SHIFT, ID_MASK, PACK_SCALE, PART_MASK, axisState, cellState, facingState, isLiquidSource, layersState, liquidState, makeCell } from '../blocks/cell';
 import { B } from '../blocks/defs';
 import { I, isBlockItem } from '../blocks/items';
-import { BLOCKS, LIQUID, REPLACEABLE, SOLID, type BlockDef } from '../blocks/registry';
+import { BLOCKS, LIQUID, REPLACEABLE, type BlockDef } from '../blocks/registry';
+import { BOXES, BOX_COUNT, cellsTouch, faceCover, isCellFace, partAt, solidFill, topCovered } from '../blocks/shapes';
 import { TICK_DT, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, dirAxis, nearestDir, type Dir } from '../core/dirs';
 import { aabb, clamp, vec3, type AABB, type Quat, type Vec3 } from '../core/math';
@@ -74,17 +75,19 @@ import { pickBlockInto, pickBlockItem } from '../entities/inventory';
 import { axisValue, finiteAngle } from '../entities/input';
 import { boxCellsWith } from '../structures/collect';
 import { analyzeHull, type HullInfo } from '../structures/hull';
-import { canGlue, canJoinStructure, sticksWithoutGlue } from '../structures/stick';
+import { canGlue, canJoinStructure, holdsGlue, sticksWithoutGlue } from '../structures/stick';
 import { Ship, type Structure } from '../structures/structure';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
-import { getPacked } from '../voxel/parts';
-import { placementCell, targetable, type CellPredicate, type GridHit } from '../voxel/raycast';
+import { getPacked, removePartAt, solidFillAt } from '../voxel/parts';
+import { targetable, type CellPredicate, type GridHit } from '../voxel/raycast';
 import { CONTACT_EPS, boxOverlapsSolid } from '../voxel/shape';
 import type { StructureGrid } from '../voxel/sgrid';
 import { spawnBlockDrop } from './drops';
 import { failMessage, msg, type MessageKey } from './messages';
-import { castRay, displacedByHull, isBucket, lookDir, rayKindOf, rayPredicate, type RayKind, type RayScene, type RayShip } from './rays';
+import { REFUSAL_TOAST, placementTarget, planPlacement } from './placement';
+import { castRay, isBucket, lookDir, partlyDisplaced, rayKindOf, rayPredicate, type RayKind, type RayScene, type RayShip } from './rays';
 import type { Simulation } from './simulation';
+import { supportOk } from './support';
 import { emptyView, type AimTarget, type InteractionView, type Message, type PlayerKey } from './view';
 
 /** Creative mode: while the attack button stays held, one more block breaks every this many ticks. */
@@ -102,13 +105,12 @@ export const CONFLICT_TICKS = 60;
  */
 export const GRID_OVERLAP_TOLERANCE = 0.1;
 
-/** Cell value the overlap probe reports for its one cell (any HARD block). */
-const PROBE_CELL = makeCell(B.STONE);
-
 /**
- * A VoxelGrid view of ONE hard cell of another grid: same transform, nothing else in it.
- * Lets the exact OBB-vs-cell queries of voxel/shape answer "does this box overlap that one
- * (possibly rotated) cell" without a separate code path.
+ * A VoxelGrid view of ONE cell of another grid holding only the part about to be placed there:
+ * same transform, nothing else in it. Lets the exact, shape-aware OBB-vs-cell queries of
+ * voxel/shape answer "does this box overlap the material that would be placed in that (possibly
+ * rotated) cell" without a separate code path (docs/SHAPES.md 6.2: the placed block's shape
+ * against bodies).
  */
 class CellProbe implements VoxelGrid {
   gridId = 0;
@@ -118,15 +120,18 @@ class CellProbe implements VoxelGrid {
   private x = 0;
   private y = 0;
   private z = 0;
+  /** The part value being placed (one part: a value below 2^24). */
+  private part = AIR;
   private readonly bounds: CellBounds = { minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 };
 
-  set(target: VoxelGrid, x: number, y: number, z: number): this {
+  set(target: VoxelGrid, x: number, y: number, z: number, part: number): this {
     this.target = target;
     this.gridId = target.gridId;
     this.parent = target.parent;
     this.x = x;
     this.y = y;
     this.z = z;
+    this.part = part;
     const b = this.bounds;
     b.minX = x;
     b.minY = y;
@@ -141,9 +146,9 @@ class CellProbe implements VoxelGrid {
     return this.target;
   }
   getCell(x: number, y: number, z: number): number {
-    return x === this.x && y === this.y && z === this.z ? PROBE_CELL : AIR;
+    return x === this.x && y === this.y && z === this.z ? this.part : AIR;
   }
-  /** The probe's cell is a full block: no second part (docs/SHAPES.md 4.4; P8b makes it the placed content's). */
+  /** The probe holds the one part being placed, never a second one (docs/SHAPES.md 4.4). */
   getPart2(): number {
     return 0;
   }
@@ -206,19 +211,34 @@ interface GlueOp {
   readonly z: number;
   /** The glued face: towards the neighbour the ray came from. */
   readonly face: Dir;
-  /** The block's cell value when the operation started: any change cancels it (like mining). */
+  /** The cell's whole packed content when the operation started: any change of the cell cancels it (docs/SHAPES.md 6.2). */
   readonly cell: number;
-  /** Seconds needed: the block's survival mining time. */
+  /** Seconds needed: the survival mining time of the part clicked. */
   readonly total: number;
   progress: number;
 }
 
 function copyTarget(t: AimTarget | null): AimTarget | null {
-  return t === null ? null : { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face, cell: t.cell };
+  return t === null ? null : { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face, sub: t.sub, cell: t.cell };
 }
 
 function targetOf(h: GridHit | null): AimTarget | null {
-  return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face, cell: h.cell };
+  return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face, sub: h.octant, cell: h.cell };
+}
+
+/**
+ * Do cell (x,y,z) of `grid` and the cell across face `f` already touch, the cell across holding
+ * glue (holdsGlue: glueable, or the unloaded sentinel) and the hard covers of the shared face
+ * overlapping (blocks/shapes.ts cellsTouch)? Such a face refuses glue (toast.glue.touching,
+ * docs/SHAPES.md 10.3). Read from the layers (solidFillAt), never forming a packed value: the
+ * crosshair hint asks it every tick (4.4).
+ */
+function touchesAcross(grid: VoxelGrid, x: number, y: number, z: number, f: Dir): boolean {
+  const ax = x + DIR_X[f]!;
+  const ay = y + DIR_Y[f]!;
+  const az = z + DIR_Z[f]!;
+  if (!holdsGlue(grid.getCell(ax, ay, az))) return false;
+  return (faceCover(solidFillAt(grid, x, y, z), f) & faceCover(solidFillAt(grid, ax, ay, az), (f ^ 1) as Dir)) !== 0;
 }
 
 function isAirOrLiquid(cell: number): boolean {
@@ -226,11 +246,50 @@ function isAirOrLiquid(cell: number): boolean {
   return id === AIR || LIQUID[id] !== 0;
 }
 
-function supportOk(def: BlockDef, below: number): boolean {
-  if (def.support === 'none') return true;
-  const id = below & ID_MASK;
-  if (def.support === 'solid') return SOLID[id] === 1;
-  return id === B.SAND || id === B.CACTUS;
+/**
+ * The part of cell (x,y,z) of `grid` that contains `octant` (blocks/shapes.ts partAt), 0 when the
+ * octant is empty. Read from the layers (getCell, and getPart2 only for a two-part cell): it never
+ * forms the packed value of a two-part cell (docs/SHAPES.md 4.4), so the per-tick checks of a
+ * claimed aim (Hands.resolve, net/server/intents.ts) use it.
+ */
+export function partAtCell(grid: VoxelGrid, x: number, y: number, z: number, octant: number): number {
+  return partOfCell(grid, x, y, z, grid.getCell(x, y, z), octant);
+}
+
+/** partAtCell when the cell value `c` (getCell) has been read already; getPart2 is read only for a two-part cell. */
+function partOfCell(grid: VoxelGrid, x: number, y: number, z: number, c: number, octant: number): number {
+  if (c < FULL_LIMIT) return (c & ID_MASK) === AIR ? 0 : c;
+  const bit = 1 << octant;
+  if ((c & ID_MASK) !== AIR && ((c >>> HOLES_SHIFT) & bit) === 0) return c & PART_MASK;
+  if ((c & CELL_MULTI_BIT) === 0) return 0;
+  const p2 = grid.getPart2(x, y, z);
+  return p2 !== 0 && ((p2 >>> HOLES_SHIFT) & bit) === 0 ? p2 : 0;
+}
+
+/**
+ * The part a target claims to aim at: partAt(t.cell, t.sub), the part of the cell the client saw
+ * that contains the octant it hit (docs/SHAPES.md 6.2 "目标是否有效"). Takes the target, not its
+ * cell: t.cell may be the packed value of a two-part cell (a heap number), which per-tick code
+ * never passes on (4.4). Any value is read bit by bit and nothing throws.
+ */
+export function claimedPart(t: Readonly<{ sub: number; cell: number }>): number {
+  const cell = t.cell;
+  if (cell < FULL_LIMIT) return (cell & ID_MASK) === AIR ? 0 : cell;
+  const first = cell % PACK_SCALE;
+  const bit = 1 << t.sub;
+  if ((first & ID_MASK) !== AIR && ((first >>> HOLES_SHIFT) & bit) === 0) return first & PART_MASK;
+  const second = (cell - first) / PACK_SCALE;
+  return second !== 0 && ((second >>> HOLES_SHIFT) & bit) === 0 ? second & PART_MASK : 0;
+}
+
+/** `out` = box `o` of the BOXES table (half-cell units) in cell (x,y,z), shrunk by `inset` on every side. */
+function insetBox(out: AABB, x: number, y: number, z: number, o: number, inset: number): void {
+  out.minX = x + BOXES[o]! / 2 + inset;
+  out.minY = y + BOXES[o + 1]! / 2 + inset;
+  out.minZ = z + BOXES[o + 2]! / 2 + inset;
+  out.maxX = x + BOXES[o + 3]! / 2 - inset;
+  out.maxY = y + BOXES[o + 4]! / 2 - inset;
+  out.maxZ = z + BOXES[o + 5]! / 2 - inset;
 }
 
 function inRegion(r: CellBounds | null, x: number, y: number, z: number): boolean {
@@ -259,12 +318,14 @@ export class Hands {
   private claimUse: AimTarget | null = null;
   private claimMine: AimTarget | null = null;
 
-  // ---- mining
+  // ---- mining: the identity of what is being mined is grid + cell + part value (docs/SHAPES.md 6.2)
   private mineGrid: VoxelGrid | null = null;
   private mineX = 0;
   private mineY = 0;
   private mineZ = 0;
-  private mineCell = AIR;
+  private minePart = AIR;
+  /** The octant of the mined part the ray hit when this mining started (the view's mining.sub). */
+  private mineOctant = 0;
   private mineProgress = 0;
   private breakCooldown = 0;
   private attackingUnbreakable = false;
@@ -374,9 +435,10 @@ export class Hands {
   /**
    * Pick block (middle click; DESIGN 选取方块, entities/inventory.ts pickBlockInto): put the block
    * the player looks at in hand. The target is `target` when given (a client's PickBlock intent),
-   * else the use ray's cell (what the outline shows; a client-driven player: its claimed use
+   * else the use ray's hit (what the outline shows; a client-driven player: its claimed use
    * target), on the world or a structure; air, liquids and the unloaded sentinel pick nothing. The
-   * item is the block itself (block id == item id), never its mining drop.
+   * item is the material of the part aimed at (block id == item id; docs/SHAPES.md 6.2), never its
+   * mining drop.
    *
    * The selection is written to input.slot too, which the next tick applies (applyLook): a caller
    * that drives input.slot itself must adopt inventory.selected afterwards. Runs between ticks
@@ -388,7 +450,7 @@ export class Hands {
     if (p.dead || p.removed) return false;
     const h = target !== undefined ? this.resolve(target) : this.raycast();
     if (h === null) return false;
-    const item = pickBlockItem(h.cell);
+    const item = pickBlockItem(h.part);
     if (item < 0 || !pickBlockInto(p.inventory, item, p.mode === 'creative')) return false;
     p.input.slot = p.inventory.selected;
     return true;
@@ -480,7 +542,8 @@ export class Hands {
     if (shown !== null) v.target = { gridId: shown.grid.gridId, x: shown.x, y: shown.y, z: shown.z, face: shown.face };
     const mg = this.mineGrid;
     if (mg !== null && this.mineProgress > 0 && this.isLive(mg)) {
-      v.mining = { gridId: mg.gridId, x: this.mineX, y: this.mineY, z: this.mineZ, sub: 0, progress: clamp(this.mineProgress, 0, 1) };
+      // sub: the octant first hit (bits 0..2); bit 3, "this one octant only", is M2.4's chisel (docs/SHAPES.md 6.3).
+      v.mining = { gridId: mg.gridId, x: this.mineX, y: this.mineY, z: this.mineZ, sub: this.mineOctant, progress: clamp(this.mineProgress, 0, 1) };
     }
     const pv = this.preview;
     if (pv !== null) v.preview = { gridId: pv.grid.gridId, kind: pv.kind, cells: pv.cells };
@@ -515,21 +578,41 @@ export class Hands {
   }
 
   /**
-   * A claimed target as a hit: while its grid exists and its cell has the id the client saw (any
-   * state: the action reads the cell as it is now); else no target.
+   * A claimed target as a hit (docs/SHAPES.md 6.3): while its grid exists and the part of its cell
+   * that contains the claimed octant has the id of the part the client saw there (any state, any
+   * shape: the action reads the part as it is now; a change of the other part of the cell, or of
+   * other octants of this one, does not matter); else no target. The hit's octant is the claimed
+   * one, its cell the cell's whole packed content now, its part the part at that octant, its point
+   * the centre of the octant. Runs every tick for a client-driven player: the part is read from
+   * the layers, and the packed value is formed only for the hit itself (as the ray does).
    */
   private resolve(t: AimTarget | null): GridHit | null {
     if (t === null) return null;
     const grid = this.sim.structures.gridById(t.gridId);
     if (grid === undefined) return null;
-    // The whole packed cell (docs/SHAPES.md 16.3): it flows into the comparisons and predicates below.
-    const cell = getPacked(grid, t.x, t.y, t.z);
-    const id = cell & ID_MASK;
-    if (id !== (t.cell & ID_MASK) || id === AIR || id === B.UNLOADED) return null;
-    const point = vec3(t.x + 0.5, t.y + 0.5, t.z + 0.5);
+    const { x, y, z, sub } = t;
+    // An octant outside 0..7 (a script's claim; the codec refuses one from the network) is no
+    // target, like every other claim that does not stand: partOfCell would read the cell's other
+    // bits as holes, and removePartAt refuses it.
+    if ((sub & 7) !== sub) return null;
+    const c = grid.getCell(x, y, z);
+    let part: number;
+    let cell: number;
+    if (c < FULL_LIMIT && t.cell < FULL_LIMIT) {
+      // A full block (or air) on both sides, every cell of a world without parts: the part is the
+      // cell, compared by id directly (what partOfCell and claimedPart answer, without the calls).
+      const id = c & ID_MASK;
+      if (id === AIR || id === B.UNLOADED || id !== (t.cell & ID_MASK)) return null;
+      part = cell = c;
+    } else {
+      part = partOfCell(grid, x, y, z, c, sub);
+      const id = part & ID_MASK;
+      if (part === 0 || id === B.UNLOADED || id !== (claimedPart(t) & ID_MASK)) return null;
+      cell = c < CELL_MULTI_BIT ? c : c + grid.getPart2(x, y, z) * PACK_SCALE;
+    }
+    const point = vec3(x + 0.25 + 0.5 * (sub & 1), y + 0.25 + 0.5 * ((sub >> 1) & 1), z + 0.25 + 0.5 * ((sub >> 2) & 1));
     grid.toWorld(point, point);
-    // Until the octant-level ray (P8a/P8b): octant 0, the part is the first part.
-    return { grid, x: t.x, y: t.y, z: t.z, face: t.face, octant: 0, cell, part: cellPrimary(cell) & PART_MASK, dist: 0, point };
+    return { grid, x, y, z, face: t.face, octant: sub, cell, part, dist: 0, point };
   }
 
   private castRay(p: Player, ray: RayKind): GridHit | null {
@@ -541,14 +624,18 @@ export class Hands {
     return grid.isWorld || this.sim.structures.structureOf(grid) !== null;
   }
 
-  /** A hit taken before the right-click, if it still stands: its grid is live, its cell still matches `pred`. */
+  /**
+   * A hit taken before the right-click, if it still stands: its grid is live and the part now at
+   * its octant still matches `pred` (the hit then carries the cell and the part as they are now).
+   */
   private recheck(h: GridHit | null, pred: CellPredicate): GridHit | null {
     if (h === null || !this.isLive(h.grid)) return null;
     const cell = getPacked(h.grid, h.x, h.y, h.z);
     if (cell === h.cell) return h;
-    if (!pred(cell)) return null;
+    const part = partAt(cell, h.octant);
+    if (part === 0 || !pred(part)) return null;
     h.cell = cell;
-    h.part = cellPrimary(cell) & PART_MASK;
+    h.part = part;
     return h;
   }
 
@@ -624,7 +711,8 @@ export class Hands {
       return;
     }
     if (hit === null) return;
-    const id = hit.cell & ID_MASK;
+    // Helm, bearing, blast crate: none can be cut or share a cell, so the part hit is the whole cell.
+    const id = hit.part & ID_MASK;
     const holdingBlock = held >= 0 && isBlockItem(held);
     const forcePlace = input.sneak && holdingBlock;
     if (id === B.HELM && !forcePlace) {
@@ -705,7 +793,10 @@ export class Hands {
       } else {
         this.conflicts = res.conflicts.map((c) => ({ x: c.x, y: c.y, z: c.z }));
         this.conflictsUntil = sim.world.time + CONFLICT_TICKS;
-        this.toastKey('toast.dock.blocked', 'warn', { count: res.conflicts.length });
+        // A cell whose parts do not overlap but would make three is empty space to the player:
+        // say why it is refused (docs/SHAPES.md 11.3, question 10).
+        const twoParts = res.conflicts.some((c) => c.limit);
+        this.toastKey(twoParts ? 'toast.dock.twoParts' : 'toast.dock.blocked', 'warn', { count: res.conflicts.length });
       }
       return;
     }
@@ -836,6 +927,15 @@ export class Hands {
 
   // ------------------------------------------------------------------ placing
 
+  /**
+   * Put the held block against the hit (DESIGN 放置与挖掘; docs/SHAPES.md 6.2): sim/placement.ts
+   * planPlacement decides the target cell and what it holds afterwards (a whole block goes into the
+   * cell across the face the ray entered the hit octant by, or replaces the soft cover clicked; it
+   * never goes into a cell that has parts); here what only the server decides: the world's bounds
+   * and loaded columns, a soft block into liquid, the structure limits and membership, the support
+   * below (sim/support.ts; a helm also needs the top face below fully covered, docs/SHAPES.md 9.2),
+   * the overlap of the placed material with bodies and other grids, and the item used up.
+   */
   private place(p: Player, hit: GridHit, item: number): void {
     const sim = this.sim;
     const def = BLOCKS[item];
@@ -845,63 +945,43 @@ export class Hands {
       this.toastKey('toast.place.spinning', 'warn');
       return;
     }
-    const hitId = hit.cell & ID_MASK;
-    let x: number;
-    let y: number;
-    let z: number;
-    const replacesClicked = REPLACEABLE[hitId] === 1 && LIQUID[hitId] === 0;
-    if (replacesClicked) {
-      // Clicking soft cover (a grass tuft, snow) puts the block in its place — in the world and
-      // on structures alike (snow cover stacks on a deck too).
-      x = hit.x;
-      y = hit.y;
-      z = hit.z;
-    } else {
-      const c = placementCell(hit);
-      x = c.x;
-      y = c.y;
-      z = c.z;
+    if (grid.isWorld) {
+      // Outside the world, or in a column that is not loaded: nothing, silently.
+      const t = placementTarget(hit, -1);
+      if (t.y < 0 || t.y >= WORLD_HEIGHT || !sim.world.isLoaded(t.x, t.z)) return;
     }
-    if (grid.isWorld && (y < 0 || y >= WORLD_HEIGHT || !sim.world.isLoaded(x, z))) return;
-    const cur = grid.getCell(x, y, z);
-    const curId = cur & ID_MASK;
-    // Structures never hold liquid, so "replaceable" means air or soft cover there. A cell that is
-    // taken (another player built there in this tick: CLAIMED AIM) refuses the block.
-    if (REPLACEABLE[curId] !== 1) {
-      if (curId !== B.UNLOADED) this.toastKey('toast.place.occupied', 'warn');
+    // A cell that is taken (also: another player built there in this tick, CLAIMED AIM) refuses the block.
+    const plan = planPlacement(grid, hit, item, this.placementState(def, hit, p), -1);
+    if (typeof plan === 'string') {
+      this.toastKey(REFUSAL_TOAST[plan], 'warn');
       return;
     }
-    let cell: number;
-    if (item === B.SNOW_LAYER && curId === B.SNOW_LAYER) {
-      // Snow cover stacks; eight layers make a packed snow block.
-      const layers = stateLayers(cellState(cur)) + 1;
-      cell = layers >= 8 ? makeCell(B.SNOW_BLOCK) : makeCell(B.SNOW_LAYER, layersState(layers));
-    } else {
-      // A torch or a flower put into water would be washed away on the spot.
-      if (!def.solid && LIQUID[curId] !== 0) return;
-      cell = makeCell(item, this.placementState(def, hit, p));
-    }
+    const { x, y, z } = plan;
+    const curId = grid.getCell(x, y, z) & ID_MASK;
+    // A torch or a flower put into water would be washed away on the spot.
+    if (!def.solid && LIQUID[curId] !== 0) return;
     if (curId === AIR && !grid.isWorld && this.structureFull(grid, x, y, z)) return;
     // A block that can never be part of a structure (unbreakable ones such as deeprock —
     // DESIGN "挖不动的方块不能被连进结构体") cannot be put onto one either: it could not be
     // mined off again and would break the dock / re-assemble round trip.
-    if (!grid.isWorld && !canJoinStructure(cell)) {
+    if (!grid.isWorld && !canJoinStructure(plan.part)) {
       this.toastKey('toast.place.notOnStructure', 'warn');
       return;
     }
-    if (!supportOk(def, grid.getCell(x, y - 1, z))) {
+    const below = getPacked(grid, x, y - 1, z);
+    if (!supportOk(def, below) || (def.func === 'helm' && !topCovered(below))) {
       this.toastKey('toast.place.support', 'warn');
       return;
     }
-    if (SOLID[cell & ID_MASK] === 1 && this.placementBlocked(grid, x, y, z)) {
+    if (solidFill(plan.part) !== 0 && this.placementBlocked(grid, x, y, z, plan.part)) {
       this.toastKey('toast.place.occupied', 'warn');
       return;
     }
-    if (!grid.setCell(x, y, z, cell)) return;
+    if (!grid.setCell(x, y, z, plan.cell)) return;
     if (p.mode !== 'creative') p.inventory.consumeSelected(1);
     // A block that replaced the clicked one (snow, a grass tuft) was not put against a face.
-    if (!replacesClicked) this.offhandGlue(p, grid, hit, grid.getCell(x, y, z));
-    sim.events.emit({ type: 'blockPlaced', gridId: grid.gridId, x, y, z, cell });
+    if (!plan.replaces) this.offhandGlue(p, grid, hit, getPacked(grid, x, y, z));
+    sim.events.emit({ type: 'blockPlaced', gridId: grid.gridId, x, y, z, cell: plan.part });
   }
 
   /**
@@ -958,63 +1038,67 @@ export class Hands {
   }
 
   /**
-   * Would a HARD block at local cell (x,y,z) of `grid` overlap something? Any entity body but
-   * item drops (they are nudged out), tested exactly — for a rotated grid the body is an OBB in
-   * its frame — and the hard cells of the other grids beyond GRID_OVERLAP_TOLERANCE.
+   * Would the hard material of `part`, placed at local cell (x,y,z) of `grid`, overlap something?
+   * Shape-aware on both sides (docs/SHAPES.md 6.2): the octants the part fills (its boxes,
+   * blocks/shapes.ts BOXES) against any entity body but item drops (they are nudged out), tested
+   * exactly — for a rotated grid the body is an OBB in its frame (CellProbe) — and against the hard
+   * octants of the other grids beyond GRID_OVERLAP_TOLERANCE. So a block goes in beside a slab a
+   * body stands next to, and is refused only when what it would fill is taken. A whole block is
+   * one box, the unit cell: the M1 tests, number for number.
    */
-  private placementBlocked(grid: VoxelGrid, x: number, y: number, z: number): boolean {
+  private placementBlocked(grid: VoxelGrid, x: number, y: number, z: number, part: number): boolean {
     const sim = this.sim;
-    const probe = this.probe.set(grid, x, y, z);
+    const fill = solidFill(part);
+    const boxes = BOX_COUNT[fill]!;
+    const at = fill * 24;
+    const probe = this.probe.set(grid, x, y, z, part);
     for (const e of sim.entities.all()) {
       if (e.removed || e.kind === 'item') continue;
       if (e instanceof Player && e.dead) continue;
       const b = e.box(this.box);
       if (grid.isWorld) {
-        if (
-          b.minX < x + 1 - CONTACT_EPS &&
-          b.maxX > x + CONTACT_EPS &&
-          b.minY < y + 1 - CONTACT_EPS &&
-          b.maxY > y + CONTACT_EPS &&
-          b.minZ < z + 1 - CONTACT_EPS &&
-          b.maxZ > z + CONTACT_EPS
-        ) {
-          return true;
+        for (let k = 0; k < boxes; k++) {
+          const o = at + k * 6;
+          if (
+            b.minX < x + BOXES[o + 3]! / 2 - CONTACT_EPS &&
+            b.maxX > x + BOXES[o]! / 2 + CONTACT_EPS &&
+            b.minY < y + BOXES[o + 4]! / 2 - CONTACT_EPS &&
+            b.maxY > y + BOXES[o + 1]! / 2 + CONTACT_EPS &&
+            b.minZ < z + BOXES[o + 5]! / 2 - CONTACT_EPS &&
+            b.maxZ > z + BOXES[o + 2]! / 2 + CONTACT_EPS
+          ) {
+            return true;
+          }
         }
       } else if (boxOverlapsSolid(probe, b)) {
         return true;
       }
     }
     const tol = GRID_OVERLAP_TOLERANCE;
+    const cb = this.box2;
     if (grid.isWorld) {
-      const cb = this.box2;
-      cb.minX = x + tol;
-      cb.minY = y + tol;
-      cb.minZ = z + tol;
-      cb.maxX = x + 1 - tol;
-      cb.maxY = y + 1 - tol;
-      cb.maxZ = z + 1 - tol;
-      for (const s of sim.structures.all()) if (boxOverlapsSolid(s.grid, cb)) return true;
+      for (let k = 0; k < boxes; k++) {
+        insetBox(cb, x, y, z, at + k * 6, tol);
+        for (const s of sim.structures.all()) if (boxOverlapsSolid(s.grid, cb)) return true;
+      }
       return false;
     }
-    // A structure cell against the world's hard cells around its world position.
+    // A structure cell against the world's hard octants around its world position.
     const c = this.tmp;
     c.x = x + 0.5;
     c.y = y + 0.5;
     c.z = z + 0.5;
     grid.toWorld(c, c);
     const world = sim.world;
-    const cb = this.box2;
     for (let wy = Math.floor(c.y - 0.87); wy <= Math.floor(c.y + 0.87); wy++) {
       for (let wz = Math.floor(c.z - 0.87); wz <= Math.floor(c.z + 0.87); wz++) {
         for (let wx = Math.floor(c.x - 0.87); wx <= Math.floor(c.x + 0.87); wx++) {
-          if (SOLID[world.getCell(wx, wy, wz) & ID_MASK] !== 1) continue;
-          cb.minX = wx + tol;
-          cb.minY = wy + tol;
-          cb.minZ = wz + tol;
-          cb.maxX = wx + 1 - tol;
-          cb.maxY = wy + 1 - tol;
-          cb.maxZ = wz + 1 - tol;
-          if (boxOverlapsSolid(probe, cb)) return true;
+          const f = solidFillAt(world, wx, wy, wz);
+          if (f === 0) continue;
+          for (let k = 0, n = BOX_COUNT[f]!; k < n; k++) {
+            insetBox(cb, wx, wy, wz, f * 24 + k * 6, tol);
+            if (boxOverlapsSolid(probe, cb)) return true;
+          }
         }
       }
     }
@@ -1033,37 +1117,24 @@ export class Hands {
     }
     const world = sim.world;
     if (held === I.BUCKET) {
-      const id = hit.cell & ID_MASK;
-      if (LIQUID[id] === 0 || !isLiquidSource(cellState(hit.cell))) return;
+      const id = hit.part & ID_MASK;
+      if (LIQUID[id] === 0 || !isLiquidSource(cellState(hit.part))) return;
       if (!world.setCell(hit.x, hit.y, hit.z, AIR)) return;
       if (p.mode !== 'creative') this.swapHeld(p, id === B.WATER ? I.BUCKET_WATER : I.BUCKET_LAVA);
       sim.events.emit({ type: 'sound', name: 'bucket_fill', x: hit.x + 0.5, y: hit.y + 0.5, z: hit.z + 0.5 });
       return;
     }
-    const hitId = hit.cell & ID_MASK;
-    let x: number;
-    let y: number;
-    let z: number;
-    if (REPLACEABLE[hitId] === 1 && LIQUID[hitId] === 0) {
-      x = hit.x;
-      y = hit.y;
-      z = hit.z;
-    } else {
-      const c = placementCell(hit);
-      x = c.x;
-      y = c.y;
-      z = c.z;
-    }
+    // The target cell as for placing a whole block (docs/SHAPES.md 6.2): the soft cover clicked,
+    // else the cell across the entered face. A cell that has parts is hard, not REPLACEABLE: liquid
+    // is never poured into it (9.1).
+    const { x, y, z } = placementTarget(hit, -1);
     if (y < 0 || y >= WORLD_HEIGHT || !world.isLoaded(x, z)) return;
     const cur = world.getCell(x, y, z);
     if (REPLACEABLE[cur & ID_MASK] !== 1) return;
     // Nor is liquid poured into a hull: a world source where a ship's hard cells or dry hold are
     // would be hidden inside it now and left floating on the sea once it sails away.
-    const c = this.tmp;
-    c.x = x + 0.5;
-    c.y = y + 0.5;
-    c.z = z + 0.5;
-    if (displacedByHull(this.system.rayScene().ships, c)) {
+    // Asked per octant: a hull cell holds as little as one hard octant (SHAPES 9.1).
+    if (partlyDisplaced(this.system.rayScene().ships, x, y, z)) {
       this.toastKey('toast.bucket.structure', 'warn');
       return;
     }
@@ -1097,16 +1168,25 @@ export class Hands {
   }
 
   /**
-   * Right-click with glue in the main hand on the face the use ray hit. Sneak removes that
-   * face's glue at once (both modes, nothing refunded). Otherwise, on a glueable block whose hit
-   * face is not glued yet: creative glues at once for free; survival starts the timed operation
-   * (updateGlueOp), which needs at least one glue.
+   * Right-click with glue in the main hand on the face the use ray hit. Glue belongs to a CELL face
+   * (docs/SHAPES.md 6.2, 10.3): an inner face (the top of a lower slab, at y + 0.5) refuses
+   * (toast.glue.inner), applying and removing alike. Sneak removes that face's glue at once (both
+   * modes, nothing refunded). Otherwise, on a glueable part whose cell face is not glued yet and
+   * whose cell does not already touch the cell across the face (two glueable cells whose hard
+   * covers of the face overlap: toast.glue.touching; DESIGN "已经挨着的两块不能直接粘", which a
+   * face half covered by a slab would otherwise allow): creative glues at once for free; survival
+   * starts the timed operation (updateGlueOp, the part's hardness), which needs at least one glue.
+   * A cell across that has material only away from the face does not touch it: that face is open.
    */
   private glueClick(p: Player, hit: GridHit | null): void {
     this.glueOp = null;
     if (hit === null) return;
     if (this.locked(hit.grid) !== null) {
       this.toastKey('toast.glue.spinning', 'warn');
+      return;
+    }
+    if (!isCellFace(hit.octant, hit.face)) {
+      this.toastKey('toast.glue.inner', 'warn');
       return;
     }
     const glue = this.sim.structures.glueFor(hit.grid);
@@ -1121,13 +1201,17 @@ export class Hands {
       this.glueSound(hit.grid, hit.x, hit.y, hit.z, hit.face, 'unglue');
       return;
     }
-    if (!canGlue(hit.cell)) {
+    if (!canGlue(hit.part)) {
       // Soft blocks, liquids, unbreakable blocks.
       this.toastKey('toast.glue.cannot', 'warn');
       return;
     }
     if (glued) {
       this.toastKey('toast.glue.already', 'warn');
+      return;
+    }
+    if (touchesAcross(hit.grid, hit.x, hit.y, hit.z, hit.face)) {
+      this.toastKey('toast.glue.touching', 'warn');
       return;
     }
     if (p.mode === 'creative') {
@@ -1138,7 +1222,7 @@ export class Hands {
       this.toastKey('toast.glue.none', 'warn');
       return;
     }
-    const total = Math.max(0, BLOCKS[hit.cell & ID_MASK]?.hardness ?? 0);
+    const total = Math.max(0, BLOCKS[hit.part & ID_MASK]?.hardness ?? 0);
     this.glueOp = { grid: hit.grid, x: hit.x, y: hit.y, z: hit.z, face: hit.face, cell: hit.cell, total, progress: 0 };
   }
 
@@ -1188,17 +1272,20 @@ export class Hands {
   }
 
   /**
-   * DESIGN 副手: the main hand just placed `placed` at (x,y,z) of `grid` against face `face` of
-   * the clicked block (hit.x, hit.y, hit.z), whose neighbour it is. With glue in the off-hand
-   * that face gets glued, when both blocks are glueable, the face is not glued yet and the two
-   * do not already stick together without glue. Survival uses 1 glue from the off-hand; with
-   * none left nothing happens.
+   * DESIGN 副手: the main hand just placed `placed` (the packed content of the cell it went into)
+   * against face hit.face of the clicked cell (hit.x, hit.y, hit.z), whose neighbour it is. With
+   * glue in the off-hand that face gets glued, when both cells are glueable, they touch on that
+   * face (blocks/shapes.ts cellsTouch: a block put against the top of a lower slab, an inner face,
+   * lies half a block above it and is neither glued nor charged; docs/SHAPES.md 10.3), the face is
+   * not glued yet and the two do not already stick together without glue. Survival uses 1 glue
+   * from the off-hand; with none left nothing happens.
    */
   private offhandGlue(p: Player, grid: VoxelGrid, hit: GridHit, placed: number): void {
     const off = p.inventory.offhand;
     if (off === null || off.item !== I.GLUE) return;
     const clicked = getPacked(grid, hit.x, hit.y, hit.z);
     if (!canGlue(clicked) || !canGlue(placed)) return;
+    if (!cellsTouch(clicked, placed, hit.face)) return;
     // Spares survival glue: blocks that connect anyway (auto-stick, mounting) are not glued.
     const alreadySticks = sticksWithoutGlue(clicked, placed, hit.face);
     if (alreadySticks) return;
@@ -1223,7 +1310,7 @@ export class Hands {
   private resetMining(): void {
     this.mineGrid = null;
     this.mineProgress = 0;
-    this.mineCell = AIR;
+    this.minePart = AIR;
   }
 
   private updateMining(p: Player, pressed: boolean): void {
@@ -1239,7 +1326,8 @@ export class Hands {
       this.resetMining();
       return;
     }
-    const def = BLOCKS[hit.cell & ID_MASK];
+    // The part aimed at is mined: its material's hardness, however much of it is left (docs/SHAPES.md 6.2, question 5).
+    const def = BLOCKS[hit.part & ID_MASK];
     if (def === undefined || def.unbreakable || !(def.hardness < Infinity)) {
       this.resetMining();
       this.attackingUnbreakable = true;
@@ -1255,12 +1343,15 @@ export class Hands {
       return;
     }
     if (pressed) this.breakCooldown = 0;
-    if (this.mineGrid !== hit.grid || this.mineX !== hit.x || this.mineY !== hit.y || this.mineZ !== hit.z || this.mineCell !== hit.cell) {
+    // The same mining while the crosshair stays on the same part (another of its octants) and the
+    // part keeps its value; a change of the other part of the cell does not reset the progress.
+    if (this.mineGrid !== hit.grid || this.mineX !== hit.x || this.mineY !== hit.y || this.mineZ !== hit.z || this.minePart !== hit.part) {
       this.mineGrid = hit.grid;
       this.mineX = hit.x;
       this.mineY = hit.y;
       this.mineZ = hit.z;
-      this.mineCell = hit.cell;
+      this.minePart = hit.part;
+      this.mineOctant = hit.octant;
       this.mineProgress = 0;
     }
     if (this.breakCooldown > 0) return;
@@ -1271,30 +1362,32 @@ export class Hands {
     this.breakCooldown = BREAK_COOLDOWN;
   }
 
-  /** Remove the hit cell from its grid; drop its item for a survival player (world position of the cell). */
+  /**
+   * Remove the part hit (the one containing hit.octant) from its cell; the other part of the cell
+   * stays (docs/SHAPES.md 6.2). A survival player gets its drop: one of the part's material, however
+   * much of it was left, at the part's DROP_POINT (sim/drops.ts). blockBroken carries the removed part.
+   */
   private breakBlock(hit: GridHit): void {
     const sim = this.sim;
     const grid = hit.grid;
     // A grid whose structure is gone is detached: its cells are already back in the world.
     if (!this.isLive(grid)) return;
-    const { x, y, z } = hit;
-    const cell = getPacked(grid, x, y, z);
-    if (cell === AIR) return;
+    const { x, y, z, octant } = hit;
+    const part = partAt(getPacked(grid, x, y, z), octant);
+    if (part === AIR) return;
     // The wheel of a helm that is being broken lets go first.
-    if ((cell & ID_MASK) === B.HELM && !grid.isWorld) {
+    if ((part & ID_MASK) === B.HELM && !grid.isWorld) {
       const ship = sim.structures.structureOf(grid);
       if (ship instanceof Ship && ship.helmsmanId !== 0 && ship.helmX === x && ship.helmY === y && ship.helmZ === z) {
         const helmsman = sim.entities.get(ship.helmsmanId);
         if (helmsman instanceof Player) sim.entities.stopSteering(helmsman);
       }
     }
-    if (!grid.setCell(x, y, z, AIR)) return;
-    // Until mining works per part (P8b), the whole cell goes and the drop and the event carry the
-    // first part's value (without CELL_MULTI_BIT: one part value, docs/SHAPES.md 16.3).
-    const first = cellPrimary(cell) & PART_MASK;
+    const removed = removePartAt(grid, x, y, z, octant);
+    if (removed === AIR) return;
     // The mining player's mode decides (sim/rules.ts): a creative player's blocks never drop.
-    if (this.player.mode !== 'creative') spawnBlockDrop(sim, grid, x, y, z, first, this.tmp);
-    sim.events.emit({ type: 'blockBroken', gridId: grid.gridId, x, y, z, cell: first });
+    if (this.player.mode !== 'creative') spawnBlockDrop(sim, grid, x, y, z, removed, this.tmp);
+    sim.events.emit({ type: 'blockBroken', gridId: grid.gridId, x, y, z, cell: removed });
   }
 
   // ================================================================== hints
@@ -1307,7 +1400,7 @@ export class Hands {
     if (this.locked(h.grid) !== null) return msg('hint.rotor.spinning');
     if (held === I.GLUE) return this.glueHint(p, h);
     if (isBucket(held) && !h.grid.isWorld) return msg('hint.bucket.structure');
-    const id = h.cell & ID_MASK;
+    const id = h.part & ID_MASK;
     const holdingBlock = held >= 0 && isBlockItem(held);
     const forcePlace = p.input.sneak && holdingBlock;
     const pv = this.preview;
@@ -1326,12 +1419,19 @@ export class Hands {
     return null;
   }
 
-  /** What a right-click with glue in the main hand would do on the hit face. */
-  private glueHint(p: Player, h: GridHit): Message {
+  /**
+   * What a right-click with glue in the main hand would do on the hit face, in glueClick's order
+   * (the spinning rotor is hintFor's). No hint where the click refuses with a toast that has no
+   * hint of its own (an inner face: toast.glue.inner; cells that already touch:
+   * toast.glue.touching): the hint never promises what the click refuses.
+   */
+  private glueHint(p: Player, h: GridHit): Message | null {
+    if (!isCellFace(h.octant, h.face)) return null;
     const glued = this.sim.structures.glueFor(h.grid).has(h.x, h.y, h.z, h.face);
     if (p.input.sneak) return msg(glued ? 'hint.glue.remove' : 'hint.glue.notGlued');
-    if (!canGlue(h.cell)) return msg('hint.glue.cannot');
-    return msg(glued ? 'hint.glue.already' : 'hint.glue.apply');
+    if (!canGlue(h.part)) return msg('hint.glue.cannot');
+    if (glued) return msg('hint.glue.already');
+    return touchesAcross(h.grid, h.x, h.y, h.z, h.face) ? null : msg('hint.glue.apply');
   }
 }
 

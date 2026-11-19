@@ -144,6 +144,15 @@ export const MAX_PREVIEW_CELLS = Math.max(SHIP_MAX_CELLS, ROTOR_MAX_CELLS);
  * a few bytes describe a whole column; this bounds what one message can make the decoder allocate.
  */
 export const MAX_BATCH_CELLS = 1 << 25;
+/** Target.sub is the octant hit, below this; any other bit is a protocol error (docs/SHAPES.md 6.3). */
+export const TARGET_SUB_LIMIT = 8;
+/** MiningView.sub: bits 0..2 the octant (MINING_SUB_OCTANT), bit 3 "this one octant only" (MINING_ONE_OCTANT, M2.4's chisel); bits 4..7 must be 0. */
+export const MINING_SUB_OCTANT = 0x07;
+export const MINING_ONE_OCTANT = 0x08;
+/** Use.flags: bit 0 sneak, bits 1..3 slabMode 0..6 (docs/SHAPES.md 14.2); 7 there, or any higher bit, is a protocol error. */
+export const USE_FLAG_SNEAK = 0x01;
+export const USE_SLAB_SHIFT = 1;
+export const MAX_SLAB_MODE = 6;
 /** Inventory slots on the wire (section 14 PrivateState bit 1); equal to entities/inventory.ts. */
 export const HOTBAR_SLOTS = 9;
 export const MAIN_SLOTS = 27;
@@ -267,14 +276,18 @@ export interface Pose {
   rot: Quat;
 }
 
-/** What a client aims at (section 10): grid-local cell, face, part, and the cell value it saw. */
+/**
+ * What a client aims at (section 10, docs/SHAPES.md 6.3): grid-local cell, the face the ray entered
+ * the hit octant by, the octant hit, and the whole cell content it saw. The part aimed at is the
+ * one of `cell` that contains octant `sub`.
+ */
 export interface Target {
   gridId: number;
   x: number;
   y: number;
   z: number;
   face: Dir;
-  /** Part or octant (M2.3, M2.4); 0 in M2.1. */
+  /** The octant hit, 0..7 (below TARGET_SUB_LIMIT). */
   sub: number;
   cell: Cell;
 }
@@ -367,6 +380,11 @@ export interface UseMsg {
   /** Selected hotbar slot 0..8. */
   slot: number;
   sneak: boolean;
+  /**
+   * The player's slab direction 0..6 (docs/SHAPES.md 14.2; the server writes it into
+   * PlayerInput.slabMode before the press). M2.3 clients send 0.
+   */
+  slabMode: number;
   target: Target | null;
 }
 export interface UseReleaseMsg {
@@ -721,12 +739,15 @@ export interface MiningView {
   x: number;
   y: number;
   z: number;
+  /** Bits 0..2: the octant of the mined part first hit; bit 3: the progress is for that one octant (M2.4); bits 4..7 are 0. */
   sub: number;
   progress: number;
 }
 
 export interface GluingView extends MiningView {
   face: Dir;
+  /** Always 0 (glue belongs to a cell face). */
+  sub: number;
 }
 
 export interface PreviewView {

@@ -35,14 +35,14 @@ describe('射线打到八分格：越过下半砖上方的空隙点到后面的�
     // The centre of the planks' south face: the ray from the eyes crosses the slab's cell above its
     // mid-plane (its upper octants are empty), so it reaches the planks.
     expect(me.aimAt(0, GROUND, -2, PZ)).toBe(true);
-    expect(me.targetCell()).toEqual({ gridId: 0, x: 0, y: GROUND, z: -2, face: PZ });
+    expect(me.targetCell()).toMatchObject({ gridId: 0, x: 0, y: GROUND, z: -2, face: PZ });
     expect(me.mine(0, GROUND, -2, PZ)).toBe(true);
     expect(getPacked(sim.world, 0, GROUND, -2)).toBe(0);
     expect(getPacked(sim.world, 0, GROUND, -1)).toBe(SLAB);
     // The centre of the slab's cell is the middle of its top: the ray goes through the empty upper
     // half and stops there, on an inner face (GROUND + 0.5), which is still PY.
     expect(me.aimAt(0, GROUND, -1)).toBe(true);
-    expect(me.targetCell()).toEqual({ gridId: 0, x: 0, y: GROUND, z: -1, face: PY });
+    expect(me.targetCell()).toMatchObject({ gridId: 0, x: 0, y: GROUND, z: -1, face: PY });
     expect(me.mine(0, GROUND, -1)).toBe(true);
     expect(getPacked(sim.world, 0, GROUND, -1)).toBe(0);
     w.tick(2);

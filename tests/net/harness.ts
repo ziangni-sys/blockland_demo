@@ -56,6 +56,10 @@ import { emptyHeldInput, OwnPlayer, type AdoptedCorrection, type HeldInput } fro
 import { ClientIntents, type ViewRay } from '../../src/net/client/intents';
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../../src/core/dirs';
 import { lookDir } from '../../src/sim/rays';
+import { aimingPoint } from '../../src/sim/players';
+import { partAt } from '../../src/blocks/shapes';
+import type { VoxelGrid } from '../../src/voxel/grid';
+import { getPacked } from '../../src/voxel/parts';
 import type { Inventory } from '../../src/entities/inventory';
 import type { ClientReplica } from '../../src/net/client/replica';
 import { decodeServerMessage, encodeClientMessage } from '../../src/net/codec';
@@ -195,7 +199,8 @@ export interface ClientDriver {
  * inventory. `silent` stops the prediction, the reports and the aims (a page that froze),
  * stopInput() lets go of the keys and the buttons.
  *
- * SCRIPTED CONTROL, named like PlayerControl's: lookAt / lookAtCell / aimAt (the held look),
+ * SCRIPTED CONTROL, named like PlayerControl's: lookAt / lookAtCell / lookAtPart / aimAt (the held look;
+ * the octant-aware forms aim at one octant of a partial cell, docs/SHAPES.md 6.2),
  * use / attack (a click: press and release), pressUse / releaseUse / pressAttack / releaseAttack
  * (held buttons), swapHands, selectSlot, hold / emptyHand (selecting, or the creative palette),
  * pickBlock, invClick, creativePick, dropCursor, closeInventory, releaseHelm, respawn,
@@ -416,13 +421,18 @@ export class HeadlessClient {
     return this.requireIntents().mineTarget;
   }
 
+  /** A grid of the replica (0 = the world), or undefined. */
+  private replicaGrid(gridId: number): VoxelGrid | undefined {
+    const r = this.replica;
+    return r === null ? undefined : gridId === 0 ? r.world : r.state.structures.get(gridId)?.structure.grid;
+  }
+
   /**
    * Point the held look at a cell of a grid of the replica (0 = the world), as shown: at the centre
    * of `face` when given (slightly inside it), else at the cell centre. False when the replica has no such grid.
    */
   lookAtCell(x: number, y: number, z: number, face?: Dir, gridId = 0): boolean {
-    const r = this.replica;
-    const g = r === null ? undefined : gridId === 0 ? r.world : r.state.structures.get(gridId)?.structure.grid;
+    const g = this.replicaGrid(gridId);
     if (g === undefined) return false;
     const p = vec3(x + 0.5, y + 0.5, z + 0.5);
     if (face !== undefined) {
@@ -435,19 +445,50 @@ export class HeadlessClient {
     return true;
   }
 
-  /** lookAtCell, then the targets now: true when the use target (`mining`: the mining target) is exactly that cell (and face). */
-  aimAt(x: number, y: number, z: number, face?: Dir, gridId = 0, mining = false): boolean {
-    if (!this.lookAtCell(x, y, z, face, gridId)) return false;
+  /**
+   * Point the held look at octant `octant` of a cell of a grid of the replica, as shown: at the
+   * centre of that octant's face `face` when given, else of its open face that looks at the eyes
+   * best (sim/players.ts aimingPoint, as PlayerControl.lookAtPart), slightly inside. False when the
+   * replica has no such grid.
+   */
+  lookAtPart(x: number, y: number, z: number, octant: number, gridId = 0, face?: Dir): boolean {
+    const g = this.replicaGrid(gridId);
+    if (g === undefined) return false;
+    const p = aimingPoint(g, x, y, z, octant, g.toLocal(this.view().eye, vec3()), face);
+    g.toWorld(p, p);
+    this.lookAt(p.x, p.y, p.z);
+    return true;
+  }
+
+  /**
+   * lookAtCell (lookAtPart with `octant`), then the targets now: true when the use target
+   * (`mining`: the mining target) is exactly that cell (and face, and octant).
+   */
+  aimAt(x: number, y: number, z: number, face?: Dir, gridId = 0, mining = false, octant?: number): boolean {
+    if (octant === undefined ? !this.lookAtCell(x, y, z, face, gridId) : !this.lookAtPart(x, y, z, octant, gridId, face)) return false;
     const own = this.requireOwn();
     const it = this.requireIntents();
     it.update(this.view(), own.tick, own.lastSeq);
     const t = mining ? it.mineTarget : it.useTarget;
-    return t !== null && t.gridId === gridId && t.x === x && t.y === y && t.z === z && (face === undefined || t.face === face);
+    return (
+      t !== null &&
+      t.gridId === gridId &&
+      t.x === x &&
+      t.y === y &&
+      t.z === z &&
+      (face === undefined || t.face === face) &&
+      (octant === undefined || t.sub === octant)
+    );
   }
 
-  /** Keep aiming at a cell at every frame (a carrier may turn the player); null stops. */
-  holdAim(cell: { x: number; y: number; z: number; face?: Dir; gridId?: number } | null): void {
-    this.aimHold = cell === null ? null : () => void this.lookAtCell(cell.x, cell.y, cell.z, cell.face, cell.gridId ?? 0);
+  /** Keep aiming at a cell (an octant of it, when given) at every frame (a carrier may turn the player); null stops. */
+  holdAim(cell: { x: number; y: number; z: number; face?: Dir; gridId?: number; octant?: number } | null): void {
+    this.aimHold =
+      cell === null
+        ? null
+        : cell.octant === undefined
+          ? () => void this.lookAtCell(cell.x, cell.y, cell.z, cell.face, cell.gridId ?? 0)
+          : () => void this.lookAtPart(cell.x, cell.y, cell.z, cell.octant!, cell.gridId ?? 0, cell.face);
   }
 
   /** A right-click: press and release (sneak: the held sneak key unless given). */
@@ -576,16 +617,23 @@ export class HeadlessClient {
 
   /**
    * Aim at a cell and hold the left button (keeping the aim at every frame) until the client sees
-   * the cell change, at most `maxMs`; then let go. False when it cannot be aimed at or did not break.
+   * the cell change, at most `maxMs`; then let go. With `octant`: aim at that octant and hold until
+   * the part that contains it is gone from the replica (one part is mined at a time, docs/SHAPES.md
+   * 6.2). False when it cannot be aimed at or did not break.
    */
-  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxMs = 30_000): boolean {
-    if (!this.aimAt(x, y, z, face, gridId, true)) return false;
-    const grid = (): VoxelGridLike | undefined => (gridId === 0 ? this.replica?.world : this.replica?.state.structures.get(gridId)?.structure.grid);
-    const before = grid()?.getCell(x, y, z);
-    this.holdAim({ x, y, z, face, gridId });
+  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxMs = 30_000, octant?: number): boolean {
+    if (!this.aimAt(x, y, z, face, gridId, true, octant)) return false;
+    const watched = (): number | undefined => {
+      const g = this.replicaGrid(gridId);
+      if (g === undefined) return undefined;
+      const c = getPacked(g, x, y, z);
+      return octant === undefined ? c : partAt(c, octant);
+    };
+    const before = watched();
+    this.holdAim({ x, y, z, face, gridId, octant });
     this.pressAttack();
     try {
-      this.runUntil(() => grid()?.getCell(x, y, z) !== before, maxMs);
+      this.runUntil(() => watched() !== before, maxMs);
       return true;
     } catch {
       return false;
@@ -703,11 +751,6 @@ export class RawClient {
     this.transport.close('dropped');
     this.ended = true;
   }
-}
-
-/** What mine() reads of a grid of the replica. */
-interface VoxelGridLike {
-  getCell(x: number, y: number, z: number): number;
 }
 
 // ====================================================================== the harness

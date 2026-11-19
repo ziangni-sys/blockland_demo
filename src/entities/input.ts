@@ -36,6 +36,13 @@ export interface PlayerInput {
   swapPresses: number;
   /** Selected hotbar slot 0..8. */
   slot: number;
+  /**
+   * The player's slab direction (docs/SHAPES.md 14.2): 0 = against the clicked face, 1 + Dir = on
+   * that side of the target cell. Client UI state, sent with every Use (its flags) and written here
+   * before the press is handled; never synchronised on its own. What it changes (placing slabs with
+   * a chisel in the off-hand) comes with M2.4.
+   */
+  slabMode: number;
 }
 
 export function emptyInput(): PlayerInput {
@@ -54,6 +61,7 @@ export function emptyInput(): PlayerInput {
     jumpPresses: 0,
     swapPresses: 0,
     slot: 0,
+    slabMode: 0,
   };
 }
 

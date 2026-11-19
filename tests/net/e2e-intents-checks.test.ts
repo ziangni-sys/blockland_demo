@@ -123,7 +123,7 @@ describe('package 7: a forged movement report lends no eyes to the intents that 
         moves.receive('p', forged);
         const target = { gridId: 0, x: at.x, y: T, z: at.z, face: PY, sub: 0, cell: sim.world.getCell(at.x, T, at.z) };
         if (present) forge(c, { type: 'attack', moveSeq: forged.seq, slot: c.inventory.selected, target });
-        else forge(c, { type: 'use', moveSeq: forged.seq, slot: c.inventory.selected, sneak: false, target });
+        else forge(c, { type: 'use', moveSeq: forged.seq, slot: c.inventory.selected, sneak: false, slabMode: 0, target });
         forge(c, { type: present ? 'attackRelease' : 'useRelease' });
         c.waitAck();
         h.run(200);

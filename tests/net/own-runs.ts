@@ -487,7 +487,9 @@ export async function steer(link: ClientLink): Promise<SceneResult> {
   r.c.input.forward = 0;
   r.c.input.strafe = 0;
   r.c.releaseHelm();
-  r.h.run(1000);
+  // Until the client has the server's answer (a retransmission on a lossy link takes longer than a fixed second).
+  r.h.runUntil(() => r.causes().includes('unseat:stopped'), 10_000, 50);
+  r.h.run(200);
   return result(r, { seated, throttle, rudder, sailed: hdist(ship.grid.position, start), turned: Math.abs(wrap(headingOf(ship.grid.rotation) - yaw0)), aboard: p.carrierId === ship.id });
 }
 

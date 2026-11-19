@@ -650,7 +650,7 @@ export type CellPredicate = (part: number) => boolean; // 现在按部件判断
 
 `InteractionView`（`sim/view.ts`）：`AimTarget` 加 `sub: number`；`mining.sub` 的位 0～2 填被挖部件里最初命中的八分格，位 3 是“只针对这一个八分格”的标志（M2.3 恒为 0，见第 6.3 节）；`gluing.sub` 填 0。事件 `blockBroken` / `blockPlaced` 的 `cell` 改成那个**部件值**（一次挖掉或放下一个部件，一个事件）。
 
-脚本接口（`PlayerControl`，以及验收测试的 `Me` 和 `HeadlessClient` 的同名方法）加可选的八分格：`lookAtPart(x, y, z, octant, gridId?)`（瞄这个八分格露出的某个面的中心）、`aimAt(x, y, z, face, gridId?, octant?)`、`mine(x, y, z, face, gridId?, maxTicks?, octant?)`（等到那个部件没了为止）、`targetCell()` 的结果带 `octant`。不给八分格时行为和现在一样（瞄格子中心），对部分格子可能瞄空。
+脚本接口（`PlayerControl`，以及验收测试的 `Me` 和 `HeadlessClient` 的同名方法）加可选的八分格：`lookAtPart(x, y, z, octant, gridId?, face?)`（瞄这个八分格露出的某个面的中心；给了 `face` 就瞄它的这个面）、`aimAt(x, y, z, face, gridId?, mining?, octant?)`（`mining` 是原有的第六个参数，八分格排在它后面）、`mine(x, y, z, face, gridId?, maxTicks?, octant?)`（等到那个部件没了为止）、`targetCell()` 的结果带 `octant`。不给八分格时行为和现在一样（瞄格子中心），对部分格子可能瞄空。
 
 ### 6.3 网络上的目标
 
@@ -1343,7 +1343,7 @@ export interface PlacePlan {
   cell: number;
   /** 新放下的部件值。 */
   part: number;
-  /** 目标格原来是被取代的软方块。 */
+  /** 被点中的软方块本身被取代（目标格就是被点的格子）。面另一侧格子里的软方块被盖掉时为 false，这时照常用副手胶。 */
   replaces: boolean;
 }
 /** 放不下的原因：'occupied' 位置被占（提示 toast.place.occupied）；'twoParts' 不重叠，但这一格已经有两个部件（提示 toast.place.twoParts）。 */
@@ -1789,7 +1789,7 @@ P2 合并之后，世界里可以存在部分格子，但工具要到 M2.4 才�
 
 ### 19.3 过渡期的标记（P10 清掉）
 
-- `docs/NETCODE.md` 第 14 节里，`Target.sub`、`Use.flags` 第 1～3 位的检查标着“P8b 实现”，转子帆数按 `round(sails × 8)` 发送标着“P7 实现”。两个包合并后去掉这些标记。
+- `docs/NETCODE.md` 第 14 节里原来有三处标记：`Target.sub`、`Use.flags` 第 1～3 位的检查标着“P8b 实现”，转子帆数按 `round(sails × 8)` 发送标着“P7 实现”。两个包都已合并，标记已去掉。
 - `src/liquid/fluids.ts` 里“只读基础层”的注释（第 4.5 节）由 P6 加。
 
 ### 19.4 P7（粘连、胶水、装配、落回世界）
@@ -1909,3 +1909,19 @@ P2 合并之后，世界里可以存在部分格子，但工具要到 M2.4 才�
 - `test:ci` 现在跑两个分配测试（`tests/voxel/alloc.test.ts`、`tests/drive/alloc.test.ts`）。
 - 性能（在繁忙的机器上交替测得，P10 在空闲时重测）：实体 tick 是 M1 的 0.99～1.03 倍；微基准里水平扫掠约 1.02 倍，身体跨在区块边界上时 1.35～1.67 倍（5.4 要求检查那一层）；世界的推出 1.13 倍。
 - 已知的、M1 就有而没有改的：每隔一条上报声称着地的长距离下落，会早一条上报落地（30 格的下落伤害 24 而不是 27）；L 形楼梯上每 11 条上报丢 10 条仍被纠正一次（`check:speed`）。
+
+### 19.11 P8b-1（交互）
+
+- 16.3 的过渡行为在 `sim/`、`entities/`、`net/` 里全部去掉：挖掘只去掉瞄准的那个部件（`removePartAt`），掉落物和 `blockBroken` 带这个部件；挖掘进度属于“网格 + 格子 + 部件值”，`mining.sub` 是最先命中的八分格，直到重新开始挖才变；拣选方块和右键的分发读 `hit.part`。
+- 脚本接口的签名：`aimAt(x, y, z, face, gridId?, mining?, octant?)`、`lookAtPart(x, y, z, octant, gridId?, face?)`（6.2 已改）。`aimAt` 原有约三十处调用把 `mining` 放在第六个，所以八分格排第七。给了八分格的 `aimAt` 要求命中的正是它；不给八分格的 `mine()` 看整格的值。瞄准点取“朝眼睛最正、外侧没有硬八分格”的那个面，在面内 0.025 处。
+- `PlacePlan.replaces` 只在被点的软方块本身被取代时为真（14.2 已改），这时不用副手胶；面另一侧格子里的软方块被盖掉时照常用（和 M1 一样）。
+- `planPlacement`：`slabMode` 不在 −1～6、或者要把不能切的方块放成半砖时抛 `RangeError`（调用的人把这类方块整块放）；雪层叠加在整块的分支里。`place()` 先做越界和未加载的检查（不提示，用导出的 `placementTarget(hit, -1)`），之后计划拒绝的每种原因都有提示（`REFUSAL_TOAST`）。
+- 和别的网格的重叠按 `BOXES[fill]` 的每个盒子测，各缩 `GRID_OVERLAP_TOLERANCE`；世界格子对结构体格子同样，用 `solidFillAt`。探测用的网格里只有新放的部件。
+- 涂胶：内面的拒绝（`toast.glue.inner`）紧跟在“转子在转”之后，潜行去胶也拒绝；“已经挨着”的拒绝（`toast.glue.touching`）排在“不能涂”和“已经涂了”之后。准星提示和点击走同样的顺序：点击会以这两条拒绝的地方不给提示（`glueHint` 返回空；两处共用 `touchesAcross`，按层读，不组打包值）。副手胶在两格都 `canGlue` 之后、自动粘连的判断之前检查 `cellsTouch`。
+- 服务器校验第 1 条：先比 `sub` 处部件的 id 和 `claimedPart(t)` 的 id（不同是 `'cell'`），再对这个部件用射线的谓词（不过是 `'ray'`）；空的八分格对空的声明按 `'ray'` 失败，和原来瞄空气一样。两边都是整格（或空气）时直接比 id，和 M1 相同（否则这条每 tick 的检查是 M1 的 1.37 倍；改后 1.04～1.15 倍）。`Hands.resolve` 有同样的快路径；它每 tick 运行，按 4.4 读 `getCell` / `getPart2`，不用 `getPacked`（16.3 的列表里写了它，以这里为准）。
+- 声明的 `sub` 不在 0～7 时不是目标（`resolve` 返回空）；从网络来的由编解码拒绝。`Use.flags` 用掩码 0x0f 解码，另外拒绝半砖方向 7。`UseMsg.slabMode` 是必填字段。
+- `sub` 和标志位的常量（`TARGET_SUB_LIMIT`、`MINING_SUB_OCTANT`、`MINING_ONE_OCTANT`、`USE_*`、`MAX_SLAB_MODE`）放在 `net/protocol.ts`：`net` 不能引用 `sim/view` 的运行时代码。
+- 准星换到同一格的另一个八分格也算换了目标，客户端发新的 `Aim`（每个客户端 tick 至多一条）。掌舵的人准星正好在舵轮格的中间平面上时会在两个八分格之间来回跳，每秒至多 20 条小消息；没有加迟滞。
+- 倒液体的检查改用 `partlyDisplaced`（19.9）。
+- 性能（繁忙的机器上交替测得，P10 重测）：声明瞄准的那条路径（`Hands.tick` + `buildView`）约是 M1 的 1.5 倍，但不高于第 1 波合并后的水平（0.93 倍）；多出来的在 `getCell`、更大的 `GridHit` 和提示上，是第 1 波带来的。
+- M2.4 要做：`tests/net/layering.test.ts` 的 `net/client` 规则里加 `sim/placement`。可选：给两种涂胶拒绝加准星提示（`hint.glue.inner`、`hint.glue.touching`）。

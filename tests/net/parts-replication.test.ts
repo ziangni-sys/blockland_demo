@@ -6,8 +6,10 @@
  *  - the host command SetCell (section 14.1): written when it passes, refused with a toast and no
  *    change by each of its four checks;
  *  - the server takes a Target.cell that is layout-valid garbage without throwing;
- *  - the transition (16.3) through a real client: aiming at and mining a two-part cell and a holed
- *    cell throws nowhere and leaves replica and server equal.
+ *  - mining parts through a real client (P8b, docs/SHAPES.md 6.2 and 6.3): the client aims at an
+ *    octant (HeadlessClient.mine with an octant) and sends it as Target.sub; the server mines the
+ *    part containing it, one part at a time, and blockBroken carries that part; replica and server
+ *    stay equal.
  */
 import { describe, expect, it } from 'vitest';
 import { facingState, makeCell, PACK_SCALE } from '../../src/blocks/cell';
@@ -232,8 +234,8 @@ describe('the host command SetCell (section 14.1)', () => {
   });
 });
 
-describe('the transition (16.3) through a real client', () => {
-  it('aiming at and mining a two-part cell and a holed cell: nothing throws, replica and server stay equal, events carry the first part', async () => {
+describe('mining parts through a real client', () => {
+  it('a two-part cell part by part, and a holed cell, each aimed at by its octant: one part each, blockBroken carries it, replica and server stay equal', async () => {
     const h = new NetHarness();
     await h.create();
     const c = h.addClient('p', {}, { local: true, viewRadius: 3 });
@@ -250,17 +252,89 @@ describe('the transition (16.3) through a real client', () => {
     h.sim.world.setCell(px + 2, T5, pz, TWO);
     h.sim.world.setCell(px - 2, T5, pz, SLAB);
     h.run(300);
-    expect(c.mine(px + 2, T5, pz, PY)).toBe(true);
-    // Aim at the cell centre: the centre of the top face lies in the slab's empty upper half, and
-    // rays pass through empty octants (SHAPES 6.1). P8b adds aiming at a part to the harness.
-    expect(c.mine(px - 2, T5, pz)).toBe(true);
+    // The planks above (octant 2: -X, upper, -Z, on the side facing the player), then the stone below (octant 0).
+    expect(c.mine(px + 2, T5, pz, undefined, 0, 30_000, 2)).toBe(true);
+    expect(c.sentIntents.filter((m) => m.type === 'attack').map((m) => (m as { target: { sub: number } | null }).target?.sub)).toEqual([2]);
+    expect(getPacked(h.sim.world, px + 2, T5, pz)).toBe(slab(B.STONE, LOWER));
+    expect(c.mine(px + 2, T5, pz, undefined, 0, 30_000, 0)).toBe(true);
+    // The lower slab's octant 1 (+X, toward the player): aiming at the cell centre would pass
+    // through its empty upper half (docs/SHAPES.md 6.1).
+    expect(c.mine(px - 2, T5, pz, undefined, 0, 30_000, 1)).toBe(true);
     h.run(300);
     expect(getPacked(h.sim.world, px + 2, T5, pz)).toBe(0);
     expect(getPacked(h.sim.world, px - 2, T5, pz)).toBe(0);
-    expect(broken).toEqual([slab(B.STONE, LOWER), SLAB]);
+    expect(broken).toEqual([slab(B.PLANKS_OAK, UPPER), slab(B.STONE, LOWER), SLAB]);
     h.quiesce();
     expect(h.compareNow(c, false)).toEqual([]);
     expect(c.mismatches).toEqual([]);
+  });
+
+  it('pick block: the client predicts the part it aims at, and the server agrees', async () => {
+    const h = new NetHarness();
+    await h.create();
+    const c = h.addClient('p', {}, { local: true, viewRadius: 3 });
+    h.track(c);
+    h.runUntil(() => c.ready && c.own !== null && c.intents !== null, 60_000);
+    const p = h.sim.players.get('p')!.player;
+    const T5 = Math.floor(p.pos.y);
+    const px = Math.floor(p.pos.x);
+    const pz = Math.floor(p.pos.z);
+    h.sim.world.setCell(px + 2, T5, pz, TWO); // stone below, planks above
+    h.run(300);
+    for (const [octant, item] of [
+      [2, B.PLANKS_OAK],
+      [0, B.STONE],
+    ] as const) {
+      expect(c.aimAt(px + 2, T5, pz, undefined, 0, false, octant)).toBe(true);
+      expect(c.pickBlock()).toBe(true);
+      expect(c.inventory.selectedStack()?.item, `octant ${octant}: predicted`).toBe(item);
+      c.waitAck();
+      expect(c.inventory.selectedStack()?.item, `octant ${octant}: the server's answer`).toBe(item);
+      expect(p.inventory.selectedStack()?.item, `octant ${octant}: on the server`).toBe(item);
+    }
+    h.quiesce();
+    expect(h.compareNow(c, false)).toEqual([]);
+  });
+
+  it('the crosshair moving to another octant of the same face of the same cell sends a new Aim (at most one per client tick), and the server holds the last octant', async () => {
+    const h = new NetHarness();
+    await h.create();
+    const c = h.addClient('p', {}, { local: true, viewRadius: 3 });
+    h.track(c);
+    h.runUntil(() => c.ready && c.own !== null && c.intents !== null, 60_000);
+    const p = h.sim.players.get('p')!.player;
+    const Y = Math.floor(p.pos.y);
+    const px = Math.floor(p.pos.x);
+    const pz = Math.floor(p.pos.z);
+    h.sim.world.setCell(px, Y, pz - 3, makeCell(B.STONE));
+    h.run(300);
+    const aims = (): Array<{ sub: number; x: number; z: number; face: number } | null> =>
+      c.sentIntents
+        .filter((m) => m.type === 'aim')
+        .map((m) => (m as { use: { sub: number; x: number; z: number; face: number } | null }).use)
+        .map((t) => (t === null ? null : { sub: t.sub, x: t.x, z: t.z, face: t.face }));
+    expect(c.aimAt(px, Y, pz - 3, PZ, 0, false, 6)).toBe(true);
+    h.run(200);
+    const n0 = aims().length;
+    expect(aims()[n0 - 1]).toEqual({ sub: 6, x: px, z: pz - 3, face: PZ });
+    // The same cell, the same face, the same block, another octant: a new target, one new Aim.
+    expect(c.aimAt(px, Y, pz - 3, PZ, 0, false, 7)).toBe(true);
+    h.run(200);
+    const n1 = aims().length;
+    expect(n1).toBe(n0 + 1);
+    expect(aims()[n1 - 1]).toEqual({ sub: 7, x: px, z: pz - 3, face: PZ });
+    // Back and forth six times while the client does not tick: at most one Aim for them all.
+    const tick0 = c.own!.tick;
+    for (let i = 0; i < 6; i++) expect(c.aimAt(px, Y, pz - 3, PZ, 0, false, i % 2 === 0 ? 4 : 5)).toBe(true);
+    expect(c.own!.tick).toBe(tick0);
+    expect(aims().length - n1).toBeLessThanOrEqual(1);
+    h.run(300);
+    const n2 = aims().length;
+    expect(n2 - n1).toBeLessThanOrEqual(2);
+    expect(aims()[n2 - 1]).toEqual({ sub: 5, x: px, z: pz - 3, face: PZ });
+    // The server's hands hold the last octant.
+    const use = h.sim.players.get('p')!.hands.raycast()!;
+    expect([use.x, use.z, use.octant]).toEqual([px, pz - 3, 5]);
   });
 
   it('a claimed target whose cell is layout-valid garbage is no target: no throw, nothing mined', async () => {

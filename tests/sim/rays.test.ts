@@ -107,8 +107,8 @@ describe('rays (sim/rays.ts)', () => {
     const scene = sim.interaction.rayScene();
     const glue = castRay(scene, p.eyePos(), lookDir(p.yaw, p.pitch), 'glue');
     const plain = castRay(scene, p.eyePos(), lookDir(p.yaw, p.pitch), 'plain');
-    expect(me.targetCell()).toEqual({ gridId: 0, x: glue!.x, y: glue!.y, z: glue!.z, face: glue!.face });
-    expect(me.mineTargetCell()).toEqual({ gridId: 0, x: plain!.x, y: plain!.y, z: plain!.z, face: plain!.face });
+    expect(me.targetCell()).toEqual({ gridId: 0, x: glue!.x, y: glue!.y, z: glue!.z, face: glue!.face, octant: glue!.octant });
+    expect(me.mineTargetCell()).toEqual({ gridId: 0, x: plain!.x, y: plain!.y, z: plain!.z, face: plain!.face, octant: plain!.octant });
     expect(glue!.z).toBe(-3);
     expect(plain!.z).toBe(-2);
   });

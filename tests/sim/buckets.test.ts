@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { cellState, facingState, isLiquidSource, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
+import { isCellFace } from '../../src/blocks/shapes';
 import { I } from '../../src/blocks/items';
 import { NZ, PY, PZ } from '../../src/core/dirs';
 import type { Simulation } from '../../src/sim/simulation';
@@ -136,7 +137,8 @@ describe('buckets and the world water hidden inside a hull', () => {
     sim.soloPlayer.hold(I.BUCKET_WATER, 1);
     sim.soloPlayer.lookAt(2.5, 28.5, 4.0);
     sim.tick();
-    expect(sim.soloPlayer.targetCell()).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
+    expect(sim.soloPlayer.targetCell()).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ, octant: expect.any(Number) });
+    expect(isCellFace(sim.soloPlayer.targetCell()!.octant, NZ), 'the octant hit lies behind the face entered').toBe(true);
     expect(sim.soloPlayer.view.target).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
   });
 

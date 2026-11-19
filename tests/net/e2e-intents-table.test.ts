@@ -55,7 +55,7 @@ describe('package 7: every intent of the table, before and after the server\'s a
     expect(c.target).toMatchObject({ gridId: 0, x: 2, y: T - 1, z: 1, face: PY, cell: sim.world.getCell(2, T - 1, 1) });
     expect(ctrl.targetCell()).not.toMatchObject({ x: 2, z: 1 });
     h.runUntil(() => ctrl.targetCell()?.z === 1, 2000, 1);
-    expect(ctrl.targetCell()).toEqual({ gridId: 0, x: 2, y: T - 1, z: 1, face: PY });
+    expect(ctrl.targetCell()).toMatchObject({ gridId: 0, x: 2, y: T - 1, z: 1, face: PY });
     // Use (press) and UseRelease: the block appears on the client only when the batch does.
     c.hold(B.COBBLE);
     c.waitLook();

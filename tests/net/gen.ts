@@ -201,7 +201,7 @@ export class Gen {
     return { key, params };
   }
   target(): Target {
-    return { gridId: this.int(0, 3000), x: this.coord(), y: this.coord(), z: this.coord(), face: this.dir(), sub: this.int(0, 255), cell: this.cell() };
+    return { gridId: this.int(0, 3000), x: this.coord(), y: this.coord(), z: this.coord(), face: this.dir(), sub: this.int(0, 7), cell: this.cell() };
   }
   optTarget(): Target | null {
     return this.bool() ? this.target() : null;
@@ -265,7 +265,7 @@ export class Gen {
       { type: 'ping', clientMs: this.int(0, 0xffffffff), rttMs: this.int(0, 60_000) },
       { type: 'moveReport', ...this.moveReport() },
       { type: 'aim', seq: seq(), moveSeq: seq(), use, mine: this.bool() ? (use === null ? null : { ...use }) : this.optTarget() },
-      { type: 'use', seq: seq(), moveSeq: seq(), slot: this.int(0, 8), sneak: this.bool(), target: this.optTarget() },
+      { type: 'use', seq: seq(), moveSeq: seq(), slot: this.int(0, 8), sneak: this.bool(), slabMode: this.int(0, 6), target: this.optTarget() },
       { type: 'useRelease', seq: seq() },
       { type: 'attack', seq: seq(), moveSeq: seq(), slot: this.int(0, 8), target: this.optTarget() },
       { type: 'attackRelease', seq: seq() },

@@ -333,11 +333,11 @@ export interface Transport {
 - 第一人称用眼睛射线。越肩和正面视角用相机射线（相机位置、相机朝向），只接受离眼睛不超过 `REACH` 的命中——够不着的服务器反正会拒绝，这样目标框画出来的都能操作。DESIGN“视角”里“准星目标、放置和挖掘始终按第一人称的视线算”这一条随工作包 7 改掉。
 - 目标框客户端自己画，不等服务器。
 
-**目标的格式**：`Target { gridId, x, y, z, face, sub, cell }`，网格局部坐标；`sub` 同第 9 节（M2.1 是 0）；`cell` 是客户端看到的那一格的值。目标的任何一项变了（包括那一格被换成别的方块）都算目标变了。每个带目标的意图和 `Aim` 还带 `moveSeq`：发出它时最近一条已发出的移动上报的序号。眼睛就是那条上报的脚的位置加眼高（眼高不随潜行变），在那条上报的载体坐标系里，所以意图不另带眼睛、载体和 tick。
+**目标的格式**：`Target { gridId, x, y, z, face, sub, cell }`，网格局部坐标；`sub` 是命中的八分格 0～7（[SHAPES.md](SHAPES.md) 第 6.3 节），换了八分格也算目标变了；`cell` 是客户端看到的那一格的值。目标的任何一项变了（包括那一格被换成别的方块）都算目标变了。每个带目标的意图和 `Aim` 还带 `moveSeq`：发出它时最近一条已发出的移动上报的序号。眼睛就是那条上报的脚的位置加眼高（眼高不随潜行变），在那条上报的载体坐标系里，所以意图不另带眼睛、载体和 tick。
 
 **服务器的校验**（`src/net/server/intents.ts`，对每个带目标的意图）
 
-1. 网格存在（`gridById`）；格子的 id 和 `cell` 的 id 相同（客户端看见的就是服务器上的这一块：A 右键舵轮的路上 B 把它挖了换成圆石，A 的右键不会作用到圆石上，创造模式的左键也不会挖掉 A 没见过的方块）；格子满足当前手持物品那条射线的谓词：普通射线 `targetable`；胶射线可瞄准且是硬方块；桶射线可瞄准或液体源，并且世界液体源不能在船体排开的地方（`displacedByHull`，DESIGN“结构体里没有液体”）。
+1. 网格存在（`gridById`）；`sub` 那个八分格所在的部件在，并且 id 等于 `partAt(cell, sub)` 的 id（[SHAPES.md](SHAPES.md) 第 6.3 节；别人凿了这一格的另一个部件或这个部件的别的八分格不算变；客户端看见的就是服务器上的这一块：A 右键舵轮的路上 B 把它挖了换成圆石，A 的右键不会作用到圆石上，创造模式的左键也不会挖掉 A 没见过的方块）；这个部件满足当前手持物品那条射线的谓词：普通射线 `targetable`；胶射线可瞄准且是硬方块；桶射线可瞄准或液体源，并且世界液体源不能在船体排开的地方（`displacedByHull`，DESIGN“结构体里没有液体”）。
 2. 够得着：眼睛取 `moveSeq` 那条上报，要工作包 2 在当前 epoch 里接受了它（第 8 节）；不在（还没校验——通常和意图一起到、被拒绝、被丢掉、丢了、太旧、在校正之前）就取这个玩家当前 epoch 里最新被接受的一条，一条也没有（刚被校正）就取服务器上这个玩家现在的位置。把眼睛从那条上报的载体坐标系用服务器当前的位姿换到目标网格的局部空间，到目标格子最近点的距离 ≤ `REACH + REACH_SLACK + min(5, (|v_rel|·viewLag + |v_own|·m)/TPS)`，`REACH_SLACK = 0.5`。
    - `viewLag` 是这个玩家当前的画面延迟（第 4 节，最近一条被应用的上报的），不是意图的年龄。
    - `v_rel` 是眼睛所在的载体（或世界）和目标网格在眼睛处的相对速度（`velocityAt`）。同一个网格、或者目标就在自己脚下的船上时为 0；人在 10 格/秒的船上、目标在码头、画面延迟 300 ms 时余量 3 格。
@@ -506,7 +506,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | `Rot64` | 4 × `i16 round_half_away_from_zero(q × 32767)`，读出后归一化 |
 | `Ang16` | `u16`：角度 /(2π) × 65536 取模 |
 | `Pose` | `Pos32 ×3` + `Rot64`（20 字节） |
-| `Target` | `vu gridId, vi x, vi y, vi z, u8 face, u8 sub, Cell cell`。`sub` = 命中的八分格 0～7，高 5 位必须是 0（这项校验由 SHAPES 的 P8b 实现，合并前编解码还不检查）；`cell` = 客户端看到的这一格的整格内容（[SHAPES.md](SHAPES.md) 第 6.3 节） |
+| `Target` | `vu gridId, vi x, vi y, vi z, u8 face, u8 sub, Cell cell`。`sub` = 命中的八分格 0～7，高 5 位必须是 0；`cell` = 客户端看到的这一格的整格内容（[SHAPES.md](SHAPES.md) 第 6.3 节） |
 | `OptTarget` | `u8 有无` + `Target` |
 | `Stack` | `vu (item + 1，0 = 空)`，非空时再 `vu count` |
 | `Message` | `str key, vu n`，每个参数 `str name, u8 tag`（0 数字后跟 `f64`，1 文字后跟 `str`）。没有参数时解码出的 `Message` 不带 `params`；参数名重复按协议错误 |
@@ -523,7 +523,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | 0x03 | `Ping` | 不可靠 | `u32 clientMs, vu rttMs`（客户端量到的往返，0 = 还没有；房主页面的状态显示它） | 6～8 B |
 | 0x10 | `MoveReport` | 不可靠 | `vu seq, vu epoch, vu viewTick, vu carrierId, f64×3 pos, f32×3 vel, f32 yaw, f32 pitch, u8 flags`（0 着地 1 潜行 2 疾跑 3 飞行 4 输入 sneak）`, i8 forward, i8 strafe, u8 landings` | ~57 B |
 | 0x20 | `Aim` | 可靠 | `vu seq, vu moveSeq, OptTarget use, bool mineSame, [OptTarget mine]`（两个目标相同时必须用 `mineSame`：标志为假又重复同一个目标按协议错误） | 6～40 B |
-| 0x21 | `Use` | 可靠 | `vu seq, vu moveSeq, u8 slot, u8 flags`（位 0 sneak；位 1～3 半砖方向 `slabMode` 0～6，7 和更高的位按协议错误，[SHAPES.md](SHAPES.md) 第 14.2 节；位 1～3 由 SHAPES 的 P8b 实现，合并前编解码还不检查）`, OptTarget` | 7～24 B |
+| 0x21 | `Use` | 可靠 | `vu seq, vu moveSeq, u8 slot, u8 flags`（位 0 sneak；位 1～3 半砖方向 `slabMode` 0～6，7 和更高的位按协议错误，[SHAPES.md](SHAPES.md) 第 14.2 节）`, OptTarget` | 7～24 B |
 | 0x22 | `UseRelease` | 可靠 | `vu seq` | 2～4 B |
 | 0x23 | `Attack` | 可靠 | `vu seq, vu moveSeq, u8 slot, OptTarget` | 6～23 B |
 | 0x24 | `AttackRelease` | 可靠 | `vu seq` | 2～4 B |
@@ -572,8 +572,8 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 **记录**
 
-- `StructureRecord`：`u8 kind`（0 ship 1 rotor）`, vu id, vu parentId, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, [CellVolume(sx·sy·sz)，盒子为空时没有], f64×3 pivot, f64×3 position, f64×4 rotation, GlueList`；转子再加 `vi bx, vi by, vi bz, u8 axis, f64×4 baseRotation, f64 angle, f64 angularSpeed, vu round(sails × 8), bool frozen`（帆数读出来除以 8：帆数按体积，半块帆布 0.5；由 SHAPES 的 P7 实现，合并前仍发整数帆数）；船再加 `vi hx, vi hy, vi hz, u8 forward, f32 throttle, f32 rudder, vu helmsmanId`。头约 130 字节 + 格子 + 胶。
-- `StructureDelta`：`vu id, u8 mask`；位 0 `vu n, n × (vi dx, vi dy, vi dz, Cell)`（与上一格的差，从 0,0,0 起）；位 1 `vu n, n × (vi dx, vi dy, vi dz, u8 axis + added × 4)`；位 2 `f64×3 pivot`；位 3 `vi hx, vi hy, vi hz, u8 forward, vu helmsmanId`；位 4 `f32 throttle, f32 rudder`；位 5 `f64 angle, f64 angularSpeed, vu round(sails × 8), bool frozen`（`round(sails × 8)` 同上，由 P7 实现）。
+- `StructureRecord`：`u8 kind`（0 ship 1 rotor）`, vu id, vu parentId, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, [CellVolume(sx·sy·sz)，盒子为空时没有], f64×3 pivot, f64×3 position, f64×4 rotation, GlueList`；转子再加 `vi bx, vi by, vi bz, u8 axis, f64×4 baseRotation, f64 angle, f64 angularSpeed, vu round(sails × 8), bool frozen`（帆数读出来除以 8：帆数按体积，半块帆布 0.5）；船再加 `vi hx, vi hy, vi hz, u8 forward, f32 throttle, f32 rudder, vu helmsmanId`。头约 130 字节 + 格子 + 胶。
+- `StructureDelta`：`vu id, u8 mask`；位 0 `vu n, n × (vi dx, vi dy, vi dz, Cell)`（与上一格的差，从 0,0,0 起）；位 1 `vu n, n × (vi dx, vi dy, vi dz, u8 axis + added × 4)`；位 2 `f64×3 pivot`；位 3 `vi hx, vi hy, vi hz, u8 forward, vu helmsmanId`；位 4 `f32 throttle, f32 rudder`；位 5 `f64 angle, f64 angularSpeed, vu round(sails × 8), bool frozen`（`round(sails × 8)` 同上）。
 - `EntityRecord`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`；player 再加 `i16 pitch`（round_half_away_from_zero(pitch/(π/2)×32767)）`, u8 flags`（0 潜行 1 疾跑 2 飞行 3 死亡 4 着地）`, vu steeringShipId, vu heldItem+1`；item `vu item, vu count`；falling `Cell`（必须是整格方块，`< 2^16`，两端检查）；tnt `vu fuse`；rabbit 无。
 - `EntitySample`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`，`kind` 是 player 时再加 `i16 pitch, u8 flags`。约 18～21 字节。
 - `EntityUpdate`：`vu id, u8 mask`；位 0 最终状态（同 `EntitySample` 去掉 id，含 `kind`）；位 1 `vu item, vu count`；位 2 `vu fuse`；位 3 `u8 flags, vu steeringShipId, vu heldItem+1`。

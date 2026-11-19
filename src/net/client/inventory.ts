@@ -26,7 +26,7 @@ export type InventoryAction =
   | { kind: 'selectSlot'; slot: number }
   | { kind: 'invClick'; area: InventoryArea; index: number; button: 0 | 2; shift: boolean }
   | { kind: 'creativePick'; item: number; shift: boolean }
-  /** `item`: what the replica's cell at the target picks (entities/inventory.ts pickBlockItem). */
+  /** `item`: what the part aimed at in the replica picks (entities/inventory.ts pickBlockItem of partAt(target.cell, target.sub)). */
   | { kind: 'pickBlock'; item: number }
   | { kind: 'dropCursor' }
   | { kind: 'closeInventory' };

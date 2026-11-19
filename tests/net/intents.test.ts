@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { facingState, makeCell } from '../../src/blocks/cell';
+import { quadrantOctant } from '../../src/blocks/shapes';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
 import { NZ, PY, type Dir } from '../../src/core/dirs';
@@ -75,8 +76,9 @@ function tick(w: World, n = 1): void {
   }
 }
 
+/** The target a client sends for face `face` of a world cell: the octant hit lies behind that face (docs/SHAPES.md 6.3). */
 function target(w: World, x: number, y: number, z: number, face: Dir = PY): Target {
-  return { gridId: 0, x, y, z, face, sub: 0, cell: w.sim.world.getCell(x, y, z) };
+  return { gridId: 0, x, y, z, face, sub: quadrantOctant(face, 0), cell: w.sim.world.getCell(x, y, z) };
 }
 
 let intentSeq = 0;
@@ -92,7 +94,7 @@ describe('the server\'s intents (package 7)', () => {
     const { sim, a } = w;
     a.player.inventory.hotbar[3] = { item: B.PLANKS_OAK, count: 64 };
     const s0 = ++intentSeq;
-    send(w, { type: 'use', seq: s0, moveSeq: w.seq, slot: 3, sneak: false, target: target(w, 2, TOP - 1, 0) });
+    send(w, { type: 'use', seq: s0, moveSeq: w.seq, slot: 3, sneak: false, slabMode: 0, target: target(w, 2, TOP - 1, 0) });
     send(w, { type: 'useRelease', seq: s0 + 1 });
     intentSeq = s0 + 1;
     tick(w);
@@ -213,7 +215,7 @@ describe('the server\'s intents (package 7)', () => {
     a.player.inventory.hotbar[0] = { item: B.PLANKS_OAK, count: 64 };
     const t = target(w, 2, TOP, 0);
     sim.world.setCell(2, TOP, 0, makeCell(B.COBBLE)); // replaced on the server meanwhile
-    send(w, { type: 'use', moveSeq: w.seq, slot: 0, sneak: false, target: t });
+    send(w, { type: 'use', moveSeq: w.seq, slot: 0, sneak: false, slabMode: 0, target: t });
     tick(w);
     expect(sim.world.getCell(2, TOP + 1, 0) & 1023).toBe(B.AIR);
     expect(a.view.preview).toBeNull();

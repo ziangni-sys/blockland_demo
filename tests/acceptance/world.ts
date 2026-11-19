@@ -66,16 +66,18 @@ import { appendFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import { expect, inject } from 'vitest';
 import { B } from '../../src/blocks/defs';
+import { partAt } from '../../src/blocks/shapes';
 import type { Dir } from '../../src/core/dirs';
 import { qrotate, vec3, type AABB } from '../../src/core/math';
 import type { Player } from '../../src/entities/entity';
 import { maxStackOf, type Inventory, type InventoryArea } from '../../src/entities/inventory';
 import type { HeldInput } from '../../src/net/client/predict';
 import { importSave, type SaveBundle } from '../../src/sim/persist';
-import type { PlayerControl } from '../../src/sim/players';
+import type { AimedCell, PlayerControl } from '../../src/sim/players';
 import { Simulation, type GameMode, type SimOptions } from '../../src/sim/simulation';
-import type { GridCell, HelmView, InteractionView, PlayerKey } from '../../src/sim/view';
+import type { HelmView, InteractionView, PlayerKey } from '../../src/sim/view';
 import type { Ship } from '../../src/structures/structure';
+import { getPacked } from '../../src/voxel/parts';
 import { testMeta, NetHarness, type HeadlessClient } from '../net/harness';
 
 export type WorldMode = 'direct' | 'network';
@@ -122,10 +124,12 @@ export interface Me {
   lookAt(x: number, y: number, z: number): void;
   /** Point the look at a cell of a grid (see PlayerControl.lookAtCell); false when the grid does not exist. */
   lookAtCell(x: number, y: number, z: number, face?: Dir, gridId?: number): boolean;
-  /** lookAtCell, then true when the use ray (or the mining ray) hits exactly that cell (and face). */
-  aimAt(x: number, y: number, z: number, face?: Dir, gridId?: number, mining?: boolean): boolean;
-  /** The cell the use ray hits now, or null. */
-  targetCell(): (GridCell & { face: Dir }) | null;
+  /** Point the look at an octant of a cell (see PlayerControl.lookAtPart: an open face of it, or `face` of it); false when the grid does not exist. */
+  lookAtPart(x: number, y: number, z: number, octant: number, gridId?: number, face?: Dir): boolean;
+  /** lookAtCell (lookAtPart with `octant`), then true when the use ray (or the mining ray) hits exactly that cell (and face, and octant). */
+  aimAt(x: number, y: number, z: number, face?: Dir, gridId?: number, mining?: boolean, octant?: number): boolean;
+  /** The cell the use ray hits now, with the face and the octant, or null. */
+  targetCell(): AimedCell | null;
   /** Queue one right-click for the next tick. */
   use(): void;
   /** Press the right button and keep it held (from the next tick; a click with the button held). */
@@ -134,8 +138,12 @@ export interface Me {
   releaseUse(): void;
   /** Aim at a cell, right-click it and run the tick; false (nothing clicked) when the cell cannot be aimed at. */
   useOn(x: number, y: number, z: number, face?: Dir, gridId?: number): boolean;
-  /** Aim at a cell and hold the left button until it is gone, at most maxTicks ticks; false when it could not be aimed at or did not break. */
-  mine(x: number, y: number, z: number, face?: Dir, gridId?: number, maxTicks?: number): boolean;
+  /**
+   * Aim at a cell and hold the left button until it is gone, at most maxTicks ticks; false when it
+   * could not be aimed at or did not break. With `octant`: aim at that octant and hold until the
+   * part that contains it is gone (docs/SHAPES.md 6.2).
+   */
+  mine(x: number, y: number, z: number, face?: Dir, gridId?: number, maxTicks?: number, octant?: number): boolean;
   /** Queue an off-hand swap for the next tick. */
   swapHands(): void;
   /** Hold `item` (see PlayerControl.hold; network: see WHAT TAKES TICKS). */
@@ -374,13 +382,14 @@ abstract class BaseMe<W extends BaseWorld> implements Me {
   protected abstract movedBody(): Player;
   protected abstract doLookAt(x: number, y: number, z: number): void;
   protected abstract doLookAtCell(x: number, y: number, z: number, face: Dir | undefined, gridId: number): boolean;
-  protected abstract doAimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining: boolean): boolean;
-  protected abstract doTargetCell(): (GridCell & { face: Dir }) | null;
+  protected abstract doLookAtPart(x: number, y: number, z: number, octant: number, gridId: number, face: Dir | undefined): boolean;
+  protected abstract doAimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining: boolean, octant: number | undefined): boolean;
+  protected abstract doTargetCell(): AimedCell | null;
   protected abstract doUse(): void;
   protected abstract doPressUse(): void;
   protected abstract doReleaseUse(): void;
-  /** Hold the left button, aiming at `cell` at every tick (network: holdAim). */
-  protected abstract doPressAttack(cell: { x: number; y: number; z: number; face?: Dir; gridId: number }): void;
+  /** Hold the left button, aiming at `cell` (its octant, when given) at every tick (network: holdAim). */
+  protected abstract doPressAttack(cell: { x: number; y: number; z: number; face?: Dir; gridId: number; octant?: number }): void;
   protected abstract doReleaseAttack(): void;
   protected abstract doSwapHands(): void;
   /** The inventory as this mode's authority on clicks has it (network: as the client shows it). */
@@ -428,11 +437,15 @@ abstract class BaseMe<W extends BaseWorld> implements Me {
     this.w.sync();
     return this.doLookAtCell(x, y, z, face, gridId);
   }
-  aimAt(x: number, y: number, z: number, face?: Dir, gridId = 0, mining = false): boolean {
+  lookAtPart(x: number, y: number, z: number, octant: number, gridId = 0, face?: Dir): boolean {
     this.w.sync();
-    return this.doAimAt(x, y, z, face, gridId, mining);
+    return this.doLookAtPart(x, y, z, octant, gridId, face);
   }
-  targetCell(): (GridCell & { face: Dir }) | null {
+  aimAt(x: number, y: number, z: number, face?: Dir, gridId = 0, mining = false, octant?: number): boolean {
+    this.w.sync();
+    return this.doAimAt(x, y, z, face, gridId, mining, octant);
+  }
+  targetCell(): AimedCell | null {
     this.w.ready();
     return this.doTargetCell();
   }
@@ -450,29 +463,38 @@ abstract class BaseMe<W extends BaseWorld> implements Me {
   }
   useOn(x: number, y: number, z: number, face?: Dir, gridId = 0): boolean {
     this.w.sync();
-    if (!this.doAimAt(x, y, z, face, gridId, false)) return false;
+    if (!this.doAimAt(x, y, z, face, gridId, false, undefined)) return false;
     if (this.heldItem() === B.HELM) {
       // HELM: the helm faces the look the server has; let a tick bring it there first.
       this.w.tick(HELM_TICKS);
-      if (!this.doAimAt(x, y, z, face, gridId, false)) return false;
+      if (!this.doAimAt(x, y, z, face, gridId, false, undefined)) return false;
     }
     this.doUse();
     this.w.tick();
     return true;
   }
-  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxTicks = 400): boolean {
+  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxTicks = 400, octant?: number): boolean {
     this.w.sync();
-    if (!this.doAimAt(x, y, z, face, gridId, true)) return false;
-    const grid = (): { getCell(x: number, y: number, z: number): number } | undefined => this.w.sim.structures.gridById(gridId);
-    const before = grid()!.getCell(x, y, z);
-    this.doPressAttack(face === undefined ? { x, y, z, gridId } : { x, y, z, face, gridId });
+    if (!this.doAimAt(x, y, z, face, gridId, true, octant)) return false;
+    // What is watched: the part containing the octant, or (no octant) the whole cell.
+    const watched = (): number | undefined => {
+      const g = this.w.sim.structures.gridById(gridId);
+      if (g === undefined) return undefined;
+      const c = getPacked(g, x, y, z);
+      return octant === undefined ? c : partAt(c, octant);
+    };
+    const before = watched();
+    const cell: { x: number; y: number; z: number; face?: Dir; gridId: number; octant?: number } = { x, y, z, gridId };
+    if (face !== undefined) cell.face = face;
+    if (octant !== undefined) cell.octant = octant;
+    this.doPressAttack(cell);
     try {
       for (let i = 0; i < maxTicks; i++) {
         this.w.tick();
-        const g = grid();
-        if (g === undefined || g.getCell(x, y, z) !== before) return true;
+        const now = watched();
+        if (now === undefined || now !== before) return true;
         // Keep aiming at the cell: a carrier may have turned the player.
-        if (!this.doAimAt(x, y, z, face, gridId, true)) return false;
+        if (!this.doAimAt(x, y, z, face, gridId, true, octant)) return false;
       }
       return false;
     } finally {
@@ -637,10 +659,13 @@ class DirectMe extends BaseMe<DirectWorld> {
   protected doLookAtCell(x: number, y: number, z: number, face: Dir | undefined, gridId: number): boolean {
     return this.ctrl.lookAtCell(x, y, z, face, gridId);
   }
-  protected doAimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining: boolean): boolean {
-    return this.ctrl.aimAt(x, y, z, face, gridId, mining);
+  protected doLookAtPart(x: number, y: number, z: number, octant: number, gridId: number, face: Dir | undefined): boolean {
+    return this.ctrl.lookAtPart(x, y, z, octant, gridId, face);
   }
-  protected doTargetCell(): (GridCell & { face: Dir }) | null {
+  protected doAimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining: boolean, octant: number | undefined): boolean {
+    return this.ctrl.aimAt(x, y, z, face, gridId, mining, octant);
+  }
+  protected doTargetCell(): AimedCell | null {
     return this.ctrl.targetCell();
   }
   protected doUse(): void {
@@ -798,12 +823,15 @@ class NetMe extends BaseMe<NetWorld> {
   protected doLookAtCell(x: number, y: number, z: number, face: Dir | undefined, gridId: number): boolean {
     return this.c.lookAtCell(x, y, z, face, gridId);
   }
-  protected doAimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining: boolean): boolean {
-    return this.c.aimAt(x, y, z, face, gridId, mining);
+  protected doLookAtPart(x: number, y: number, z: number, octant: number, gridId: number, face: Dir | undefined): boolean {
+    return this.c.lookAtPart(x, y, z, octant, gridId, face);
   }
-  protected doTargetCell(): (GridCell & { face: Dir }) | null {
+  protected doAimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining: boolean, octant: number | undefined): boolean {
+    return this.c.aimAt(x, y, z, face, gridId, mining, octant);
+  }
+  protected doTargetCell(): AimedCell | null {
     const t = this.c.target;
-    return t === null ? null : { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face as Dir };
+    return t === null ? null : { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face as Dir, octant: t.sub };
   }
   protected doUse(): void {
     this.c.use();
@@ -814,7 +842,7 @@ class NetMe extends BaseMe<NetWorld> {
   protected doReleaseUse(): void {
     this.c.releaseUse();
   }
-  protected doPressAttack(cell: { x: number; y: number; z: number; face?: Dir; gridId: number }): void {
+  protected doPressAttack(cell: { x: number; y: number; z: number; face?: Dir; gridId: number; octant?: number }): void {
     this.c.holdAim(cell);
     this.c.pressAttack();
   }

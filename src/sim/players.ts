@@ -53,6 +53,7 @@
  * still reach the server for both; for a client-driven player the held movement keys only matter
  * to its client, except the stick axes and sneak, which its reports carry (helm, docking).
  */
+import { partAt } from '../blocks/shapes';
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../core/dirs';
 import { vec3, type Vec3 } from '../core/math';
 import type { Correction, DriveMode, MoveReport } from '../entities/drive';
@@ -61,6 +62,8 @@ import { maxStackOf } from '../entities/inventory';
 import { readPlayerRecord, writePlayerRecord } from '../entities/manager';
 import { ByteReader, ByteWriter } from '../save/bytes';
 import { Ship } from '../structures/structure';
+import type { VoxelGrid } from '../voxel/grid';
+import { getPacked, solidAtHalf } from '../voxel/parts';
 import { boxOverlapsSolid } from '../voxel/shape';
 import { Hands } from './interact';
 import type { Simulation } from './simulation';
@@ -472,7 +475,9 @@ export class PlayerControl {
   /**
    * Point the view at a cell of a grid (0 = world, else a structure id): at the centre of
    * `face` when given (the ray then enters through that face, if the eye is on its outer
-   * side), else at the cell centre. Returns false when the grid does not exist.
+   * side), else at the cell centre. Returns false when the grid does not exist. The centre of a
+   * partial cell may be empty, and the ray passes through empty octants (docs/SHAPES.md 6.1):
+   * aim at a part with lookAtPart.
    */
   lookAtCell(x: number, y: number, z: number, face?: Dir, gridId = 0): boolean {
     const g = this.sim.structures.gridById(gridId);
@@ -484,6 +489,21 @@ export class PlayerControl {
       p.y += DIR_Y[face]! * 0.45;
       p.z += DIR_Z[face]! * 0.45;
     }
+    g.toWorld(p, p);
+    this.lookAt(p.x, p.y, p.z);
+    return true;
+  }
+
+  /**
+   * Point the view at octant `octant` of a cell of a grid (docs/SHAPES.md 6.2): at the centre of
+   * `face` of that octant when given, else of the exposed face of the octant that faces the eyes
+   * best (aimingPoint); slightly inside it, so the ray enters the octant through that face.
+   * Returns false when the grid does not exist.
+   */
+  lookAtPart(x: number, y: number, z: number, octant: number, gridId = 0, face?: Dir): boolean {
+    const g = this.sim.structures.gridById(gridId);
+    if (g === undefined) return false;
+    const p = aimingPoint(g, x, y, z, octant, g.toLocal(this.player.eyePos(), vec3()), face);
     g.toWorld(p, p);
     this.lookAt(p.x, p.y, p.z);
     return true;
@@ -572,18 +592,18 @@ export class PlayerControl {
 
   /**
    * The cell the player looks at right now with the held item's use ray (what a right-click acts
-   * on: with a bucket in hand, liquid sources count), or null.
+   * on: with a bucket in hand, liquid sources count), the face entered and the octant hit, or null.
    */
-  targetCell(): (GridCell & { face: Dir }) | null {
+  targetCell(): AimedCell | null {
     this.requireOnline();
     const h = this.hands.raycast();
-    return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face };
+    return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face, octant: h.octant };
   }
-  /** The cell a left-click would mine right now (liquid never counts), or null. */
-  mineTargetCell(): (GridCell & { face: Dir }) | null {
+  /** The cell a left-click would mine right now (liquid never counts), face and octant, or null. */
+  mineTargetCell(): AimedCell | null {
     this.requireOnline();
     const h = this.hands.raycastMining();
-    return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face };
+    return h === null ? null : { gridId: h.grid.gridId, x: h.x, y: h.y, z: h.z, face: h.face, octant: h.octant };
   }
 
   /**
@@ -602,23 +622,25 @@ export class PlayerControl {
   /**
    * Aim at a cell and hold the attack button until it is gone (survival mining takes the
    * block's hardness in seconds; creative breaks it at once), at most `maxTicks` ticks of the
-   * whole simulation. Returns true when the cell was mined; false when it could not be aimed at
-   * or did not break in time.
+   * whole simulation. With `octant`, aim at that octant (aimAt) and hold until the part that
+   * contains it is gone (docs/SHAPES.md 6.2: one part is mined at a time); without, until the
+   * cell changes. Returns true when it was mined; false when it could not be aimed at or did not
+   * break in time.
    */
-  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxTicks = 400): boolean {
-    if (!this.aimAt(x, y, z, face, gridId, true)) return false;
+  mine(x: number, y: number, z: number, face?: Dir, gridId = 0, maxTicks = 400, octant?: number): boolean {
+    if (!this.aimAt(x, y, z, face, gridId, true, octant)) return false;
     const input = this.player.input;
     const grid = this.sim.structures.gridById(gridId)!;
-    const before = grid.getCell(x, y, z);
+    const before = minedValue(grid, x, y, z, octant);
     this.attack();
     input.attack = true;
     try {
       for (let i = 0; i < maxTicks; i++) {
         this.sim.tick();
         const g = this.sim.structures.gridById(gridId);
-        if (g === undefined || g.getCell(x, y, z) !== before) return true;
+        if (g === undefined || minedValue(g, x, y, z, octant) !== before) return true;
         // Keep aiming at the cell: a carrier may have turned the player.
-        if (!this.aimAt(x, y, z, face, gridId, true)) return false;
+        if (!this.aimAt(x, y, z, face, gridId, true, octant)) return false;
       }
       return false;
     } finally {
@@ -627,12 +649,78 @@ export class PlayerControl {
   }
 
   /**
-   * lookAtCell + check that the ray hits exactly that cell: the use ray of the held item, or the
-   * mining ray (which never stops at liquid, even with a bucket in hand).
+   * lookAtCell (lookAtPart with `octant`) + check that the ray hits exactly that cell (and face,
+   * and octant): the use ray of the held item, or the mining ray (which never stops at liquid,
+   * even with a bucket in hand). `mining` stays the sixth parameter, ahead of `octant`, for the
+   * callers that pass it.
    */
-  aimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining = false): boolean {
-    if (!this.lookAtCell(x, y, z, face, gridId)) return false;
+  aimAt(x: number, y: number, z: number, face: Dir | undefined, gridId: number, mining = false, octant?: number): boolean {
+    if (octant === undefined ? !this.lookAtCell(x, y, z, face, gridId) : !this.lookAtPart(x, y, z, octant, gridId, face)) return false;
     const h = mining ? this.hands.raycastMining() : this.hands.raycast();
-    return h !== null && h.grid.gridId === gridId && h.x === x && h.y === y && h.z === z && (face === undefined || h.face === face);
+    return (
+      h !== null &&
+      h.grid.gridId === gridId &&
+      h.x === x &&
+      h.y === y &&
+      h.z === z &&
+      (face === undefined || h.face === face) &&
+      (octant === undefined || h.octant === octant)
+    );
   }
+}
+
+/** A cell aimed at: grid, cell, the face the ray entered the hit octant by, the octant (docs/SHAPES.md 6.2). */
+export interface AimedCell extends GridCell {
+  face: Dir;
+  octant: number;
+}
+
+/** What mine() watches: the part containing `octant`, or (no octant) the whole packed cell. */
+function minedValue(grid: VoxelGrid, x: number, y: number, z: number, octant: number | undefined): number {
+  const c = getPacked(grid, x, y, z);
+  return octant === undefined ? c : partAt(c, octant);
+}
+
+/**
+ * Where to look to hit octant `octant` of cell (x,y,z) of `grid` from `eye` (grid-local), in
+ * grid-local coordinates (a new vector): slightly inside the centre of face `face` of the octant
+ * when given; else of the octant's face that faces the eye best among those whose neighbouring
+ * octant (in this cell or the next) holds no hard material (voxel/parts.ts solidAtHalf); the
+ * octant's centre when none is open. The point is a quarter of an octant's half width inside the
+ * face, so the ray crosses the face near its centre, never an edge. Shared by the scripted aim of
+ * PlayerControl and of the test clients (tests/net/harness.ts), so both aim alike.
+ */
+export function aimingPoint(grid: VoxelGrid, x: number, y: number, z: number, octant: number, eye: Vec3, face?: Dir): Vec3 {
+  const ox = octant & 1;
+  const oy = (octant >> 1) & 1;
+  const oz = (octant >> 2) & 1;
+  const c = vec3(x + 0.25 + 0.5 * ox, y + 0.25 + 0.5 * oy, z + 0.25 + 0.5 * oz);
+  let best = face ?? -1;
+  if (best < 0) {
+    let score = 0;
+    const hx = 2 * x + ox;
+    const hy = 2 * y + oy;
+    const hz = 2 * z + oz;
+    for (let d = 0; d < 6; d++) {
+      const dx = DIR_X[d]!;
+      const dy = DIR_Y[d]!;
+      const dz = DIR_Z[d]!;
+      if (solidAtHalf(grid, hx + dx, hy + dy, hz + dz)) continue;
+      // How squarely the face looks at the eye: the normal against the unit vector from the face's centre to the eye.
+      const fx = eye.x - (c.x + dx * 0.25);
+      const fy = eye.y - (c.y + dy * 0.25);
+      const fz = eye.z - (c.z + dz * 0.25);
+      const s = (dx * fx + dy * fy + dz * fz) / (Math.hypot(fx, fy, fz) || 1);
+      if (s > score) {
+        score = s;
+        best = d;
+      }
+    }
+  }
+  if (best >= 0) {
+    c.x += DIR_X[best]! * 0.225;
+    c.y += DIR_Y[best]! * 0.225;
+    c.z += DIR_Z[best]! * 0.225;
+  }
+  return c;
 }

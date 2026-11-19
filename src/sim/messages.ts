@@ -45,10 +45,12 @@ const EN = {
   'toast.dock.done': 'Docked: {count} blocks back in the world',
   'toast.dock.tilted': 'The ship leans too far to dock',
   'toast.dock.blocked': 'Docking blocked by {count} blocks (marked red)',
+  'toast.dock.twoParts': '{count} cells cannot take the docking ship: some of them already hold two parts (marked red)',
   'toast.helm.taken': 'Someone else is at the wheel',
   // ---- toasts: placement
   'toast.place.support': 'This needs a supporting block below',
   'toast.place.occupied': 'Something is in the way',
+  'toast.place.twoParts': 'This cell already holds two parts',
   'toast.place.spinning': 'A spinning rotor cannot be edited',
   'toast.place.notOnStructure': 'This block cannot be part of a structure',
   // ---- toasts: glue
@@ -59,6 +61,8 @@ const EN = {
   'toast.glue.notGlued': 'This face has no glue',
   'toast.glue.cannot': 'Glue does not hold on this block',
   'toast.glue.spinning': 'A spinning rotor cannot be glued',
+  'toast.glue.inner': 'Glue only goes on the outer faces of a block',
+  'toast.glue.touching': 'These two blocks already touch',
   // ---- toasts: buckets
   'toast.bucket.structure': 'Buckets cannot be used on structures',
   // ---- toasts: multiplayer
@@ -113,9 +117,11 @@ const ZH: Record<MessageKey, string> = {
   'toast.dock.done': '已停靠：{count} 格回到世界',
   'toast.dock.tilted': '船倾斜太大，无法停靠',
   'toast.dock.blocked': '停靠位置被 {count} 个方块挡住（已标红）',
+  'toast.dock.twoParts': '停靠位置有 {count} 格放不下：有的格子已经有两个部件（已标红）',
   'toast.helm.taken': '有人正在掌舵',
   'toast.place.support': '下方需要有支撑的方块',
   'toast.place.occupied': '有东西挡着',
+  'toast.place.twoParts': '这一格已经有两个部件了',
   'toast.place.spinning': '转动中的转子不能编辑',
   'toast.place.notOnStructure': '这种方块不能成为结构体的一部分',
   'toast.glue.none': '需要强力胶',
@@ -125,6 +131,8 @@ const ZH: Record<MessageKey, string> = {
   'toast.glue.notGlued': '这个面没有胶',
   'toast.glue.cannot': '这个方块不能涂胶',
   'toast.glue.spinning': '转动中的转子不能涂胶',
+  'toast.glue.inner': '胶只能涂在方块的外侧面上',
+  'toast.glue.touching': '两块已经挨着',
   'toast.bucket.structure': '桶不能用在结构体上',
   'toast.host.only': '只有房主能这样做',
   'toast.host.setCell': '这个格子不能这样改',

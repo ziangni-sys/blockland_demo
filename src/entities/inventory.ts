@@ -339,11 +339,13 @@ export class Inventory {
 }
 
 /**
- * The item pick block puts in hand for a cell: the block itself (block id == item id), never its
- * mining drop; -1 for air, liquids, the unloaded sentinel and blocks that are no item.
+ * The item pick block puts in hand for a PART (docs/SHAPES.md 6.2: the part aimed at, the one
+ * containing the hit octant, never the whole cell): its material (block id == item id), never its
+ * mining drop and never its shape; -1 for air, liquids, the unloaded sentinel and blocks that are
+ * no item. Reads only the id bits.
  */
-export function pickBlockItem(cell: number): number {
-  const id = cell & ID_MASK;
+export function pickBlockItem(part: number): number {
+  const id = part & ID_MASK;
   if (id === AIR || id === B.UNLOADED || LIQUID[id] !== 0 || !isBlockItem(id)) return -1;
   return id;
 }

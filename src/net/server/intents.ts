@@ -23,10 +23,15 @@
  * disconnects the client (receive() returns false: NetServer kicks it, protocol_error).
  *
  * THE CHECKS of a target (check()):
- *  1. the grid exists (gridById), its cell has the id of the cell the client saw (the target's
- *     `cell`: a helm mined and replaced meanwhile is not clicked as cobble, a block the client never
- *     saw is not mined), and the cell suits the ray of the held item (sim/rays.ts rayPredicate;
- *     a bucket's world liquid source must not be all inside a hull: cellDisplaced);
+ *  1. the grid exists (gridById), and the part of its cell that contains the octant the client
+ *     hit (`sub`) is there and has the id of the part the client saw at that octant (the target's
+ *     `cell`, docs/SHAPES.md 6.2 and 6.3: a helm mined and replaced meanwhile is not clicked as
+ *     cobble, a block the client never saw is not mined; another player chiselling the other part
+ *     of the cell, or other octants of this one, does not matter), and that part suits the ray of
+ *     the held item (sim/rays.ts rayPredicate; a bucket's world liquid source must not be all
+ *     inside a hull: cellDisplaced). Read from the grid's layers and the target's fields
+ *     (sim/interact.ts partAtCell, claimedPart): this runs every tick for the claimed aim and
+ *     never forms or passes the packed value of a two-part cell (docs/SHAPES.md 4.4);
  *  2. reach: the eyes are those of the movement report `moveSeq` as package 2 ACCEPTED it, in the
  *     player's present epoch (moves.ts accepted(): the feet, carrier and velocity package 2 took,
  *     a seated player's seat; never a report merely received, which package 2 checks only in the
@@ -35,7 +40,7 @@
  *     correction — the newest accepted report of the present epoch, and without one, right after a
  *     correction, the player as the server holds it. The eyes are its feet plus the eye height,
  *     converted from its carrier's frame with the server's present poses into the target grid;
- *     from there the nearest point of the cell is at most REACH + REACH_SLACK + min(5, (|v_rel| * viewLag + |v_own| * m) / TPS) away, where
+ *     from there the nearest point of the cell (the whole cell, whatever part is aimed at) is at most REACH + REACH_SLACK + min(5, (|v_rel| * viewLag + |v_own| * m) / TPS) away, where
  *     viewLag is the player's present view lag (ticks), v_rel the velocity of the target grid
  *     relative to the eyes' carrier (or the world) at the eyes, v_own the report's own velocity
  *     relative to its carrier, and m 1 when the eyes are those of the report `moveSeq` (the client
@@ -61,7 +66,7 @@
  * docs/SHAPES.md 14.1) writes a cell bypassing the interaction rules, so it is checked here
  * (setCellProblem) and refused with 'toast.host.setCell'.
  */
-import { AIR, cellSecond, ID_MASK, PART_MASK } from '../../blocks/cell';
+import { AIR, cellSecond, FULL_LIMIT, ID_MASK, PART_MASK } from '../../blocks/cell';
 import { CELL_UNLOADED } from '../../blocks/defs';
 import { isItem } from '../../blocks/items';
 import { BLOCKS, LIQUID } from '../../blocks/registry';
@@ -70,6 +75,7 @@ import { TPS, WORLD_HEIGHT } from '../../core/constants';
 import { vec3, type Vec3 } from '../../core/math';
 import type { AcceptedReport } from '../../entities/drive';
 import type { Player } from '../../entities/entity';
+import { claimedPart, partAtCell } from '../../sim/interact';
 import { msg } from '../../sim/messages';
 import type { PlayerControl } from '../../sim/players';
 import { REACH, cellDisplaced, rayKindOf, rayPredicate, type RayKind } from '../../sim/rays';
@@ -164,9 +170,9 @@ class PlayerIntents {
   }
 }
 
-/** The protocol's Target as the simulation's AimTarget (`sub` is 0 in M2.1 and not used). */
+/** The protocol's Target as the simulation's AimTarget (`sub`: the octant hit, docs/SHAPES.md 6.3). */
 function aimTarget(t: Target): AimTarget {
-  return { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face, cell: t.cell };
+  return { gridId: t.gridId, x: t.x, y: t.y, z: t.z, face: t.face, sub: t.sub, cell: t.cell };
 }
 
 function heldItem(p: Player): number {
@@ -264,10 +270,20 @@ export class IntentQueue {
     const sim = this.sim;
     const grid = sim.structures.gridById(t.gridId);
     if (grid === undefined) return 'grid';
-    const cell = grid.getCell(t.x, t.y, t.z);
-    if ((cell & ID_MASK) !== (t.cell & ID_MASK)) return 'cell';
-    if (!rayPredicate(kind)(cell)) return 'ray';
-    if (kind === 'bucket' && grid.isWorld && LIQUID[cell & ID_MASK] !== 0 && cellDisplaced(sim.interaction.rayScene().ships, t.x, t.y, t.z)) return 'ray';
+    // The part now at the claimed octant has the id of the part the client saw there; an empty
+    // octant (0) passes this only against a claimed empty one, and every ray predicate rejects air.
+    // A full block (or air) on both sides, every cell of a world without parts, is compared
+    // directly, the part being the cell itself (air is id 0, which every ray predicate rejects):
+    // what partAtCell and claimedPart would answer, without the two calls on this per-tick path.
+    let part = grid.getCell(t.x, t.y, t.z);
+    if (part < FULL_LIMIT && t.cell < FULL_LIMIT) {
+      if (((part ^ t.cell) & ID_MASK) !== 0) return 'cell';
+    } else {
+      part = partAtCell(grid, t.x, t.y, t.z, t.sub);
+      if ((part & ID_MASK) !== (claimedPart(t) & ID_MASK)) return 'cell';
+    }
+    if (!rayPredicate(kind)(part)) return 'ray';
+    if (kind === 'bucket' && grid.isWorld && LIQUID[part & ID_MASK] !== 0 && cellDisplaced(sim.interaction.rayScene().ships, t.x, t.y, t.z)) return 'ray';
     // 2. Reach.
     const rec = this.eyeReport(ctrl, moveSeq);
     const found = rec !== null && moveSeq !== null && rec.seq === moveSeq;
@@ -346,6 +362,7 @@ export class IntentQueue {
         if (p.dead) return this.consumed(st, true);
         this.select(p, m.slot);
         input.sneak = m.sneak;
+        input.slabMode = m.slabMode;
         st.use = m.target;
         ctrl.claimUseTarget(this.checked(ctrl, st, m.target, rayKindOf(heldItem(p)), m.moveSeq, false));
         input.usePresses++;
