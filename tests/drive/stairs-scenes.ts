@@ -82,27 +82,34 @@ export interface WalkResult {
 
 export interface WalkOpts {
   sprint: boolean;
-  /** Of every lose + 1 reports, the first `lose` are lost on the way (0: none). */
+  /** Of every lose + 1 reports, `lose` are lost on the way (0: none). */
   lose: number;
+  /**
+   * Which of them is delivered: report n (counted from 1) when (n + phase) % (lose + 1) === 0.
+   * Default 0: the last of every lose + 1.
+   */
+  phase?: number;
   ticks: number;
   /** Jump in the tick of each delivered report and the one before it (the known limitation, 5.8 item 2). */
   jumpBeforeDelivered?: boolean;
 }
 
 /**
- * Walk the run's player (held forward at `yaw`) for o.ticks ticks, its reports lost per o.lose.
- * Measured on the body that moves: the client's (client-driven) or the server's (the reference).
+ * Walk the run's player (held forward at `yaw`) for o.ticks ticks, its reports lost per o.lose
+ * and o.phase. Measured on the body that moves: the client's (client-driven) or the server's
+ * (the reference).
  */
 export function walk(run: Run, yaw: number, o: WalkOpts): WalkResult {
   const sim = run.sim;
   const ctl = sim.soloPlayer;
   for (let t = 0; t < 5; t++) sim.tick();
   const submit = ctl.submitReport.bind(ctl);
+  const shift = o.phase ?? 0;
   let n = 0;
   let delivered = 0;
   ctl.submitReport = (rep: MoveReport) => {
     n++;
-    if (o.lose > 0 && n % (o.lose + 1) !== 0) return;
+    if (o.lose > 0 && (n + shift) % (o.lose + 1) !== 0) return;
     delivered++;
     submit(rep);
   };
@@ -119,8 +126,8 @@ export function walk(run: Run, yaw: number, o: WalkOpts): WalkResult {
   let low = y0;
   for (let t = 0; t < o.ticks; t++) {
     if (o.jumpBeforeDelivered === true) {
-      const phase = (n + 1) % (o.lose + 1);
-      inp.jump = phase === 0 || phase === o.lose;
+      const next = (n + 1 + shift) % (o.lose + 1);
+      inp.jump = next === 0 || next === o.lose;
     }
     sim.tick();
     top = Math.max(top, body.pos.y);
@@ -171,21 +178,69 @@ export function worldStairs(kind: StairKind, atTop = false, lag: number | null =
   return run;
 }
 
+/** A raft's planks deck (one layer at SEA_TOP - 1): inclusive x and z ranges. */
+export interface Deck {
+  x0: number;
+  x1: number;
+  z0: number;
+  z1: number;
+}
+
 /**
- * A sea run with a raft (planks deck at SEA_TOP - 1, x -3..14, z -3..14) carrying a staircase of
- * `kind` (planks, 12 steps: six blocks high), assembled at its helm; the client-driven player on
- * the deck at the stairs' foot.
+ * The raft of the ship scenes: 36 by 36, wide enough to float level under any of the staircases
+ * (it heels about a fifth of a degree, as a raft at sea does: docs/SHAPES.md 19.10).
  */
-export function shipStairs(kind: StairKind, atTop = false, steps = 12): { run: Run; ship: Ship } {
+export const LEVEL_RAFT: Deck = { x0: -12, x1: 23, z0: -12, z1: 23 };
+
+/**
+ * An 18 by 18 raft. Its deck displaces at most 324 cells of water; with the diagonal staircase
+ * (284 cells of planks over one corner of the deck) the raft weighs 304, and the staircase's
+ * weight, off the middle, heels it toward that corner: 8.6 degrees after the 60 ticks of
+ * shipStairs, still rolling; steady at about 9.7 after some 200 more (the straight staircase heels
+ * it about 3). On the diagonal staircase every tread then slopes down the way the body climbs,
+ * and the climbing body leaves it for a tick now and then (the mover does not snap down:
+ * docs/SHAPES.md 5.7).
+ */
+export const HEELED_RAFT: Deck = { x0: -3, x1: 14, z0: -3, z1: 14 };
+
+export interface ShipStairsOpts {
+  /** The player at the top of the staircase instead of its foot. */
+  atTop?: boolean;
+  /** The raft's deck (default LEVEL_RAFT). */
+  deck?: Deck;
+  /** Ticks the raft is left on the water before anything else (default 60). */
+  settle?: number;
+  /** Then under way for 60 ticks at this throttle and rudder before the player is put on board. */
+  sail?: readonly [number, number];
+}
+
+/**
+ * A sea run with a raft (planks deck o.deck at SEA_TOP - 1) carrying a staircase of `kind`
+ * (planks, 12 steps: six blocks high), assembled at its helm; the client-driven player on the
+ * deck at the stairs' foot (or top). The stairwell's ceiling touches nothing but itself, so a
+ * pillar beside the stairs holds it to the deck (else assembly leaves it in the world, the raft
+ * floats up under it and the stairwell's headroom is whatever the raft's height in the water
+ * makes it).
+ */
+export function shipStairs(kind: StairKind, o: ShipStairsOpts = {}): { run: Run; ship: Ship } {
   const s = START[kind];
-  const at = atTop ? s.shipTop : { x: s.x, z: s.z, dy: 0 };
+  const deck = o.deck ?? LEVEL_RAFT;
+  const at = o.atTop === true ? s.shipTop : { x: s.x, z: s.z, dy: 0 };
   const run = seaRun('creative', vec3(s.x, SEA_TOP, s.z), 0);
   const sim = run.sim;
-  fill(sim.world, -3, SEA_TOP - 1, -3, 14, SEA_TOP - 1, 14, B.PLANKS_OAK);
-  buildStairs(sim.world, kind, 10, 2 * SEA_TOP, s.hz0, steps, B.PLANKS_OAK, 8);
+  fill(sim.world, deck.x0, SEA_TOP - 1, deck.z0, deck.x1, SEA_TOP - 1, deck.z1, B.PLANKS_OAK);
+  buildStairs(sim.world, kind, 10, 2 * SEA_TOP, s.hz0, 12, B.PLANKS_OAK, 8);
+  // (The ceiling before the stairs is at SEA_TOP + 3, over half cells hz0..hz0 + 5: the pillar's
+  // top cell shares the face z = hz0 / 2 + 3 with it.)
+  if (kind === 'stairwell') fill(sim.world, 1, SEA_TOP, s.hz0 / 2 + 3, 1, SEA_TOP + 3, s.hz0 / 2 + 3, B.PLANKS_OAK);
   sim.world.setCell(-2, SEA_TOP, 12, makeCell(B.HELM, facingState(NZ)));
   const ship = assemble(sim, vec3(-2, SEA_TOP, 12));
-  for (let t = 0; t < 60; t++) sim.tick(); // let it settle on the water
+  for (let t = 0; t < (o.settle ?? 60); t++) sim.tick(); // let it settle on the water
+  if (o.sail !== undefined) {
+    ship.throttle = o.sail[0];
+    ship.rudder = o.sail[1];
+    for (let t = 0; t < 60; t++) sim.tick();
+  }
   const w = ship.grid.toWorld(vec3(at.x, SEA_TOP + at.dy, at.z));
   sim.soloPlayer.teleport(w.x, w.y + 0.02, w.z);
   for (let t = 0; t < 20; t++) sim.tick();

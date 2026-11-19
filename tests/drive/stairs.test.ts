@@ -6,11 +6,17 @@
  * eleven lost. No report is refused and nothing is corrected, and walking down hurts the
  * client-driven player exactly as much as it hurts a server-driven one (running down the diagonal
  * staircase is a series of real falls of up to 4.5 blocks; down the others nobody is hurt).
- * The known limitation (item 2: a report ending in the air after several lost ones on a
- * staircase) is pinned as it is.
+ * The ship cases ride a raft wide enough to float level (stairs-scenes.ts LEVEL_RAFT), and again
+ * an 18 by 18 raft that heels under the staircase (HEELED_RAFT, about 9 degrees under the
+ * diagonal one), with every phase of the loss pattern.
+ * The known limitation (item 2: a report ending in the air, above what the support probe reaches,
+ * after several lost ones on a staircase) is pinned as it is.
  */
 import { describe, expect, it } from 'vitest';
-import { shipStairs, START, walk, worldStairs, type StairKind } from './stairs-scenes';
+import { NZ } from '../../src/core/dirs';
+import { vec3 } from '../../src/core/math';
+import { assemble, B, facingState, fill, makeCell, SEA_TOP, seaRun } from './scenes';
+import { buildStairs, HEELED_RAFT, shipStairs, START, walk, worldStairs, type StairKind } from './stairs-scenes';
 
 const KINDS: readonly StairKind[] = ['slab', 'straight', 'diagonal', 'stairwell'];
 
@@ -66,7 +72,7 @@ for (const lose of [0, 10]) {
           expect(up.rejected, what).toBe(0);
           expect(up.climbed, what).toBeGreaterThan(height(kind, true, true));
           expect(s.run.sim.soloPlayer.player.carrierId, what).toBe(s.ship.id);
-          const t = shipStairs(kind, true);
+          const t = shipStairs(kind, { atTop: true });
           const down = walk(t.run, START[kind].yaw + Math.PI, { sprint, lose, ticks: ticks(kind, sprint, true, false) });
           const whatDown = `down ${kind} ${sprint ? 'sprint' : 'walk'}: ${JSON.stringify(down)}`;
           expect(down.causes, whatDown).toEqual([]);
@@ -78,6 +84,98 @@ for (const lose of [0, 10]) {
     }
   });
 }
+
+describe('5.8 on a heeled raft (stairs-scenes.ts HEELED_RAFT), every phase of the loss pattern', () => {
+  /**
+   * The 18 by 18 raft heels toward the staircase under its weight (about 9 degrees under the
+   * diagonal one): every tread slopes down the way the body climbs, the climbing body leaves it
+   * for a tick now and then, a hair above it and in the air by its own flag (held up all the
+   * same: drive.ts heldEnd), and lands on it unseen; it stands on a few thousandths of a tread
+   * after a step up, the next riser leaning in at its corner (drive.ts clearOfLeaningWalls); and
+   * on the diagonal staircase its path follows the diagonal, crossing an x riser and a z riser at
+   * the same sample (the staircase path's corner, drive.ts stairClear). Each delivered report of
+   * every phase of the pattern is one of those states somewhere.
+   */
+  /** At least this many blocks up (or down) on the heeled raft. */
+  const moved = (kind: StairKind): number => (kind === 'slab' ? 0.49 : 3);
+
+  function run(kind: StairKind, sprint: boolean, up: boolean, lose: number, phase: number, settle: number, sail?: readonly [number, number]): string | null {
+    const s = shipStairs(kind, { atTop: !up, deck: HEELED_RAFT, settle, sail });
+    // Held forward as in the matrix above (the scene of 05db395), or, under way, up (or down) the
+    // staircase in the ship's frame: the raft has turned.
+    const f = s.ship.grid.dirToWorld(vec3(up ? 1 : -1, 0, kind === 'diagonal' ? (up ? 1 : -1) : 0));
+    const yaw = sail === undefined ? START[kind].yaw + (up ? 0 : Math.PI) : Math.atan2(-f.x, -f.z);
+    const r = walk(s.run, yaw, { sprint, lose, phase, ticks: ticks(kind, sprint, true, up) });
+    const ok = r.causes.length === 0 && r.rejected === 0 && (up ? r.climbed : r.descended) > moved(kind) && s.run.sim.soloPlayer.player.carrierId === s.ship.id;
+    return ok ? null : `${kind} ${up ? 'up' : 'down'} ${sprint ? 'sprint' : 'walk'}, ${lose} of ${lose + 1} lost, phase ${phase}, settled ${settle} ticks${sail ? `, under way ${sail}` : ''}: ${JSON.stringify(r)}`;
+  }
+
+  for (const kind of KINDS) {
+    it(`${kind}: walking and sprinting up and down, every report delivered and ten of every eleven lost (each phase): nothing refused or corrected`, () => {
+      const bad: string[] = [];
+      for (const sprint of [false, true])
+        for (const up of [true, false])
+          for (const lose of [0, 10])
+            for (let phase = 0; phase <= lose; phase++) {
+              const b = run(kind, sprint, up, lose, phase, 60);
+              if (b !== null) bad.push(b);
+            }
+      expect(bad).toEqual([]);
+    });
+  }
+
+  it('diagonal, a 22 by 22 raft heeling 2 degrees, walking up along the ship, seven of every eight lost (each phase): nothing refused', () => {
+    // A report of phase 7 ends right after a step up: the body stands on 0.005 of the tread, and the
+    // next higher column, leaning in a little, touches its corner (the wall's lean was cut off all
+    // four sides of the footprint, and the strip of tread with it).
+    const bad: string[] = [];
+    for (let phase = 0; phase <= 7; phase++) {
+      const s = START.diagonal;
+      const run = seaRun('creative', vec3(s.x, SEA_TOP, s.z), 0);
+      const sim = run.sim;
+      fill(sim.world, -5, SEA_TOP - 1, -5, 16, SEA_TOP - 1, 16, B.PLANKS_OAK);
+      buildStairs(sim.world, 'diagonal', 10, 2 * SEA_TOP, s.hz0, 12, B.PLANKS_OAK, 8);
+      sim.world.setCell(-4, SEA_TOP, 14, makeCell(B.HELM, facingState(NZ)));
+      const ship = assemble(sim, vec3(-4, SEA_TOP, 14));
+      for (let t = 0; t < 60; t++) sim.tick();
+      const w = ship.grid.toWorld(vec3(s.x, SEA_TOP, s.z));
+      sim.soloPlayer.teleport(w.x, w.y + 0.02, w.z);
+      for (let t = 0; t < 20; t++) sim.tick();
+      // Held forward along the staircase's diagonal in the ship's frame.
+      const f = ship.grid.dirToWorld(vec3(1, 0, 1));
+      const r = walk(run, Math.atan2(-f.x, -f.z), { sprint: false, lose: 7, phase, ticks: 30 });
+      if (r.causes.length > 0 || r.rejected > 0 || r.climbed < 3) bad.push(`phase ${phase}: ${JSON.stringify(r)}`);
+    }
+    expect(bad).toEqual([]);
+  });
+
+  for (const kind of ['diagonal', 'stairwell'] as const) {
+    it(`${kind}, the raft under way and turning: walking and sprinting up and down, ten of every eleven lost (each phase): nothing refused or corrected`, () => {
+      // (Walking up the stairwell, phase 10: a report ends a hair above a tread, in the air by the
+      // body's own flag, with no landing since the last delivered one: held up all the same.)
+      const bad: string[] = [];
+      for (const sprint of [false, true])
+        for (const up of [true, false])
+          for (let phase = 0; phase <= 10; phase++) {
+            const b = run(kind, sprint, up, 10, phase, 60, [1, 1]);
+            if (b !== null) bad.push(b);
+          }
+      expect(bad).toEqual([]);
+    });
+  }
+
+  it('diagonal, the raft settled (its heel steady at about 9.7 degrees): seven and ten of every eight and eleven lost, each phase: nothing refused or corrected', () => {
+    const bad: string[] = [];
+    for (const sprint of [false, true])
+      for (const up of [true, false])
+        for (const lose of [7, 10])
+          for (let phase = 0; phase <= lose; phase++) {
+            const b = run('diagonal', sprint, up, lose, phase, 360);
+            if (b !== null) bad.push(b);
+          }
+    expect(bad).toEqual([]);
+  });
+});
 
 describe('5.8 item 2, the known limitation (pinned as it is: update docs/NETCODE.md when it changes)', () => {
   it('sprinting up a staircase, three of every four reports lost, jumping right before each delivered one: corrected, for check:rise', () => {
