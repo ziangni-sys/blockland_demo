@@ -10,6 +10,8 @@ import { Rng } from '../../src/core/rng';
 import { LightEngine } from '../../src/light/engine';
 import { Chunk } from '../../src/voxel/chunk';
 import { World } from '../../src/voxel/world';
+import { LOWER, slab, UPPER } from '../shapes';
+import { randomPartial, writeLayers } from './shape-helpers';
 import { makeFlatChunk, makeTerrainChunk } from './terrain';
 
 /** Chunk coordinates in rings around the origin, the order a streaming client loads them. */
@@ -172,5 +174,74 @@ describe('light engine performance', () => {
     );
     console.log(`[light perf] open/close a skylight in the 24x24 roof: ${holes.map(fmt).join(', ')}`);
     expect(bs.median).toBeLessThan(2);
+  });
+
+  it('partial cells (docs/SHAPES.md section 15): a gap in a half-slab roof, initChunk with 10% partial cells', () => {
+    // A 24 x 24 roof of alternating lower and upper stone slabs over flat ground at y = 4; one
+    // slab after another is taken out and put back. Asserted: a hall roof at y = 30. Printed for
+    // comparison: the same at y = 120 (every gap relights a 115-deep shaft and the room under it,
+    // like the skylight above), next to a roof of full stone blocks in the same place, which
+    // runs the M1 code.
+    const gapTimes = (roofY: number, roofCell: (x: number, z: number) => number): { open: number[]; close: number[] } => {
+      const world = new World(3);
+      const engine = new LightEngine(world);
+      engine.attach();
+      for (let cz = -1; cz <= 2; cz++) {
+        for (let cx = -1; cx <= 2; cx++) {
+          const c = makeFlatChunk(cx, cz, 4);
+          world.addChunk(c);
+          engine.initChunk(c);
+        }
+      }
+      for (let x = 4; x < 28; x++) for (let z = 4; z < 28; z++) world.setCell(x, roofY, z, roofCell(x, z));
+      engine.update();
+      const open: number[] = [];
+      const close: number[] = [];
+      for (let k = 0; k < 50; k++) {
+        const x = 10 + (k % 8);
+        const z = 10 + ((k >> 3) % 8);
+        let t0 = performance.now();
+        world.setCell(x, roofY, z, 0);
+        engine.update();
+        open.push(performance.now() - t0);
+        t0 = performance.now();
+        world.setCell(x, roofY, z, roofCell(x, z));
+        engine.update();
+        close.push(performance.now() - t0);
+      }
+      return { open: open.slice(10), close: close.slice(10) };
+    };
+    const halfSlab = (x: number, z: number) => slab(B.STONE, (x + z) & 1 ? LOWER : UPPER);
+    const hall = gapTimes(30, halfSlab);
+    const gs = stats([...hall.open, ...hall.close]);
+    console.log(`[light perf] open/close a gap in a half-slab roof at y=30 x${hall.open.length * 2}: median ${fmt(gs.median)}, p95 ${fmt(gs.p95)}, max ${fmt(gs.max)}`);
+    const high = gapTimes(120, halfSlab);
+    const full = gapTimes(120, () => makeCell(B.STONE));
+    console.log(
+      `[light perf] gap at y=120: half-slab roof open median ${fmt(stats(high.open).median)}, close median ${fmt(stats(high.close).median)}; ` +
+        `full stone roof (M1 path) open median ${fmt(stats(full.open).median)}, close median ${fmt(stats(full.close).median)}`,
+    );
+
+    // Terrain chunks in which 10% of all cells are partial cells, streamed in like the chunks above.
+    const shaped = new World(1);
+    const shapedEngine = new LightEngine(shaped);
+    shapedEngine.attach();
+    const rng = new Rng(7);
+    const initTimes: number[] = [];
+    for (const [cx, cz] of spiral(3)) {
+      const plain = makeTerrainChunk(cx, cz, 1);
+      const holes = new Uint8Array(plain.cells.length);
+      const part2 = new Uint32Array(plain.cells.length);
+      for (let i = 0; i < plain.cells.length; i++) if (rng.chance(0.1)) writeLayers(plain.cells, holes, part2, i, randomPartial(rng));
+      const c = new Chunk(cx, cz, plain.cells, undefined, holes, part2);
+      shaped.addChunk(c);
+      const t0 = performance.now();
+      shapedEngine.initChunk(c);
+      initTimes.push(performance.now() - t0);
+    }
+    const ps = stats(initTimes.slice(9));
+    console.log(`[light perf] initChunk with 10% partial cells x${initTimes.length - 9}: mean ${fmt(ps.mean)}, median ${fmt(ps.median)}, max ${fmt(ps.max)}`);
+    expect(gs.median).toBeLessThan(2);
+    expect(ps.mean).toBeLessThan(40);
   });
 });
