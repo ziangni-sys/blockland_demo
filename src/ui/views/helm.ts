@@ -52,6 +52,14 @@ function dialMarkup(): string {
 
 const SAIL_GLYPH = '<svg viewBox="0 0 16 16"><path d="M7 1.5v12.5H2.5L7 1.5zM8.5 3.5c3 2.5 4.5 6 4.5 10.5H8.5V3.5zM1.5 15h13v.8h-13z"/></svg>';
 
+/**
+ * The sail count as shown: sails count by volume (a felt slab is half a sail, docs/SHAPES.md
+ * 11.1), so the value is a multiple of 1/8 and shown exactly ("4", "4.5", "4.125"); never negative.
+ */
+export function sailsText(sails: number): string {
+  return String(Math.max(0, Math.round(sails * 8) / 8));
+}
+
 export class HelmInstrument {
   readonly el: HTMLElement;
   private readonly knob: HTMLElement;
@@ -159,6 +167,6 @@ export class HelmInstrument {
       this.needle.style.transform = `rotate(${angle}deg)`;
     }
     this.speed.set(formatSpeed(v.speed));
-    this.sails.set(String(Math.max(0, Math.round(v.sails))));
+    this.sails.set(sailsText(v.sails));
   }
 }
