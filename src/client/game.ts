@@ -91,9 +91,9 @@ import { pageRandom, playerKeyFor, slotFromSearch } from './identity';
 import { InputState, type InputCommand, type LookSettings } from './input';
 import { InputBinder, type InputHost } from './inputdom';
 import { FrameLoop } from './loop';
-import { Lobby, parseJoinText, type JoinTarget } from './lobby';
+import { Lobby, parseJoinLink, parseJoinText, type JoinTarget } from './lobby';
 import { checkWorld, listWorlds, makeWorldId, newWorldMeta } from './saves';
-import { joinFromSearch, kickKey, onlineAvailable, pageConnectDeps, pageSignaller, pageTimers, refuseKey, signalFromSearch, type SignalKind } from './room';
+import { kickKey, onlineAvailable, pageConnectDeps, pageSignaller, pageTimers, refuseKey, signalFromSearch, type SignalKind } from './room';
 import { LocalServer, type OpenCommand, type ServerWay } from './server';
 import { WorldSession, type SessionDeps } from './session';
 import { applySettingsPatch, languageFromLocale, SettingsStore, type KeyValueStore } from './settings';
@@ -328,8 +328,10 @@ export class Game implements InputHost {
     this.heartbeat = this.win.setInterval(() => this.session?.heartbeat(this.win.performance.now()), HEARTBEAT_MS);
     this.loop.start();
     // A link to someone's room: join it at once (after the name, the first time).
-    const join = joinFromSearch(search(this.win));
-    const target: JoinTarget | null = join === null ? null : join.code.replace(/\s+/g, '').startsWith('BL1I.') ? { kind: 'manual', code: join.code } : { kind: join.signal, code: join.code };
+    // The address is read like a pasted link (a chat may have glued punctuation to it). A code that
+    // is not one is still dialled: the join then says so (bad_code).
+    const link = parseJoinLink(search(this.win));
+    const target: JoinTarget | null = link === null ? null : { kind: link.kind, code: link.code ?? '' };
     if (this.lobby.nameChosen || !onlineAvailable()) {
       if (target !== null) void this.joinRoom(target.kind, target.code);
     } else {

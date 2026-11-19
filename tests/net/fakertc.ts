@@ -208,7 +208,7 @@ export class FakePeer implements RtcPeer {
 
   setLocalDescription(d?: RTCLocalSessionDescriptionInit): Promise<void> {
     if (this.closed) return Promise.reject(new Error('closed'));
-    const sdp = `${d?.sdp ?? `fake:${this.id}`}\r\na=candidate:${this.id}`;
+    const sdp = `${d?.sdp ?? `fake:${this.id}`}\r\na=candidate:${this.id} 1 udp 2122260223 10.0.0.1 5000 typ host`;
     this.localDescription = { type: d?.type ?? 'offer', sdp, toJSON: () => ({}) } as RTCSessionDescription;
     this.iceGatheringState = 'gathering';
     if (this.net.gatheringNeverCompletes) {

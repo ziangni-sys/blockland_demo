@@ -8,12 +8,14 @@
  * too), which gives the join up: no stage waits without a way out. Reconnecting after the link
  * died: the message and "Give up". A join that failed, or a connection that ended: a title, the
  * message, "Try again" when it can help and "Back to the menu" (the bar and stages are hidden
- * then).
+ * then). On a failure and while reconnecting, "Copy diagnostics" too (the room screen's: the build,
+ * the signalling, the failure code and how far the WebRTC handshake got), so a guest that never got
+ * in can still send what went wrong.
  */
 import type { UiContext } from '../context';
 import { formatPercent, quantize } from '../format';
 import type { StringKey } from '../i18n';
-import type { JoinView, UiState } from '../model';
+import type { JoinView, OnlineView, UiState } from '../model';
 import { h, setHidden, TextSlot } from '../dom';
 import type { ScreenView } from './screen';
 import { buildLogo, button, CopyField, ICON_BACK, ICON_RESPAWN } from './widgets';
@@ -41,8 +43,14 @@ export class LoadingView implements ScreenView {
   private readonly menuBtn: HTMLButtonElement;
   private readonly giveUpBtn: HTMLButtonElement;
   private readonly cancelBtn: HTMLButtonElement;
+  private readonly diagBox: HTMLElement;
+  private readonly diagBtn: HTMLButtonElement;
+  private readonly diagLabel: HTMLElement;
+  private readonly diag: CopyField;
+  private diagText: string | null = null;
   private progress = -1;
   private join: JoinView | null = null;
+  private online: OnlineView | null = null;
   /**
    * Esc on a join stage or a failure: back to the menu, as the button (the client's keys do not
    * act outside a world, and focus may be anywhere, so the document is listened to while shown).
@@ -94,9 +102,16 @@ export class LoadingView implements ScreenView {
     this.cancelBtn = button(ctx, { variant: 'ghost', icon: ICON_BACK, label: 'join.menu', onClick: () => a.abandonJoin() });
     this.cancelBtn.dataset.act = 'cancel';
     setHidden(this.cancelBtn, true);
+    // ---- diagnostics of a join that failed or is reconnecting (the room screen's, see room.ts)
+    this.diagLabel = ctx.text(h(d, 'span', 'bl-btn-label'), 'room.copyDiagnostics');
+    this.diagBtn = h(d, 'button', 'bl-btn bl-btn--ghost bl-btn--sm', { type: 'button', 'data-act': 'diagnostics' }, [this.diagLabel]);
+    this.diagBtn.addEventListener('click', () => a.copyDiagnostics());
+    this.diag = new CopyField(ctx, { labelKey: 'room.diagnostics', act: 'copy-diagnostics', multiline: true, mono: true, cls: 'bl-copy--diag' });
+    setHidden(this.diag.el, true);
+    this.diagBox = h(d, 'div', 'bl-loading-diag', { hidden: true }, [this.diagBtn, this.diag.el, ctx.text(h(d, 'p', 'bl-room-hint'), 'room.diagnosticsHint')]);
 
     this.el = h(d, 'div', 'bl-screen bl-screen--opaque bl-loading', { hidden: true, 'data-screen': 'loading' }, [
-      h(d, 'div', 'bl-loading-inner', null, [buildLogo(ctx, true), this.title, this.bar, this.row, this.steps, this.answerBox, this.failBox, this.giveUpBtn, this.cancelBtn]),
+      h(d, 'div', 'bl-loading-inner', null, [buildLogo(ctx, true), this.title, this.bar, this.row, this.steps, this.answerBox, this.failBox, this.giveUpBtn, this.cancelBtn, this.diagBox]),
     ]);
   }
 
@@ -115,6 +130,10 @@ export class LoadingView implements ScreenView {
       this.join = j;
       this.renderJoin();
     }
+    if (s.online !== this.online) {
+      this.online = s.online;
+      this.renderDiagnostics(s.online);
+    }
   }
 
   onShow(): void {
@@ -127,13 +146,29 @@ export class LoadingView implements ScreenView {
 
   relocalize(): void {
     this.answer.relocalize();
+    this.diag.relocalize();
     this.renderJoin();
+    if (this.online !== null) this.renderDiagnostics(this.online);
   }
 
   dispose(): void {
     this.onHide();
     this.answer.dispose();
+    this.diag.dispose();
     this.el.remove();
+  }
+
+  /** The button says when it is measuring; a new text is shown and copied (as on the room screen). */
+  private renderDiagnostics(o: OnlineView): void {
+    this.diagLabel.textContent = this.ctx.t(o.diagnosticsBusy ? 'room.measuring' : 'room.copyDiagnostics');
+    this.diagBtn.disabled = o.diagnosticsBusy;
+    setHidden(this.diag.el, o.diagnostics === null);
+    if (o.diagnostics === null) this.diagText = null;
+    else if (o.diagnostics !== this.diagText) {
+      this.diagText = o.diagnostics;
+      this.diag.set(o.diagnostics);
+      void this.diag.copy();
+    }
   }
 
   private renderJoin(): void {
@@ -162,5 +197,6 @@ export class LoadingView implements ScreenView {
     }
     setHidden(this.giveUpBtn, !reconnecting);
     setHidden(this.cancelBtn, j === null || failed || reconnecting);
+    setHidden(this.diagBox, !failed && !reconnecting);
   }
 }

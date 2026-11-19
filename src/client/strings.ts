@@ -85,7 +85,7 @@ const STRINGS = {
     zh: '连不上信令服务（可能被网络屏蔽）：稍后再试，或改用手动邀请码',
     en: 'Could not reach the signalling service (it may be blocked) — try again later, or use a manual invitation code',
   },
-  'join.unknown': { zh: '没有找到这个房间：请检查房间码，房主可能已经关闭了房间', en: 'No room has this code — check it; the host may have closed the room' },
+  'join.unknown': { zh: '没有找到这个房间：请检查房间码；房主可能还没开放房间，或者已经关闭了它', en: 'No room has this code — check it; the host may not have opened the room yet, or has closed it' },
   'join.taken': { zh: '这个房间码已被占用，请换一个', en: 'This room code is already in use — pick another' },
   'join.invitationUsed': { zh: '这个邀请码已经用过了：请房主重新生成一个', en: 'This invitation has been used — ask the host for a new one' },
   'join.badCode': { zh: '这个码无效：请完整地重新复制', en: 'This code is not valid — copy it again in full' },

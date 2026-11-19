@@ -822,6 +822,9 @@ ${twin('bl-hit', HIT)}
 .bl-loading-fail-text { font-size: 15px; color: var(--canvas-100); overflow-wrap: anywhere; }
 .bl-loading-fail .bl-actions { justify-content: flex-start; }
 .bl-loading > .bl-loading-inner > .bl-btn { align-self: center; }
+.bl-loading-diag { display: flex; flex-direction: column; gap: 8px; }
+.bl-loading-diag > .bl-btn { align-self: flex-start; }
+.bl-loading-diag .bl-copy--diag .bl-copy-text { min-height: 9em; }
 
 /* ------------------------------------------------------------------ playing together */
 .bl-mono { font-family: var(--font-mono); }
@@ -1036,6 +1039,9 @@ ${twin('bl-hit', HIT)}
 }
 @media (max-width: 1100px) {
   .bl-ui { --helm-base: 0.82; --helm-margin: 8px; }
+  /* The panels fill the width here: over a screen, toasts keep to the bottom edge instead of
+     covering the panel's title (the room screen's "The room is open" toast at 800x450). */
+  .bl-ui:not([data-screen="none"]) .bl-toasts { top: auto; bottom: max(12px, env(safe-area-inset-bottom, 0px)); flex-direction: column-reverse; }
 }
 @media (max-width: 560px) {
   .bl-ui { font-size: 14px; --helm-base: 0.78; }

@@ -24,7 +24,7 @@ import { focusInto, type ScreenView } from './screen';
 import { button, CopyField, ICON_BACK, ICON_CLOSE, ICON_LINK, ICON_PEOPLE } from './widgets';
 
 function playersKey(rows: readonly PlayerRow[]): string {
-  return rows.map((r) => `${r.entityId}|${r.name}|${r.host ? 1 : 0}|${r.you ? 1 : 0}|${r.mode ?? '-'}`).join('\n');
+  return rows.map((r) => `${r.entityId}|${r.name}|${r.host ? 1 : 0}|${r.you ? 1 : 0}|${r.mode}`).join('\n');
 }
 
 export class RoomScreenView implements ScreenView {

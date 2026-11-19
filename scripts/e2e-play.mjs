@@ -336,23 +336,57 @@ async function session(build, renderer) {
     await selectItem(B.PLANKS);
     let placed = null;
     const tries = [];
-    for (const [yaw, pitch] of [[0, -0.7], [1.2, -0.7], [-1.2, -0.7], [Math.PI, -0.7]]) {
-      await G(([y, p]) => window.__blocklands.game.debug.look(y, p), [yaw, pitch]);
-      await frames(3);
-      const s = await state();
-      const t = s.target;
-      const pl = s.player;
-      tries.push(`yaw ${yaw.toFixed(1)}: target ${JSON.stringify(t)}, player ${pl ? `${pl.x.toFixed(2)} ${pl.y.toFixed(2)} ${pl.z.toFixed(2)} shown ${pl.shownX.toFixed(2)} ${pl.shownY.toFixed(2)} ${pl.shownZ.toFixed(2)} look ${pl.yaw.toFixed(2)} ${pl.pitch.toFixed(2)}` : null}, screen ${s.screen}, ${s.sessionState}, locked ${s.pointerLocked}`);
-      if (!t || t.gridId !== 0 || t.face !== PY) continue;
-      const above = { x: t.x, y: t.y + 1, z: t.z };
-      await click('right');
-      try {
-        await waitFor('a placed block', (c) => (window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) === 10, above, 30_000);
-        placed = above;
-        break;
-      } catch {
-        // another direction
+    // A mob (a rabbit hopping by) in the cell refuses the block, rightly: the toast says so
+    // (toast.place.occupied). Then another direction, and a second round after the mob moved on.
+    await G(() => {
+      const g = window.__blocklands.game;
+      if (window.__e2eToasts) return;
+      window.__e2eToasts = [];
+      const push = g.toasts.push.bind(g.toasts);
+      g.toasts.push = (text, ...rest) => {
+        window.__e2eToasts.push(text);
+        push(text, ...rest);
+      };
+    });
+    const OCCUPIED = ['Something is in the way', '有东西挡着'];
+    for (let round = 0; round < 2 && !placed; round++) {
+      for (const [yaw, pitch] of [[0, -0.7], [1.2, -0.7], [-1.2, -0.7], [Math.PI, -0.7]]) {
+        await G(([y, p]) => window.__blocklands.game.debug.look(y, p), [yaw, pitch]);
+        await frames(3);
+        const s = await state();
+        const t = s.target;
+        const pl = s.player;
+        tries.push(`yaw ${yaw.toFixed(1)}: target ${JSON.stringify(t)}, player ${pl ? `${pl.x.toFixed(2)} ${pl.y.toFixed(2)} ${pl.z.toFixed(2)} shown ${pl.shownX.toFixed(2)} ${pl.shownY.toFixed(2)} ${pl.shownZ.toFixed(2)} look ${pl.yaw.toFixed(2)} ${pl.pitch.toFixed(2)}` : null}, screen ${s.screen}, ${s.sessionState}, locked ${s.pointerLocked}`);
+        if (!t || t.gridId !== 0 || t.face !== PY) continue;
+        const above = { x: t.x, y: t.y + 1, z: t.z };
+        await G(() => void (window.__e2eToasts.length = 0));
+        await click('right');
+        let outcome = 'timeout';
+        try {
+          const settled = await page.waitForFunction(
+            ([c, occupied]) => ((window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) === 10 ? 'placed' : window.__e2eToasts.some((x) => occupied.includes(x)) ? 'occupied' : false),
+            [above, OCCUPIED],
+            { timeout: 30_000, polling: 200 },
+          );
+          outcome = await settled.jsonValue();
+        } catch {
+          // another direction
+        }
+        if (outcome === 'placed') {
+          placed = above;
+          break;
+        }
+        const near = await G((c) => {
+          const g = window.__blocklands.game;
+          const r = g.session.replica;
+          return r.entities(g.session.net.clock.renderTick)
+            .filter((e) => Math.hypot(e.pos.x - c.x - 0.5, e.pos.z - c.z - 0.5) < 2 && e.kind !== 'player')
+            .map((e) => `${e.kind}#${e.id}@${e.pos.x.toFixed(2)},${e.pos.y.toFixed(2)},${e.pos.z.toFixed(2)}`);
+        }, above);
+        tries.push(`  ${outcome === 'occupied' ? 'refused: something is in the way' : 'nothing within 30 s'}; near the cell: ${JSON.stringify(near)}`);
+        if (outcome === 'occupied') log(`placing at ${JSON.stringify(above)}: something is in the way (${near.join(', ') || 'nothing seen nearby'}), trying another direction`);
       }
+      if (!placed && round === 0) await frames(20);
     }
     if (!placed) log(`placing failed:\n      ${tries.join('\n      ')}`);
     check(placed, 'could not place a block');
