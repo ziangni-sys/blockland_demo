@@ -251,7 +251,9 @@ describe('the transition (16.3) through a real client', () => {
     h.sim.world.setCell(px - 2, T5, pz, SLAB);
     h.run(300);
     expect(c.mine(px + 2, T5, pz, PY)).toBe(true);
-    expect(c.mine(px - 2, T5, pz, PY)).toBe(true);
+    // Aim at the cell centre: the centre of the top face lies in the slab's empty upper half, and
+    // rays pass through empty octants (SHAPES 6.1). P8b adds aiming at a part to the harness.
+    expect(c.mine(px - 2, T5, pz)).toBe(true);
     h.run(300);
     expect(getPacked(h.sim.world, px + 2, T5, pz)).toBe(0);
     expect(getPacked(h.sim.world, px - 2, T5, pz)).toBe(0);

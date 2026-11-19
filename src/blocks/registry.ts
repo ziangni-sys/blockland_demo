@@ -81,8 +81,9 @@ export interface BlockDef {
   /** Falls when unsupported (sand, gravel). */
   gravity: boolean;
   /**
-   * Needs a supporting block directly below, else it pops off as a drop:
-   *  'none' | 'solid' (any HARD block below) | 'sandOrSelf' (cactus).
+   * Needs support directly below, else it pops off as a drop:
+   *  'none' | 'solid' (the top face of the cell below is fully covered by hard material,
+   *  sim/support.ts) | 'sandOrSelf' (cactus).
    */
   support: 'none' | 'solid' | 'sandOrSelf';
   /** Explodes when triggered (TNT-like). */

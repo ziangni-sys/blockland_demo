@@ -829,7 +829,7 @@ export class ShipDynamicsImpl implements ShipDynamics {
    * Destroy the deepest pinned hull part of this tick (docs/SHAPES.md 12.7): the part holding the
    * pinned octant of the pinned cell is removed (a two-part cell takes two ticks) and drops its
    * item once (BlockDef.drop: undefined = the block itself, null = nothing) when the world's drops
-   * are on, its feet at the cell corner + DROP_POINT of the part's fill (the cell centre for a full
+   * are on, centred on the cell corner + DROP_POINT of the part's fill (the cell centre for a full
    * block, as in M1; docs/SHAPES.md 9.5).
    */
   private destroyPinnedCell(b: Body): void {

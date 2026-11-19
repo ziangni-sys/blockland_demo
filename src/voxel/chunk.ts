@@ -58,8 +58,10 @@ export class Chunk {
   /** Light, same index: high nibble = sky light, low nibble = block light. */
   readonly light: Uint8Array;
   /**
-   * Per column (index lx | lz<<4): y of the highest cell with lightOpacity > 0, plus 1
-   * (0 when the column is empty). Maintained by the light module.
+   * Per column (index lx | lz<<4): 1 + the highest y at which the sky falling straight down stops
+   * (the cell's medium has lightOpacity > 0, or the face between y and y + 1 is closed by the
+   * opaque covers of the two cells), 0 when it never stops. Maintained by the light module
+   * (docs/SHAPES.md 7.1).
    */
   readonly heightmap: Uint8Array;
   /** True once the chunk differs from pristine generator output and must be saved. */
