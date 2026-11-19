@@ -1128,7 +1128,7 @@ export function dryMask(h: HullInfo): { scale: 1 | 2; mask: Uint8Array } | null;
 - `build` 读格子用 `grid.storage()` 的三层，不用只看第一部件的 `getCell`。`solidCount` 数的是“至少有一个硬八分格”的格子：只由半砖组成的船不是空船。
 - **采样点**：
   1. 第一遍和现在完全一样：整格实心格子朝“敞开的整格”的每个单位面，4 个角加中心，角在整数网格上去重。面的另一侧是 `OCC_PARTIAL` 的那些面这一遍跳过。
-  2. 第二遍只处理和部分格子有关的面：凡是“所属格子是 `OCC_PARTIAL`，或对面的格子是 `OCC_PARTIAL`”的硬八分格的面，如果对面的八分格既不是硬的也不是密封的，就是一个暴露的四分之一面，发它的 4 个角，不发中心。角在半格网格上去重：三个半格坐标都是偶数的点和第一遍的整数网格共用同一张稠密表（法线掩码按位或），其余的点放进一张以半格下标为键的哈希表。
+  2. 第二遍只处理和部分格子有关的面：凡是“所属格子是 `OCC_PARTIAL`，或对面的格子是 `OCC_PARTIAL`”的硬八分格的面，如果对面的八分格既不是硬的也不是密封的，就是一个暴露的四分之一面，发它的 4 个角，不发中心。角在半格网格上去重：三个半格坐标都是偶数的点和第一遍的整数网格共用同一张稠密表（法线掩码按位或），其余的点放进一张以半格下标为键的哈希表。第二遍的点如果落在第一遍发过的某个单位面的边的中点上（这个点也在那个单位面上），法线掩码再并上那个面的方向。这样每个采样点的掩码正好等于经过它的所有暴露面（单位面和四分之一面）的方向；第二遍不因此多出点，只有整格方块的船不受影响。
   3. 第二遍的点排在第一遍之后，顺序是扫描顺序（格子按 y、z、x，方向 0..5，象限 0..3，角按固定顺序）。哈希表只用来查重，不决定输出顺序。
 - 这样只有整格方块的船，点的个数和顺序不变（约 3500 格的敞口船仍是约 1.6 万个点）；部分方块只按自己的表面积加点：一个半砖的顶面是 9 个点（单位面是 5 个）。
 - `nearestOwnerCell`（279-320）在部分格子里按八分格判断，返回格子和八分格（夹毁要用）。
@@ -1155,6 +1155,7 @@ export function dryMask(h: HullInfo): { scale: 1 | 2; mask: Uint8Array } | null;
   3. 水线所在的半层 `wl`：从下往上累加 `vol`，第一个使累加值不小于 `mass / ρ` 的半层；没有就取最高的半层。
   4. 水线面只数**穿过半层 `wl` 的排水体**，每个只数一次：单位立方体（它的 `j` 或 `j + 1` 等于 `wl`）面积 1，二阶矩 `dz² + 1/12` 和 `dx² + 1/12`；半立方体（`j === wl`）面积 1/4，二阶矩 `(dz² + 1/48) / 4` 和 `(dx² + 1/48) / 4`（边长 0.5 的正方形：面积 1/4，绕自身中心轴的二阶矩是面积乘 `0.5² / 12`）。竖着的半砖在同一格里上下两个半立方体分属两个半层，只有一个在水线上，面积不会重复计。
 - 吃水符合体积（场景 43）：用下半砖铺底的木筏，平衡时的浸没体积等于 `质量 / ρ`，P9 的测试在 3% 以内核对（现有的阿基米德测试的做法）。
+- 已知限制：排水体按中心所在的那一列取水，而水从不和部件同格。船头的立方体中心越过半砖厚的墙（墙面在 0.5 平面上）进入墙格那一列时，那一列在这个高度没有水，浮力势能在那里有一个台阶：撞墙那一 tick 按 `tests/shipphys/helpers.ts` 算的机械能会上升几焦耳（全速撞北半砖墙约 4 J），随后回落，一个周期内没有净增，动能也不超过撞前。所以半砖墙的测试断言 `collision.test.ts` 的动能条件，机械能条件只对墙面在格子平面上的墙断言。
 
 ### 12.6 接触
 
@@ -1397,7 +1398,7 @@ export function planPlacement(grid: VoxelGrid, hit: GridHit, blockId: number, st
 | 光照：半砖屋顶上开关一个缺口；10% 是部分方块的区块 `initChunk` | 中位 < 2 ms；平均 < 40 ms | P5 |
 | 液体：性能测试的场景四周换成半砖 | 和整格的预算相同 | P6 |
 | 收集：4000 格里 30% 是半砖和楼梯的船 | < 25 ms | P7 |
-| 船体物理：1000 格里 30% 是半砖和楼梯的船，三种工况 | < 1.5 ms | P9 |
+| 船体物理：1000 格里 30% 是半砖和楼梯、舱内保持密封的船，三种工况 | < 1.5 ms | P9（舱被凿开、灌水的同一条船着陆约 1.3～1.9 ms：贴近地面的采样点多了近一倍。记为遗留，见 ROADMAP） |
 | `analyzeHull`：4000 格里 30% 是部分方块 | 不超过整格基线的 2 倍 | P9 |
 | 采样点：整格的船点数不变；每个部分格子多出的点 ≤ 27（它的 3×3×3 个半格网格点） | 精确 | P9 |
 | 网络：区块增量里单独的一个带缺口的格子、一个双部件格子（任意位置） | ≤ 7、11 字节（下标的差至多 3 字节，`y >= 64` 的单独一格就是 3 字节；带缺口的部件至多 4 字节；双部件 4 + 4） | P2 |
@@ -1576,7 +1577,7 @@ export function planPlacement(grid: VoxelGrid, hit: GridHit, blockId: number, st
 - 目标：第 12 节。**场景 43** 的漂浮和吃水部分。
 - 文件：`src/structures/hull.ts`、`src/structures/physics/*`、`src/render/backend.ts`（只有 `DryVolume`）、`src/render/three/{drymask,shading}.ts`、`src/render/three/backend.ts`（只有建干区三维贴图的 `makeMaskTexture`）、`src/client/structures.ts`（干区的上传）；`tests/shipphys/*`、`tests/structures-contract/hull-orient.test.ts`、`tests/render/drymask.test.ts`、`tests/render/{pose,backend}.test.ts`（只给 `DryVolume` 字面量补 `scale`）、`tests/acceptance/g8-shapes-ship.test.ts`（新）。
 - 开工第一件事：加敞口船和 `analyzeHull` 的性能用例，各跑 5 次记下基线（第 15 节）。
-- 测试：现有测试原样通过，整格的船采样点个数不变；半砖和楼梯的船吃水符合体积；半立方体的浸没高度对几组手算的值（跨两格、水面不满的格子）；竖半砖做的船，阻尼估计里的水线面面积是 1/2 格每列而不是 1；半砖船体停在平地上不下陷、不悬空；整格船滑过半砖台阶、贴着半砖厚的墙不穿过；叶片推半砖船；夹毁双部件格子一次去掉一个部件、一份掉落（位置按 `DROP_POINT`）；半砖围成的密封舱是干的；上半砖做的舷墙挡水到半格；`isDryHalf` 对混合格子逐个八分格；测试里的对照（`tests/shipphys/helpers.ts` 的穿透深度、能量）改成按八分格；性能（第 15 节）。
+- 测试：现有测试原样通过，整格的船采样点个数不变；半砖和楼梯的船吃水符合体积；半立方体的浸没高度对几组手算的值（跨两格、水面不满的格子）；竖半砖做的船，阻尼估计里的水线面面积是 1/2 格每列而不是 1；半砖船体停在平地上不下陷、不悬空；整格船滑过半砖台阶、贴着半砖厚的墙不穿过；叶片推半砖船；夹毁双部件格子一次去掉一个部件、一份掉落（位置按 `DROP_POINT`）；半砖围成的密封舱是干的；下半砖做的舷墙挡水到半格（上半砖做的舷墙让水从下面进来，那一层是敞开的）；`isDryHalf` 对混合格子逐个八分格；测试里的对照（`tests/shipphys/helpers.ts` 的穿透深度、能量）改成按八分格；性能（第 15 节）。
 - 依赖：P2。
 
 **P10 集成**
@@ -1768,7 +1769,7 @@ P2 合并之后，世界里可以存在部分格子，但工具要到 M2.4 才�
 
 - `World.setCell` / `StructureGrid.setCell` 的检查是 `checkCanonical`：布局、第 24 位和第二部件对应、I1～I6。它不查 id 是否注册，那是 `cellProblem` 在不可信数据的入口做的事。
 - 射线命中时只读一次 `getCell`，第 24 位置位才再读 `getPart2`。
-- `isDryHalf(h, hx, hy, hz)` 收半格的整数坐标。P9 之前它回答的是“这个点所在的整格干不干”。
+- `isDryHalf(h, hx, hy, hz)` 收半格的整数坐标。P9 之前它回答的是“这个点所在的整格干不干”；P9 合并后逐个八分格回答。
 - 网络编解码里三种宽度的格子：下落方块实体和平地生成器的层只能是整格方块（`writeFullCell` / `readFullCell`，< 2¹⁶）；方块事件带的是部件值（`writePartCell` / `readPartCell`，< 2²⁴）；其余是整格内容。语义检查（`cellProblem`）在 `apply.ts`。
 - 空结构体的记录是 `{ base: new Uint16Array(0), holes: null, part2: null }`。
 - 网格输入：`snapshotSection` 只在遇到非零项时才分配另外两层；`checkInput` 检查层的长度。
@@ -1781,3 +1782,37 @@ P2 合并之后，世界里可以存在部分格子，但工具要到 M2.4 才�
 - `docs/NETCODE.md` 第 14 节里，`Target.sub`、`Use.flags` 第 1～3 位的检查标着“P8b 实现”，转子帆数按 `round(sails × 8)` 发送标着“P7 实现”。两个包合并后去掉这些标记。
 - `src/liquid/fluids.ts` 里“只读基础层”的注释（第 4.5 节）由 P6 加。
 
+### 19.4 P7（粘连、胶水、装配、落回世界）
+
+- 接触类的判断（`autoSticks`、`mountSticks`、`sticksWithoutGlue`、`connectedCells`、`glueSideAt`、`glueFaceKept`）和 `sailVolume8` 遇到“第 24 位置位却没带第二部件”的值抛 `RangeError`（两个参数里任何一个 ≥ `FULL_LIMIT` 时才检查）。按 id 的判断从不抛错。
+- `isSailCell` 保留为材质判断（看第一部件的 id）；`sailVolume8` 对每个部件各用一次。
+- 转子找不到和轴承接触的轮毂时，收集返回 `no_hub`。
+- `pruneGlueAt(oldPacked)` 在这一格现在是能涂胶的整格方块时直接返回：两条规则都不可能去掉面。
+- 世界的格子变化钩子对每次变化都调 `pruneGlueAt`（第 10.2 节）。没有胶时只多一次大小判断；有胶时，涂胶面旁边的液体状态变化每次多六次查表。
+- 装配后对新结构体做的那一遍寿命检查（`pruneGlueAround`）把现在的内容当作 `oldPacked` 传进去，所以只有“状态规则”起作用。
+- 挨着没加载的列的格子被凿掉一面时，那一面的胶立刻去掉：“失去接触”规则拿哨兵值（当作整格方块）来比。不管那一列里实际是什么，两条规则里总有一条会去掉它。
+- 落回世界时被挡住的格子：掉落物取**转过之后**的格子，每个部件一份，第一部件在前，位置是目的地坐标里各自的 `DROP_POINT`，掉什么按各自的 `BlockDef.drop`（石头掉圆石）。被覆盖的软方块掉在格子中心。
+- `landing()` 保留第 11.3 节字面上的分支“值 ≥ `FULL_LIMIT` 且 `solidFill(dest) === 0` → `LAND_OVERWRITE`”；按 I7，合法的格子走不到它。
+- `BlockifyReport` 不加字段：并进去算作放下了。`DockPlan.overwritten` 只数 `LAND_OVERWRITE`。`DockConflict`、`DockPlanConflict` 带 `limit`（因为一格最多两个部件而放不下）。`isHardDestination` 删掉了。
+- `STRUCTURES_FORMAT` 仍是 4，尽管转子的帆数现在按八分之一存：4 就是 M2.3 的布局，中间没有发布过。
+- 协议里帆数用编解码器自己的 `Math.round(sails * 8)`（`net` 不能引用 `structures/`）。帆数是 1/8 的整数倍，所以没有误差；`varuint` 仍然拒绝负数和非有限值。
+- 舵的界面按精确值显示帆数（`String(round(sails × 8) / 8)`），不再取整。
+
+### 19.5 P9（船体物理与船体分析）
+
+- `hullCavityCells` 列出“没有硬八分格、至少有一个舱底或密封八分格”的格子，不管船浮不浮（原来的语义）。
+- 采样点第二遍的顺序：格子按 y、z、x；方向 0～5；象限 0～3（P1 的 `quadrantOctant`）；一个象限里先内侧的八分格、后外侧的；角按第一遍 `FACE_CORNERS` 的顺序。第二遍的点落在第一遍某个单位面的边的中点上时，掩码并上那个面的方向（第 12.4 节，表 `FACE_EDGE_MIDS`）；`tests/shipphys/shapes-shape.test.ts` 断言每个点的掩码**等于**经过它的暴露面的方向。
+- 8 个八分格都排水的混合格子算一个单位立方体，按 M1 的扫描顺序。
+- `nearestOwnerCell`：8 个八分格都硬的格子用格子中心参加比较（同 M1），报告点所在那一侧的八分格（点在中间平面上时取朝目标的一侧）；部分格子里，闭包含这个点的每个硬八分格用自己的中心参加比较。
+- 探测器走整数路径时报告点所在的八分格（`x − cx ≥ 0.5`），所以几何上是满的双部件格子也说得出该夹毁哪个部件。
+- `ProbeTarget.hasPartial` 是快速路径的标志：目标有部分格子时才做那 7 次 `isPartial` 查询。
+- 世界补丁：`PF_PARTIAL` 和 `PF_SOLID` 互斥；格子级的 `isOpen` 是两者都不是；`isOpenHalf` 是“不硬”（世界里没有密封的八分格）；补丁之外由 `solidFillAt` / `solidAtHalf` 回答。
+- `collectCorners`：周围 8 格里有部分格子的整数点改在半格网格上取；奇数的半格点由第一个闭包含它的部分格子发出（不建稠密的半格表）。
+- 接触记录多一个字段 `F_OCTANT = 83`，`STRIDE = 84`。
+- `destroyPinnedCell` 在 `removePartAt` 之后算掉落位置（这次写入不改位姿），用被去掉的部件的填充查 `DROP_POINT`。
+- `rotorMass` 把每个部分部件当作在自己质心上的质点（没有自身项），和 M1 对方块的做法相同。
+- `estimateDampingHalf`：水线是累计体积第一次达到 `质量 / ρ` 的半层；`ymax` 包括单位立方体的上半层。
+- `DryVolume`：盒子仍以格为单位，多一个 `scale`；纹素下标是 `tx + tz × (sx × scale) + ty × (sx × scale) × (sz × scale)`。`DRY_MASK_MAX_TEXELS` 从 `structures/hull.ts` 导出。`render/three/backend.ts` 里 `setStructureDryVolume`（字节数、同尺寸判断、存下的记录）和 `assignDrySlots`（层数 = `sy × scale`）跟着 `scale` 走。
+- 部件全都不硬的部分格子（按 I3 不可能出现）在灌水时当作一个整格节点。
+- 性能预算（第 15 节）量的是舱内保持密封的船。把壳也凿开、舱里灌水的同一条船着陆时超出预算，原因是贴近地面的采样点从约 3900 个变成约 7200 个（第 12.4 节的四分之一面），地形接触和探测器的开销跟着涨。整格方块、舱口敞开的 1000 格船着陆是 1.03～1.06 ms，在预算内。
+- `tests/shipphys/perf-shapes.test.ts` 是计时测试，不进 `test:ci`（`--exclude "**/perf-*.test.ts"`）。

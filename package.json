@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:ci": "vitest run --retry 1 --exclude \"**/perf.test.ts\" --exclude \"**/alloc.test.ts\"",
+    "test:ci": "vitest run --retry 1 --exclude \"**/perf.test.ts\" --exclude \"**/perf-*.test.ts\" --exclude \"**/alloc.test.ts\"",
     "test:watch": "vitest"
   },
   "dependencies": {

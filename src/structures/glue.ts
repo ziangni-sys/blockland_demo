@@ -23,11 +23,12 @@
  * history of operations gives the same order). toArray() is canonical: two stores holding
  * the same faces serialise identically, whatever order the faces were added in.
  *
- * LIFETIME. The store does not know cells. The rule "a glued face stays while at least one
- * side is a glueable block" (DESIGN 强力胶) is applied by the grids' change hooks through
- * pruneGlueAt (stick.ts), on the world's faces around a chunk when it is added (pruneGlueInBox),
- * and by the structure moves (moveTo, then the destination's rules: assembly.ts, which also
- * removes every face a blockify or dock would turn into a joint no player made).
+ * LIFETIME. The store does not know cells. The rules of docs/SHAPES.md 10.2 (a glued face stays
+ * while one side still holds it, glueFaceKept; it goes when a cell that stays stops touching the
+ * neighbour across it) are applied by the grids' change hooks through pruneGlueAt (stick.ts), on
+ * the world's faces around a chunk when it is added (pruneGlueInBox, the first rule only), and by
+ * the structure moves (moveTo, then the destination's rules: assembly.ts, which also removes
+ * every face a blockify or dock would turn into a joint no player made).
  *
  * EVENTS. onChange() reports every face that is added or removed, by any method (bulk ones
  * included: moveTo on both stores, clear, fromArray has no listeners yet), so a mirror kept
@@ -375,7 +376,8 @@ export class GlueStore {
    * 要按映射后的两个端点重新计算键). A face with exactly ONE end in the set stays here when
    * `stays(other end)` is true (the end left behind is a glueable block that remains in this
    * grid: the glue keeps holding on to it and is not duplicated), and otherwise moves like the
-   * others (DESIGN 强力胶: glue lives on while one side is glueable). Faces with no end in the
+   * others (glue lives on while one side holds it; the source grid's hook then applies
+   * glueFaceKept, SHAPES 11.2). Faces with no end in the
    * set are untouched. A moved face landing on a face `target` already holds merges with it.
    *
    * `map` may return the same object on every call. `target` may be this store (in-place
