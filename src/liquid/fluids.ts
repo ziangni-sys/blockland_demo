@@ -44,6 +44,15 @@
  * for water on open ground) waits for it — like the non-ticking border chunks of the classic
  * game.
  *
+ * PARTIAL CELLS (docs/SHAPES.md section 9.1): liquid never flows into a cell with parts. No code
+ * here looks at shapes for that: a cell with any part (a part with holes, or two parts) has a
+ * hard first part (invariant I7 of section 1.3: every cuttable material is hard), so every
+ * decision below that reads IS_SOLID of the id — canFlowInto, isPassable, isHole, holdsSource,
+ * the infinite source's floor — sees a partial cell as a full wall or floor. Water beside a lower
+ * slab stops at the slab's cell, water over it rests in the cell above (half a cell of air over
+ * the slab's surface), and a new infinite source may form over it. Only the base layer is read
+ * (the id and state of the first part); the holes and the second part never matter here.
+ *
  * DEVIATIONS from the classic rules, on purpose:
  *  - spreading may also raise a same-liquid FLOWING cell that holds less than the incoming
  *    amount (classic code leaves that to the neighbour's own tick; the end state is the
@@ -473,6 +482,9 @@ export class Fluids {
    */
   private scanColumns(chunk: Chunk, lx0: number, lx1: number, lz0: number, lz1: number): void {
     const world = this.world;
+    // The base layer only, on purpose: holes and second parts are not looked at. A cell with
+    // parts has a hard id in the base layer (invariant I7), which is all a liquid decision
+    // needs (docs/SHAPES.md section 9.1). The same holds for the neighbours' arrays below.
     const cells = chunk.cells;
     const x0 = chunk.cx << LOCAL_SHIFT;
     const z0 = chunk.cz << LOCAL_SHIFT;
@@ -524,6 +536,9 @@ export class Fluids {
     newCell: number,
     flags: number,
   ): void => {
+    // oldCell and newCell are packed cells (both parts); only their id and state bits are read,
+    // which bitwise operations take from the first part. Carving a part (hard -> hard) changes
+    // nothing a slope search sees; removing the last part (hard -> air) wakes like any mining.
     this.restGen++;
     if (LIQUID_KIND[newCell & CELL_ID] !== 0) this.scheduleCell(x, y, z, newCell);
     if ((flags & NO_NEIGHBOR_UPDATE) !== 0) return;
@@ -753,6 +768,7 @@ export class Fluids {
     // Most of the search area lies in the searching cell's own chunk: read that one directly.
     const home = this.world.getChunk(x >> LOCAL_SHIFT, z >> LOCAL_SHIFT);
     if (!home) return UNKNOWN; // unreachable: the cell itself was just read from it
+    // Base layer only, on purpose (see scanColumns and peek): partial cells read as hard (I7).
     const hc = home.cells;
     const hx = home.cx << LOCAL_SHIFT;
     const hz = home.cz << LOCAL_SHIFT;
@@ -864,6 +880,9 @@ export class Fluids {
   /**
    * Cell at (qx, qy, qz): straight from `cells` (the chunk whose origin is hx, hz) when the
    * position lies inside it, else through the world (unloaded / below-world rules apply).
+   * Deliberately ignores the holes and second-part layers: the base layer's id is hard for every
+   * cell with parts (invariant I7, docs/SHAPES.md section 9.1), and the slope search reads only
+   * ids and liquid states. The world fallback returns a cell value whose id bits are the same.
    */
   private peek(cells: Uint16Array, hx: number, hz: number, qx: number, qy: number, qz: number): number {
     const lx = qx - hx;
