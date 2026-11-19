@@ -196,14 +196,24 @@ const groundY = (x: number, z: number): number => {
   return 0;
 };
 
+/** An entity state with the defaults of a non-player. */
+function ent(e: Partial<EntityRenderState> & Pick<EntityRenderState, 'id' | 'kind' | 'x' | 'z'>): EntityRenderState {
+  return { y: 0, yaw: 0, vx: 0, vy: 0, vz: 0, payload: 0, flash: 0, sky: 15, block: 0, headYaw: e.yaw ?? 0, headPitch: 0, held: 0, posture: 'stand', label: null, ...e };
+}
+
 const entities: EntityRenderState[] = [
-  { id: 1, kind: 'item', x: 17.5, y: 0, z: 40.5, yaw: 0, payload: B.LOG_OAK, flash: 0, sky: 15, block: 0 },
-  { id: 2, kind: 'item', x: 18.6, y: 0, z: 40.8, yaw: 0, payload: I.GLUE, flash: 0, sky: 15, block: 0 },
-  { id: 3, kind: 'item', x: 16.4, y: 0, z: 40.2, yaw: 0, payload: B.FLOWER_YELLOW, flash: 0, sky: 15, block: 0 },
-  { id: 4, kind: 'falling', x: 21.5, y: 0, z: 38.5, yaw: 0, payload: B.SAND, flash: 0, sky: 15, block: 0 },
-  { id: 5, kind: 'tnt', x: 23.5, y: 0, z: 41.5, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
-  { id: 6, kind: 'rabbit', x: 18, y: 0, z: 37, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
-  { id: 7, kind: 'player', x: 14.5, y: 0, z: 38, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 },
+  ent({ id: 1, kind: 'item', x: 17.5, z: 40.5, payload: B.LOG_OAK }),
+  ent({ id: 2, kind: 'item', x: 18.6, z: 40.8, payload: I.GLUE }),
+  ent({ id: 3, kind: 'item', x: 16.4, z: 40.2, payload: B.FLOWER_YELLOW }),
+  ent({ id: 4, kind: 'falling', x: 21.5, z: 38.5, payload: B.SAND }),
+  ent({ id: 5, kind: 'tnt', x: 23.5, z: 41.5 }),
+  ent({ id: 6, kind: 'rabbit', x: 18, z: 37 }),
+  // Players: one walking with a plank in hand; the postures side by side, each with its name tag.
+  ent({ id: 7, kind: 'player', x: 14.5, z: 38, held: B.PLANKS_OAK, label: 'Walker' }),
+  ent({ id: 8, kind: 'player', x: 11, z: 41, yaw: 0.4, headYaw: 0.9, headPitch: 0.3, held: I.GLUE, label: '水手 Mira' }),
+  ent({ id: 9, kind: 'player', x: 12.5, z: 42.5, posture: 'sneak', label: 'Sneak' }),
+  ent({ id: 10, kind: 'player', x: 14, z: 43.5, posture: 'fly', y: 1.2, label: 'Flyer' }),
+  ent({ id: 11, kind: 'player', x: 15.5, z: 44, posture: 'helm', headPitch: -0.3, label: 'Helm' }),
 ];
 
 function updateEntities(t: number): void {
@@ -212,15 +222,20 @@ function updateEntities(t: number): void {
       const a = t * 0.6;
       e.x = 18.5 + Math.cos(a) * 2.2;
       e.z = 36.5 + Math.sin(a) * 2.2;
+      e.vx = -Math.sin(a) * 2.2 * 0.6;
+      e.vz = Math.cos(a) * 2.2 * 0.6;
       // Motion direction d/da (cos, sin) = (-sin, cos); forward(yaw) = (-sin yaw, -cos yaw).
       e.yaw = Math.atan2(Math.sin(a), -Math.cos(a));
       e.y = groundY(e.x, e.z);
-    } else if (e.kind === 'player') {
+    } else if (e.kind === 'player' && e.id === 7) {
       const a = t * 0.35;
       e.x = 14.5 + Math.sin(a) * 1.5;
       e.z = 38;
-      e.yaw = Math.cos(a) >= 0 ? -Math.PI / 2 : Math.PI / 2;
+      e.vx = Math.cos(a) * 1.5 * 0.35;
+      e.yaw = e.headYaw = Math.cos(a) >= 0 ? -Math.PI / 2 : Math.PI / 2;
       e.y = groundY(e.x, e.z);
+    } else if (e.kind === 'player') {
+      e.y = groundY(e.x, e.z) + (e.posture === 'fly' ? 1.2 : 0);
     } else if (e.kind === 'falling') {
       const g = groundY(e.x, e.z);
       const ph = (t * 0.5) % 1;
@@ -249,16 +264,16 @@ const overlays: OverlayState = {
     { structureId: SHIP, x: 12, y: 1, z: 3 },
     { structureId: SHIP, x: 12, y: 2, z: 3 },
   ],
-  // Real glue, as the client sends it: the smaller cell of two adjacent BLOCKS plus the
-  // positive face along the glue axis (both sides are always occupied).
+  // Real glue, as the client sends it. Covered faces: the smaller cell of two adjacent BLOCKS
+  // plus the positive face along the glue axis. Exposed faces: the block plus the open side.
   glue: [
-    { structureId: SHIP, x: 2, y: 3, z: 3, face: 0 }, // deck plank | deck plank (x)
-    { structureId: SHIP, x: 3, y: 3, z: 2, face: 4 }, // deck plank | deck plank (z)
-    { structureId: SHIP, x: 4, y: 0, z: 0, face: 2 }, // floor | wall (y)
-    { structureId: SHIP, x: 6, y: 1, z: 0, face: 2 }, // wall | wall (y)
-    { structureId: SHIP, x: 7, y: 2, z: 0, face: 0 }, // wall | wall (x)
+    { structureId: SHIP, x: 2, y: 3, z: 3, face: 0, covered: true, sky: 15, block: 0 }, // deck plank | deck plank (x)
+    { structureId: SHIP, x: 3, y: 3, z: 2, face: 4, covered: true, sky: 15, block: 0 }, // deck plank | deck plank (z)
+    { structureId: SHIP, x: 4, y: 0, z: 0, face: 2, covered: true, sky: 15, block: 0 }, // floor | wall (y)
+    { structureId: SHIP, x: 6, y: 1, z: 0, face: 2, covered: true, sky: 15, block: 0 }, // wall | wall (y)
+    { structureId: SHIP, x: 7, y: 2, z: 0, face: 0, covered: true, sky: 15, block: 0 }, // wall | wall (x)
+    { structureId: SHIP, x: 2, y: 3, z: 3, face: 2, covered: false, sky: 15, block: 0 }, // deck plank top, open
   ],
-  glueAnchor: { structureId: SHIP, x: 2, y: 3, z: 3 },
 };
 
 // ---------------------------------------------------------------- frame loop
@@ -304,7 +319,6 @@ const shiftedOverlays: OverlayState = {
   preview: overlays.preview.map(shiftCell),
   conflicts: overlays.conflicts.map(shiftCell),
   glue: overlays.glue.map(shiftCell),
-  glueAnchor: overlays.glueAnchor && shiftCell(overlays.glueAnchor),
 };
 
 function frame(now: number): void {

@@ -11,24 +11,34 @@
  * These functions know nothing about the StructureManager's registry, indexes or hooks; the
  * manager calls them in the order that keeps its bookkeeping consistent (re-parent before
  * clearing, unregister before blockifying, ...). Every bulk write uses MOVE_FLAGS: neighbours
- * are re-evaluated afterwards through StructureHost.blockUpdate, and the glue hooks leave the
- * glue alone because the glue is transferred explicitly with GlueStore.moveTo.
+ * are re-evaluated afterwards through StructureHost.blockUpdate. The grids' glue hooks apply
+ * the lifetime rule to these writes too, so glue moves in the order GlueStore.moveTo describes:
+ * destination cells, moveTo, source cells cleared, the destination's glue rules.
+ *
+ * STRUCTURE MOVES NEVER CREATE GLUE JOINTS. Glue joins two blocks only when a player places a
+ * block against a glued face, or when both blocks travel together. Blockify and dock write
+ * structure cells into a grid that already holds blocks, so afterwards every face between a
+ * written cell and a neighbour the move did not write loses its glue when that neighbour could
+ * hold glue (settlePlacedGlue), whether the glue came with the structure or was already there.
+ * The one exception is the glue already on the face between a stopping rotor's bearing and the
+ * cell in front of it (the hub's place), so the hub and the bearing stay glued across a start
+ * and a stop.
  */
 import { AIR, cellState, ID_MASK, isLiquidSource, liquidState, makeCell } from '../blocks/cell';
 import { B } from '../blocks/defs';
 import { BLOCKS, isLiquidCell, isSolidCell, type DropSpec } from '../blocks/registry';
-import { WORLD_HEIGHT } from '../core/constants';
-import { DIR_X, DIR_Y, DIR_Z, nearestDir, NX, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
+import { STRUCTURE_MAX_BOX_CELLS, WORLD_HEIGHT } from '../core/constants';
+import { DIR_X, DIR_Y, DIR_Z, NX, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
 import { qmul, vclone, vec3, vset, type Quat, type Vec3 } from '../core/math';
 import { SET_NO_NEIGHBOR_UPDATE, SET_STRUCTURE_MOVE, type CellBounds, type VoxelGrid } from '../voxel/grid';
 import type { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
-import { CellSet } from './collect';
+import { boxCellsWith, CellSet, inBounds } from './collect';
 import type { GlueStore } from './glue';
 import { HULL_BILGE, HULL_SEALED, isDryCell, type HullInfo } from './hull';
 import { nearestRot, rotCell, rotCellPos, rotToQuat, rotVec, type GridRot } from './orient';
 import { applyRotorPose } from './rotor';
-import { canGlue, cellFunc } from './stick';
+import { holdsGlue, pruneGlueAt } from './stick';
 import type { Rotor, Ship, StructureHost } from './structure';
 
 /** Flags of every bulk write made while assembling, blockifying or docking. */
@@ -41,7 +51,7 @@ const WATER_SOURCE = makeCell(B.WATER, liquidState(0, false));
 export interface BlockifyReport {
   /** Structure cells written into the destination grid. */
   placed: number;
-  /** Structure cells that hit a hard block and became drops (or vanished in creative). */
+  /** Structure cells that hit a hard block and became drops (or vanished when drops are off). */
   dropped: number;
   /** Soft destination blocks (plants, torches, snow cover, liquids) replaced. */
   overwritten: number;
@@ -58,9 +68,9 @@ export function dropOf(cell: number): DropSpec | null {
   return def.drop ?? { item: def.id, count: 1 };
 }
 
-/** Spawn the drop of `cell` centred on cell (x,y,z) of `grid`. Nothing in creative mode. */
+/** Spawn the drop of `cell` centred on cell (x,y,z) of `grid`. Nothing when the world's drops are off. */
 function spawnCellDrop(host: StructureHost, grid: VoxelGrid, x: number, y: number, z: number, cell: number, tmp: Vec3): void {
-  if (host.creative) return;
+  if (!host.dropsEnabled) return;
   const d = dropOf(cell);
   if (!d || d.count <= 0) return;
   grid.toWorld(vset(tmp, x + 0.5, y + 0.5, z + 0.5), tmp);
@@ -81,10 +91,20 @@ export function isHardDestination(grid: VoxelGrid, x: number, y: number, z: numb
 
 /**
  * Move collected cells (x,y,z triples, as in CollectResult) from `src` into the structure
- * grid `dst`, keeping their coordinates. Every cell is copied first and only then are all of
- * them cleared from `src`: a torch must not see its base leave before it left itself.
+ * grid `dst`, keeping their coordinates, and their glue from `srcGlue` into `dstGlue`. Every
+ * cell is copied first and only then are all of them cleared from `src`: a torch must not see
+ * its base leave before it left itself. A glued face between a moved cell and a glueable block
+ * that stays behind stays in `srcGlue` (DESIGN 强力胶; e.g. the hub of a rotor and its bearing).
  */
-export function transferCells(src: VoxelGrid, dst: StructureGrid, cells: Int32Array, count: number, bounds: CellBounds | null): void {
+export function transferCells(
+  src: VoxelGrid,
+  srcGlue: GlueStore,
+  dst: StructureGrid,
+  dstGlue: GlueStore,
+  cells: Int32Array,
+  count: number,
+  bounds: CellBounds | null,
+): void {
   if (bounds && dst.count === 0) {
     // One allocation instead of repeated growth while copying.
     dst.resize(bounds.minX, bounds.minY, bounds.minZ, bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, bounds.maxZ - bounds.minZ);
@@ -95,13 +115,91 @@ export function transferCells(src: VoxelGrid, dst: StructureGrid, cells: Int32Ar
     const z = cells[i * 3 + 2]!;
     dst.setCell(x, y, z, src.getCell(x, y, z), SET_STRUCTURE_MOVE);
   }
+  if (srcGlue.size > 0) {
+    const inSet = CellSet.fromCells(cells, count);
+    srcGlue.moveTo(dstGlue, (x, y, z) => inSet.has(x, y, z), identityMap(), (x, y, z) => holdsGlue(src.getCell(x, y, z)));
+  }
   for (let i = 0; i < count; i++) src.setCell(cells[i * 3]!, cells[i * 3 + 1]!, cells[i * 3 + 2]!, AIR, MOVE_FLAGS);
+  pruneGlueAround(dst, dstGlue, cells, count);
 }
 
 /** `{x,y,z} -> same {x,y,z}` mapping for GlueStore.moveTo (returns one reused object). */
 export function identityMap(): (x: number, y: number, z: number) => Vec3 {
   const out = vec3();
   return (x, y, z) => vset(out, x, y, z);
+}
+
+/** The glue lifetime rule (pruneGlueAt) on every cell of a list (x,y,z triples) of `grid`. */
+function pruneGlueAround(grid: VoxelGrid, glue: GlueStore, cells: Int32Array, count: number): void {
+  for (let i = 0; i < count && glue.size > 0; i++) {
+    const x = cells[i * 3]!;
+    const y = cells[i * 3 + 1]!;
+    const z = cells[i * 3 + 2]!;
+    pruneGlueAt(grid, glue, x, y, z, grid.getCell(x, y, z));
+  }
+}
+
+/** moveTo's `stays` for a source grid that is going away: no end cell stays behind. */
+function nothingStays(): boolean {
+  return false;
+}
+
+/** One face of a grid: the cell (x,y,z) and the direction towards the other end. */
+export interface GridFace {
+  x: number;
+  y: number;
+  z: number;
+  dir: Dir;
+}
+
+/**
+ * The glue rules on the destination of a blockify or dock, after the structure's cells were
+ * written there (`placed`, x,y,z triples; `written` holds the same cells) and its glue was moved
+ * there. For every glued face of a written cell P, with Q the cell across it:
+ *  - Q written by the move too: the face travelled with both blocks; the lifetime rule applies
+ *    (removed when neither side holdsGlue);
+ *  - Q not written and holdsGlue(Q) (a glueable block, or an unloaded cell that may be one):
+ *    removed, wherever the glue came from — a move never joins a structure block to a block it
+ *    did not bring along (DESIGN 强力胶: 结构体移动不会产生新的胶连接) — unless the face is `keep`;
+ *  - Q not written and not holdsGlue(Q): the lifetime rule (an exposed face on P stays when P
+ *    holds glue).
+ * `keep` is the bearing face of a stopping rotor when the destination store held its glue
+ * before the move (see blockifyGrid), else null.
+ */
+function settlePlacedGlue(
+  grid: VoxelGrid,
+  glue: GlueStore,
+  placed: Int32Array,
+  count: number,
+  written: CellSet,
+  keep: GridFace | null,
+): void {
+  for (let i = 0; i < count && glue.size > 0; i++) {
+    const x = placed[i * 3]!;
+    const y = placed[i * 3 + 1]!;
+    const z = placed[i * 3 + 2]!;
+    const mask = glue.dirMaskAt(x, y, z);
+    if (mask === 0) continue;
+    const holdsP = holdsGlue(grid.getCell(x, y, z));
+    for (let d = 0; d < 6; d++) {
+      if ((mask & (1 << d)) === 0) continue;
+      const qx = x + DIR_X[d]!;
+      const qy = y + DIR_Y[d]!;
+      const qz = z + DIR_Z[d]!;
+      const holdsQ = holdsGlue(grid.getCell(qx, qy, qz));
+      let remove: boolean;
+      if (written.has(qx, qy, qz)) remove = !holdsP && !holdsQ;
+      else if (holdsQ) remove = keep === null || !isFace(keep, x, y, z, d);
+      else remove = !holdsP;
+      if (remove) glue.remove(x, y, z, d as Dir);
+    }
+  }
+}
+
+/** Is the face of cell (x,y,z) towards `d` the face `f` (seen from either end)? */
+function isFace(f: GridFace, x: number, y: number, z: number, d: number): boolean {
+  if (f.x === x && f.y === y && f.z === z) return f.dir === d;
+  return f.dir === (d ^ 1) && f.x === x + DIR_X[d]! && f.y === y + DIR_Y[d]! && f.z === z + DIR_Z[d]!;
 }
 
 // ------------------------------------------------------------ water
@@ -282,13 +380,22 @@ function gridCells(grid: StructureGrid): { xyz: Int32Array; cells: Uint16Array; 
 /**
  * Blockify `src` in place onto `dst` (DESIGN "方块化"): every cell goes to snapCell(t, ...)
  * with its block state rotated by t.r.
- *  - destination HARD: the cell is not placed; it becomes a drop there (nothing in creative);
- *  - destination soft: overwritten; a replaced non-liquid, non-air block drops (not in creative);
+ *  - destination HARD: the cell is not placed; it becomes a drop there (if the world drops);
+ *  - destination soft: overwritten; a replaced non-liquid, non-air block drops (if the world drops);
  *  - `inShip`: `dst` is a ship's grid, and a destination whose centre lies inside a HARD block
  *    of the WORLD is a hard conflict too (DESIGN "船上的转子"), so nothing ends up in rock and
- *    the ship is never pushed out of it.
- * Glue between placed cells moves along (re-keyed by the rotation); glue touching a cell
- * that dropped is gone. `src` and `srcGlue` are read only, apart from the glue that moves.
+ *    the ship is never pushed out of it;
+ *  - `inShip`, box limit (DESIGN 组装与方块化: a structure's tight box holds at most
+ *    STRUCTURE_MAX_BOX_CELLS cells): when the cells that would be placed would spread the ship's
+ *    tight box past the limit, every one of them that lands outside the ship's current tight box
+ *    is a hard conflict too (it drops). The ship's box then stays as it is. Which cells drop does
+ *    not depend on their order, and nothing changes while the limit is not reached.
+ * Every glued face with a placed end moves along (re-keyed by the rotation), then the glue rules
+ * of settlePlacedGlue apply at the destination: no face joins a placed cell to a block that was
+ * not placed with it, apart from `bearingFace` (the face between the rotor's bearing and the
+ * cell in front of it, destination-grid coordinates), which keeps the glue `dstGlue` already
+ * holds on it. Faces with no placed end stay in `srcGlue` (discarded with the structure). `src`
+ * and `srcGlue` are read only, apart from the glue that moves.
  */
 export function blockifyGrid(
   host: StructureHost,
@@ -298,6 +405,7 @@ export function blockifyGrid(
   dstGlue: GlueStore,
   t: SnapTransform,
   inShip: boolean,
+  bearingFace: GridFace | null,
 ): BlockifyOutcome {
   const report = emptyReport();
   const { xyz, cells, n } = gridCells(src);
@@ -306,12 +414,21 @@ export function blockifyGrid(
   const d = vec3();
   const tmp = vec3();
   const world = host.world;
+  // Destinations and hard conflicts first: the box limit below depends on all of them. The
+  // destinations are distinct, so a write never changes whether another destination is hard.
+  const dest = new Int32Array(n * 3);
+  const hardAt = new Uint8Array(n);
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
   for (let i = 0; i < n; i++) {
-    const x = xyz[i * 3]!;
-    const y = xyz[i * 3 + 1]!;
-    const z = xyz[i * 3 + 2]!;
-    const cell = cells[i]!;
-    snapCell(t, x, y, z, d);
+    snapCell(t, xyz[i * 3]!, xyz[i * 3 + 1]!, xyz[i * 3 + 2]!, d);
+    dest[i * 3] = d.x;
+    dest[i * 3 + 1] = d.y;
+    dest[i * 3 + 2] = d.z;
     let hard = isHardDestination(dst, d.x, d.y, d.z);
     if (!hard && inShip) {
       // The cell is written into the ship, so only a HARD world block at its centre matters
@@ -321,6 +438,31 @@ export function blockifyGrid(
       hard = isSolidCell(world.getCell(Math.floor(tmp.x), Math.floor(tmp.y), Math.floor(tmp.z)));
     }
     if (hard) {
+      hardAt[i] = 1;
+      continue;
+    }
+    minX = Math.min(minX, d.x);
+    minY = Math.min(minY, d.y);
+    minZ = Math.min(minZ, d.z);
+    maxX = Math.max(maxX, d.x);
+    maxY = Math.max(maxY, d.y);
+    maxZ = Math.max(maxZ, d.z);
+  }
+  if (inShip && minX <= maxX) {
+    const shipBox = dst.cellBounds();
+    if (boxCellsWith(grownBounds(shipBox, minX, minY, minZ), maxX, maxY, maxZ) > STRUCTURE_MAX_BOX_CELLS) {
+      for (let i = 0; i < n; i++) {
+        if (shipBox === null || !inBounds(shipBox, dest[i * 3]!, dest[i * 3 + 1]!, dest[i * 3 + 2]!)) hardAt[i] = 1;
+      }
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const x = xyz[i * 3]!;
+    const y = xyz[i * 3 + 1]!;
+    const z = xyz[i * 3 + 2]!;
+    const cell = cells[i]!;
+    vset(d, dest[i * 3]!, dest[i * 3 + 1]!, dest[i * 3 + 2]!);
+    if (hardAt[i] === 1) {
       report.dropped++;
       spawnCellDrop(host, dst, d.x, d.y, d.z, cell, tmp);
       continue;
@@ -329,8 +471,6 @@ export function blockifyGrid(
     if (prev !== AIR) {
       report.overwritten++;
       if (!isLiquidCell(prev)) spawnCellDrop(host, dst, d.x, d.y, d.z, prev, tmp);
-      // The replaced block's glue (there should be none on a soft block) vanishes with it.
-      dstGlue.removeAllAt(d.x, d.y, d.z);
     }
     dst.setCell(d.x, d.y, d.z, rotCell(t.r, cell), MOVE_FLAGS);
     const o = report.placed * 3;
@@ -340,35 +480,25 @@ export function blockifyGrid(
     report.placed++;
     placedSrc.add(x, y, z);
   }
+  // Decided before the move: glue arriving with the rotor's cells on that face is not exempt.
+  const keep = bearingFace !== null && dstGlue.has(bearingFace.x, bearingFace.y, bearingFace.z, bearingFace.dir) ? bearingFace : null;
   const map = (x: number, y: number, z: number): Vec3 => snapCell(t, x, y, z, d);
-  srcGlue.moveTo(dstGlue, (x, y, z) => placedSrc.has(x, y, z), map);
+  srcGlue.moveTo(dstGlue, (x, y, z) => placedSrc.has(x, y, z), map, nothingStays);
+  settlePlacedGlue(dst, dstGlue, placed, report.placed, CellSet.fromCells(placed, report.placed), keep);
   return { report, placed: report.placed * 3 === placed.length ? placed : placed.slice(0, report.placed * 3), placedSrc };
 }
 
-/**
- * LESSONS "风车停下后轴心和轴承之间的胶没了": the glue between bearing and hub, removed when
- * the rotor started, comes back when it stops — provided the bearing is still there, the hub
- * cell was placed (not dropped) and landed right in front of it. Returns true when restored.
- */
-export function restoreHubGlue(dst: VoxelGrid, dstGlue: GlueStore, rotor: Rotor, t: SnapTransform, placedSrc: CellSet): boolean {
-  const p = rotor.grid.pivot; // the hub centre
-  const hx = Math.floor(p.x);
-  const hy = Math.floor(p.y);
-  const hz = Math.floor(p.z);
-  if (!placedSrc.has(hx, hy, hz)) return false;
-  const bx = rotor.bearingX;
-  const by = rotor.bearingY;
-  const bz = rotor.bearingZ;
-  const bearing = dst.getCell(bx, by, bz);
-  if (cellFunc(bearing) !== 'bearing') return false;
-  const h = snapCell(t, hx, hy, hz);
-  const dx = h.x - bx;
-  const dy = h.y - by;
-  const dz = h.z - bz;
-  if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) !== 1) return false;
-  if (!canGlue(bearing) || !canGlue(dst.getCell(h.x, h.y, h.z))) return false;
-  dstGlue.add(bx, by, bz, nearestDir(dx, dy, dz));
-  return true;
+/** `b` (null = empty) grown to contain cell (x,y,z). */
+function grownBounds(b: CellBounds | null, x: number, y: number, z: number): CellBounds {
+  if (b === null) return { minX: x, minY: y, minZ: z, maxX: x + 1, maxY: y + 1, maxZ: z + 1 };
+  return {
+    minX: Math.min(b.minX, x),
+    minY: Math.min(b.minY, y),
+    minZ: Math.min(b.minZ, z),
+    maxX: Math.max(b.maxX, x + 1),
+    maxY: Math.max(b.maxY, y + 1),
+    maxZ: Math.max(b.maxZ, z + 1),
+  };
 }
 
 // ------------------------------------------------------------ docking
@@ -414,9 +544,13 @@ export interface DockOutcome {
 /**
  * Write a ship's cells into the world with transform `t` (the caller has checked that no
  * destination is hard; should one have become hard since, that cell drops like a rotor cell
- * would). Overwritten soft non-liquid blocks drop (not in creative); liquids at the
+ * would). Overwritten soft non-liquid blocks drop (if the world drops); liquids at the
  * destinations of the hull's dry cells are removed (DESIGN: 方块化时，清掉密封舱位置里的液体);
- * the ship's glue moves to the world. The ship's own grid and pose are left untouched.
+ * the ship's glue moves to the world like a rotor's on blockify: every face with a placed end,
+ * re-keyed by the rotation, then the glue rules of settlePlacedGlue where it landed (no face
+ * joins a ship cell to a world block the ship did not bring); faces with no placed end stay in
+ * the ship's store. The ship's own grid and pose are left untouched, apart from the
+ * glue that moves.
  */
 export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hull: HullInfo | null): DockOutcome {
   const world = host.world;
@@ -425,10 +559,16 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
   const report = emptyReport();
   const { xyz, cells, n } = gridCells(grid);
   const touched: number[] = [];
+  const placed = new Int32Array(n * 3);
+  const written = new CellSet(n);
+  const placedSrc = new CellSet(n);
   const d = vec3();
   const tmp = vec3();
   for (let i = 0; i < n; i++) {
-    snapCell(t, xyz[i * 3]!, xyz[i * 3 + 1]!, xyz[i * 3 + 2]!, d);
+    const x = xyz[i * 3]!;
+    const y = xyz[i * 3 + 1]!;
+    const z = xyz[i * 3 + 2]!;
+    snapCell(t, x, y, z, d);
     const cell = cells[i]!;
     if (isHardDestination(world, d.x, d.y, d.z)) {
       report.dropped++;
@@ -439,11 +579,15 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
     if (prev !== AIR) {
       report.overwritten++;
       if (!isLiquidCell(prev)) spawnCellDrop(host, world, d.x, d.y, d.z, prev, tmp);
-      worldGlue.removeAllAt(d.x, d.y, d.z);
     }
     world.setCell(d.x, d.y, d.z, rotCell(t.r, cell), MOVE_FLAGS);
+    placed[report.placed * 3] = d.x;
+    placed[report.placed * 3 + 1] = d.y;
+    placed[report.placed * 3 + 2] = d.z;
     report.placed++;
     touched.push(d.x, d.y, d.z);
+    written.add(d.x, d.y, d.z);
+    placedSrc.add(x, y, z);
   }
   if (hull) {
     const { ox, oy, oz, sx, sy, sz } = hull;
@@ -458,12 +602,8 @@ export function commitDock(host: StructureHost, ship: Ship, t: SnapTransform, hu
       }
     }
   }
-  // Every face of a ship's glue joins two ship cells (the hooks keep it so), so all of it moves.
-  ship.glue.moveTo(
-    worldGlue,
-    (x, y, z) => grid.getCell(x, y, z) !== AIR,
-    (x, y, z) => snapCell(t, x, y, z, d),
-  );
+  ship.glue.moveTo(worldGlue, (x, y, z) => placedSrc.has(x, y, z), (x, y, z) => snapCell(t, x, y, z, d), nothingStays);
+  settlePlacedGlue(world, worldGlue, placed, report.placed, written, null);
   return { report, touched: Int32Array.from(touched) };
 }
 

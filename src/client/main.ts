@@ -9,7 +9,7 @@ import { Game } from './game';
 
 declare global {
   interface Window {
-    /** Debug / scripting handle (the e2e smoke test drives the game through it). */
+    /** Debug / scripting handle (the browser scripts drive the game through it: Game.debug). */
     __blocklands?: { game: Game };
   }
 }

@@ -5,12 +5,16 @@
  * Positions: (x, y, z) is the bottom centre of the entity (feet / resting point), yaw in the
  * game's convention (0 looks toward -Z, CCW from above) which equals Object3D.rotation.y.
  *
- * Animation (rabbit hop, player walk) is driven by the entity's OWN motion. The contract
- * carries no velocity, so it is measured from successive positions, and an entity riding a
- * ship or a turntable would otherwise walk / hop in place. EntityLayer.set() only records
- * the states; animate() runs once per rendered frame, after every structure pose of the
- * frame is known, and asks a CarrierQuery for the displacement relative to whatever might be
- * carrying the entity.
+ * Animation (rabbit hop, player walk) is driven by the entity's OWN motion, which the client hands
+ * over (EntityRenderState vx, vy, vz: relative to whatever carries it, measured in the carrier's
+ * frame), smoothed here over frame time: someone standing on a sailing ship stands still, someone
+ * walking its deck walks. EntityLayer.set() only records the states; animate() poses every view
+ * once per rendered frame and sizes the name tags for the camera.
+ *
+ * Players: the box model of models.ts, built as a hierarchy that bends at the hips (sneaking,
+ * sprinting, flying lean), turns and tilts the head (headYaw within HEAD_TURN_LIMIT of the body,
+ * headPitch), swings arms and legs with the walk, holds the main-hand item in the right hand,
+ * grips the wheel at a helm, and carries a name tag (labels.ts).
  */
 import * as THREE from 'three/webgpu';
 import type { EntityKind, EntityRenderState } from '../backend';
@@ -20,6 +24,7 @@ import { buildBox, buildQuad } from './boxgeom';
 import { toBufferGeometry, type GeometryOptions } from './geometry';
 import { VFLAG_EMISSIVE } from '../../mesh/types';
 import type { VoxelMaterials } from './shading';
+import { LABEL_GAP, LabelCache, labelView, NameTag, placeholderLabelMaterial, type LabelView } from './labels';
 import { createModelGeometries, detailGeometry, RABBIT_EYE, RABBIT_NOSE, type ModelGeometries } from './models';
 
 const ITEM_CUBE = 0.28;
@@ -102,29 +107,21 @@ export class EntityAssets {
   }
 }
 
-/**
- * Removes carrier motion from a measured displacement. Given an entity at world (x, y, z)
- * that moved by (dx, dy, dz) since the previous rendered frame, writes into `out` the
- * displacement relative to the structure most plausibly carrying it (the raw displacement
- * when none is).
- */
-export interface CarrierQuery {
-  selfMotion(x: number, y: number, z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void;
-}
-
-/** A CarrierQuery for a world without structures. */
-export const NO_CARRIERS: CarrierQuery = Object.freeze({
-  selfMotion(_x: number, _y: number, _z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void {
-    out.x = dx;
-    out.y = dy;
-    out.z = dz;
-  },
-});
-
 function makeMesh(geo: THREE.BufferGeometry, mat: THREE.Material, light: THREE.Vector4): THREE.Mesh {
   const m = new THREE.Mesh(geo, mat);
   m.userData.bl = light;
   return m;
+}
+
+/** A blank state (the view's copy before its first frame). */
+function blankState(): EntityRenderState {
+  return { id: -1, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, vx: 0, vy: 0, vz: 0, payload: 0, flash: 0, sky: 15, block: 0, headYaw: 0, headPitch: 0, held: 0, posture: 'stand', label: null };
+}
+
+/** Per-frame inputs of every view's update(). */
+interface FrameInfo {
+  time: number;
+  labels: LabelView;
 }
 
 /** Base of every pooled entity view. */
@@ -133,19 +130,14 @@ abstract class EntityView {
   /** Per-object light uniform shared by every mesh of the view (x sky, y block, z flash). */
   readonly light = new THREE.Vector4(1, 0, 0, 0);
   /** The state of this frame (copied: the caller may reuse its objects after setEntities). */
-  readonly cur: EntityRenderState = { id: -1, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 };
+  readonly cur: EntityRenderState = blankState();
   id = -1;
   stamp = 0;
-  // Motion tracking for animation.
-  protected lastX = 0;
-  protected lastY = 0;
-  protected lastZ = 0;
   protected lastT = -1;
-  /** Smoothed velocity relative to the carrier (blocks / s). */
+  /** Own velocity (blocks / s), smoothed over frame time. */
   protected vx = 0;
   protected vy = 0;
   protected vz = 0;
-  private readonly rel = { x: 0, y: 0, z: 0 };
 
   abstract readonly kind: EntityKind;
 
@@ -153,11 +145,11 @@ abstract class EntityView {
   reset(s: EntityRenderState): void {
     this.id = s.id;
     this.capture(s);
-    this.lastX = s.x;
-    this.lastY = s.y;
-    this.lastZ = s.z;
     this.lastT = -1;
-    this.vx = this.vy = this.vz = 0;
+    const h = horizontalScale(s.vx, s.vz);
+    this.vx = s.vx * h;
+    this.vy = s.vy;
+    this.vz = s.vz * h;
     this.root.visible = true;
   }
 
@@ -169,37 +161,41 @@ abstract class EntityView {
     c.y = s.y;
     c.z = s.z;
     c.yaw = s.yaw;
+    c.vx = s.vx;
+    c.vy = s.vy;
+    c.vz = s.vz;
     c.payload = s.payload;
     c.flash = s.flash;
     c.sky = s.sky;
     c.block = s.block;
+    c.headYaw = s.headYaw;
+    c.headPitch = s.headPitch;
+    c.held = s.held;
+    c.posture = s.posture;
+    c.label = s.label;
+  }
+
+  /** The view goes back to the pool (its entity left): let go of what it holds. */
+  release(): void {
+    this.root.visible = false;
   }
 
   /**
-   * Smoothed self-motion velocity from successive positions, carrier motion removed; returns
-   * the frame dt (0 on the first frame).
+   * Smooths the own velocity toward this frame's (its horizontal part no faster than
+   * MAX_OWN_SPEED: a jump of the measured position is not a run); returns the frame dt. A frame
+   * where time did not move forward (the first one, the world paused, a gap or a clock jump) has
+   * dt 0 and changes nothing, so the pose stays as it was.
    */
-  protected track(time: number, carriers: CarrierQuery): number {
+  protected track(time: number): number {
     const s = this.cur;
-    let dt = 0;
-    if (this.lastT >= 0) {
-      dt = time - this.lastT;
-      if (dt > 1e-4 && dt < 0.5) {
-        const r = this.rel;
-        carriers.selfMotion(s.x, s.y, s.z, s.x - this.lastX, s.y - this.lastY, s.z - this.lastZ, r);
-        const k = Math.min(1, dt * 12);
-        this.vx += (r.x / dt - this.vx) * k;
-        this.vy += (r.y / dt - this.vy) * k;
-        this.vz += (r.z / dt - this.vz) * k;
-      } else if (dt >= 0.5) {
-        this.vx = this.vy = this.vz = 0;
-      }
-    }
-    if (dt < 0 || dt > 0.25) dt = 0;
-    this.lastX = s.x;
-    this.lastY = s.y;
-    this.lastZ = s.z;
+    const dt = this.lastT >= 0 ? time - this.lastT : 0;
     this.lastT = time;
+    if (dt <= 0 || dt > 0.25) return 0;
+    const k = Math.min(1, dt * 12);
+    const h = horizontalScale(s.vx, s.vz);
+    this.vx += (s.vx * h - this.vx) * k;
+    this.vy += (s.vy - this.vy) * k;
+    this.vz += (s.vz * h - this.vz) * k;
     return dt;
   }
 
@@ -208,7 +204,19 @@ abstract class EntityView {
   }
 
   /** Poses the view from `cur` for this frame. */
-  abstract update(time: number, carriers: CarrierQuery): void;
+  abstract update(f: FrameInfo): void;
+}
+
+/**
+ * The fastest own horizontal motion anything shows (blocks / s): a player's flying sprint
+ * (entities/constants FLY_SPEED x FLY_SPRINT_MULTIPLIER). Faster measures are scaled down to it.
+ */
+const MAX_OWN_SPEED = 18;
+
+/** Factor (at most 1) that brings a horizontal velocity down to MAX_OWN_SPEED. */
+function horizontalScale(vx: number, vz: number): number {
+  const h2 = vx * vx + vz * vz;
+  return h2 > MAX_OWN_SPEED * MAX_OWN_SPEED ? MAX_OWN_SPEED / Math.sqrt(h2) : 1;
 }
 
 function clamp01(v: number): number {
@@ -227,9 +235,9 @@ class ItemView extends EntityView {
     this.root.add(this.mesh);
   }
 
-  update(time: number, carriers: CarrierQuery): void {
+  update(f: FrameInfo): void {
     const s = this.cur;
-    this.track(time, carriers);
+    const time = f.time;
     this.setLight(s);
     if (s.payload !== this.shown) {
       this.shown = s.payload;
@@ -259,9 +267,8 @@ class CellView extends EntityView {
     this.root.add(this.mesh);
   }
 
-  update(time: number, carriers: CarrierQuery): void {
+  update(): void {
     const s = this.cur;
-    this.track(time, carriers);
     this.setLight(s);
     if (s.payload !== this.shown) {
       this.shown = s.payload;
@@ -287,9 +294,8 @@ class TntView extends EntityView {
     this.root.add(this.mesh);
   }
 
-  update(time: number, carriers: CarrierQuery): void {
+  update(): void {
     const s = this.cur;
-    this.track(time, carriers);
     this.setLight(s);
     // Swells a touch as it flashes, around its centre.
     const k = 1 + clamp01(s.flash) * 0.06;
@@ -349,9 +355,10 @@ class RabbitView extends EntityView {
     this.hopper.add(this.hindL, this.hindR, foreL, foreR);
   }
 
-  update(time: number, carriers: CarrierQuery): void {
+  update(f: FrameInfo): void {
     const s = this.cur;
-    const dt = this.track(time, carriers);
+    const time = f.time;
+    const dt = this.track(time);
     this.setLight(s);
     const speed = Math.hypot(this.vx, this.vz);
     let lift = 0;
@@ -386,48 +393,175 @@ class RabbitView extends EntityView {
   }
 }
 
+/** How far the head turns from the body (radians), and how far it tilts. */
+export const HEAD_TURN_LIMIT = 1.2;
+const HEAD_PITCH_LIMIT = 1.3;
+/** Model joints (blocks over the feet): hips, the neck and shoulders over the hips, the top of the head. */
+const HIP_Y = 0.74;
+const NECK_Y = 0.66;
+const SHOULDER_Y = 0.64;
+const HEAD_TOP = 1.82;
+/** Sneaking lowers the body this much. */
+const SNEAK_DROP = 0.14;
+/** Horizontal speed (blocks / s) at which the walk reaches its full swing, and the swing limits. */
+const FULL_SWING_SPEED = 4.3;
+const SWING = 0.75;
+const SPRINT_SWING = 0.95;
+
+
 class PlayerView extends EntityView {
   readonly kind = 'player' as const;
+  /** Bends at the hips: torso, head and arms. */
+  private readonly upper = new THREE.Group();
+  /** Turns and tilts the head. */
+  private readonly neck = new THREE.Group();
   private readonly armL: THREE.Mesh;
   private readonly armR: THREE.Mesh;
   private readonly legL: THREE.Mesh;
   private readonly legR: THREE.Mesh;
+  /** The main-hand item, in the right hand. */
+  private readonly handItem: THREE.Mesh;
+  private readonly tag: NameTag;
+  private shownHeld = -1;
   private phase = 0;
 
-  constructor(a: EntityAssets) {
+  constructor(
+    private readonly assets: EntityAssets,
+    labels: LabelCache,
+    labelPlaceholder: THREE.SpriteNodeMaterial,
+  ) {
     super();
-    const g = a.models.player;
-    const mat = a.modelMaterial;
+    const g = assets.models.player;
+    const mat = assets.modelMaterial;
     const L = this.light;
+    this.upper.position.set(0, HIP_Y, 0);
+    this.upper.rotation.order = 'YXZ';
     const torso = makeMesh(g.torso, mat, L);
-    torso.position.set(0, 0.74, 0);
-    const head = makeMesh(g.head, mat, L);
-    head.position.set(0, 1.4, 0);
+    this.neck.position.set(0, NECK_Y, 0);
+    this.neck.rotation.order = 'YXZ';
+    this.neck.add(makeMesh(g.head, mat, L));
     this.armL = makeMesh(g.arm, mat, L);
-    this.armL.position.set(-0.325, 1.38, 0);
+    this.armL.position.set(-0.325, SHOULDER_Y, 0);
     this.armR = makeMesh(g.arm, mat, L);
-    this.armR.position.set(0.325, 1.38, 0);
+    this.armR.position.set(0.325, SHOULDER_Y, 0);
+    this.handItem = makeMesh(assets.tnt(), assets.materials.opaque, L);
+    this.handItem.visible = false;
+    this.armR.add(this.handItem);
+    this.upper.add(torso, this.neck, this.armL, this.armR);
     this.legL = makeMesh(g.leg, mat, L);
-    this.legL.position.set(-0.11, 0.74, 0);
+    this.legL.position.set(-0.11, HIP_Y, 0);
     this.legR = makeMesh(g.leg, mat, L);
-    this.legR.position.set(0.11, 0.74, 0);
-    this.root.add(torso, head, this.armL, this.armR, this.legL, this.legR);
+    this.legR.position.set(0.11, HIP_Y, 0);
+    this.tag = new NameTag(labels, labelPlaceholder);
+    this.root.add(this.upper, this.legL, this.legR, this.tag.sprite);
   }
 
-  update(time: number, carriers: CarrierQuery): void {
+  /** The name tag's text (null = none), for tests. */
+  get labelText(): string | null {
+    return this.tag.text;
+  }
+
+  /** Takes the tag's text at once (before the layer sweeps the views that left: a text passed on is not re-made). */
+  override capture(s: EntityRenderState): void {
+    super.capture(s);
+    this.tag.setText(s.label);
+  }
+
+  override release(): void {
+    super.release();
+    this.tag.release();
+  }
+
+  /** Puts the held item's visual in the right hand (a block as a small cube, a flat item as its icon). */
+  private setHeld(item: number): void {
+    if (item === this.shownHeld) return;
+    this.shownHeld = item;
+    const v = item > 0 ? this.assets.item(item) : null;
+    const m = this.handItem;
+    m.visible = v !== null;
+    if (v === null) return;
+    m.geometry = v.geo;
+    m.material = v.mat;
+    const icon = v.geo.boundingBox !== null && v.geo.boundingBox.max.z - v.geo.boundingBox.min.z < 0.05;
+    if (icon) {
+      // A flat item: held by its lower end, its face turned half way between the front and the
+      // side, so it reads from both.
+      m.position.set(0.02, -0.62, -0.14);
+      m.rotation.set(0, Math.PI / 4, 0);
+      m.scale.setScalar(0.8);
+    } else {
+      m.position.set(0, -0.62, -0.06);
+      m.rotation.set(0, Math.PI / 4, 0);
+      m.scale.setScalar(0.85);
+    }
+  }
+
+  update(f: FrameInfo): void {
     const s = this.cur;
-    const dt = this.track(time, carriers);
+    const time = f.time;
+    const dt = this.track(time);
     this.setLight(s);
-    const speed = Math.hypot(this.vx, this.vz);
-    const amp = Math.min(1, speed / 4.3) * 0.75;
-    this.phase += dt * (2 + speed * 1.9);
+    const posture = s.posture;
+    // At a helm both hands are on the wheel: nothing in the hand.
+    this.setHeld(posture === 'helm' ? 0 : s.held);
+    const speed = posture === 'helm' ? 0 : Math.sqrt(this.vx * this.vx + this.vz * this.vz);
+    // Walk: legs and arms swing with the own horizontal motion; not while flying or steering.
+    const walking = posture !== 'fly' && posture !== 'helm';
+    const maxSwing = posture === 'sprint' ? SPRINT_SWING : SWING;
+    let amp = walking ? Math.min(1, speed / FULL_SWING_SPEED) * maxSwing : 0;
+    if (posture === 'sneak') amp *= 0.6;
+    if (amp > 1e-3) this.phase += dt * (2 + speed * 1.9);
+    else this.phase = 0;
     const sw = Math.sin(this.phase) * amp;
-    this.legL.rotation.x = sw;
-    this.legR.rotation.x = -sw;
-    this.armL.rotation.x = -sw * 0.8;
-    this.armR.rotation.x = sw * 0.8;
-    this.root.position.set(s.x, s.y, s.z);
+    let lean = 0;
+    let drop = 0;
+    let armBase = 0;
+    let armSpread = 0;
+    let legBase = 0;
+    let legSway = 0;
+    let bob = 0;
+    switch (posture) {
+      case 'sneak':
+        lean = -0.42;
+        drop = SNEAK_DROP;
+        armBase = 0.3;
+        break;
+      case 'sprint':
+        lean = -0.22 * Math.min(1, speed / FULL_SWING_SPEED);
+        break;
+      case 'fly': {
+        const fwd = Math.min(1, speed / 6);
+        lean = -0.35 * fwd;
+        legBase = -0.2 - 0.3 * fwd;
+        legSway = Math.sin(time * 2.1 + s.id) * 0.08;
+        armSpread = 0.22;
+        bob = (1 - fwd) * Math.sin(time * 2 + s.id * 0.7) * 0.05;
+        break;
+      }
+      case 'helm':
+        armBase = 1.2;
+        armSpread = -0.18;
+        break;
+      case 'stand':
+        break;
+    }
+    const idle = Math.sin(time * 1.3 + s.id) * 0.03;
+    this.upper.rotation.set(lean, 0, 0);
+    this.upper.position.set(0, HIP_Y, 0);
+    // The head: within HEAD_TURN_LIMIT of the body, its pitch measured from the horizon.
+    let turn = s.headYaw - s.yaw;
+    turn -= 2 * Math.PI * Math.round(turn / (2 * Math.PI));
+    turn = turn < -HEAD_TURN_LIMIT ? -HEAD_TURN_LIMIT : turn > HEAD_TURN_LIMIT ? HEAD_TURN_LIMIT : turn;
+    const pitch = s.headPitch < -HEAD_PITCH_LIMIT ? -HEAD_PITCH_LIMIT : s.headPitch > HEAD_PITCH_LIMIT ? HEAD_PITCH_LIMIT : s.headPitch;
+    this.neck.rotation.set(pitch - lean, turn, 0);
+    const holding = this.shownHeld > 0;
+    this.armL.rotation.set(armBase - sw * 0.8, 0, -armSpread - idle);
+    this.armR.rotation.set(armBase + sw * 0.8 + (holding ? 0.35 - sw * 0.4 : 0), 0, armSpread + idle);
+    this.legL.rotation.set(legBase + sw + legSway, 0, 0);
+    this.legR.rotation.set(legBase - sw - legSway, 0, 0);
+    this.root.position.set(s.x, s.y - drop + bob, s.z);
     this.root.rotation.set(0, s.yaw, 0);
+    this.tag.place(s.x, s.y - drop + bob, s.z, HEAD_TOP + LABEL_GAP - (posture === 'sneak' ? 0.12 : 0), f.labels);
   }
 }
 
@@ -437,15 +571,19 @@ export class EntityLayer {
   private readonly live = new Map<number, EntityView>();
   private readonly free: Record<EntityKind, EntityView[]> = { player: [], item: [], falling: [], tnt: [], rabbit: [] };
   private stamp = 0;
+  /** Rasterised name tags (counted; see labels.ts). */
+  readonly labels = new LabelCache();
+  private readonly labelPlaceholder = placeholderLabelMaterial();
+  /** The warm-up player's tag (warmupViews): its own cache, never released before dispose(). */
+  private readonly warmupLabels = new LabelCache();
   /** animate() arguments, held for the allocation-free forEach callback. */
-  private time = 0;
-  private carriers: CarrierQuery = NO_CARRIERS;
+  private readonly frame: FrameInfo = { time: 0, labels: labelView() };
   private readonly animateOne = (v: EntityView): void => {
-    v.update(this.time, this.carriers);
+    v.update(this.frame);
   };
   private readonly sweep = (v: EntityView, id: number): void => {
     if (v.stamp !== this.stamp) {
-      v.root.visible = false;
+      v.release();
       this.live.delete(id);
       this.free[v.kind].push(v);
     }
@@ -473,7 +611,7 @@ export class EntityLayer {
       case 'rabbit':
         return new RabbitView(this.assets);
       case 'player':
-        return new PlayerView(this.assets);
+        return new PlayerView(this.assets, this.labels, this.labelPlaceholder);
     }
   }
 
@@ -484,7 +622,7 @@ export class EntityLayer {
       const s = list[i]!;
       let v = this.live.get(s.id);
       if (v && v.kind !== s.kind) {
-        v.root.visible = false;
+        v.release();
         this.free[v.kind].push(v);
         v = undefined;
       }
@@ -501,32 +639,56 @@ export class EntityLayer {
     this.live.forEach(this.sweep);
   }
 
-  /** Poses every live view for a frame at `time` (seconds); call once per rendered frame. */
-  animate(time: number, carriers: CarrierQuery): void {
-    this.time = time;
-    this.carriers = carriers;
+  /**
+   * Poses every live view for a frame at `time` (seconds) and sizes the name tags for the camera
+   * described by `labels` (copied; its fog object is only read during the call); call once per
+   * rendered frame.
+   */
+  animate(time: number, labels: LabelView): void {
+    const f = this.frame;
+    f.time = time;
+    const l = f.labels;
+    l.x = labels.x;
+    l.y = labels.y;
+    l.z = labels.z;
+    l.fov = labels.fov;
+    l.viewportPx = labels.viewportPx;
+    l.fog = labels.fog;
     this.live.forEach(this.animateOne);
-    this.carriers = NO_CARRIERS;
   }
 
-  /** Builds one view of every kind (for pipeline warm-up). */
+  /** The live view of entity `id` (tests). */
+  viewOf(id: number): { kind: EntityKind; root: THREE.Object3D; labelText: string | null } | null {
+    const v = this.live.get(id);
+    if (v === undefined) return null;
+    return { kind: v.kind, root: v.root, labelText: v instanceof PlayerView ? v.labelText : null };
+  }
+
+  /** Builds one view of every kind (for pipeline warm-up); the player holds an item and has a tag. */
   warmupViews(): THREE.Object3D[] {
     const kinds: EntityKind[] = ['item', 'falling', 'tnt', 'rabbit', 'player'];
     const out: THREE.Object3D[] = [];
-    const dummy: EntityRenderState = { id: -1, kind: 'item', x: 0, y: 0, z: 0, yaw: 0, payload: B.STONE, flash: 0, sky: 15, block: 0 };
+    const dummy = blankState();
+    const f: FrameInfo = { time: 0, labels: labelView() };
     for (const k of kinds) {
-      const v = this.create(k);
+      const v = k === 'player' ? new PlayerView(this.assets, this.warmupLabels, this.labelPlaceholder) : this.create(k);
       dummy.kind = k;
       dummy.payload = k === 'falling' ? B.SAND : B.STONE;
+      dummy.held = k === 'player' ? B.STONE : 0;
+      dummy.label = k === 'player' ? '·' : null;
       v.reset(dummy);
-      v.update(0, NO_CARRIERS);
+      v.update(f);
       out.push(v.root);
     }
     return out;
   }
 
   dispose(): void {
+    this.live.forEach((v) => v.release());
     this.live.clear();
     this.group.clear();
+    this.labels.dispose();
+    this.warmupLabels.dispose();
+    this.labelPlaceholder.dispose();
   }
 }

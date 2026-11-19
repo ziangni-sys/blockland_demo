@@ -29,11 +29,11 @@ export function dropCountOf(cell: number): number {
 
 /**
  * Spawn what `cell` drops at the centre of local cell (x,y,z) of `grid`, in world space.
- * Creative mode never drops anything (the same rule the structures module applies to
- * blockify). `tmp` is caller-owned scratch. Returns true when an item entity was spawned.
+ * Unconditional: the caller decides whether this drop happens at all (sim/rules.ts — the mining
+ * player's mode, or the world's dropsEnabled). `tmp` is caller-owned scratch. Returns true when
+ * an item entity was spawned.
  */
 export function spawnBlockDrop(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: number, cell: number, tmp: Vec3 = vec3()): boolean {
-  if (sim.creative) return false;
   const item = dropItemOf(cell);
   const count = dropCountOf(cell);
   if (item < 0 || count <= 0) return false;

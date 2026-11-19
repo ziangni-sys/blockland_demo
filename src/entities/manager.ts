@@ -1,7 +1,10 @@
 /**
- * EntityManager: owns every entity and moves them through the world and on / around
- * structures — collision, being carried, being pushed, being crushed — plus health, item
- * pickup, falling blocks, blast crates and rabbit AI.
+ * EntityManager: the server's entity rules. It owns every entity (registry, spawning, saving)
+ * and decides what happens to them: damage and death, vitals (air, drowning, lava), fall
+ * damage, suffocation, squeezes, item pickup and merging, creature AI, falling blocks, blast
+ * crates and their fuses, the helm seat, and the events. HOW a body moves — carrying, own
+ * motion, collision, push-out, relocation, attaching — is the BodyMover's business (body.ts);
+ * the manager runs one and acts on the facts each step reports.
  *
  * TICK CONTRACT. The simulation calls, every tick and in this order:
  *     [structures move]  ->  syncCarried()  ->  update()
@@ -17,12 +20,19 @@
  * host.explode(), ...) stay in all() with removed = true until the iteration ends; iterate a
  * copy of all() if you add or remove entities while walking it outside the manager.
  *
- * Per entity, update() runs (docs/LESSONS.md 携带与实体: the ORDER matters):
- *   a. controller: input / AI / nothing -> own velocity relative to the carrier
- *   b. world collision: exact axis sweeps of the own displacement (never into world blocks)
- *   c. structure collision: SAT push-out, axis by axis, sub-stepped against tunnelling
- *   d. crush: a structure still overlaps the body -> damage + nearest free spot
- *   e. attach / detach: carried only while a carrier cell is under the feet
+ * Per entity, update() runs the body step (body.ts: controller, world collision, structure
+ * push-out, squeeze, attach / detach), then the rules on its facts: a squeeze hurts (players by
+ * their own mode) or flattens (rabbits, when the world harms creatures), a body stuck in world
+ * blocks suffocates, a landing after a long fall hurts, a seated player pushed off its seat lets
+ * go of the wheel.
+ *
+ * CLIENT-DRIVEN PLAYERS (drive.ts). A player whose client moves it is not carried or stepped by
+ * the server (unless it sits at a helm: the seat is the server's; or it hangs in the air with
+ * nothing holding it up and no valid reports: fallOnServer). Its move reports are checked
+ * and applied in update(), in its place in the entity order; the server keeps the rules: vitals
+ * from the fluids where the report puts it, falls on the reported track, squeezes judged with
+ * hysteresis (judgeSqueeze), suffocation. Whenever the server moves such a player on its own
+ * authority it raises a correction (raise()); corrections raised in a tick are settled at its end.
  *
  * Determinism: no Math.random / Date; randomness comes from host.rng only. All state is on
  * the instance (no module-level mutable state).
@@ -34,33 +44,32 @@ import { ID_MASK } from '../blocks/cell';
 import { isItem } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID } from '../blocks/registry';
 import type { ByteReader, ByteWriter } from '../save/bytes';
+import { snapPoint, type SnapTransform } from '../structures/assembly';
 import type { Ship, Structure } from '../structures/structure';
-import type { VoxelGrid } from '../voxel/grid';
-import { boxOverlapsSolid, columnHasSolidBelow, hasSupportBelow, nearestFreeOffset, sweepAxis } from '../voxel/shape';
+import { boxOverlapsSolid, hasSupportBelow } from '../voxel/shape';
 import {
-  BURIED_RISE_LIMIT,
-  COLUMN_DEPTH,
   CRUSH_DAMAGE,
   CRUSH_SEARCH_RADIUS,
   DROWN_DAMAGE,
   DROWN_INTERVAL_TICKS,
   FALL_SAFE_HEIGHT,
   FALLING_MAX_TICKS,
-  FLY_TOGGLE_TICKS,
+  FLY_SPEED,
+  FLY_SPRINT_MULTIPLIER,
   GRAVITY,
   HURT_TICKS,
   ITEM_BUOYANCY,
   ITEM_DESPAWN_TICKS,
   ITEM_GRAVITY,
   ITEM_HEIGHT,
+  JUMP_SPEED,
   LAND_EVENT_HEIGHT,
   LAVA_DAMAGE,
   LAVA_INTERVAL_TICKS,
-  MAX_INHERITED_SPEED,
   MERGE_INTERVAL_TICKS,
   MERGE_REACH,
-  NO_ATTACH_TICKS,
   PICKUP_REACH_H,
+  PREFER_MIN_SPEED,
   PICKUP_REACH_V,
   PLAYER_MAX_HEALTH,
   AIR_REFILL_PER_TICK,
@@ -71,49 +80,59 @@ import {
   RABBIT_SWIM_SPEED,
   REGEN_DELAY_TICKS,
   REGEN_INTERVAL_TICKS,
+  REPORT_CREDIT_TICKS,
+  REPORT_DEBT_TICKS,
+  REPORT_QUEUE_LIMIT,
+  REPORT_SLACK_BURST,
+  REPORT_SLACK_RATE,
+  REPORT_STALL_TICKS,
   SPLASH_SPEED,
-  STEP_HEIGHT,
+  SPRINT_SPEED,
+  SQUEEZE_DEPTH,
+  SQUEEZE_TICKS,
   SUPPORT_GAP,
   SWIM_UP_ACCEL,
   SWIMMING_WET,
   TNT_DEFAULT_FUSE,
   TNT_HOP_SPEED,
   TNT_POWER,
-  UNSTUCK_MAX_BACKOFF_TICKS,
   UNSTUCK_SEARCH_RADIUS,
   VOID_Y,
   WATER_DRAG,
   WATER_SINK_ACCEL,
 } from './constants';
+import { BodyMover, sanitizeInput, takeJumpPresses, trackFall } from './body';
+import { ClientDrive, ReportJudge, copyReport, emptyReport, hardDepth, reportLag, type Correction, type DriveMode, type MoveReport } from './drive';
 import { Entity, FallingBlockEntity, ItemEntity, Player, Rabbit, TntEntity, type EntityKind, type GameMode } from './entity';
-import { FluidSampler } from './fluids';
 import type { EntityHost } from './host';
-import { axisValue, finiteAngle } from './input';
+import { axisValue } from './input';
 import { maxStackOf } from './inventory';
-import { passiveMotion, playerMotion } from './motion';
-import { Mover, attachInset, boxAt } from './physics';
-import { StructureCache, boxNearRec, carryPoint, curToWorld, pointVelocity, type StructRec } from './structs';
+import { attachInset, boxAt } from './physics';
+import { headingOf, pointVelocity, type StructRec } from './structs';
 
 const DT = TICK_DT;
-const SAVE_VERSION = 1;
+/** Layout of the entity blob. Version 2: players are no longer part of it. */
+const SAVE_VERSION = 2;
 const KIND_TAG: Readonly<Record<EntityKind, number>> = Object.freeze({ player: 1, item: 2, falling: 3, tnt: 4, rabbit: 5 });
-/** Margin around a body when collecting the structures it may touch this tick. */
-const NEAR_MARGIN = 0.5;
-/** A carrier that moves a rider farther than this in one tick was re-gridded / teleported: let go. */
-const MAX_CARRY_STEP = 4;
 /** spawnItem() splits a count above the item's stack size into at most this many drops. */
 const MAX_SPAWN_STACKS = 64;
+/** judgeSqueeze() results. */
+const SQUEEZE_CLEAR = 0;
+const SQUEEZE_HELD = 1;
+const SQUEEZE_DONE = 2;
 
 export class EntityManager {
   private readonly host: EntityHost;
   private readonly list: Entity[] = [];
   private readonly byId = new Map<number, Entity>();
   private nextId = 1;
-  private localPlayer: Player | null = null;
 
-  private readonly cache = new StructureCache();
-  private readonly mover: Mover;
-  private readonly fluids: FluidSampler;
+  /** Moves the bodies (body.ts); the manager acts on what it reports. */
+  private readonly body: BodyMover;
+  /** Checks the move reports of client-driven players (drive.ts). */
+  private readonly judge: ReportJudge;
+  /** Client-driven players with a correction raised in the current tick (settled at its end). */
+  private readonly unsettled: Player[] = [];
   /** Ticks completed by update() (staggers the item merge scan). */
   private tickCount = 0;
   private snapshotDone = false;
@@ -125,26 +144,22 @@ export class EntityManager {
   private readonly pendingBlasts: TntEntity[] = [];
 
   // ---- scratch (instance-owned, never shared across modules)
-  /** Own velocity relative to the carrier of the entity being updated. */
-  private readonly rel: Vec3 = vec3();
-  private readonly disp: Vec3 = vec3();
-  private readonly wish: Vec3 = vec3();
+  /** A creature's chosen velocity relative to its carrier. */
+  private readonly aiRel: Vec3 = vec3();
   private readonly t1: Vec3 = vec3();
   private readonly t2: Vec3 = vec3();
   private readonly box1: AABB = aabb();
   private readonly box2: AABB = aabb();
-  private readonly box3: AABB = aabb();
-  private readonly grids: VoxelGrid[] = [];
-  /** Structures a free-spot search can reach (wider than mover.near). */
-  private readonly relocNear: StructRec[] = [];
   private readonly items: ItemEntity[] = [];
-  /** Vertical distance the last moveBody() teleported the body (crush / unstuck): not a fall. */
-  private relocatedDy = 0;
+  /** pickups(): the live players, and those in reach of one drop. */
+  private readonly pickers: Player[] = [];
+  private readonly takers: Player[] = [];
+  private readonly overlapNear: StructRec[] = [];
 
   constructor(host: EntityHost) {
     this.host = host;
-    this.mover = new Mover(host.world);
-    this.fluids = new FluidSampler(host.world);
+    this.body = new BodyMover(host);
+    this.judge = new ReportJudge(this.body, host.world);
   }
 
   // ================================================================== registry
@@ -156,33 +171,43 @@ export class EntityManager {
   get(id: number): Entity | undefined {
     return this.byId.get(id);
   }
-  /** The (single) local player. */
-  get player(): Player | null {
-    return this.localPlayer;
-  }
   /** A fresh entity id (for entities built outside the spawn helpers). */
   allocateId(): number {
     return this.nextId++;
   }
 
+  /**
+   * Add an entity. The list stays in ascending id order (the update order): a new entity has the
+   * largest id and goes last; an entity that comes back with an older id (a player rejoining
+   * under its kept id, sim/players.ts) takes its old place — only outside an iteration, which an
+   * insertion would disturb (it then goes last).
+   */
   add<T extends Entity>(e: T): T {
     if (this.byId.has(e.id)) throw new Error(`duplicate entity id ${e.id}`);
     e.removed = false;
     e.snapshot();
-    this.list.push(e);
+    const list = this.list;
+    if (list.length > 0 && list[list.length - 1]!.id > e.id && this.iterDepth === 0) {
+      let lo = 0;
+      let hi = list.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (list[mid]!.id < e.id) lo = mid + 1;
+        else hi = mid;
+      }
+      list.splice(lo, 0, e);
+    } else {
+      list.push(e);
+    }
     this.byId.set(e.id, e);
     if (e.id >= this.nextId) this.nextId = e.id + 1;
-    if (e instanceof Player && this.localPlayer === null) this.localPlayer = e;
     return e;
   }
 
   remove(e: Entity): void {
     if (e.removed) return;
     e.removed = true;
-    if (e instanceof Player) {
-      this.releaseHelm(e, 'removed');
-      if (this.localPlayer === e) this.localPlayer = null;
-    }
+    if (e instanceof Player) this.releaseHelm(e, 'removed');
     if (this.byId.get(e.id) === e) this.byId.delete(e.id);
     if (this.iterDepth > 0) {
       // Someone is walking the list (this manager, or a callback it invoked): splicing now
@@ -198,11 +223,11 @@ export class EntityManager {
     this.list.length = 0;
     this.byId.clear();
     this.nextId = 1;
-    this.localPlayer = null;
     this.pendingBlasts.length = 0;
+    this.unsettled.length = 0;
     this.snapshotDone = false;
     this.carriedThisTick = false;
-    this.cache.reset();
+    this.body.reset();
   }
 
   private beginIteration(): void {
@@ -223,17 +248,17 @@ export class EntityManager {
 
   // ================================================================== spawning
 
-  /** A new local player with feet at (x, y, z); that is also its spawn point. Replaces an existing local player. */
-  createPlayer(mode: GameMode, x: number, y: number, z: number): Player {
-    if (this.localPlayer !== null) this.remove(this.localPlayer);
+  /**
+   * A new player with feet at (x, y, z); that is also its spawn point. Any number of players may
+   * exist; which client drives which one is the simulation's business (sim/players.ts).
+   */
+  spawnPlayer(mode: GameMode, x: number, y: number, z: number): Player {
     const p = new Player(this.allocateId(), mode);
     p.setPosition(x, y, z);
     p.spawn.x = x;
     p.spawn.y = y;
     p.spawn.z = z;
-    this.add(p);
-    this.localPlayer = p;
-    return p;
+    return this.add(p);
   }
 
   /**
@@ -349,7 +374,8 @@ export class EntityManager {
     this.beginTick();
     // Always re-read the poses: only the motion since the previous carry is carried (see the
     // tick contract), so a repeated call is harmless and a stale cache is never used.
-    this.cache.rebuild(this.host.structures());
+    const body = this.body;
+    body.beginCarry();
     this.carriedThisTick = true;
     const world = this.host.world;
     const list = this.list;
@@ -360,11 +386,17 @@ export class EntityManager {
         e.carryBlocked = false;
         if (e.removed || !world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
         if (e instanceof Player && e.steeringShipId !== 0) this.syncSeat(e);
-        else if (e.carrierId !== 0) this.syncRider(e);
+        else if (e.carrierId !== 0) this.carry(e);
       }
     } finally {
       this.endIteration();
     }
+  }
+
+  /** A rider follows its carrier — unless its client moves it (it rides its reference, update()). */
+  private carry(e: Entity): void {
+    if (e instanceof Player && e.remote !== null) return;
+    this.body.carryRider(e);
   }
 
   /** Tick steps 5–6: own motion, collision, push, crush, attach / detach, pickups, fuses, AI. */
@@ -391,7 +423,8 @@ export class EntityManager {
       blasts.length = 0;
       this.endIteration();
     }
-    this.cache.commit();
+    this.settleCorrections();
+    this.body.endTick();
     this.tickCount++;
     this.snapshotDone = false;
     this.carriedThisTick = false;
@@ -402,50 +435,31 @@ export class EntityManager {
   /**
    * Everything carried by `structure` (or by a structure mounted on it) lets go, and its
    * helmsman releases the wheel. Call before a structure blockifies / docks / dies / is re-gridded.
+   * With `snap` (a blockify or a dock: `structure`'s local cells -> its parent grid's), the riders
+   * follow the snap (NETCODE section 9 item 7): each one's new place is the snapped pose applied
+   * to where it was in `structure`, so it stays on the very cell it stood on (a dock turns a ship
+   * by up to 45 degrees and shifts it by half a block). Client-driven riders get a 'release'
+   * correction.
    */
-  releaseRiders(structure: Structure): void {
-    const ids = new Set<number>();
-    const collect = (s: Structure): void => {
-      ids.add(s.id);
-      for (const c of s.children) collect(c);
-    };
-    collect(structure);
-    // The blocks of a structure mounted on a surviving one (a turntable on a ship whose bearing
-    // was mined) end up in, or above, that parent and keep moving with it: its riders are handed
-    // to the parent with the parent's velocity under their feet. Stripping the whole carrier
-    // velocity there made them skid ~0.5 block across a sailing deck (review finding; the
-    // LESSONS 停靠时站在转盘上的人被瞬移 class). Only what becomes WORLD blocks stops dead.
-    let heir: Structure | null = structure.parent;
-    while (heir !== null && (heir.removed || ids.has(heir.id))) heir = heir.parent;
-    // Last tick's motion of the heir (the cache is not rebuilt mid-tick): its current velocity.
-    const heirRec = heir !== null ? this.cache.get(heir.id) : undefined;
-    // Its frame is about to jump (blockify / dock / re-grid): never carry anything across that.
-    for (const id of ids) this.cache.forget(id);
+  releaseRiders(structure: Structure, snap: SnapTransform | null): void {
+    const body = this.body;
+    body.beginRelease(structure);
     const list = this.list;
+    const t = this.t1;
     this.beginIteration();
     try {
       for (let i = 0; i < list.length; i++) {
         const e = list[i]!;
         if (e.removed) continue;
-        if (e instanceof Player && e.steeringShipId !== 0 && ids.has(e.steeringShipId)) this.releaseHelm(e, 'released');
-        if (e.carrierId === 0 || !ids.has(e.carrierId)) continue;
-        // Keep the own motion (relative to the old carrier).
-        e.vel.x -= e.carrierVel.x;
-        e.vel.y -= e.carrierVel.y;
-        e.vel.z -= e.carrierVel.z;
-        if (heir !== null) {
-          if (heirRec !== undefined) pointVelocity(heirRec, e.pos, e.carrierVel);
-          // (without a record of the heir the old carrier velocity is the best estimate)
-          e.carrierId = heir.id;
-        } else {
-          e.carrierVel.x = 0;
-          e.carrierVel.y = 0;
-          e.carrierVel.z = 0;
-          e.carrierId = 0;
+        if (e instanceof Player && e.steeringShipId !== 0 && body.isReleasing(e.steeringShipId)) this.releaseHelm(e, 'released');
+        if (!body.handOff(e)) continue;
+        if (snap !== null) {
+          structure.grid.toLocal(e.pos, t);
+          snapPoint(snap, t, t);
+          structure.grid.parent.toWorld(t, t);
+          e.setPosition(t.x, t.y, t.z);
         }
-        e.vel.x += e.carrierVel.x;
-        e.vel.y += e.carrierVel.y;
-        e.vel.z += e.carrierVel.z;
+        if (e instanceof Player) this.raise(e, 'release');
       }
     } finally {
       this.endIteration();
@@ -484,25 +498,59 @@ export class EntityManager {
     ship.helmY = helmY;
     ship.helmZ = helmZ;
     // Sit down now; the seat follows the ship from the next syncCarried() on.
-    const w = g.toWorld(player.seat, this.t1);
-    player.pos.x = w.x;
-    player.pos.y = w.y;
-    player.pos.z = w.z;
-    // The ship's velocity over its latest tick (the cache holds the last poses it read).
-    const r = this.cache.get(ship.id);
-    if (r !== undefined) pointVelocity(r, player.pos, player.carrierVel);
-    else player.carrierVel.x = player.carrierVel.y = player.carrierVel.z = 0;
-    player.vel.x = player.carrierVel.x;
-    player.vel.y = player.carrierVel.y;
-    player.vel.z = player.carrierVel.z;
-    player.carrierId = ship.id;
-    player.fallDistance = 0;
+    this.body.sit(player, ship);
+    this.raise(player, 'seat');
     return true;
   }
 
-  /** Let go of the wheel (clears both sides, zeroes throttle and rudder). The player stays aboard as a rider. */
-  stopSteering(player: Player): void {
-    this.releaseHelm(player, 'stopped');
+  /** Let go of the wheel (clears both sides, zeroes throttle and rudder; `cause` goes to the event and the correction). The player stays aboard as a rider. */
+  stopSteering(player: Player, cause = 'stopped'): void {
+    this.releaseHelm(player, cause);
+  }
+
+  /** The helmsman follows its seat, as long as it may sit there (tick step 4). */
+  private syncSeat(p: Player): void {
+    const s = this.host.structure(p.steeringShipId);
+    if (s === undefined || s.removed || s.kind !== 'ship') {
+      this.releaseHelm(p, 'missing');
+      if (p.carrierId !== 0) this.carry(p);
+      return;
+    }
+    const ship = s as Ship;
+    if (ship.helmsmanId !== p.id) {
+      if (ship.helmsmanId === 0) ship.helmsmanId = p.id; // re-claim after loading a save
+      else {
+        this.releaseHelm(p, 'taken');
+        if (p.carrierId !== 0) this.carry(p);
+        return;
+      }
+    }
+    const seat = this.body.followSeat(p);
+    if (seat === 'lost') {
+      this.releaseHelm(p, 'missing');
+    } else if (seat === 'blocked') {
+      // LESSONS 舵手穿过方块: a seat inside a world block releases the wheel; the rider then
+      // follows the deck with world sweeps like anyone else and the push logic takes over.
+      this.releaseHelm(p, 'blocked');
+      this.carry(p);
+    }
+  }
+
+  private releaseHelm(p: Player, cause: string): void {
+    const id = p.steeringShipId;
+    if (id === 0) return;
+    p.steeringShipId = 0;
+    const s = this.host.structure(id);
+    if (s !== undefined && s.kind === 'ship') {
+      const ship = s as Ship;
+      if (ship.helmsmanId === p.id) {
+        ship.helmsmanId = 0;
+        ship.throttle = 0;
+        ship.rudder = 0;
+      }
+    }
+    this.raise(p, `unseat:${cause}`);
+    this.host.emit({ type: 'helmReleased', entity: p, cause });
   }
 
   // ================================================================== health
@@ -541,6 +589,7 @@ export class EntityManager {
       e.flying = false;
       e.sprinting = false;
       e.fallDistance = 0;
+      this.raise(e, 'death');
       this.host.emit({ type: 'death', entity: e, cause });
       return;
     }
@@ -568,15 +617,572 @@ export class EntityManager {
     player.onGround = false;
     player.flying = false;
     player.setPosition(player.spawn.x, player.spawn.y, player.spawn.z);
+    this.raise(player, 'respawn');
+  }
+
+  // ================================================================== commands that move a player
+
+  /** Move a player's feet to a world point: lets go of any helm or carrier, no velocity, no fall. */
+  teleport(p: Player, x: number, y: number, z: number): void {
+    this.releaseHelm(p, 'stopped');
+    p.carrierId = 0;
+    p.carrierVel.x = p.carrierVel.y = p.carrierVel.z = 0;
+    p.vel.x = p.vel.y = p.vel.z = 0;
+    p.fallDistance = 0;
+    p.setPosition(x, y, z);
+    this.raise(p, 'teleport');
+  }
+
+  /** A blast's knock-back: adds to the body's velocity. */
+  knock(e: Entity, dvx: number, dvy: number, dvz: number): void {
+    e.vel.x += dvx;
+    e.vel.y += dvy;
+    e.vel.z += dvz;
+    if (e instanceof Player && e.remote !== null) {
+      e.remote.inherit += Math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
+      this.raise(e, 'knock');
+    }
+  }
+
+  /** A player's game mode (DESIGN: per player). Survival ends flight. */
+  setMode(p: Player, mode: GameMode): void {
+    p.mode = mode;
+    if (mode === 'survival' && p.flying) {
+      p.flying = false;
+      this.raise(p, 'mode');
+    }
+  }
+
+  // ================================================================== client-driven players (drive.ts)
+
+  /** Who moves this player: the server ('server', from its input) or its client ('client', from move reports). */
+  driveOf(p: Player): DriveMode {
+    return p.remote === null ? 'server' : 'client';
+  }
+
+  /**
+   * Switch who moves the player. To 'client': the server stops moving it and waits for move
+   * reports of the epoch of the correction raised now ('drive'), which tells the client where the
+   * player is. To 'server': the server moves it from its input again, from where it is.
+   */
+  setDrive(p: Player, mode: DriveMode): void {
+    if (mode === this.driveOf(p)) return;
+    if (mode === 'server') {
+      p.remote = null;
+      return;
+    }
+    p.remote = new ClientDrive();
+    this.raise(p, 'drive');
+  }
+
+  /**
+   * A move report of a client-driven player arrived: it is checked and applied in the next tick's
+   * entity step (with any others that arrived meanwhile, oldest first). Copied; ignored for a
+   * server-driven player. At most REPORT_QUEUE_LIMIT wait; the oldest are dropped.
+   */
+  submitReport(p: Player, rep: MoveReport): void {
+    const d = p.remote;
+    if (d === null) return;
+    const q = d.queue;
+    if (q.length >= REPORT_QUEUE_LIMIT) {
+      d.spare.push(q.shift()!);
+      d.dropped++;
+    }
+    q.push(copyReport(rep, d.spare.pop() ?? emptyReport()));
+  }
+
+  /** The correction waiting to be sent to a client-driven player's client, or null. */
+  correctionOf(p: Player): Readonly<Correction> | null {
+    const d = p.remote;
+    return d !== null && d.pending ? d.correction : null;
+  }
+
+  /** Take (and clear) the waiting correction: a copy, or null. */
+  takeCorrection(p: Player): Correction | null {
+    const d = p.remote;
+    if (d === null || !d.pending) return null;
+    d.pending = false;
+    // Taken: from now on it is what the client adopts, so it must not change any more.
+    d.dirty = false;
+    const c = d.correction;
+    return { ...c, pos: { ...c.pos }, vel: { ...c.vel }, seat: { ...c.seat } };
+  }
+
+  /**
+   * The server moved a client-driven player on its own authority (or refused a report: cause
+   * 'check:<what>'): new epoch, correction pending.
+   */
+  private raise(p: Player, cause: string): void {
+    const d = p.remote;
+    if (d === null) return;
+    d.epoch++;
+    d.pending = true;
+    d.correction.cause = cause;
+    if (!d.dirty) {
+      d.dirty = true;
+      d.serverMoved = false;
+      this.unsettled.push(p);
+    }
+    // A refused report leaves the reference where it was; anything else is a new state.
+    if (!cause.startsWith('check:')) d.serverMoved = true;
+    this.settle(p, d);
+  }
+
+  /** Write the player's present state into its correction and make it the reference of the next report. */
+  private settle(p: Player, d: ClientDrive): void {
+    const c = d.correction;
+    c.epoch = d.epoch;
+    d.settledTick = this.host.world.time;
+    // A carrier the structure cache has not seen yet (raised before the first tick after a load,
+    // or for a ship assembled in this tick): read the poses now, else the frame would be lost; a
+    // structure seen for the first time takes its pose now as its base (a loaded ship's start-of-
+    // tick pose is that of the saved tick: the next tick would carry the rider at twice the speed).
+    if (p.carrierId !== 0 && this.body.record(p.carrierId) === undefined) {
+      const s = this.host.structure(p.carrierId);
+      if (s !== undefined && !s.removed) this.body.beginCarry('now');
+    }
+    this.judge.toReportFrame(p, c);
+    if (c.carrierId === 0 && p.carrierId !== 0) {
+      // The carrier has no record any more: the player stands in the world.
+      p.carrierId = 0;
+      p.carrierVel.x = p.carrierVel.y = p.carrierVel.z = 0;
+    }
+    c.pitch = p.pitch;
+    c.onGround = p.onGround;
+    c.flying = p.flying;
+    c.seatShipId = p.steeringShipId;
+    c.seat.x = p.seat.x;
+    c.seat.y = p.seat.y;
+    c.seat.z = p.seat.z;
+    d.carrierId = c.carrierId;
+    d.pos.x = c.pos.x;
+    d.pos.y = c.pos.y;
+    d.pos.z = c.pos.z;
+    d.vel.x = c.vel.x;
+    d.vel.y = c.vel.y;
+    d.vel.z = c.vel.z;
+    d.yaw = c.yaw;
+    d.pitch = c.pitch;
+    d.onGround = c.onGround;
+    d.flying = c.flying;
+    d.fresh = true;
+    d.idleTicks = 0;
+    d.squeezeTicks = 0;
+    if (d.serverMoved) {
+      // The vertical envelope starts again at the new state: a jump when something holds the
+      // body up, else no more upward speed than it has (a knock-back's included).
+      const vy = p.vel.y - p.carrierVel.y;
+      const up = Math.min(vy > 0 ? vy : 0, JUMP_SPEED + d.inherit);
+      const held = this.judge.heldUp(p);
+      d.resetEnvelope(held ? Math.max(up, JUMP_SPEED) : up, held);
+    }
+  }
+
+  /** End of the tick: corrections raised in it take the state the tick left the player in. */
+  private settleCorrections(): void {
+    const list = this.unsettled;
+    for (let i = 0; i < list.length; i++) {
+      const p = list[i]!;
+      const d = p.remote;
+      if (d === null || !d.dirty) continue;
+      d.dirty = false;
+      if (!p.removed) this.settle(p, d);
+    }
+    list.length = 0;
+  }
+
+  /** The player rides its reference: world position, velocity and look from the reference frames at the present poses. */
+  private followReference(p: Player, d: ClientDrive): void {
+    const yaw = this.judge.toWorld(d.carrierId, d.pos, d.vel, d.yaw, p.pos, p.carrierVel, p.vel);
+    if (Number.isNaN(yaw)) {
+      // The carrier vanished without releasing its riders: stay where the player was, in the world.
+      d.carrierId = 0;
+      d.pos.x = p.pos.x;
+      d.pos.y = p.pos.y;
+      d.pos.z = p.pos.z;
+      d.vel.x = p.vel.x - p.carrierVel.x;
+      d.vel.y = p.vel.y - p.carrierVel.y;
+      d.vel.z = p.vel.z - p.carrierVel.z;
+      d.yaw = p.yaw;
+      p.carrierId = 0;
+      p.carrierVel.x = p.carrierVel.y = p.carrierVel.z = 0;
+      p.vel.x = d.vel.x;
+      p.vel.y = d.vel.y;
+      p.vel.z = d.vel.z;
+      return;
+    }
+    p.carrierId = d.carrierId;
+    p.yaw = yaw;
+    p.pitch = d.pitch;
+    p.input.yaw = yaw;
+    p.input.pitch = d.pitch;
+    p.onGround = d.onGround;
+    // Standing on the world (never while carried): the world itself holds the reported feet.
+    p.onWorldGround = d.carrierId === 0 && d.onGround && hasSupportBelow(this.host.world, p.box(this.box2), SUPPORT_GAP, 0);
+  }
+
+  /** Move reports of a seated client-driven player: only the stick axes, the sneak key and the look count. */
+  private takeSeatedReports(p: Player, d: ClientDrive): void {
+    const q = d.queue;
+    const inp = p.input;
+    for (let i = 0; i < q.length; i++) {
+      const rep = q[i]!;
+      if (rep.epoch !== d.epoch || !(rep.seq > d.lastSeq)) {
+        d.dropped++;
+        continue;
+      }
+      d.lastSeq = rep.seq;
+      d.viewTick = rep.viewTick;
+      d.lag = reportLag(this.host.world.time, rep.viewTick);
+      d.accepted++;
+      // As the server took it: the body is in the seat, whatever the report says.
+      d.recordAccepted(rep.seq, p.steeringShipId, p.seat, ORIGIN);
+      inp.forward = axisValue(rep.forward);
+      inp.strafe = axisValue(rep.strafe);
+      inp.sneak = rep.sneak === true;
+      const r = rep.carrierId !== 0 ? this.body.record(rep.carrierId) : undefined;
+      if (Number.isFinite(rep.yaw)) inp.yaw = r !== undefined ? rep.yaw + headingOf(r.q1) : rep.yaw;
+      if (Number.isFinite(rep.pitch)) inp.pitch = rep.pitch;
+    }
+    this.recycleReports(d);
+    inp.jumpPresses = 0;
+  }
+
+  private recycleReports(d: ClientDrive): void {
+    const q = d.queue;
+    for (let i = 0; i < q.length; i++) d.spare.push(q[i]!);
+    q.length = 0;
+  }
+
+  /**
+   * A client-driven player's tick (not seated): check and apply its move reports, then the rules
+   * the server keeps — vitals from the fluids where the reports put it, falls on the reported
+   * track, squeezes (with hysteresis: see judgeSqueeze), suffocation. A body nothing holds up
+   * whose reports stopped, or that rose above the vertical envelope, falls on the server's own
+   * authority (takeover).
+   */
+  private updateClientDriven(p: Player, d: ClientDrive): void {
+    const inp = p.input;
+    const slot = Math.floor(inp.slot);
+    if (slot >= 0 && slot < p.inventory.hotbar.length) p.inventory.selected = slot;
+    if (p.mode !== 'creative' && p.flying) {
+      p.flying = false;
+      this.raise(p, 'mode');
+    }
+    // The client toggles flight itself (its reports say whether it flies).
+    inp.jumpPresses = 0;
+    if (p.dead) {
+      p.vel.x = p.vel.y = p.vel.z = 0;
+      d.dropped += d.queue.length;
+      this.recycleReports(d);
+      return;
+    }
+    if (p.hurtTicks > 0) p.hurtTicks--;
+    p.unhurtTicks++;
+    d.credit = Math.min(REPORT_CREDIT_TICKS, d.credit + 1);
+    d.slack = Math.min(REPORT_SLACK_BURST, d.slack + REPORT_SLACK_RATE * DT);
+    d.inherit *= 0.9;
+    d.idleTicks++;
+    // Ride along with the reference: no report may arrive in this tick.
+    this.followReference(p, d);
+    this.holdPush(p, d);
+    const body = this.body;
+    const judge = this.judge;
+    let sampled = false;
+    let landed = -1;
+    let landedFromAir = false;
+    let landedDry = false;
+    const q = d.queue;
+    for (let i = 0; i < q.length; i++) {
+      const rep = q[i]!;
+      if (rep.epoch !== d.epoch || !(rep.seq > d.lastSeq)) {
+        d.dropped++;
+        continue;
+      }
+      // Movement time: the client ticks the report claims, within what the server's clock grants.
+      const gap = d.fresh ? 1 : rep.seq - d.lastSeq;
+      const ticks = Math.max(0, Math.min(gap, d.credit + REPORT_DEBT_TICKS));
+      // Landings the server did not see (drive.ts LANDINGS): the first report of an epoch is the
+      // baseline; else the count beyond this report's own landing.
+      const ownLanding = !d.reportedOnGround && rep.onGround === true ? 1 : 0;
+      const missed = d.fresh ? 0 : ((rep.landings - d.landings) & 255) - ownLanding;
+      const fail = judge.check(p, d, rep, ticks, this.host.world.time, missed > 0);
+      if (fail !== null) {
+        // The rest of the queue carries the old epoch: it is dropped below.
+        d.rejected++;
+        this.raise(p, `check:${fail}`);
+        // Risen with nothing to lift it: the server lets it fall itself.
+        if (fail === 'rise') d.takeover = true;
+        continue;
+      }
+      d.accepted++;
+      d.credit -= ticks;
+      d.slack -= judge.slackUsed;
+      d.lastSeq = rep.seq;
+      d.viewTick = rep.viewTick;
+      d.lag = judge.lag;
+      d.landings = rep.landings & 255;
+      d.reportedOnGround = rep.onGround === true;
+      d.fresh = false;
+      d.idleTicks = 0;
+      d.takeover = false;
+      if (judge.switchSpeed > d.inherit) d.inherit = judge.switchSpeed;
+      // Flight ended: the body keeps the flight's speed and loses it as any airborne body does.
+      if (d.flying && !rep.flying) d.inherit = Math.max(d.inherit, FLY_SPEED * FLY_SPRINT_MULTIPLIER - SPRINT_SPEED);
+      let y0 = p.pos.y;
+      const wasOnGround = d.onGround;
+      const unseen = judge.landedUnseen;
+      if (unseen) {
+        // The fall tracked so far ended in a landing no report showed: judged by what was tracked
+        // (fluids where the body last was); the next fall starts at this report.
+        const total = p.wet > 0 || p.inLava || p.flying ? 0 : p.fallDistance;
+        p.fallDistance = 0;
+        if (total > landed) {
+          landed = total;
+          landedFromAir = true;
+          landedDry = true;
+        }
+      }
+      d.carrierId = rep.carrierId;
+      d.pos.x = rep.pos.x;
+      d.pos.y = rep.pos.y;
+      d.pos.z = rep.pos.z;
+      d.vel.x = rep.vel.x;
+      d.vel.y = rep.vel.y;
+      d.vel.z = rep.vel.z;
+      d.yaw = rep.yaw;
+      d.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, rep.pitch));
+      // On the ground only where something holds the feet up: a claim in mid-air keeps falling.
+      d.onGround = judge.groundOk;
+      d.flying = rep.flying === true;
+      p.flying = d.flying;
+      p.sneaking = rep.sneaking === true && !p.flying;
+      p.sprinting = rep.sprinting === true && !p.sneaking;
+      inp.forward = axisValue(rep.forward);
+      inp.strafe = axisValue(rep.strafe);
+      inp.sneak = rep.sneak === true;
+      this.followReference(p, d);
+      d.recordAccepted(rep.seq, d.carrierId, d.pos, d.vel);
+      if (unseen) y0 = p.pos.y;
+      // Vitals where the report puts the body; the fall on the reported track (a fall that ends
+      // on a moving deck counts from where it began: both ends at the server's present poses).
+      body.sampleFluids(p);
+      sampled = true;
+      // Held up where the report put it: the envelope starts again there. Else it goes on (after an
+      // unseen landing, from the ground the body came down on: drive.ts VERTICAL ENVELOPE).
+      if (d.onGround || p.wet > 0 || p.inLava || p.flying) d.resetEnvelope(JUMP_SPEED, true);
+      else {
+        d.envRise = judge.envRise;
+        d.envTop = judge.envTop;
+        d.envVy = judge.envVy;
+        d.envTopLate = judge.envTopLate;
+        d.envVyLate = judge.envVyLate;
+        d.envPeak = judge.envPeak;
+        d.envHeld = judge.envHeld;
+        d.envPaid = judge.envPaid;
+      }
+      const total = trackFall(p, y0 > p.pos.y ? y0 - p.pos.y : 0, false);
+      // Several reports can arrive in one tick (jitter, coalescing): the landing report may be
+      // followed by standing ones, whose "landings" of 0 must not hide it. The largest counts.
+      if (total > landed) {
+        landed = total;
+        landedFromAir = !wasOnGround;
+        landedDry = p.wet === 0 && !p.inLava;
+      }
+    }
+    this.recycleReports(d);
+    if (!sampled) body.sampleFluids(p);
+    // Reports stopped while nothing holds the body up: it may not hang in the air. After a
+    // correction no report of its epoch can come before a round trip: the lag is waited for too.
+    const stall = REPORT_STALL_TICKS + (d.fresh ? Math.ceil(d.lag / DT - 1e-9) : 0);
+    if (!d.takeover && d.idleTicks > stall && !judge.heldUp(p)) d.takeover = true;
+    if (d.takeover) {
+      // (Its step reports a splash with the rest of its facts.)
+      this.fallOnServer(p, d);
+      return;
+    }
+    if (body.facts.liquidEntrySpeed > SPLASH_SPEED) this.host.emit({ type: 'splash', entity: p, amount: body.facts.liquidEntrySpeed });
+    // A structure deep in the body is the squeeze rules' business: no free way out of world blocks then.
+    if (this.judgeSqueeze(p, d) === SQUEEZE_CLEAR) this.judgeWorldStuck(p, d);
+    if (p.removed || p.dead) return;
+    if (landed >= 0) {
+      if (landedFromAir && landed >= LAND_EVENT_HEIGHT) this.host.emit({ type: 'land', entity: p, amount: landed });
+      if (landed > FALL_SAFE_HEIGHT && landedDry) this.damage(p, Math.ceil(landed - FALL_SAFE_HEIGHT), 'fall');
+    }
+    if (!p.dead) this.playerHealth(p);
+  }
+
+  /**
+   * Remember this tick's fastest structure motion near a client-driven player and the speed of its
+   * carrier at it (ClientDrive.recordSpeeds: the checks look back over a report's lag).
+   */
+  private holdPush(p: Player, d: ClientDrive): void {
+    const cv = p.carrierVel;
+    d.recordSpeeds(this.judge.structureSpeed(p, p.pos, p.carrierId, cv), Math.sqrt(cv.x * cv.x + cv.y * cv.y + cv.z * cv.z));
+  }
+
+  /**
+   * The server moves a client-driven player itself, with no input, and applies the usual rules
+   * (falls, squeezes, suffocation): a correction every tick it does, until something holds the
+   * body up or a report of the current epoch is accepted (ClientDrive.takeover).
+   */
+  private fallOnServer(p: Player, d: ClientDrive): void {
+    const inp = p.input;
+    inp.forward = 0;
+    inp.strafe = 0;
+    inp.jump = false;
+    inp.sneak = false;
+    inp.sprint = false;
+    // From a velocity the server can vouch for: the reported one is the client's word. No faster
+    // than the movement limits allow, no more upward speed than the vertical envelope.
+    const v = p.vel;
+    const cv = p.carrierVel;
+    const rx = v.x - cv.x;
+    const rz = v.z - cv.z;
+    const h = Math.sqrt(rx * rx + rz * rz);
+    const hMax = SPRINT_SPEED + d.inherit;
+    if (h > hMax) {
+      v.x = cv.x + (rx * hMax) / h;
+      v.z = cv.z + (rz * hMax) / h;
+    }
+    if (v.y - cv.y > d.envVyLate) v.y = cv.y + d.envVyLate;
+    this.stepOnServer(p, 0, false);
+    if (p.removed || p.dead) {
+      d.takeover = false;
+      return;
+    }
+    d.serverMoved = true;
+    if (!d.dirty) this.raise(p, 'fall');
+    if (p.onGround || p.wet > 0 || p.inLava) d.takeover = false;
+    this.playerHealth(p);
+  }
+
+  /**
+   * Squeeze judgement of a client-driven player. Its client pushes its body out of structures at
+   * the poses of its LAGGING copies, so at the server's present poses the reported body often
+   * overlaps a structure a little, briefly — that must not hurt. The server pushes a copy of the
+   * reported body out at its present poses (the same push as for any body, body.ts pushOut): if
+   * that clears it, the client will be pushed too, soon. A squeeze candidate is a body that a
+   * structure overlaps by more than SQUEEZE_DEPTH and that neither the usual push nor one leaning
+   * along the structure's recent motion can free without leaving it that deep in the structure or
+   * pushing it that much deeper into world blocks (ReportJudge.ghostStuck); SQUEEZE_TICKS candidate
+   * ticks in a row are a squeeze: the server moves the player to the nearest free spot (a
+   * correction) and the squeeze rules apply (survival hurt, creative only moved).
+   * Returns SQUEEZE_CLEAR (no structure overlaps the body), SQUEEZE_HELD (one does, by more than
+   * SQUEEZE_DEPTH: being judged) or SQUEEZE_DONE (squeezed now).
+   */
+  private judgeSqueeze(p: Player, d: ClientDrive): number {
+    const body = this.body;
+    const judge = this.judge;
+    const b = p.box(this.box1);
+    const near = body.structuresNear(b, 0, this.overlapNear);
+    let overlap = false;
+    let deep = false;
+    let fastest = PREFER_MIN_SPEED;
+    const c = this.t1;
+    c.x = p.pos.x;
+    c.y = p.pos.y + p.height * 0.5;
+    c.z = p.pos.z;
+    if (d.pushDirTicks > 0) d.pushDirTicks--;
+    for (let k = 0; k < near.length; k++) {
+      const r = near[k]!;
+      if (!boxOverlapsSolid(r.grid, b)) continue;
+      overlap = true;
+      if (hardDepth(r.grid, b) > SQUEEZE_DEPTH) deep = true;
+      if (r.id === p.carrierId) continue;
+      // Remember which way it moves through the body, relative to the body's carrier.
+      const v = pointVelocity(r, c, this.t2);
+      const vx = v.x - p.carrierVel.x;
+      const vy = v.y - p.carrierVel.y;
+      const vz = v.z - p.carrierVel.z;
+      const s = Math.sqrt(vx * vx + vy * vy + vz * vz);
+      if (s > fastest) {
+        fastest = s;
+        d.pushDir.x = vx / s;
+        d.pushDir.y = vy / s;
+        d.pushDir.z = vz / s;
+        // (Remembered for the lag: the client's copy may still be moving that way.)
+        d.pushDirTicks = Math.ceil(d.lag / DT - 1e-9);
+      }
+    }
+    if (!overlap) {
+      d.squeezeTicks = d.deepRun = d.plainStuckRun = 0;
+      return SQUEEZE_CLEAR;
+    }
+    d.overlapTicks++;
+    if (deep) {
+      d.deepOverlapTicks++;
+      if (++d.deepRun > d.longestDeepRun) d.longestDeepRun = d.deepRun;
+    } else d.deepRun = 0;
+    // Two push-outs of a copy of the reported body: the usual one, and one leaning along the
+    // structures' (recent) motion in the carrier's frame — the way the lagging client is pushed.
+    const plain = deep && judge.ghostStuck(p, null);
+    if (plain) {
+      if (++d.plainStuckRun > d.longestPlainStuckRun) d.longestPlainStuckRun = d.plainStuckRun;
+    } else d.plainStuckRun = 0;
+    if (!plain || (d.pushDirTicks > 0 && !judge.ghostStuck(p, d.pushDir))) {
+      d.squeezeTicks = 0;
+      return deep ? SQUEEZE_HELD : SQUEEZE_CLEAR;
+    }
+    d.squeezeCandidateTicks++;
+    d.squeezeTicks++;
+    if (d.squeezeTicks > d.longestSqueezeRun) d.longestSqueezeRun = d.squeezeTicks;
+    if (d.squeezeTicks < SQUEEZE_TICKS) return SQUEEZE_HELD;
+    // Squeezed: out of it from where the push left the body (unless that is inside world blocks).
+    if (judge.ghostEnd(this.t2)) {
+      p.pos.x = this.t2.x;
+      p.pos.y = this.t2.y;
+      p.pos.z = this.t2.z;
+    }
+    body.unstick(p, CRUSH_SEARCH_RADIUS);
+    p.vel.x = p.carrierVel.x;
+    p.vel.y = p.carrierVel.y;
+    p.vel.z = p.carrierVel.z;
+    p.fallDistance = 0;
+    this.raise(p, 'crush');
+    this.crushed(p);
+    return SQUEEZE_DONE;
+  }
+
+  /**
+   * A client-driven player deeper in world blocks than lag explains (a block put into it): moved
+   * to the nearest free spot (a correction), or suffocating when there is none. Lag explains world
+   * overlap only for a carried body (its carrier's pose leads the client's copy); the world does
+   * not move, so an uncarried body overlapping it at all had a block put into it, and is moved
+   * out as a server-driven one is (BodyMover: any overlap). A shallow overlap left alone would
+   * never end: the client does not relocate, its body sinks on into the block, and every report
+   * is refused ('check:world') back to the same place.
+   */
+  private judgeWorldStuck(p: Player, d: ClientDrive): void {
+    const world = this.host.world;
+    const box = p.box(this.box1);
+    const stuck =
+      p.carrierId === 0
+        ? boxOverlapsSolid(world, box)
+        : hardDepth(world, box) > this.judge.worldTolerance(p.carrierId, Math.max(this.judge.speedAt(p.carrierId, p.pos), d.carrierWithin(d.lag)), d.lag);
+    if (!stuck) {
+      p.unstuckFails = 0;
+      p.unstuckWait = 0;
+      return;
+    }
+    if (this.body.unstick(p, UNSTUCK_SEARCH_RADIUS)) {
+      p.vel.x = p.carrierVel.x;
+      p.vel.y = p.carrierVel.y;
+      p.vel.z = p.carrierVel.z;
+      p.fallDistance = 0;
+      this.raise(p, 'unstick');
+    } else {
+      this.damage(p, 1, 'suffocate');
+    }
   }
 
   // ================================================================== save
 
   /**
-   * All entities including the player (position, look, health, air, mode, flying, inventory,
-   * spawn). Never writes a value deserialize() would reject: a non-player entity whose state is
-   * not finite (or a drop that holds nothing) is left out, non-finite player fields are written
-   * as safe defaults — one broken entity must not make the whole save unloadable.
+   * Every entity except players (players are saved per PlayerKey by the simulation, with
+   * writePlayerRecord). Never writes a value deserialize() would reject: an entity whose state is
+   * not finite (or a drop that holds nothing) is left out — one broken entity must not make the
+   * whole save unloadable.
    */
   serialize(w: ByteWriter): void {
     w.u8(SAVE_VERSION);
@@ -588,45 +1194,8 @@ export class EntityManager {
       if (!saveable(e)) continue;
       w.u8(KIND_TAG[e.kind]);
       w.varuint(e.id);
-      if (e instanceof Player && !finiteVec(e.pos)) writeVec(w, finiteVec(e.spawn) ? e.spawn : ORIGIN);
-      else writeVec(w, e.pos);
-      writeVec(w, finiteVec(e.vel) ? e.vel : ORIGIN);
-      writeVec(w, finiteVec(e.carrierVel) ? e.carrierVel : ORIGIN);
-      w.f64(finiteOr(e.yaw, 0));
-      w.f64(finiteOr(e.pitch, 0));
-      w.bool(e.onGround);
-      w.f64(finiteOr(e.wet, 0));
-      w.bool(e.headWet);
-      w.bool(e.inLava);
-      w.varuint(uint(e.carrierId));
-      w.varuint(uint(e.noAttachTicks));
-      w.varuint(uint(e.noAttachStructureId));
-      w.varuint(uint(e.age));
-      w.f64(finiteOr(e.fallDistance, 0));
-      w.f64(finiteOr(e.contactNx, 0));
-      w.f64(finiteOr(e.contactNz, 0));
-      w.bool(e.onWorldGround);
-      if (e instanceof Player) {
-        w.u8(e.mode === 'creative' ? 1 : 0);
-        w.f64(finiteOr(e.health, e.maxHealth));
-        w.f64(finiteOr(e.maxHealth, PLAYER_MAX_HEALTH));
-        w.varuint(uint(e.air));
-        w.varuint(uint(e.maxAir));
-        w.bool(e.dead);
-        w.varuint(uint(e.hurtTicks));
-        w.bool(e.flying);
-        w.bool(e.sneaking);
-        w.bool(e.sprinting);
-        w.varuint(uint(e.steeringShipId));
-        writeVec(w, finiteVec(e.seat) ? e.seat : ORIGIN);
-        writeVec(w, finiteVec(e.spawn) ? e.spawn : ORIGIN);
-        w.varuint(uint(e.drownTicks));
-        w.varuint(uint(e.lavaTicks));
-        w.varuint(Math.min(uint(e.unhurtTicks), 1 << 30));
-        w.varint(Math.max(-(1 << 30), int(e.lastJumpPressAge)));
-        w.u8(e.input.slot & 0xff);
-        e.inventory.serialize(w);
-      } else if (e instanceof ItemEntity) {
+      writeCommon(w, e, e.pos);
+      if (e instanceof ItemEntity) {
         w.varuint(e.stack.item);
         w.varuint(uint(e.stack.count));
         w.varuint(uint(e.pickupDelay));
@@ -646,8 +1215,10 @@ export class EntityManager {
   }
 
   /**
-   * Replace every entity with the saved ones. Atomic: the whole blob is parsed first, so a
-   * corrupt or truncated one throws (SaveFormatError) and leaves the current entities untouched.
+   * Replace every entity with the saved ones (players are not part of this blob: the players
+   * that are in the manager are dropped too — the simulation loads and joins them separately).
+   * Atomic: the whole blob is parsed first, so a corrupt or truncated one throws
+   * (SaveFormatError) and leaves the current entities untouched.
    */
   deserialize(r: ByteReader): void {
     const v = r.u8();
@@ -662,48 +1233,9 @@ export class EntityManager {
       if (id === 0) r.fail('entity id 0');
       if (seen.has(id)) r.fail(`duplicate entity id ${id}`);
       seen.add(id);
-      const pos = readVec(r);
-      const vel = readVec(r);
-      const cvel = readVec(r);
-      const yaw = readFinite(r);
-      const pitch = readFinite(r);
-      const onGround = r.bool();
-      const wet = readFinite(r);
-      const headWet = r.bool();
-      const inLava = r.bool();
-      const carrierId = r.varuint();
-      const noAttachTicks = r.varuint();
-      const noAttachStructureId = r.varuint();
-      const age = r.varuint();
-      const fallDistance = readFinite(r);
-      const cnx = readFinite(r);
-      const cnz = readFinite(r);
-      const onWorldGround = r.bool();
+      const common = readCommon(r);
       let e: Entity;
-      if (tag === KIND_TAG.player) {
-        const mode: GameMode = r.u8() === 1 ? 'creative' : 'survival';
-        const p = new Player(id, mode);
-        p.health = readFinite(r);
-        p.maxHealth = readFinite(r);
-        p.air = r.varuint();
-        p.maxAir = r.varuint();
-        p.dead = r.bool();
-        p.hurtTicks = r.varuint();
-        p.flying = r.bool();
-        p.sneaking = r.bool();
-        p.sprinting = r.bool();
-        p.steeringShipId = r.varuint();
-        copyVec(p.seat, readVec(r));
-        copyVec(p.spawn, readVec(r));
-        p.drownTicks = r.varuint();
-        p.lavaTicks = r.varuint();
-        p.unhurtTicks = r.varuint();
-        p.lastJumpPressAge = r.varint();
-        p.input.slot = r.u8();
-        p.inventory.deserialize(r);
-        p.input.slot = p.inventory.selected;
-        e = p;
-      } else if (tag === KIND_TAG.item) {
+      if (tag === KIND_TAG.item) {
         const item = r.varuint();
         const cnt = r.varuint();
         const it = new ItemEntity(id, { item, count: cnt });
@@ -729,29 +1261,7 @@ export class EntityManager {
       } else {
         r.fail(`unknown entity kind tag ${tag}`);
       }
-      copyVec(e.pos, pos);
-      copyVec(e.vel, vel);
-      copyVec(e.carrierVel, cvel);
-      e.yaw = yaw;
-      e.pitch = pitch;
-      if (e instanceof Player) {
-        // The look is driven by input.yaw / pitch: seed it, or the first tick after loading
-        // would snap the view to 0 until the client writes its own.
-        e.input.yaw = yaw;
-        e.input.pitch = pitch;
-      }
-      e.onGround = onGround;
-      e.wet = wet;
-      e.headWet = headWet;
-      e.inLava = inLava;
-      e.carrierId = carrierId;
-      e.noAttachTicks = noAttachTicks;
-      e.noAttachStructureId = noAttachStructureId;
-      e.age = age;
-      e.fallDistance = fallDistance;
-      e.contactNx = cnx;
-      e.contactNz = cnz;
-      e.onWorldGround = onWorldGround;
+      applyCommon(e, common);
       parsed.push(e);
     }
     this.clear();
@@ -759,187 +1269,12 @@ export class EntityManager {
     if (nextId > this.nextId) this.nextId = nextId;
   }
 
-  // ================================================================== carrying
-
-  private syncRider(e: Entity): void {
-    let r = this.cache.get(e.carrierId);
-    if (r === undefined) {
-      this.detach(e, e.vel);
-      return;
-    }
-    // Own velocity in the carrier's frame, which turns with the carrier: standing still on a
-    // yawing deck or turntable stays standing still (no fictitious slide).
-    let relx = e.vel.x - e.carrierVel.x;
-    const rely = e.vel.y - e.carrierVel.y;
-    let relz = e.vel.z - e.carrierVel.z;
-    let target = carryPoint(r, e.pos, this.t1);
-    // LESSONS 转盘在船上: a rider swept by a rotor into a cell of the rotor's PARENT lets go of
-    // the rotor and stays with the parent; it may not re-attach to the rotor for a while.
-    const parent = r.parent;
-    if (parent !== null && r.carryMoved) {
-      const bt = boxAt(e, target.x, target.y, target.z, this.box1);
-      if (boxNearRec(bt, parent, 0) && boxOverlapsSolid(parent.grid, bt)) {
-        const pt = carryPoint(parent, e.pos, this.t2);
-        const bp = boxAt(e, pt.x, pt.y, pt.z, this.box2);
-        if (!(boxNearRec(bp, parent, 0) && boxOverlapsSolid(parent.grid, bp))) {
-          e.noAttachTicks = NO_ATTACH_TICKS;
-          e.noAttachStructureId = r.id;
-          e.carrierId = parent.id;
-          r = parent;
-          target = pt;
-        }
-      }
-    }
-    const dx = target.x - e.pos.x;
-    const dy = target.y - e.pos.y;
-    const dz = target.z - e.pos.z;
-    if (dx * dx + dy * dy + dz * dz > MAX_CARRY_STEP * MAX_CARRY_STEP) {
-      this.detach(e, e.vel);
-      return;
-    }
-    const a = r.carryDyaw;
-    if (a !== 0) {
-      const c = Math.cos(a);
-      const s = Math.sin(a);
-      const x = relx * c + relz * s;
-      relz = -relx * s + relz * c;
-      relx = x;
-      this.turn(e, a);
-    }
-    // The carrier's velocity at the feet over this tick. Not the carry delta: a repeated
-    // syncCarried() carries nothing more but must not zero the carrier velocity.
-    pointVelocity(r, target, e.carrierVel);
-    this.carryMove(e, dx, dy, dz);
-    e.vel.x = relx + e.carrierVel.x;
-    e.vel.y = rely + e.carrierVel.y;
-    e.vel.z = relz + e.carrierVel.z;
-  }
-
-  private syncSeat(p: Player): void {
-    const s = this.host.structure(p.steeringShipId);
-    if (s === undefined || s.removed || s.kind !== 'ship') {
-      this.releaseHelm(p, 'missing');
-      if (p.carrierId !== 0) this.syncRider(p);
-      return;
-    }
-    const ship = s as Ship;
-    if (ship.helmsmanId !== p.id) {
-      if (ship.helmsmanId === 0) ship.helmsmanId = p.id; // re-claim after loading a save
-      else {
-        this.releaseHelm(p, 'taken');
-        if (p.carrierId !== 0) this.syncRider(p);
-        return;
-      }
-    }
-    const r = this.cache.get(ship.id);
-    if (r === undefined) {
-      this.releaseHelm(p, 'missing');
-      return;
-    }
-    p.carrierId = ship.id;
-    const target = curToWorld(r, p.seat, this.t1);
-    // LESSONS 舵手穿过方块: a seat inside a world block releases the wheel; the rider then
-    // follows the deck with world sweeps like anyone else and the push logic takes over.
-    if (boxOverlapsSolid(this.host.world, boxAt(p, target.x, target.y, target.z, this.box1))) {
-      this.releaseHelm(p, 'blocked');
-      this.syncRider(p);
-      return;
-    }
-    pointVelocity(r, target, p.carrierVel);
-    p.pos.x = target.x;
-    p.pos.y = target.y;
-    p.pos.z = target.z;
-    if (r.carryDyaw !== 0) this.turn(p, r.carryDyaw);
-    p.vel.x = p.carrierVel.x;
-    p.vel.y = p.carrierVel.y;
-    p.vel.z = p.carrierVel.z;
-    p.onGround = true;
-  }
-
-  /** Turn an entity's heading with its carrier (the player's look too). */
-  private turn(e: Entity, a: number): void {
-    e.yaw += a;
-    if (e instanceof Player) {
-      e.input.yaw += a;
-      e.carriedYaw += a;
-    }
-  }
-
-  /** Carrier motion applied with world sweeps: a wall scrapes the rider off instead of swallowing it. */
-  private carryMove(e: Entity, dx: number, dy: number, dz: number): void {
-    const world = this.host.world;
-    const b = e.box(this.box1);
-    if (dy !== 0) {
-      const m = sweepAxisSafe(world, b, 1, dy);
-      if (m !== dy) e.carryBlocked = true;
-      e.pos.y += m;
-      b.minY += m;
-      b.maxY += m;
-    }
-    const xFirst = Math.abs(dx) >= Math.abs(dz);
-    for (let k = 0; k < 2; k++) {
-      const axis = (k === 0) === xFirst ? 0 : 2;
-      const d = axis === 0 ? dx : dz;
-      if (d === 0) continue;
-      const m = sweepAxisSafe(world, b, axis, d);
-      if (m !== d) e.carryBlocked = true;
-      if (axis === 0) {
-        e.pos.x += m;
-        b.minX += m;
-        b.maxX += m;
-      } else {
-        e.pos.z += m;
-        b.minZ += m;
-        b.maxZ += m;
-      }
-    }
-  }
-
-  private releaseHelm(p: Player, cause: string): void {
-    const id = p.steeringShipId;
-    if (id === 0) return;
-    p.steeringShipId = 0;
-    const s = this.host.structure(id);
-    if (s !== undefined && s.kind === 'ship') {
-      const ship = s as Ship;
-      if (ship.helmsmanId === p.id) {
-        ship.helmsmanId = 0;
-        ship.throttle = 0;
-        ship.rudder = 0;
-      }
-    }
-    this.host.emit({ type: 'helmReleased', entity: p, cause });
-  }
-
-  /** Let go of the carrier, keeping the world velocity `v` (vel or the working relative+carrier velocity). */
-  private detach(e: Entity, v: Vec3): void {
-    if (e.carrierId === 0) return;
-    let vx = v.x;
-    let vy = v.y;
-    let vz = v.z;
-    const sp = Math.sqrt(vx * vx + vy * vy + vz * vz);
-    if (sp > MAX_INHERITED_SPEED) {
-      const k = MAX_INHERITED_SPEED / sp;
-      vx *= k;
-      vy *= k;
-      vz *= k;
-    }
-    e.vel.x = vx;
-    e.vel.y = vy;
-    e.vel.z = vz;
-    e.carrierVel.x = 0;
-    e.carrierVel.y = 0;
-    e.carrierVel.z = 0;
-    e.carrierId = 0;
-  }
-
   // ================================================================== per-entity update
 
   private updateEntity(e: Entity): void {
     const world = this.host.world;
     if (!world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) return; // frozen: never fall into the unknown
-    e.age++;
-    if (e.noAttachTicks > 0 && --e.noAttachTicks === 0) e.noAttachStructureId = 0;
+    this.body.beginStep(e);
     if (e.pos.y < VOID_Y) {
       this.fellOut(e);
       return;
@@ -961,339 +1296,63 @@ export class EntityManager {
     this.remove(e);
   }
 
-  /** 'splash' when a body that was dry hits the water fast (call after sampleFluids, before moving). */
-  private splashCheck(e: Entity, wasWet: number): void {
-    if (wasWet === 0 && e.wet > 0 && e.vel.y < -SPLASH_SPEED) this.host.emit({ type: 'splash', entity: e, amount: -e.vel.y });
-  }
-
-  /** rel := own velocity relative to the carrier. */
-  private loadRel(e: Entity): Vec3 {
-    const rel = this.rel;
-    rel.x = e.vel.x - e.carrierVel.x;
-    rel.y = e.vel.y - e.carrierVel.y;
-    rel.z = e.vel.z - e.carrierVel.z;
-    return rel;
-  }
-
-  /** Collect the structures within reach of the body (and of its displacement this tick). */
-  private gatherNear(e: Entity, dx: number, dy: number, dz: number, extra = 0): void {
-    const b = e.box(this.box2);
-    if (dx < 0) b.minX += dx;
-    else b.maxX += dx;
-    if (dy < 0) b.minY += dy;
-    else b.maxY += dy;
-    if (dz < 0) b.minZ += dz;
-    else b.maxZ += dz;
-    this.cache.near(b, NEAR_MARGIN + extra, this.mover.near);
-  }
-
-  /** Fluid share before moving (the controller needs it). */
-  private sampleFluids(e: Entity): number {
-    this.gatherNear(e, 0, 0, 0);
-    this.fluids.sample(e, this.mover.near);
-    return e.wet + this.fluids.lavaShare;
-  }
-
   /**
-   * Steps b–e for a displacement already chosen by the controller (in this.rel / this.disp).
-   * Returns the structure that crushed the body this tick, or null.
+   * The rules every body step is followed by: 'splash' when a dry body hit the water fast, then
+   * a squeeze (DESIGN 实体被挤: the body has already been moved to the nearest free spot).
    */
-  private moveBody(e: Entity, sneakGuard: boolean, walker = false): StructRec | null {
-    const d = this.disp;
-    const rel = this.rel;
-    this.relocatedDy = 0;
-    // A walker may step up STEP_HEIGHT: structures that high above must be seen too.
-    if (walker) this.gatherNear(e, d.x, d.y, d.z, STEP_HEIGHT);
-    else if (Math.abs(d.x) + Math.abs(d.y) + Math.abs(d.z) > NEAR_MARGIN * 0.5) this.gatherNear(e, d.x, d.y, d.z);
-    const mover = this.mover;
-    mover.move(e, rel, d.x, d.y, d.z, sneakGuard, walker);
-    e.onWorldGround = mover.onWorldGround;
-    e.onGround = mover.onWorldGround || mover.groundRec !== null;
-    e.contactNx = mover.contactNx;
-    e.contactNz = mover.contactNz;
-    // d. crush: whatever overlap remains was made by a structure (own motion was taken back).
-    let crushed: StructRec | null = null;
-    let relocated = false;
-    if (mover.near.length > 0) {
-      crushed = mover.findOverlap(e);
-      if (crushed !== null) {
-        relocated = this.unstick(e, CRUSH_SEARCH_RADIUS);
-        this.crushed(e);
-        if (e.removed) return crushed;
-      }
-    }
-    if (crushed === null) {
-      if (mover.inWorldBlock(e)) {
-        // Something put a world block into the body (placed, landed, blockified): step aside.
-        relocated = this.unstick(e, UNSTUCK_SEARCH_RADIUS);
-        if (!relocated && e instanceof Player) this.damage(e, 1, 'suffocate');
-      } else {
-        e.unstuckFails = 0;
-        e.unstuckWait = 0;
-      }
-    }
-    // The attach step looks at the structures around the body where it is NOW.
-    if (relocated) this.gatherNear(e, 0, 0, 0);
-    // e. attach / detach
-    this.updateCarrier(e);
-    e.vel.x = rel.x + e.carrierVel.x;
-    e.vel.y = rel.y + e.carrierVel.y;
-    e.vel.z = rel.z + e.carrierVel.z;
-    return crushed;
-  }
-
-  /**
-   * Free a body that overlaps the world or a structure: nearest free spot within `radius`; a
-   * buried passive body (no free spot nearby) rises to the first free spot above it. A failed
-   * attempt backs off (2^failures ticks, at most UNSTUCK_MAX_BACKOFF_TICKS): a body deep in rock
-   * must not run a full lattice search every tick (review finding: ~0.26 ms per buried drop).
-   */
-  private unstick(e: Entity, radius: number): boolean {
-    if (e.unstuckWait > 0) {
-      e.unstuckWait--;
-      return false;
-    }
-    if (this.relocate(e, radius) || (!(e instanceof Player) && this.riseOut(e))) {
-      e.unstuckFails = 0;
-      return true;
-    }
-    const f = e.unstuckFails < 16 ? e.unstuckFails : 16;
-    e.unstuckFails = f + 1;
-    const wait = 1 << f;
-    e.unstuckWait = wait < UNSTUCK_MAX_BACKOFF_TICKS ? wait : UNSTUCK_MAX_BACKOFF_TICKS;
-    return false;
-  }
-
-  /**
-   * Move the body to the nearest spot free of the world and of EVERY structure the search can
-   * reach — the same overlap test as pushing (LESSONS 挪到空位后立刻又被挤). The structures are
-   * gathered over the whole search radius: mover.near only covers NEAR_MARGIN, and a spot inside
-   * a structure 1–3 blocks away would be crushed again at once (review finding).
-   */
-  private relocate(e: Entity, radius: number): boolean {
-    const b = e.box(this.box1);
-    const reach = this.cache.near(b, radius, this.relocNear);
-    const grids = this.grids;
-    grids.length = 0;
-    grids.push(this.host.world);
-    for (let k = 0; k < reach.length; k++) grids.push(reach[k]!.grid);
-    const off = nearestFreeOffset(grids, b, radius);
-    if (off === null) return false;
-    this.teleportBy(e, off.x, off.y, off.z);
-    return true;
-  }
-
-  /**
-   * A buried passive body rises straight up to the first cell-aligned spot free of the world and
-   * of every structure, at most BURIED_RISE_LIMIT blocks (drops of a windmill blockified inside a
-   * hill pop out on top of it, ACCEPTANCE 12). Cheap: one world range test per layer.
-   */
-  private riseOut(e: Entity): boolean {
-    const col = e.box(this.box1);
-    col.maxY += BURIED_RISE_LIMIT;
-    const reach = this.cache.near(col, 0, this.relocNear);
-    const world = this.host.world;
-    const y0 = e.pos.y;
-    const base = Math.floor(y0);
-    const b = this.box3;
-    for (let k = 1; k <= BURIED_RISE_LIMIT; k++) {
-      const fy = base + k;
-      boxAt(e, e.pos.x, fy, e.pos.z, b);
-      if (boxOverlapsSolid(world, b)) continue;
-      let free = true;
-      for (let j = 0; j < reach.length && free; j++) {
-        const r = reach[j]!;
-        if (boxNearRec(b, r, 0) && boxOverlapsSolid(r.grid, b)) free = false;
-      }
-      if (!free) continue;
-      this.teleportBy(e, 0, fy - y0, 0);
-      return true;
-    }
-    return false;
-  }
-
-  /** Displace a body that was squeezed / dug out: a teleport, not a fall, and no velocity survives. */
-  private teleportBy(e: Entity, dx: number, dy: number, dz: number): void {
-    e.pos.x += dx;
-    e.pos.y += dy;
-    e.pos.z += dz;
-    this.relocatedDy += dy;
-    // Stand still relative to the carrier.
-    this.rel.x = 0;
-    this.rel.y = 0;
-    this.rel.z = 0;
-  }
-
-  /**
-   * Step e (DESIGN 携带): carried only while a cell of the structure is under the feet.
-   *  - landed on a world block -> detach;
-   *  - standing on a structure (attach probe, innermost first) -> that structure;
-   *  - airborne with a carrier -> keep it while its column under the footprint holds a cell
-   *    (jumping on a deck keeps you with the ship), else its parent's, else detach.
-   *    Swimmers are never kept (ACCEPTANCE 19: a swimmer next to a hull is never picked up).
-   * Attaching needs the inset probe (strictly inside the push range); KEEPING an existing
-   * carrier — standing or airborne over its column — uses the plain footprint (inset 0), so a
-   * rider who stands at the very edge and jumps comes down with the ship.
-   */
-  private updateCarrier(e: Entity): void {
-    const flying = e instanceof Player && e.flying;
-    if (e.onWorldGround || (flying && !e.onGround)) {
-      this.detachRel(e);
-      return;
-    }
-    const b = e.box(this.box1);
-    const inset = attachInset(e);
-    const near = this.mover.near;
-    let stand: StructRec | null = null;
-    for (let k = 0; k < near.length; k++) {
-      const r = near[k]!;
-      if (this.attachBlocked(e, r)) continue;
-      if (b.minY - SUPPORT_GAP >= r.maxY || b.minY <= r.minY) continue;
-      if (hasSupportBelow(r.grid, b, SUPPORT_GAP, inset)) {
-        stand = r;
-        break;
-      }
-    }
-    const cur = e.carrierId !== 0 ? this.cache.get(e.carrierId) : undefined;
-    // Hysteresis: once attached, plain standing (inset 0) keeps the carrier.
-    if (stand === null && cur !== undefined && e.onGround && !this.attachBlocked(e, cur) && hasSupportBelow(cur.grid, b, SUPPORT_GAP, 0)) {
-      stand = cur;
-    }
-    if (stand !== null) {
-      this.setCarrier(e, stand);
-      return;
-    }
-    const swimming = e.wet >= SWIMMING_WET && !e.onGround;
-    if (cur !== undefined && !flying && !swimming) {
-      for (let r: StructRec | null = cur; r !== null; r = r.parent) {
-        if (columnHasSolidBelow(r.grid, b, COLUMN_DEPTH, 0)) {
-          this.setCarrier(e, r);
-          return;
-        }
-      }
-    }
-    this.detachRel(e);
-  }
-
-  private attachBlocked(e: Entity, r: StructRec): boolean {
-    return e.noAttachTicks > 0 && (e.noAttachStructureId === 0 || e.noAttachStructureId === r.id);
-  }
-
-  /** Switch carrier keeping the world velocity continuous. */
-  private setCarrier(e: Entity, r: StructRec): void {
-    if (e.carrierId === r.id) return;
-    const rel = this.rel;
-    const vx = rel.x + e.carrierVel.x;
-    const vy = rel.y + e.carrierVel.y;
-    const vz = rel.z + e.carrierVel.z;
-    pointVelocity(r, e.pos, e.carrierVel);
-    rel.x = vx - e.carrierVel.x;
-    rel.y = vy - e.carrierVel.y;
-    rel.z = vz - e.carrierVel.z;
-    e.carrierId = r.id;
-  }
-
-  /** Detach during update(): the working relative velocity becomes the world velocity. */
-  private detachRel(e: Entity): void {
-    if (e.carrierId === 0) return;
-    const rel = this.rel;
-    const v = this.t2;
-    v.x = rel.x + e.carrierVel.x;
-    v.y = rel.y + e.carrierVel.y;
-    v.z = rel.z + e.carrierVel.z;
-    this.detach(e, v);
-    rel.x = e.vel.x;
-    rel.y = e.vel.y;
-    rel.z = e.vel.z;
+  private afterStep(e: Entity): void {
+    const facts = this.body.facts;
+    if (facts.liquidEntrySpeed > SPLASH_SPEED) this.host.emit({ type: 'splash', entity: e, amount: facts.liquidEntrySpeed });
+    if (facts.crushedBy !== 0) this.crushed(e);
   }
 
   // ------------------------------------------------------------------ player
 
   private updatePlayer(p: Player): void {
+    const d = p.remote;
+    if (d !== null && p.steeringShipId === 0) {
+      this.updateClientDriven(p, d);
+      return;
+    }
+    if (d !== null) this.takeSeatedReports(p, d);
+    sanitizeInput(p);
     const inp = p.input;
-    inp.forward = axisValue(inp.forward);
-    inp.strafe = axisValue(inp.strafe);
-    // Garbage look input keeps the current look; if a caller poisoned that too (wrote NaN into
-    // both), the last finite one, else straight ahead.
-    inp.yaw = finiteAngle(inp.yaw, finiteAngle(p.yaw, finiteAngle(p.prevYaw, 0)));
-    inp.pitch = finiteAngle(inp.pitch, finiteAngle(p.pitch, finiteAngle(p.prevPitch, 0)));
     const slot = Math.floor(inp.slot);
     if (slot >= 0 && slot < p.inventory.hotbar.length) p.inventory.selected = slot;
     if (p.mode !== 'creative') p.flying = false;
-    const presses = inp.jumpPresses > 0 ? Math.min(8, Math.floor(inp.jumpPresses)) : 0;
-    inp.jumpPresses = 0;
+    const presses = takeJumpPresses(p);
     if (p.dead) {
       p.vel.x = p.vel.y = p.vel.z = 0;
       return;
     }
     if (p.hurtTicks > 0) p.hurtTicks--;
     p.unhurtTicks++;
-    p.yaw = inp.yaw;
-    p.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, inp.pitch));
+    this.stepOnServer(p, presses, p.mode === 'creative');
+    if (!p.removed && !p.dead) this.playerHealth(p);
+  }
 
-    const seated = p.steeringShipId !== 0;
-    // Double-tap jump toggles creative flight.
-    if (!seated && p.mode === 'creative') {
-      for (let i = 0; i < presses; i++) {
-        if (p.age - p.lastJumpPressAge <= FLY_TOGGLE_TICKS) {
-          p.flying = !p.flying;
-          p.lastJumpPressAge = -1000;
-          if (p.flying) p.vel.y = p.carrierVel.y;
-        } else {
-          p.lastJumpPressAge = p.age;
-        }
-      }
-    }
-    p.sneaking = inp.sneak && !p.flying && !seated;
-    p.sprinting = inp.sprint && inp.forward > 0 && !p.sneaking && !seated;
-
-    const wasOnGround = p.onGround;
-    const wasWet = p.wet;
-    const fluid = this.sampleFluids(p);
-    const rel = this.loadRel(p);
-    const d = this.disp;
-    let guard = false;
-    if (seated) {
-      rel.x = rel.y = rel.z = 0;
-      d.x = d.y = d.z = 0;
-    } else {
-      guard = playerMotion(p, rel, fluid, p.inLava, this.wish, d);
-    }
-    this.splashCheck(p, wasWet);
-    const y0 = p.pos.y;
-    this.moveBody(p, guard && !p.flying, !seated && !p.flying);
+  /** The server moves a player itself (from its input) and applies the rules to the facts of the step. */
+  private stepOnServer(p: Player, presses: number, mayFly: boolean): void {
+    const body = this.body;
+    body.stepPlayer(p, presses, mayFly);
+    const facts = body.facts;
+    // The seat is the server's even for a client-driven player: moving it off is a correction.
+    if (p.remote !== null && facts.relocated) this.raise(p, facts.crushedBy !== 0 ? 'crush' : 'unstick');
+    this.afterStep(p);
+    // A body stuck in world blocks with no free spot nearby suffocates.
+    if (facts.stuckInWorld) this.damage(p, 1, 'suffocate');
     if (p.removed || p.dead) return;
-    if (seated && p.steeringShipId !== 0) {
-      p.onGround = true;
-      // Pushed far off the seat (a blade swept through the helm): let go of the wheel.
-      const r = this.cache.get(p.steeringShipId);
-      if (r !== undefined) {
-        const s = curToWorld(r, p.seat, this.t1);
-        const dx = s.x - p.pos.x;
-        const dy = s.y - p.pos.y;
-        const dz = s.z - p.pos.z;
-        if (dx * dx + dy * dy + dz * dz > 0.25) this.releaseHelm(p, 'pushed');
-      }
-    }
-    // Falls and landing. A crush / unstuck relocation is a teleport, not a fall.
-    const y1 = p.pos.y - this.relocatedDy;
-    const fell = y1 < y0 ? y0 - y1 : 0;
-    if (p.wet > 0 || p.inLava || p.flying || p.steeringShipId !== 0) {
-      p.fallDistance = 0;
-    } else if (p.onGround) {
-      const total = p.fallDistance + fell;
-      p.fallDistance = 0;
-      if (!wasOnGround && total >= LAND_EVENT_HEIGHT) this.host.emit({ type: 'land', entity: p, amount: total });
+    if (facts.pushedOffSeat && p.steeringShipId !== 0) this.releaseHelm(p, 'pushed');
+    if (facts.landedFall >= 0) {
+      const total = facts.landedFall;
+      if (facts.landedFromAir && total >= LAND_EVENT_HEIGHT) this.host.emit({ type: 'land', entity: p, amount: total });
       if (total > FALL_SAFE_HEIGHT) {
         // Fluids were sampled before this tick's move: a fast fall can enter shallow water and
         // hit its bottom in the same tick. Water at the landing spot always breaks the fall.
-        this.fluids.sample(p, this.mover.near);
+        body.resampleFluids(p);
         if (p.wet === 0 && !p.inLava) this.damage(p, Math.ceil(total - FALL_SAFE_HEIGHT), 'fall');
       }
-    } else {
-      p.fallDistance += fell;
     }
-    if (!p.dead) this.playerHealth(p);
   }
 
   private playerHealth(p: Player): void {
@@ -1337,26 +1396,20 @@ export class EntityManager {
       this.remove(e);
       return;
     }
-    const wasWet = e.wet;
-    const fluid = this.sampleFluids(e);
+    const fluid = this.body.sampleFluids(e);
     if (e.inLava) {
       this.host.emit({ type: 'despawn', entity: e, cause: 'lava' });
       this.remove(e);
       return;
     }
-    const rel = this.loadRel(e);
-    this.splashCheck(e, wasWet);
-    passiveMotion(e, rel, fluid, ITEM_GRAVITY, ITEM_BUOYANCY, this.disp);
-    this.moveBody(e, false);
+    this.body.stepPassive(e, fluid, ITEM_GRAVITY, ITEM_BUOYANCY, false);
+    this.afterStep(e);
   }
 
   private updateTnt(e: TntEntity): void {
-    const wasWet = e.wet;
-    const fluid = this.sampleFluids(e);
-    const rel = this.loadRel(e);
-    this.splashCheck(e, wasWet);
-    passiveMotion(e, rel, fluid, ITEM_GRAVITY, 0, this.disp);
-    this.moveBody(e, false);
+    const fluid = this.body.sampleFluids(e);
+    this.body.stepPassive(e, fluid, ITEM_GRAVITY, 0, false);
+    this.afterStep(e);
     if (e.removed) return;
     if (--e.fuse <= 0) {
       e.fuse = 0;
@@ -1366,22 +1419,15 @@ export class EntityManager {
   }
 
   private updateFalling(e: FallingBlockEntity): void {
-    const wasWet = e.wet;
-    const fluid = this.sampleFluids(e);
-    const rel = this.loadRel(e);
-    this.splashCheck(e, wasWet);
-    passiveMotion(e, rel, fluid, ITEM_GRAVITY, 0, this.disp);
-    rel.x = 0;
-    rel.z = 0;
-    this.disp.x = 0;
-    this.disp.z = 0;
+    const fluid = this.body.sampleFluids(e);
     const y0 = e.pos.y;
-    this.moveBody(e, false);
+    this.body.stepPassive(e, fluid, ITEM_GRAVITY, 0, true);
+    this.afterStep(e);
     if (e.removed) return;
     if (e.pos.y < y0) e.fallDistance += y0 - e.pos.y;
-    if (this.mover.onWorldGround) this.landFalling(e);
+    if (e.onWorldGround) this.landFalling(e);
     // LESSONS 沙子落到船上悬浮: landing on a structure always yields an item drop.
-    else if (this.mover.groundRec !== null || e.carrierId !== 0) this.fallingToItem(e, 'structure');
+    else if (this.body.facts.groundStructureId !== 0 || e.carrierId !== 0) this.fallingToItem(e, 'structure');
     else if (e.age > FALLING_MAX_TICKS) this.fallingToItem(e, 'timeout');
   }
 
@@ -1391,22 +1437,8 @@ export class EntityManager {
     const y = Math.floor(e.pos.y + 0.5);
     const z = Math.floor(e.pos.z);
     const here = world.getCell(x, y, z);
-    let ok = REPLACEABLE[here & ID_MASK] === 1;
-    if (ok) {
-      // A structure cell (or part of one) in the target cell wins: hard blocks may not be placed into structures.
-      const cb = this.box1;
-      cb.minX = x + 0.02;
-      cb.minY = y + 0.02;
-      cb.minZ = z + 0.02;
-      cb.maxX = x + 0.98;
-      cb.maxY = y + 0.98;
-      cb.maxZ = z + 0.98;
-      const near = this.mover.near;
-      for (let k = 0; k < near.length && ok; k++) {
-        const r = near[k]!;
-        if (boxNearRec(cb, r, 0) && boxOverlapsSolid(r.grid, cb)) ok = false;
-      }
-    }
+    // A structure cell (or part of one) in the target cell wins: hard blocks may not be placed into structures.
+    const ok = REPLACEABLE[here & ID_MASK] === 1 && !this.body.structureInCell(x, y, z);
     if (ok && world.setCell(x, y, z, e.cell)) {
       this.host.emit({ type: 'land', entity: e, amount: e.fallDistance });
       this.remove(e);
@@ -1430,15 +1462,15 @@ export class EntityManager {
 
   private updateRabbit(e: Rabbit): void {
     const rng = this.host.rng;
-    const wasWet = e.wet;
-    const fluid = this.sampleFluids(e);
+    const fluid = this.body.sampleFluids(e);
     if (e.inLava) {
       this.kill(e, 'lava');
       return;
     }
-    const rel = this.loadRel(e);
-    this.splashCheck(e, wasWet);
-    const d = this.disp;
+    const rel = this.aiRel;
+    rel.x = e.vel.x - e.carrierVel.x;
+    rel.y = e.vel.y - e.carrierVel.y;
+    rel.z = e.vel.z - e.carrierVel.z;
     const dirx = -Math.sin(e.wanderYaw);
     const dirz = -Math.cos(e.wanderYaw);
     let vy0 = rel.y;
@@ -1488,15 +1520,16 @@ export class EntityManager {
       vy1 = vy0 - GRAVITY * DT;
     }
     if (vy1 < -60) vy1 = -60;
-    d.x = rel.x * DT;
-    d.z = rel.z * DT;
-    d.y = (vy0 + vy1) * 0.5 * DT;
+    const dx = rel.x * DT;
+    const dz = rel.z * DT;
+    const dy = (vy0 + vy1) * 0.5 * DT;
     rel.y = vy1;
     // Face where it is going.
-    let dy = e.wanderYaw - e.yaw;
-    dy = Math.atan2(Math.sin(dy), Math.cos(dy));
-    e.yaw += dy * 0.35;
-    this.moveBody(e, false, true);
+    let turn = e.wanderYaw - e.yaw;
+    turn = Math.atan2(Math.sin(turn), Math.cos(turn));
+    e.yaw += turn * 0.35;
+    this.body.stepWalker(e, rel, dx, dy, dz);
+    this.afterStep(e);
   }
 
   /**
@@ -1507,12 +1540,15 @@ export class EntityManager {
   private rabbitCanHop(e: Rabbit, dirx: number, dirz: number): boolean {
     const tx = e.pos.x + dirx * 1.1;
     const tz = e.pos.z + dirz * 1.1;
-    this.gatherNear(e, dirx * 1.2, -RABBIT_MAX_DROP, dirz * 1.2);
     // Probe from just above a 1-block step down to RABBIT_MAX_DROP below the current feet.
     const b = boxAt(e, tx, e.pos.y + 1.05, tz, this.box1);
     const depth = RABBIT_MAX_DROP + 1.05;
     const inset = attachInset(e);
-    if (this.mover.supportedByStructure(b, depth, inset)) return true;
+    const reach = this.t1;
+    reach.x = dirx * 1.2;
+    reach.y = -RABBIT_MAX_DROP;
+    reach.z = dirz * 1.2;
+    if (this.body.structureSupports(e, reach, b, depth, inset)) return true;
     const world = this.host.world;
     const fx = Math.floor(tx);
     const fz = Math.floor(tz);
@@ -1525,53 +1561,84 @@ export class EntityManager {
 
   /**
    * DESIGN 实体被挤: the body has already been moved to the nearest free spot. Players take
-   * damage in survival (HURT_TICKS of invulnerability), rabbits are flattened at the third
-   * squeeze in survival, item drops / falling blocks / crates are only moved.
+   * damage in survival (their own mode; HURT_TICKS of invulnerability), rabbits are flattened at
+   * the third squeeze when the world harms creatures (host.harmsCreatures: a survival world),
+   * item drops / falling blocks / crates are only moved.
    */
   private crushed(e: Entity): void {
     this.host.emit({ type: 'crush', entity: e, cause: 'structure' });
     if (e instanceof Player) {
       this.damage(e, CRUSH_DAMAGE, 'crush');
-    } else if (e instanceof Rabbit && this.survival()) {
+    } else if (e instanceof Rabbit && this.host.harmsCreatures) {
       e.crushCount++;
       if (e.crushCount >= RABBIT_CRUSH_LIMIT) this.kill(e, 'crush');
     }
   }
 
-  /** The world's mode is the local player's mode (creative when there is no player). */
-  private survival(): boolean {
-    const p = this.localPlayer;
-    return p !== null && p.mode === 'survival';
-  }
-
   // ------------------------------------------------------------------ pickups and merging
 
+  /**
+   * Every live player collects the drops within its pickup reach. A drop several players can
+   * reach goes to the nearest one (distance from the drop to the player's feet; a tie goes to the
+   * lower entity id); what does not fit into that player's inventory is offered to the next
+   * nearest, and so on. Players are considered in ascending id order, so the outcome depends only
+   * on positions and inventories (and on ids for exact ties).
+   */
   private pickups(): void {
-    const p = this.localPlayer;
-    if (p === null || p.dead || p.removed) return;
-    const reach = p.box(this.box2);
-    reach.minX -= PICKUP_REACH_H;
-    reach.maxX += PICKUP_REACH_H;
-    reach.minZ -= PICKUP_REACH_H;
-    reach.maxZ += PICKUP_REACH_H;
-    reach.minY -= PICKUP_REACH_V;
-    reach.maxY += PICKUP_REACH_V;
     const world = this.host.world;
-    if (!world.isLoaded(Math.floor(p.pos.x), Math.floor(p.pos.z))) return;
+    const players = this.pickers;
+    players.length = 0;
     const list = this.list;
     for (let i = 0; i < list.length; i++) {
       const e = list[i]!;
+      if (!(e instanceof Player) || e.removed || e.dead) continue;
+      if (!world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
+      players.push(e);
+    }
+    if (players.length === 0) return;
+    players.sort((a, b) => a.id - b.id);
+    const reach = this.box2;
+    const takers = this.takers;
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i]!;
       if (!(e instanceof ItemEntity) || e.removed || e.pickupDelay > 0) continue;
-      const b = e.box(this.box1);
-      if (b.minX >= reach.maxX || b.maxX <= reach.minX || b.minY >= reach.maxY || b.maxY <= reach.minY || b.minZ >= reach.maxZ || b.maxZ <= reach.minZ) continue;
       // A drop in an unloaded chunk is frozen: it does nothing, not even get picked up.
       if (!world.isLoaded(Math.floor(e.pos.x), Math.floor(e.pos.z))) continue;
-      const left = p.inventory.add(e.stack.item, e.stack.count);
-      const taken = e.stack.count - left;
-      if (taken <= 0) continue;
-      e.stack.count = left;
-      this.host.emit({ type: 'pickup', entity: e, amount: taken });
-      if (left <= 0) this.remove(e);
+      const b = e.box(this.box1);
+      takers.length = 0;
+      for (let j = 0; j < players.length; j++) {
+        const p = players[j]!;
+        p.box(reach);
+        if (
+          b.minX >= reach.maxX + PICKUP_REACH_H ||
+          b.maxX <= reach.minX - PICKUP_REACH_H ||
+          b.minY >= reach.maxY + PICKUP_REACH_V ||
+          b.maxY <= reach.minY - PICKUP_REACH_V ||
+          b.minZ >= reach.maxZ + PICKUP_REACH_H ||
+          b.maxZ <= reach.minZ - PICKUP_REACH_H
+        ) {
+          continue;
+        }
+        takers.push(p);
+      }
+      if (takers.length === 0) continue;
+      if (takers.length > 1) {
+        const ex = e.pos.x;
+        const ey = e.pos.y;
+        const ez = e.pos.z;
+        const d2 = (p: Player): number => (p.pos.x - ex) ** 2 + (p.pos.y - ey) ** 2 + (p.pos.z - ez) ** 2;
+        // Stable sort on an id-ordered list: equal distances keep the lower id first.
+        takers.sort((a, c) => d2(a) - d2(c));
+      }
+      for (let j = 0; j < takers.length && e.stack.count > 0; j++) {
+        const p = takers[j]!;
+        const left = p.inventory.add(e.stack.item, e.stack.count);
+        const taken = e.stack.count - left;
+        if (taken <= 0) continue;
+        e.stack.count = left;
+        this.host.emit({ type: 'pickup', entity: e, amount: taken, player: p });
+      }
+      if (e.stack.count <= 0) this.remove(e);
     }
   }
 
@@ -1647,11 +1714,6 @@ function byPosX(a: Entity, b: Entity): number {
 
 // ====================================================================== helpers
 
-/** sweepAxis on the world with a numeric axis. */
-function sweepAxisSafe(world: VoxelGrid, b: AABB, axis: number, d: number): number {
-  return sweepAxis(world, b, axis as 0 | 1 | 2, d);
-}
-
 /** A tick counter as a non-negative integer (save fields are integers even if a caller set a fraction). */
 function uint(v: number): number {
   return v > 0 ? (v < Number.MAX_SAFE_INTEGER ? Math.floor(v) : Number.MAX_SAFE_INTEGER) : 0;
@@ -1667,8 +1729,7 @@ const ORIGIN: Readonly<Vec3> = Object.freeze(vec3(0, 0, 0));
 
 /** Does serialize() write this entity? (see serialize) */
 function saveable(e: Entity): boolean {
-  if (e.removed) return false;
-  if (e instanceof Player) return true;
+  if (e.removed || e instanceof Player) return false;
   if (!finiteVec(e.pos)) return false;
   if (e instanceof ItemEntity) return isItem(e.stack.item) && Number.isFinite(e.stack.count) && e.stack.count >= 1;
   return true;
@@ -1695,4 +1756,181 @@ function copyVec(out: Vec3, v: Vec3): void {
   out.x = v.x;
   out.y = v.y;
   out.z = v.z;
+}
+
+// ====================================================================== records
+
+/** The fields every saved entity has, as read back (all finite). */
+interface CommonFields {
+  pos: Vec3;
+  vel: Vec3;
+  cvel: Vec3;
+  yaw: number;
+  pitch: number;
+  onGround: boolean;
+  wet: number;
+  headWet: boolean;
+  inLava: boolean;
+  carrierId: number;
+  noAttachTicks: number;
+  noAttachStructureId: number;
+  age: number;
+  fallDistance: number;
+  cnx: number;
+  cnz: number;
+  onWorldGround: boolean;
+}
+
+/** The common fields of an entity; `pos` is written in place of e.pos (a player with a broken position writes its spawn). */
+function writeCommon(w: ByteWriter, e: Entity, pos: Vec3): void {
+  writeVec(w, pos);
+  writeVec(w, finiteVec(e.vel) ? e.vel : ORIGIN);
+  writeVec(w, finiteVec(e.carrierVel) ? e.carrierVel : ORIGIN);
+  w.f64(finiteOr(e.yaw, 0));
+  w.f64(finiteOr(e.pitch, 0));
+  w.bool(e.onGround);
+  w.f64(finiteOr(e.wet, 0));
+  w.bool(e.headWet);
+  w.bool(e.inLava);
+  w.varuint(uint(e.carrierId));
+  w.varuint(uint(e.noAttachTicks));
+  w.varuint(uint(e.noAttachStructureId));
+  w.varuint(uint(e.age));
+  w.f64(finiteOr(e.fallDistance, 0));
+  w.f64(finiteOr(e.contactNx, 0));
+  w.f64(finiteOr(e.contactNz, 0));
+  w.bool(e.onWorldGround);
+}
+
+function readCommon(r: ByteReader): CommonFields {
+  return {
+    pos: readVec(r),
+    vel: readVec(r),
+    cvel: readVec(r),
+    yaw: readFinite(r),
+    pitch: readFinite(r),
+    onGround: r.bool(),
+    wet: readFinite(r),
+    headWet: r.bool(),
+    inLava: r.bool(),
+    carrierId: r.varuint(),
+    noAttachTicks: r.varuint(),
+    noAttachStructureId: r.varuint(),
+    age: r.varuint(),
+    fallDistance: readFinite(r),
+    cnx: readFinite(r),
+    cnz: readFinite(r),
+    onWorldGround: r.bool(),
+  };
+}
+
+function applyCommon(e: Entity, c: CommonFields): void {
+  copyVec(e.pos, c.pos);
+  copyVec(e.vel, c.vel);
+  copyVec(e.carrierVel, c.cvel);
+  e.yaw = c.yaw;
+  e.pitch = c.pitch;
+  e.onGround = c.onGround;
+  e.wet = c.wet;
+  e.headWet = c.headWet;
+  e.inLava = c.inLava;
+  e.carrierId = c.carrierId;
+  e.noAttachTicks = c.noAttachTicks;
+  e.noAttachStructureId = c.noAttachStructureId;
+  e.age = c.age;
+  e.fallDistance = c.fallDistance;
+  e.contactNx = c.cnx;
+  e.contactNz = c.cnz;
+  e.onWorldGround = c.onWorldGround;
+  e.snapshot();
+}
+
+/** Layout version of a player record (writePlayerRecord). Only this version is read. */
+const PLAYER_RECORD_VERSION = 2;
+
+/** A player read back from its record (readPlayerRecord). */
+export interface PlayerRecord {
+  readonly player: Player;
+  /**
+   * Feet local to the structure player.carrierId named when the record was written (the carrier
+   * it stood on); null when it had none (player.carrierId is then 0).
+   */
+  readonly carrierPos: Vec3 | null;
+}
+
+/**
+ * Everything a player keeps between sessions: position and motion, look, carrier (with the feet
+ * local to it: `carrierPos`, the caller's conversion; null = no carrier) and seat, mode, health,
+ * air, death, flight, spawn point, the selected slot and the whole inventory (hotbar, backpack,
+ * off-hand, cursor), and the timers that go with them (hurt flash, breath and lava timers,
+ * regeneration, the double-tap-to-fly timer). Not part of it: the entity id (the caller keeps it
+ * next to the record) and the input, except the selected slot. Never writes a value
+ * readPlayerRecord would reject (non-finite fields become safe defaults; a non-finite carrierPos
+ * writes no carrier).
+ */
+export function writePlayerRecord(w: ByteWriter, p: Player, carrierPos: Readonly<Vec3> | null): void {
+  const carried = carrierPos !== null && p.carrierId !== 0 && finiteVec(carrierPos);
+  w.u8(PLAYER_RECORD_VERSION);
+  writeCommon(w, p, finiteVec(p.pos) ? p.pos : finiteVec(p.spawn) ? p.spawn : ORIGIN);
+  w.bool(carried);
+  if (carried) writeVec(w, carrierPos);
+  w.u8(p.mode === 'creative' ? 1 : 0);
+  w.f64(finiteOr(p.health, p.maxHealth));
+  w.f64(finiteOr(p.maxHealth, PLAYER_MAX_HEALTH));
+  w.varuint(uint(p.air));
+  w.varuint(uint(p.maxAir));
+  w.bool(p.dead);
+  w.varuint(uint(p.hurtTicks));
+  w.bool(p.flying);
+  w.bool(p.sneaking);
+  w.bool(p.sprinting);
+  w.varuint(uint(p.steeringShipId));
+  writeVec(w, finiteVec(p.seat) ? p.seat : ORIGIN);
+  writeVec(w, finiteVec(p.spawn) ? p.spawn : ORIGIN);
+  w.varuint(uint(p.drownTicks));
+  w.varuint(uint(p.lavaTicks));
+  w.varuint(Math.min(uint(p.unhurtTicks), 1 << 30));
+  w.varint(Math.max(-(1 << 30), int(p.lastJumpPressAge)));
+  p.inventory.serialize(w);
+}
+
+/**
+ * A player entity with id `id` from a record written by writePlayerRecord. Throws
+ * SaveFormatError on a corrupt or truncated record.
+ */
+export function readPlayerRecord(r: ByteReader, id: number): PlayerRecord {
+  const v = r.u8();
+  if (v !== PLAYER_RECORD_VERSION) r.fail(`unsupported player record version ${v}`);
+  const common = readCommon(r);
+  const carrierPos = r.bool() ? readVec(r) : null;
+  if (carrierPos === null) {
+    common.carrierId = 0;
+    common.cvel = vec3();
+  }
+  const mode: GameMode = r.u8() === 1 ? 'creative' : 'survival';
+  const p = new Player(id, mode);
+  p.health = readFinite(r);
+  p.maxHealth = readFinite(r);
+  p.air = r.varuint();
+  p.maxAir = r.varuint();
+  p.dead = r.bool();
+  p.hurtTicks = r.varuint();
+  p.flying = r.bool();
+  p.sneaking = r.bool();
+  p.sprinting = r.bool();
+  p.steeringShipId = r.varuint();
+  copyVec(p.seat, readVec(r));
+  copyVec(p.spawn, readVec(r));
+  p.drownTicks = r.varuint();
+  p.lavaTicks = r.varuint();
+  p.unhurtTicks = r.varuint();
+  p.lastJumpPressAge = r.varint();
+  p.inventory.deserialize(r);
+  p.input.slot = p.inventory.selected;
+  applyCommon(p, common);
+  // The look is driven by input.yaw / pitch: seed it, or the first tick after joining would snap
+  // the view to 0 until the client writes its own.
+  p.input.yaw = p.yaw;
+  p.input.pitch = p.pitch;
+  return { player: p, carrierPos };
 }

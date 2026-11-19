@@ -1,20 +1,28 @@
 /**
- * The player's inventory: 9 hotbar slots, 27 backpack slots and the stack held by the mouse
- * cursor while the inventory screen is open.
+ * The player's inventory: 9 hotbar slots, 27 backpack slots, the off-hand slot and the stack
+ * held by the mouse cursor while the inventory screen is open.
+ *
+ * The off-hand holds a "placement modifier" (DESIGN 副手): an item that changes what the main
+ * hand's placement does (glue first). Any item may sit there; only modifiers have an effect.
+ * It is a slot like the others for counting, consuming, clearing and saving; a pickup only
+ * tops up a stack already there (it never fills an empty off-hand), and pick block ignores it.
  *
  * Stack objects stored in the slots belong to the inventory: read them freely, but change
  * counts only through these methods (or replace the slot) — a stack object is never shared
  * between two slots.
  */
-import { isItem, itemDef, type ItemStack } from '../blocks/items';
+import { AIR, ID_MASK } from '../blocks/cell';
+import { B } from '../blocks/defs';
+import { isBlockItem, isItem, itemDef, type ItemStack } from '../blocks/items';
+import { LIQUID } from '../blocks/registry';
 import type { ByteReader, ByteWriter } from '../save/bytes';
 
 export const HOTBAR_SLOTS = 9;
 export const MAIN_SLOTS = 27;
 
-const SAVE_VERSION = 1;
+const SAVE_VERSION = 2;
 
-export type InventoryArea = 'hotbar' | 'inventory';
+export type InventoryArea = 'hotbar' | 'inventory' | 'offhand';
 
 /** Largest stack of an item (unknown items: 1, so a corrupt id can never multiply). */
 export function maxStackOf(item: number): number {
@@ -30,6 +38,8 @@ function emptySlots(n: number): Array<ItemStack | null> {
 export class Inventory {
   readonly hotbar: Array<ItemStack | null> = emptySlots(HOTBAR_SLOTS);
   readonly main: Array<ItemStack | null> = emptySlots(MAIN_SLOTS);
+  /** The off-hand slot, as a one-slot area (slotClick and the helpers treat it like the others). */
+  private readonly off: Array<ItemStack | null> = emptySlots(1);
   /** Stack held by the mouse cursor (inventory screen). */
   cursor: ItemStack | null = null;
   /** Selected hotbar slot 0..8. */
@@ -39,9 +49,35 @@ export class Inventory {
     return this.hotbar[this.selected] ?? null;
   }
 
+  /** The off-hand stack (null when empty). */
+  get offhand(): ItemStack | null {
+    return this.off[0] ?? null;
+  }
+  set offhand(s: ItemStack | null) {
+    this.off[0] = s !== null && s.count > 0 ? s : null;
+  }
+
+  /** Swap the selected hotbar stack with the off-hand stack (either may be empty). */
+  swapOffhand(): void {
+    const held = this.hotbar[this.selected] ?? null;
+    this.hotbar[this.selected] = this.off[0] ?? null;
+    this.off[0] = held;
+  }
+
+  /** Remove `count` (a non-negative integer) from the off-hand stack; false (nothing removed) when it holds fewer. */
+  consumeOffhand(count = 1): boolean {
+    if (!validCount(count)) return false;
+    if (count === 0) return true;
+    const s = this.off[0] ?? null;
+    if (s === null || s.count < count) return false;
+    s.count -= count;
+    if (s.count <= 0) this.off[0] = null;
+    return true;
+  }
+
   /**
    * Put `count` of `item` into the inventory: first topping up existing stacks of the item
-   * (hotbar, then backpack), then into empty hotbar slots, then empty backpack slots.
+   * (hotbar, backpack, off-hand), then into empty hotbar slots, then empty backpack slots.
    * Returns the amount that did not fit.
    */
   add(item: number, count: number): number {
@@ -52,21 +88,25 @@ export class Inventory {
     let left = count;
     left = this.topUp(this.hotbar, item, left, max);
     left = this.topUp(this.main, item, left, max);
+    left = this.topUp(this.off, item, left, max);
     left = this.fillEmpty(this.hotbar, item, left, max);
     left = this.fillEmpty(this.main, item, left, max);
     return left;
   }
 
-  /** Total count of `item` in the hotbar and the backpack (not the cursor). */
+  /** Total count of `item` in the hotbar, the backpack and the off-hand (not the cursor). */
   count(item: number): number {
     let n = 0;
     for (const s of this.hotbar) if (s !== null && s.item === item) n += s.count;
     for (const s of this.main) if (s !== null && s.item === item) n += s.count;
+    const o = this.off[0];
+    if (o && o.item === item) n += o.count;
     return n;
   }
 
   /**
-   * Remove `count` of `item`, preferring the selected slot, then the hotbar, then the backpack.
+   * Remove `count` of `item`, preferring the selected slot, then the hotbar, then the backpack,
+   * then the off-hand.
    * All or nothing: returns false (and removes nothing) when there are not enough. `count` must
    * be a non-negative integer: 0 trivially succeeds; a negative, fractional or non-finite count
    * is a caller bug and is refused (false) — it could otherwise create items or leave a stack
@@ -80,6 +120,7 @@ export class Inventory {
     left = this.takeFrom(this.hotbar, this.selected, item, left);
     for (let i = 0; i < HOTBAR_SLOTS && left > 0; i++) left = this.takeFrom(this.hotbar, i, item, left);
     for (let i = 0; i < MAIN_SLOTS && left > 0; i++) left = this.takeFrom(this.main, i, item, left);
+    this.takeFrom(this.off, 0, item, left);
     return true;
   }
 
@@ -103,21 +144,31 @@ export class Inventory {
    *               into the same item (as far as it fits) or swap with a different item.
    *  - right (2): empty cursor picks up half (rounded up); otherwise place one item into an
    *               empty slot or onto the same item; a different item is swapped.
-   *  - shift    : move the slot's whole stack to the other area (hotbar <-> backpack), topping
-   *               up existing stacks first; whatever does not fit stays. The cursor is untouched.
+   *  - shift    : move the slot's whole stack to the other area (hotbar <-> backpack; from the
+   *               off-hand into the hotbar, then the backpack), topping up existing stacks
+   *               first; whatever does not fit stays. The cursor is untouched.
    */
   slotClick(area: InventoryArea, index: number, button: 0 | 2, shift: boolean): void {
-    const slots = area === 'hotbar' ? this.hotbar : this.main;
+    const slots = area === 'hotbar' ? this.hotbar : area === 'offhand' ? this.off : area === 'inventory' ? this.main : null;
+    if (slots === null) return;
     if (!Number.isInteger(index) || index < 0 || index >= slots.length) return;
     // Only the two documented buttons (a middle click from an untyped caller is not a right click).
     if (button !== 0 && button !== 2) return;
     const slot = slots[index] ?? null;
     if (shift) {
       if (slot === null) return;
-      const other = area === 'hotbar' ? this.main : this.hotbar;
       const max = maxStackOf(slot.item);
-      let left = this.topUp(other, slot.item, slot.count, max);
-      left = this.fillEmpty(other, slot.item, left, max);
+      let left = slot.count;
+      if (area === 'offhand') {
+        left = this.topUp(this.hotbar, slot.item, left, max);
+        left = this.topUp(this.main, slot.item, left, max);
+        left = this.fillEmpty(this.hotbar, slot.item, left, max);
+        left = this.fillEmpty(this.main, slot.item, left, max);
+      } else {
+        const other = area === 'hotbar' ? this.main : this.hotbar;
+        left = this.topUp(other, slot.item, left, max);
+        left = this.fillEmpty(other, slot.item, left, max);
+      }
       if (left <= 0) slots[index] = null;
       else slot.count = left;
       return;
@@ -200,9 +251,22 @@ export class Inventory {
     return c;
   }
 
+  /**
+   * Closing the inventory screen: the cursor stack goes back into the inventory like a pickup
+   * (add). Returns what did not fit, taken off the cursor too (the caller throws it into the
+   * world), or null.
+   */
+  stowCursor(): ItemStack | null {
+    const c = this.takeCursor();
+    if (c === null) return null;
+    const left = this.add(c.item, c.count);
+    return left > 0 ? { item: c.item, count: left } : null;
+  }
+
   clear(): void {
     this.hotbar.fill(null);
     this.main.fill(null);
+    this.off[0] = null;
     this.cursor = null;
     this.selected = 0;
   }
@@ -215,6 +279,7 @@ export class Inventory {
     w.u8(Number.isInteger(sel) && sel >= 0 && sel < HOTBAR_SLOTS ? sel : 0);
     for (const s of this.hotbar) writeSlot(w, s);
     for (const s of this.main) writeSlot(w, s);
+    writeSlot(w, this.off[0] ?? null);
     writeSlot(w, this.cursor);
   }
 
@@ -231,10 +296,12 @@ export class Inventory {
     const main: Array<ItemStack | null> = [];
     for (let i = 0; i < HOTBAR_SLOTS; i++) hotbar.push(readSlot(r));
     for (let i = 0; i < MAIN_SLOTS; i++) main.push(readSlot(r));
+    const offhand = readSlot(r);
     const cursor = readSlot(r);
     this.selected = sel;
     for (let i = 0; i < HOTBAR_SLOTS; i++) this.hotbar[i] = hotbar[i]!;
     for (let i = 0; i < MAIN_SLOTS; i++) this.main[i] = main[i]!;
+    this.off[0] = offhand;
     this.cursor = cursor;
   }
 
@@ -269,6 +336,49 @@ export class Inventory {
     if (s.count <= 0) slots[i] = null;
     return left - n;
   }
+}
+
+/**
+ * The item pick block puts in hand for a cell: the block itself (block id == item id), never its
+ * mining drop; -1 for air, liquids, the unloaded sentinel and blocks that are no item.
+ */
+export function pickBlockItem(cell: number): number {
+  const id = cell & ID_MASK;
+  if (id === AIR || id === B.UNLOADED || LIQUID[id] !== 0 || !isBlockItem(id)) return -1;
+  return id;
+}
+
+/**
+ * Pick block (DESIGN 选取方块) on an inventory: put block item `item` in hand. Pure: the result
+ * depends on the inventory alone, so a client predicts it exactly (NETCODE section 10).
+ *  - Already in the hotbar: that slot is selected (the selected slot first, if it holds it).
+ *  - Creative, not in the hotbar: a full stack goes into the selected slot when it is empty, else
+ *    into the first empty hotbar slot (selected), else it replaces the selected slot.
+ *  - Survival, only in the backpack: that stack swaps places with the selected hotbar slot. No
+ *    items are ever created; with none at all nothing happens (false).
+ * The off-hand is never involved. Returns true when the item is in hand afterwards (inv.selected).
+ */
+export function pickBlockInto(inv: Inventory, item: number, creative: boolean): boolean {
+  if (!isItem(item)) return false;
+  const holds = (s: ItemStack | null | undefined): boolean => s != null && s.count > 0 && s.item === item;
+  const empty = (s: ItemStack | null | undefined): boolean => s == null || s.count <= 0;
+  let slot = holds(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(holds);
+  if (slot < 0) {
+    if (creative) {
+      slot = empty(inv.hotbar[inv.selected]) ? inv.selected : inv.hotbar.findIndex(empty);
+      if (slot < 0) slot = inv.selected;
+      inv.hotbar[slot] = { item, count: maxStackOf(item) };
+    } else {
+      const j = inv.main.findIndex(holds);
+      if (j < 0) return false;
+      slot = inv.selected;
+      const cur = inv.hotbar[slot] ?? null;
+      inv.hotbar[slot] = inv.main[j]!;
+      inv.main[j] = empty(cur) ? null : cur;
+    }
+  }
+  inv.selected = slot;
+  return true;
 }
 
 /** A count consume() accepts: a non-negative integer. */

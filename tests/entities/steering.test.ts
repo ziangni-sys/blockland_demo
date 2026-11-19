@@ -23,7 +23,7 @@ describe('ACCEPTANCE 21 — steering', () => {
     const b = new Bench();
     const ship = helmShip(b);
     b.drive(ship, (t) => ({ p: vec3(0.5 + 2 * t * DT, 60.5 + 0.1 * Math.sin(t * 0.2), 0.5 - 1 * t * DT), q: qfromYaw(0.3 * t * DT) }));
-    const p = b.entities.createPlayer('survival', 0.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 1.5);
     b.tick(3);
     expect(b.entities.startSteering(p, ship, 0, 61, -2)).toBe(true);
     expect(p.steeringShipId).toBe(ship.id);
@@ -51,7 +51,7 @@ describe('ACCEPTANCE 21 — steering', () => {
     fill(b.world, -30, 40, -30, 29, 40, 29, B.STONE);
     const ship = helmShip(b);
     b.drive(ship, (t) => ({ p: vec3(0.5 + 1 * t * DT, 60.5, 0.5), q: qfromYaw(0.2 * t * DT) }));
-    const p = b.entities.createPlayer('survival', 0.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 1.5);
     p.spawn.x = 10.5;
     p.spawn.y = 41;
     p.spawn.z = -7.5;
@@ -88,7 +88,7 @@ describe('ACCEPTANCE 21 — steering', () => {
     const b = new Bench();
     const ship = helmShip(b);
     b.drive(ship, (t) => ({ p: vec3(0.5 + 1 * t * DT, 60.5, 0.5), q: qfromYaw(0) }));
-    const p = b.entities.createPlayer('survival', 0.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 1.5);
     const item = b.entities.spawnItem(2.5, 61.3, 2.5, B.COBBLE, 3, vec3(0, 0, 0));
     b.tick(10);
     expect(item.carrierId).toBe(ship.id);
@@ -102,7 +102,7 @@ describe('ACCEPTANCE 21 — steering', () => {
     expect(p.carrierId).toBe(ship.id);
     b.entities.startSteering(p, ship, 0, 61, -2);
     b.tick(2);
-    b.entities.releaseRiders(ship);
+    b.entities.releaseRiders(ship, null);
     expect(p.steeringShipId).toBe(0);
     expect(p.carrierId).toBe(0);
     expect(item.carrierId).toBe(0);
@@ -116,7 +116,7 @@ describe('ACCEPTANCE 21 — steering', () => {
     b.drive(ship, (t) => ({ p: vec3(0.5, 60.5, 0.5 - 2 * t * DT), q: qfromYaw(0) }));
     // a low beam across the deck path at the helmsman's head height
     fill(b.world, -10, 62, -12, 10, 62, -12, B.STONE);
-    const p = b.entities.createPlayer('survival', 0.5, 61, 1.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 1.5);
     b.tick(2);
     b.entities.startSteering(p, ship, 0, 61, -2);
     b.tickUntil(() => p.steeringShipId === 0, 300);
@@ -125,7 +125,7 @@ describe('ACCEPTANCE 21 — steering', () => {
     // removed ship
     const c = new Bench();
     const ship2 = helmShip(c);
-    const q = c.entities.createPlayer('survival', 0.5, 61, 1.5);
+    const q = c.entities.spawnPlayer('survival', 0.5, 61, 1.5);
     c.tick(2);
     c.entities.startSteering(q, ship2, 0, 61, -2);
     c.tick(2);
@@ -161,7 +161,7 @@ describe('ACCEPTANCE 22 — drowning and dry hulls', () => {
     const { b, ship } = sunkBoat(B.STONE);
     ship.hull = analyzeHull(ship.grid);
     expect(ship.hull!.floats).toBe(false);
-    const p = b.entities.createPlayer('survival', 0.5, 45, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 45, 0.5);
     b.tick(2);
     expect(b.entities.startSteering(p, ship, 0, 45, -1)).toBe(true);
     b.tick(5);
@@ -179,7 +179,7 @@ describe('ACCEPTANCE 22 — drowning and dry hulls', () => {
     const { b, ship } = sunkBoat(B.PLANKS_OAK);
     ship.hull = analyzeHull(ship.grid);
     expect(ship.hull!.floats).toBe(true);
-    const p = b.entities.createPlayer('survival', 0.5, 45, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 45, 0.5);
     b.tick(2);
     b.entities.startSteering(p, ship, 0, 45, -1);
     for (let i = 0; i < 400; i++) {
@@ -204,7 +204,7 @@ describe('ACCEPTANCE 22 — drowning and dry hulls', () => {
     ship.hull = analyzeHull(ship.grid);
     expect(ship.hull!.floats).toBe(false);
     b.drive(ship, (t) => ({ p: vec3(0.5, 45.5 - 0.02 * Math.sin(t * 0.1), 0.5), q: qfromYaw(0) }));
-    const p = b.entities.createPlayer('survival', 0.5, 45, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 45, 0.5);
     for (let i = 0; i < 400; i++) {
       b.tick();
       expect(p.headWet).toBe(false);

@@ -24,7 +24,7 @@ describe('review: item drops buried deep in rock', () => {
   it('do not repeat a failing free-spot search every tick (bounded cost)', () => {
     const b = new Bench();
     fill(b.world, -12, 20, -12, 12, 50, 12, B.STONE); // solid hill, top layer y = 50
-    b.entities.createPlayer('survival', 0.5, 51, 0.5);
+    b.entities.spawnPlayer('survival', 0.5, 51, 0.5);
     // Ten drops of blade cells 3 blocks under the surface (cell y = 47).
     for (let k = 0; k < 10; k++) b.entities.spawnItem(-5.5 + k, 47.5, 0.5, B.CANVAS, 1);
     const spy = vi.mocked(shape.nearestFreeOffset);

@@ -312,9 +312,9 @@ describe('stopRotor (blockify in place, ACCEPTANCE 10)', () => {
     expect(drops).toEqual([`${B.FLOWER_RED}@0.5,67.5,1.5`, `${B.WOOL_RED}@0.5,66.5,1.5`].sort());
   });
 
-  it('creative mode: nothing drops', () => {
+  it('drops off (a creative world): nothing drops', () => {
     const s = millScene();
-    s.host.creative = true;
+    s.host.dropsEnabled = false;
     const r = started(s);
     s.world.setCell(BX, BY + 2, BZ + 1, c(B.STONE));
     s.world.setCell(BX, BY + 3, BZ + 1, c(B.TORCH));
@@ -345,23 +345,28 @@ describe('stopRotor (blockify in place, ACCEPTANCE 10)', () => {
   });
 });
 
-describe('hub glue (ACCEPTANCE 14)', () => {
+describe('hub glue (ACCEPTANCE 14): the face stays on the bearing', () => {
   for (const angle of [0, 1.3, Math.PI, -2.0]) {
-    it(`glue between bearing and hub survives a start / stop at angle ${angle}`, () => {
+    it(`glue between bearing and hub stays on the bearing while the rotor spins and joins the hub again after a stop at angle ${angle}`, () => {
       const s = millScene();
       s.host.worldGlue.add(BX, BY, BZ, PZ);
       const r = started(s);
-      expect(r.hubGlue).toBe(true);
-      expect(s.host.worldGlue.has(BX, BY, BZ, PZ)).toBe(false);
+      // The bearing is a glueable block that stays behind: the face stays in the world, exposed
+      // on the bearing's front; only the arm-log face went along with the rotor.
+      expect(s.host.worldGlue.has(BX, BY, BZ, PZ)).toBe(true);
+      expect(s.host.worldGlue.size).toBe(1);
+      expect(r.glue.size).toBe(1);
+      expect(r.glue.has(BX, BY, BZ + 1, NZ)).toBe(false); // not duplicated into the rotor
       for (let i = 0; i < 7; i++) s.mgr.step();
       setAngle(r, angle);
       s.mgr.stopRotor(r);
+      expect(s.world.getCell(BX, BY, BZ + 1)).toBe(c(B.CANVAS)); // the hub is back in front of it
       expect(s.host.worldGlue.has(BX, BY, BZ, PZ)).toBe(true);
       expect(s.host.worldGlue.size).toBe(2);
     });
   }
 
-  it('no glue is invented when there was none, nor restored when the hub dropped', () => {
+  it('no glue is invented when there was none; when the hub was lost the glue stays on the bearing', () => {
     const s = millScene();
     const r = started(s);
     s.mgr.stopRotor(r);
@@ -372,6 +377,9 @@ describe('hub glue (ACCEPTANCE 14)', () => {
     const r2 = started(t);
     r2.grid.setCell(BX, BY, BZ + 1, 0, SET_EXPLOSION); // hub blown away
     t.mgr.stopRotor(r2);
+    expect(t.world.getCell(BX, BY, BZ + 1)).toBe(0);
+    expect(t.host.worldGlue.has(BX, BY, BZ, PZ)).toBe(true);
+    t.world.setCell(BX, BY, BZ, 0); // the bearing goes too: neither side is glueable any more
     expect(t.host.worldGlue.has(BX, BY, BZ, PZ)).toBe(false);
   });
 });

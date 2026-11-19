@@ -3,7 +3,15 @@
  * "now" is always a parameter) so they are unit-tested in Node.
  */
 import { t } from './i18n';
-import type { Language } from './model';
+import type { GuestLink, Language } from './model';
+
+/**
+ * `text` (a player's name) isolated from the sentence around it (FSI ... PDI): a name in a
+ * right-to-left script, or ending in neutral characters, keeps the sentence's order.
+ */
+export function isolate(text: string): string {
+  return `\u2068${text}\u2069`;
+}
 
 /** U+2212 MINUS SIGN: same width as digits in most fonts, unlike the hyphen. */
 const MINUS = String.fromCharCode(0x2212);
@@ -178,4 +186,17 @@ export function throttleNotch(throttle: number): ThrottleNotch {
 export function arcDash(fill: number, sweep: number, circ: number): string {
   const len = clamp(finite(fill), 0, 1) * sweep * circ;
   return `${len.toFixed(2)} ${circ.toFixed(2)}`;
+}
+
+/** A byte count, short: "820 B", "4.3 KB", "1.2 MB". */
+export function formatBytes(n: number): string {
+  const v = Math.max(0, finite(n));
+  if (v < 1024) return `${Math.round(v)} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** A guest's connection on the host's list: what the server sends a second, the backlog, the round trip. */
+export function formatGuestLink(g: GuestLink, lang: Language): string {
+  return t(lang, 'room.traffic', { rate: formatBytes(g.bytesPerSec), backlog: formatBytes(g.backlogBytes), rtt: g.rttMs > 0 ? `${Math.round(g.rttMs)}` : '–' });
 }

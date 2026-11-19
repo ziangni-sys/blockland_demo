@@ -14,8 +14,9 @@ import { vec3, type Vec3 } from '../../src/core/math';
 import type { ItemEntity } from '../../src/entities/entity';
 import { exportSave } from '../../src/sim/persist';
 import type { Simulation } from '../../src/sim/simulation';
+import type { Me, TestWorld } from './world';
 import type { Rotor, Ship } from '../../src/structures/structure';
-import { boxOverlapsSolid } from '../../src/voxel/shape';
+import { boxOverlapsSolid, deepestPenetration } from '../../src/voxel/shape';
 import {
   B,
   Events,
@@ -28,13 +29,13 @@ import {
   buildHull,
   copy,
   fillBox,
-  flatSim,
+  flatWorld,
   hdist,
   local,
   makeCell,
   facingState,
   releaseWheelByClick,
-  seaSim,
+  seaWorld,
   steerToYaw,
   stopInput,
   walkTo,
@@ -55,16 +56,17 @@ import {
 const RAFT_A = { x0: 0, z0: 0, x1: 6, z1: 6, y: SEA_TOP - 1, block: B.PLANKS_OAK, gunwale: ['N', 'E', 'W'] as const, helm: { x: 3, z: 2 } };
 const DECK_TOP = SEA_TOP; // deck-local y of the deck's top face (deck cells are y = SEA_TOP - 1)
 
-function raftA(mode: 'creative' | 'survival', opts: { pier?: boolean; spawn?: Vec3 } = {}): { sim: Simulation; ship: Ship } {
-  const sim = seaSim(mode, opts.spawn ?? vec3(3.5, SEA_TOP, 3.5));
+function raftA(mode: 'creative' | 'survival', opts: { pier?: boolean; spawn?: Vec3 } = {}): { w: TestWorld; sim: Simulation; me: Me; ship: Ship } {
+  const w = seaWorld(mode, opts.spawn ?? vec3(3.5, SEA_TOP, 3.5));
+  const { sim, me } = w;
   if (opts.pier) fillBox(sim.world, 0, SEA_FLOOR, 7, 6, SEA_TOP - 1, 10, B.COBBLE);
   const helm = buildHull(sim, { ...RAFT_A, gunwale: [...RAFT_A.gunwale] });
-  sim.advance(2);
-  if (opts.spawn) walkTo(sim, () => vec3(3.5, 0, 4.2)); // from the pier onto the deck, behind the helm
-  const ship = assembleAtHelm(sim, helm);
+  w.tick(2);
+  if (opts.spawn) walkTo(w, () => vec3(3.5, 0, 4.2)); // from the pier onto the deck, behind the helm
+  const ship = assembleAtHelm(w, helm);
   expect(ship.grid.count).toBe(49 + 7 + 6 + 6 + 1);
-  sim.advance(40); // settle on the water
-  return { sim, ship };
+  w.tick(40); // settle on the water
+  return { w, sim, me, ship };
 }
 
 /** Accumulated heading change of a structure, tick by tick (no wrap-around jumps). */
@@ -90,22 +92,32 @@ function distToRect(lx: number, lz: number, x0: number, z0: number, x1: number, 
   return -Math.min(lx - x0, x1 - lx, lz - z0, z1 - lz);
 }
 
-function inWorldBlock(sim: Simulation): boolean {
-  return boxOverlapsSolid(sim.world, sim.player.box());
+/**
+ * The player's body is inside world blocks. Both copies are checked (see Me.body): the body as the
+ * authority on its movement placed it must not overlap at all; the server's copy of the carried
+ * body (what other players see and the server judges with) no deeper than TestWorld.carriedOverlap
+ * (0 in direct mode, where the two are the same body).
+ */
+function inWorldBlock(w: TestWorld, carrier: Ship): boolean {
+  const world = w.sim.world;
+  if (boxOverlapsSolid(world, w.me.body.box())) return true;
+  const box = w.me.player.box();
+  if (!boxOverlapsSolid(world, box)) return false;
+  return (deepestPenetration(world, box)?.depth ?? Infinity) > w.carriedOverlap(carrier, box);
 }
 
 // ====================================================================================== 19
 
 describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水里时脱离；潜行走到甲板边缘不会掉下去；船体没对齐网格时贴墙走不扣血；船转 45° 时在船角附近游泳，不会被拎上船', () => {
   it('会被带着走: a player standing on the deck (not at the wheel) keeps its deck spot and heading while the ship sails and turns for 300 ticks', () => {
-    const { sim, ship } = raftA('survival');
-    const p = sim.player;
-    releaseWheelByClick(sim);
+    const { w, sim, me, ship } = raftA('survival');
+    const p = me.player;
+    releaseWheelByClick(w);
     expect(p.carrierId).toBe(ship.id);
     // The ship sails on under a remembered throttle and rudder (nobody at the wheel).
     ship.throttle = 1;
     ship.rudder = 0.5;
-    sim.advance(40);
+    w.tick(40);
     const l0 = local(ship, p.pos);
     const start = copy(ship.grid.position);
     const yaw = new YawTrack(ship.grid);
@@ -113,7 +125,7 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
     let maxSlip = 0;
     let maxDy = 0;
     for (let i = 0; i < 300; i++) {
-      sim.tick();
+      w.tick();
       yaw.update();
       expect(p.carrierId).toBe(ship.id);
       const l = local(ship, p.pos);
@@ -132,16 +144,16 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
   });
 
   it('走上码头时脱离: walking from the deck onto a pier detaches at once; the ship then leaves without the player', () => {
-    const { sim, ship } = raftA('survival', { pier: true });
-    const p = sim.player;
-    releaseWheelByClick(sim);
+    const { w, sim, me, ship } = raftA('survival', { pier: true });
+    const p = me.player;
+    releaseWheelByClick(w);
     expect(p.carrierId).toBe(ship.id);
     // walk south (astern) onto the pier
-    p.input.yaw = Math.PI;
-    p.input.forward = 1;
+    me.input.yaw = Math.PI;
+    me.input.forward = 1;
     let detachedAt: number | null = null;
     for (let i = 0; i < 60 && p.pos.z < 9; i++) {
-      sim.tick();
+      w.tickWhile();
       const overPier = p.pos.z - p.halfWidth > 7.05; // the whole footprint is above the pier
       if (overPier && p.onGround && detachedAt === null) {
         expect(p.carrierId, 'standing on the pier').toBe(0);
@@ -152,8 +164,8 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
       }
     }
     expect(detachedAt).not.toBeNull();
-    stopInput(sim);
-    sim.advance(40); // let the walk die out
+    stopInput(w);
+    w.tick(40); // let the walk die out
     expect(p.carrierId).toBe(0);
     expect(p.onWorldGround).toBe(true);
     // the ship sails away north; the player stays exactly where it stands
@@ -161,7 +173,7 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
     const shipStart = copy(ship.grid.position);
     ship.throttle = 1;
     for (let i = 0; i < 100; i++) {
-      sim.tick();
+      w.tick();
       expect(p.carrierId).toBe(0);
     }
     expect(shipStart.z - ship.grid.position.z).toBeGreaterThan(1.5);
@@ -174,39 +186,40 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
     // ~0.1 below the top of a pier one block higher than the sea (a step up; raft A floats ~0.2
     // ABOVE its pier: the other case, tested above).
     const pierTop = SEA_TOP + 1;
-    const sim = seaSim('survival', vec3(3.5, pierTop, 4.5));
+    const w = seaWorld('survival', vec3(3.5, pierTop, 4.5));
+    const { sim, me } = w;
     fillBox(sim.world, 0, SEA_FLOOR, 7, 6, pierTop - 1, 10, B.COBBLE);
     fillBox(sim.world, 0, SEA_TOP - 1, 0, 6, SEA_TOP - 1, 6, B.PLANKS_OAK);
     const helm = buildHull(sim, { x0: 0, z0: 0, x1: 6, z1: 6, y: SEA_TOP, block: B.PLANKS_OAK, helm: { x: 3, z: 3 } });
-    sim.advance(2);
-    const ship = assembleAtHelm(sim, helm);
+    w.tick(2);
+    const ship = assembleAtHelm(w, helm);
     expect(ship.grid.count).toBe(99);
-    sim.advance(40);
-    const p = sim.player;
-    releaseWheelByClick(sim);
-    sim.advance(20);
+    w.tick(40);
+    const p = me.player;
+    releaseWheelByClick(w);
+    w.tick(20);
     const deckTop = ship.grid.toWorld(vec3(3.5, pierTop, 5.5)).y;
     expect(deckTop).toBeLessThan(pierTop - 0.05);
     expect(deckTop).toBeGreaterThan(pierTop - 0.6);
     expect(p.carrierId).toBe(ship.id);
-    p.input.yaw = Math.PI; // south, astern onto the pier
-    p.input.forward = 1;
+    me.input.yaw = Math.PI; // south, astern onto the pier
+    me.input.forward = 1;
     let firstOnPier: { z: number; carrier: number } | null = null;
     for (let i = 0; i < 60 && p.pos.z < 9; i++) {
-      sim.tick();
+      w.tickWhile();
       if (firstOnPier === null && p.onWorldGround) firstOnPier = { z: p.pos.z, carrier: p.carrierId };
     }
     expect(firstOnPier, 'stepped up onto the pier').not.toBeNull();
     expect(firstOnPier!.carrier, 'detached the tick the pier was underfoot').toBe(0);
     expect(firstOnPier!.z - p.halfWidth, 'part of the footprint was still over the deck').toBeLessThan(7);
-    stopInput(sim);
-    sim.advance(40);
+    stopInput(w);
+    w.tick(40);
     expect(p.carrierId).toBe(0);
     const here = copy(p.pos);
     const shipStart = copy(ship.grid.position);
     ship.throttle = 1;
     for (let i = 0; i < 100; i++) {
-      sim.tick();
+      w.tick();
       expect(p.carrierId).toBe(0);
     }
     expect(shipStart.z - ship.grid.position.z).toBeGreaterThan(1.5);
@@ -215,19 +228,19 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
   });
 
   it('跳进水里时脱离: jumping off the stern of a sailing ship into the water detaches; the ship leaves the swimmer behind', () => {
-    const { sim, ship } = raftA('creative');
-    const p = sim.player;
-    releaseWheelByClick(sim);
+    const { w, sim, me, ship } = raftA('creative');
+    const p = me.player;
+    releaseWheelByClick(w);
     ship.throttle = 1; // sailing north
-    sim.advance(60);
+    w.tick(60);
     expect(p.carrierId).toBe(ship.id);
     // run astern (south) and jump over the open stern
-    p.input.yaw = yawOf(ship.grid) + Math.PI;
-    p.input.forward = 1;
-    p.input.jump = true;
+    me.input.yaw = yawOf(ship.grid) + Math.PI;
+    me.input.forward = 1;
+    me.input.jump = true;
     let wetAt = -1;
     for (let i = 0; i < 80; i++) {
-      sim.tick();
+      w.tickWhile();
       if (p.wet > 0) {
         wetAt = i;
         break;
@@ -237,11 +250,11 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
     expect(p.carrierId, 'detached on reaching the water').toBe(0);
     expect(local(ship, p.pos).z).toBeGreaterThan(7); // overboard astern
     // tread water while the ship sails on
-    p.input.forward = 0;
+    me.input.forward = 0;
     const swim0 = copy(p.pos);
     const ship0 = copy(ship.grid.position);
     for (let i = 0; i < 100; i++) {
-      sim.tick();
+      w.tick();
       expect(p.carrierId).toBe(0);
     }
     const shipMoved = hdist(ship.grid.position, ship0);
@@ -252,64 +265,65 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
   });
 
   /** Sneak toward the open stern for `ticks` ticks; the walking direction is fixed in the deck frame. */
-  function sneakToStern(sim: Simulation, ship: Ship, ticks: number): { minY: number; maxZ: number } {
-    const p = sim.player;
-    p.input.sneak = true;
-    p.input.forward = 1;
-    p.input.yaw = yawOf(ship.grid) + Math.PI; // deck-local +Z (the carrier turns the look with the deck)
+  function sneakToStern(w: TestWorld, ship: Ship, ticks: number): { minY: number; maxZ: number } {
+    const { me } = w;
+    const p = me.player;
+    me.input.sneak = true;
+    me.input.forward = 1;
+    me.input.yaw = yawOf(ship.grid) + Math.PI; // deck-local +Z (the carrier turns the look with the deck)
     let minY = Infinity;
     let maxZ = -Infinity;
     for (let i = 0; i < ticks; i++) {
-      sim.tick();
+      w.tick();
       const l = local(ship, p.pos);
       expect(p.carrierId).toBe(ship.id);
       expect(p.wet).toBe(0);
       minY = Math.min(minY, l.y);
       maxZ = Math.max(maxZ, l.z);
     }
-    stopInput(sim);
+    stopInput(w);
     return { minY, maxZ };
   }
 
   it('潜行走到甲板边缘不会掉下去: sneaking toward the open stern for 150 ticks stops at the edge (grid-aligned deck)', () => {
-    const { sim, ship } = raftA('survival');
-    releaseWheelByClick(sim);
-    const { minY, maxZ } = sneakToStern(sim, ship, 150);
+    const { w, sim, me, ship } = raftA('survival');
+    releaseWheelByClick(w);
+    const { minY, maxZ } = sneakToStern(w, ship, 150);
     expect(minY).toBeGreaterThan(DECK_TOP - 0.05); // never dropped below the deck surface
     expect(maxZ).toBeGreaterThan(6.6); // it really walked to the edge (deck ends at z = 7) ...
-    expect(local(ship, sim.player.pos).z - sim.player.halfWidth).toBeLessThan(7); // ... and still stands on it
-    sim.advance(20);
-    expect(sim.player.carrierId).toBe(ship.id);
+    expect(local(ship, me.player.pos).z - me.player.halfWidth).toBeLessThan(7); // ... and still stands on it
+    w.tick(20);
+    expect(me.player.carrierId).toBe(ship.id);
   });
 
   it('潜行走到甲板边缘不会掉下去: on a deck yawed 0.6 rad (not grid-aligned) the sneaking player stops at the edge', () => {
-    const { sim, ship } = raftA('survival');
-    steerToYaw(sim, ship, 0.6);
-    releaseWheelByClick(sim);
-    sim.advance(20);
+    const { w, sim, me, ship } = raftA('survival');
+    steerToYaw(w, ship, 0.6);
+    releaseWheelByClick(w);
+    w.tick(20);
     expect(Math.abs(wrap(yawOf(ship.grid) - 0.6))).toBeLessThan(0.02);
-    const { minY, maxZ } = sneakToStern(sim, ship, 150);
+    const { minY, maxZ } = sneakToStern(w, ship, 150);
     expect(minY).toBeGreaterThan(DECK_TOP - 0.05);
     expect(maxZ).toBeGreaterThan(6.6);
-    expect(local(ship, sim.player.pos).z - sim.player.halfWidth).toBeLessThan(7);
+    expect(local(ship, me.player.pos).z - me.player.halfWidth).toBeLessThan(7);
   });
 
   it('潜行走到甲板边缘不会掉下去: on a yawed deck that keeps turning and sailing, the sneaking player stays at the edge', () => {
-    const { sim, ship } = raftA('survival');
-    steerToYaw(sim, ship, -0.7);
-    releaseWheelByClick(sim);
+    const { w, sim, me, ship } = raftA('survival');
+    steerToYaw(w, ship, -0.7);
+    releaseWheelByClick(w);
     ship.throttle = 0.6;
     ship.rudder = 0.6;
-    sim.advance(30);
+    w.tick(30);
     const yaw = new YawTrack(ship.grid);
-    const p = sim.player;
-    p.input.sneak = true;
-    p.input.forward = 1;
-    p.input.yaw = yawOf(ship.grid) + Math.PI;
+    const p = me.player;
+    me.input.sneak = true;
+    me.input.forward = 1;
+    me.input.yaw = yawOf(ship.grid) + Math.PI;
     let minY = Infinity;
     let maxZ = -Infinity;
     for (let i = 0; i < 200; i++) {
-      sim.tick();
+      w.tick();
       yaw.update();
       const l = local(ship, p.pos);
       expect(p.carrierId).toBe(ship.id);
@@ -325,27 +339,28 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
 
   it('潜行走到甲板边缘不会掉下去: on a raft without gunwale yawed 45 degrees, sneaking diagonally toward a corner stops there', () => {
     // 7x7 plank raft, helm in the middle; every edge open
-    const sim = seaSim('survival', vec3(3.5, SEA_TOP, 4.5));
+    const w = seaWorld('survival', vec3(3.5, SEA_TOP, 4.5));
+    const { sim, me } = w;
     const helm = buildHull(sim, { x0: 0, z0: 0, x1: 6, z1: 6, y: SEA_TOP - 1, block: B.PLANKS_OAK, helm: { x: 3, z: 3 } });
-    sim.advance(2);
-    const ship = assembleAtHelm(sim, helm);
-    sim.advance(30);
-    steerToYaw(sim, ship, Math.PI / 4);
-    releaseWheelByClick(sim);
-    sim.advance(20);
-    const p = sim.player;
-    p.input.sneak = true;
-    p.input.forward = 1;
-    p.input.yaw = yawOf(ship.grid) + Math.atan2(-1, -1); // deck-local (+x, +z): the stern-starboard corner (7, 7)
+    w.tick(2);
+    const ship = assembleAtHelm(w, helm);
+    w.tick(30);
+    steerToYaw(w, ship, Math.PI / 4);
+    releaseWheelByClick(w);
+    w.tick(20);
+    const p = me.player;
+    me.input.sneak = true;
+    me.input.forward = 1;
+    me.input.yaw = yawOf(ship.grid) + Math.atan2(-1, -1); // deck-local (+x, +z): the stern-starboard corner (7, 7)
     let minY = Infinity;
     for (let i = 0; i < 200; i++) {
-      sim.tick();
+      w.tick();
       const l = local(ship, p.pos);
       expect(p.carrierId).toBe(ship.id);
       expect(p.wet).toBe(0);
       minY = Math.min(minY, l.y);
     }
-    stopInput(sim);
+    stopInput(w);
     const l = local(ship, p.pos);
     expect(minY).toBeGreaterThan(DECK_TOP - 0.05);
     expect(Math.max(l.x, l.z)).toBeGreaterThan(6.6); // at an edge next to the corner
@@ -359,28 +374,29 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
    * put across the deck at chest height (stone y SEA_TOP+1 .. SEA_TOP+2 over z 1..2, south face
    * at z = 3): the flat deck floats under it, a player on the deck walks into it.
    */
-  function wallScene(shipYaw: number): { sim: Simulation; ship: Ship } {
-    const sim = seaSim('survival', vec3(6.5, SEA_TOP, 7.5));
+  function wallScene(shipYaw: number): { w: TestWorld; sim: Simulation; me: Me; ship: Ship } {
+    const w = seaWorld('survival', vec3(6.5, SEA_TOP, 7.5));
+    const { sim, me } = w;
     const helm = buildHull(sim, { x0: 0, z0: 0, x1: 12, z1: 12, y: SEA_TOP - 1, block: B.PLANKS_OAK, helm: { x: 6, z: 6 } });
-    sim.advance(2);
-    const ship = assembleAtHelm(sim, helm);
-    sim.advance(30);
-    steerToYaw(sim, ship, shipYaw);
-    releaseWheelByClick(sim);
-    sim.advance(10);
+    w.tick(2);
+    const ship = assembleAtHelm(w, helm);
+    w.tick(30);
+    steerToYaw(w, ship, shipYaw);
+    releaseWheelByClick(w);
+    w.tick(10);
     fillBox(sim.world, -10, SEA_TOP + 1, 1, 22, SEA_TOP + 2, 2, B.STONE);
-    sim.advance(2);
-    return { sim, ship };
+    w.tick(2);
+    return { w, sim, me, ship };
   }
 
   for (const shipYaw of [0.4, -0.25, Math.PI / 4]) {
     it(`船体没对齐网格时贴墙走不扣血: survival, ship yawed ${shipYaw.toFixed(2)} rad, walking along a world wall pressing into it costs no health`, () => {
-      const { sim, ship } = wallScene(shipYaw);
-      const p = sim.player;
+      const { w, sim, me, ship } = wallScene(shipYaw);
+      const p = me.player;
       const ev = new Events(sim);
       expect(Math.abs(wrap(yawOf(ship.grid) - shipYaw))).toBeLessThan(0.03);
       // to the wall
-      walkTo(sim, () => vec3(p.pos.x, 0, 3.5), 0.1, 60);
+      walkTo(w, () => vec3(p.pos.x, 0, 3.5), 0.1, 60);
       expect(p.carrierId).toBe(ship.id);
       let contact = 0;
       // along the wall, pressing into it (north-east, north-west, ...), looking where it goes
@@ -394,17 +410,17 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
       ];
       for (const [yaw, n] of phases) {
         for (let i = 0; i < n; i++) {
-          p.input.yaw = yaw;
-          p.input.forward = 1;
-          sim.tick();
+          me.input.yaw = yaw;
+          me.input.forward = 1;
+          w.tick();
           expect(p.health).toBe(20);
-          expect(inWorldBlock(sim)).toBe(false);
+          expect(inWorldBlock(w, ship)).toBe(false);
           expect(p.carrierId).toBe(ship.id);
-          if (Math.abs(p.pos.z - p.halfWidth - 3) < 0.01) contact++;
+          if (Math.abs(me.body.pos.z - p.halfWidth - 3) < 0.01) contact++; // against the wall face (Me.body)
         }
       }
-      stopInput(sim);
-      sim.advance(20);
+      stopInput(w);
+      w.tick(20);
       expect(contact).toBeGreaterThan(80); // it really walked along the wall face
       expect(ev.of('playerHurt')).toEqual([]);
       expect(p.health).toBe(20);
@@ -412,24 +428,24 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
   }
 
   it('船体没对齐网格时贴墙走不扣血: survival, against a world wall on a deck that keeps turning under it, no health is lost', () => {
-    const { sim, ship } = wallScene(0.3);
-    const p = sim.player;
+    const { w, sim, me, ship } = wallScene(0.3);
+    const p = me.player;
     const ev = new Events(sim);
-    walkTo(sim, () => vec3(p.pos.x, 0, 3.5), 0.1, 60);
+    walkTo(w, () => vec3(p.pos.x, 0, 3.5), 0.1, 60);
     ship.rudder = -0.4; // remembered rudder: the deck slowly turns under the wall
     const yaw = new YawTrack(ship.grid);
     let contact = 0;
     for (let i = 0; i < 168; i++) {
       // back and forth along the wall (12 ticks east, then 24-tick legs), always pressing into it
       const east = i < 12 || Math.floor((i - 12) / 24) % 2 === 1;
-      p.input.yaw = east ? -Math.PI / 2 + 0.4 : Math.PI / 2 - 0.4;
-      p.input.forward = 1;
-      sim.tick();
+      me.input.yaw = east ? -Math.PI / 2 + 0.4 : Math.PI / 2 - 0.4;
+      me.input.forward = 1;
+      w.tick();
       yaw.update();
       expect(p.health).toBe(20);
-      expect(inWorldBlock(sim)).toBe(false);
+      expect(inWorldBlock(w, ship)).toBe(false);
       expect(p.carrierId).toBe(ship.id);
-      if (Math.abs(p.pos.z - p.halfWidth - 3) < 0.01) contact++;
+      if (Math.abs(me.body.pos.z - p.halfWidth - 3) < 0.01) contact++; // against the wall face (Me.body)
     }
     expect(Math.abs(yaw.total)).toBeGreaterThan(0.2);
     expect(contact).toBeGreaterThan(80);
@@ -437,21 +453,21 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
   });
 
   it('船体没对齐网格时贴墙走不扣血: survival, the yawed ship is pushed against the wall by its remembered throttle while the player walks along it', () => {
-    const { sim, ship } = wallScene(-0.5);
-    const p = sim.player;
+    const { w, sim, me, ship } = wallScene(-0.5);
+    const p = me.player;
     const ev = new Events(sim);
-    walkTo(sim, () => vec3(p.pos.x, 0, 3.5), 0.1, 60);
+    walkTo(w, () => vec3(p.pos.x, 0, 3.5), 0.1, 60);
     ship.throttle = 1; // bow first under the wall until the helm (one block high) meets it
     const start = copy(ship.grid.position);
     let contact = 0;
     for (let i = 0; i < 200; i++) {
-      p.input.yaw = Math.floor(i / 20) % 2 === 0 ? -Math.PI / 2 + 0.4 : Math.PI / 2 - 0.4;
-      p.input.forward = 1;
-      sim.tick();
+      me.input.yaw = Math.floor(i / 20) % 2 === 0 ? -Math.PI / 2 + 0.4 : Math.PI / 2 - 0.4;
+      me.input.forward = 1;
+      w.tick();
       expect(p.health).toBe(20);
-      expect(inWorldBlock(sim)).toBe(false);
+      expect(inWorldBlock(w, ship)).toBe(false);
       expect(p.carrierId).toBe(ship.id);
-      if (Math.abs(p.pos.z - p.halfWidth - 3) < 0.01) contact++;
+      if (Math.abs(me.body.pos.z - p.halfWidth - 3) < 0.01) contact++; // against the wall face (Me.body)
     }
     expect(start.z - ship.grid.position.z).toBeGreaterThan(1.5); // it sailed up to the wall
     expect(Math.abs(Math.sin(2 * yawOf(ship.grid)))).toBeGreaterThan(0.2); // still off the grid
@@ -464,38 +480,39 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
    * turned to 45 degrees by its helmsman. The swimmer starts in the water just outside the
    * corner that points west.
    */
-  function swimScene(): { sim: Simulation; ship: Ship; corner: Vec3 } {
-    const sim = seaSim('survival', vec3(3.5, SEA_TOP, 4.5));
+  function swimScene(): { w: TestWorld; sim: Simulation; me: Me; ship: Ship; corner: Vec3 } {
+    const w = seaWorld('survival', vec3(3.5, SEA_TOP, 4.5));
+    const { sim, me } = w;
     const helm = buildHull(sim, { x0: 0, z0: 0, x1: 6, z1: 6, y: SEA_TOP - 1, block: B.PLANKS_OAK, gunwale: ['N', 'S', 'E', 'W'], helm: { x: 3, z: 3 } });
-    sim.advance(2);
-    const ship = assembleAtHelm(sim, helm);
-    sim.advance(30);
-    steerToYaw(sim, ship, Math.PI / 4);
-    releaseWheelByClick(sim);
-    sim.advance(20);
+    w.tick(2);
+    const ship = assembleAtHelm(w, helm);
+    w.tick(30);
+    steerToYaw(w, ship, Math.PI / 4);
+    releaseWheelByClick(w);
+    w.tick(20);
     expect(Math.abs(wrap(yawOf(ship.grid) - Math.PI / 4))).toBeLessThan(0.02);
     const corner = ship.grid.toWorld(vec3(0, SEA_TOP - 1, 0)); // bow-port corner: points west at 45 degrees
-    return { sim, ship, corner };
+    return { w, sim, me, ship, corner };
   }
 
   it('船转 45° 时在船角附近游泳，不会被拎上船: treading water at the corner while the ship drifts corner-first into the swimmer', () => {
-    const { sim, ship, corner } = swimScene();
-    const p = sim.player;
+    const { w, sim, me, ship, corner } = swimScene();
+    const p = me.player;
     const centre = ship.grid.toWorld(vec3(3.5, SEA_TOP - 1, 3.5));
     const ux = (corner.x - centre.x) / hdist(corner, centre);
     expect(ux).toBeLessThan(-0.99); // the corner points west
     // just ahead of the bow face, at its port corner
     const at = ship.grid.toWorld(vec3(0.25, SEA_TOP - 1, -0.5));
-    sim.teleport(at.x, WATER_SURFACE - 1.3, at.z);
-    stopInput(sim);
-    p.input.jump = true; // treading water
+    me.teleport(at.x, WATER_SURFACE - 1.3, at.z);
+    stopInput(w);
+    me.input.jump = true; // treading water
     ship.throttle = 0.5; // the ship gets under way bow first (north-west), into the swimmer
     const deckTop = ship.grid.toWorld(vec3(3.5, SEA_TOP, 3.5)).y;
     const start = copy(p.pos);
     let maxY = -Infinity;
     let minDist = Infinity;
     for (let i = 0; i < 300; i++) {
-      sim.tick();
+      w.tick();
       expect(p.carrierId).toBe(0);
       const l = local(ship, p.pos);
       minDist = Math.min(minDist, distToRect(l.x, l.z, 0, 0, 7, 7));
@@ -509,20 +526,20 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
   });
 
   it('船转 45° 时在船角附近游泳，不会被拎上船: swimming (W + space) into the corner of the ship at rest never lifts the swimmer aboard', () => {
-    const { sim, ship, corner } = swimScene();
-    const p = sim.player;
+    const { w, sim, me, ship, corner } = swimScene();
+    const p = me.player;
     const centre = ship.grid.toWorld(vec3(3.5, SEA_TOP - 1, 3.5));
     const ux = (corner.x - centre.x) / hdist(corner, centre);
     const uz = (corner.z - centre.z) / hdist(corner, centre);
-    sim.teleport(corner.x + ux * 3, WATER_SURFACE - 1.3, corner.z + uz * 3);
+    me.teleport(corner.x + ux * 3, WATER_SURFACE - 1.3, corner.z + uz * 3);
     const deckTop = ship.grid.toWorld(vec3(3.5, SEA_TOP, 3.5)).y;
     let maxY = -Infinity;
     let minDist = Infinity;
     for (let i = 0; i < 200; i++) {
-      p.input.yaw = yawToward(p.pos, corner) + (i < 100 ? 0.15 : -0.15);
-      p.input.forward = 1;
-      p.input.jump = true;
-      sim.tick();
+      me.input.yaw = yawToward(p.pos, corner) + (i < 100 ? 0.15 : -0.15);
+      me.input.forward = 1;
+      me.input.jump = true;
+      w.tick();
       expect(p.carrierId).toBe(0);
       const l = local(ship, p.pos);
       minDist = Math.min(minDist, distToRect(l.x, l.z, 0, 0, 7, 7));
@@ -539,24 +556,25 @@ describe('19. 站在船上的玩家：会被带着走；走上码头、跳进水
 describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘走到甲板会切换到跟船走，不会掉穿甲板。', () => {
   it('竖直轴的转盘会带人转: a rider on a turntable is carried round the axis and turned with it', () => {
     const T = FLAT_TOP;
-    const sim = flatSim('survival', vec3(-3.5, T, 0.5));
-    const w = sim.world;
+    const w = flatWorld('survival', vec3(-3.5, T, 0.5));
+    const { sim, me } = w;
+    const wg = sim.world;
     // bearing facing up on the ground; hub on it at the west edge of a 5x5 felt platform
-    w.setCell(0, T, 0, makeCell(B.BEARING, facingState(PY)));
-    fillBox(w, 0, T + 1, -2, 4, T + 1, 2, B.WOOL_WHITE);
-    sim.advance(2);
+    wg.setCell(0, T, 0, makeCell(B.BEARING, facingState(PY)));
+    fillBox(wg, 0, T + 1, -2, 4, T + 1, 2, B.WOOL_WHITE);
+    w.tick(2);
     // the player starts it: right-click the bearing twice (preview, start)
-    expect(sim.useOn(0, T, 0, NX)).toBe(true);
-    expect(sim.view.preview?.kind).toBe('rotor');
-    expect(sim.useOn(0, T, 0, NX)).toBe(true);
+    expect(me.useOn(0, T, 0, NX)).toBe(true);
+    expect(me.view.preview?.kind).toBe('rotor');
+    expect(me.useOn(0, T, 0, NX)).toBe(true);
     const rotors = sim.structures.rotors();
     expect(rotors.length).toBe(1);
     const rotor = rotors[0]!;
     expect(rotor.grid.count).toBe(25);
     // board: onto the platform centre (2 blocks from the axis)
-    sim.teleport(...xyz(rotor.grid.toWorld(vec3(2.5, T + 2, 0.5))));
-    sim.advance(5);
-    const p = sim.player;
+    me.teleport(...xyz(rotor.grid.toWorld(vec3(2.5, T + 2, 0.5))));
+    w.tick(5);
+    const p = me.player;
     expect(p.carrierId).toBe(rotor.id);
     const axis = vec3(0.5, 0, 0.5);
     const r0 = local(rotor, p.pos);
@@ -565,7 +583,7 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
     let turned = 0;
     let lastAngle = rotor.angle;
     for (let i = 0; i < 160; i++) {
-      sim.tick();
+      w.tick();
       turned += wrap(rotor.angle - lastAngle);
       lastAngle = rotor.angle;
       expect(p.carrierId).toBe(rotor.id);
@@ -585,45 +603,46 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
    * bearing facing up at (5, SEA_TOP, 4), glued to its felt hub; a 3x3 felt platform at
    * y = SEA_TOP + 1 (x 4..6, z 3..5): a turntable mounted on the ship.
    */
-  function turntableShip(raised = false): { sim: Simulation; ship: Ship; rotor: Rotor } {
-    const sim = seaSim('survival', vec3(9.5, SEA_TOP, 10.5));
-    const w = sim.world;
+  function turntableShip(raised = false): { w: TestWorld; sim: Simulation; me: Me; ship: Ship; rotor: Rotor } {
+    const w = seaWorld('survival', vec3(9.5, SEA_TOP, 10.5));
+    const { sim, me } = w;
+    const wg = sim.world;
     const helm = buildHull(sim, { x0: 0, z0: 0, x1: 10, z1: 10, y: SEA_TOP - 1, block: B.PLANKS_OAK, helm: { x: 9, z: 9 } });
-    w.setCell(5, SEA_TOP, 4, makeCell(B.BEARING, facingState(PY)));
-    fillBox(w, 4, SEA_TOP + 1, 3, 6, SEA_TOP + 1, 5, B.WOOL_RED);
+    wg.setCell(5, SEA_TOP, 4, makeCell(B.BEARING, facingState(PY)));
+    fillBox(wg, 4, SEA_TOP + 1, 3, 6, SEA_TOP + 1, 5, B.WOOL_RED);
     sim.worldGlue.add(5, SEA_TOP, 4, PY); // hub <-> bearing: the stopped turntable comes along
     // raised: a two-high plank block on the deck east of the platform (x 7..10, z 1..7), its top
     // flush with the platform top (the platform's corners sweep through its edge)
-    if (raised) fillBox(w, 7, SEA_TOP, 1, 10, SEA_TOP + 1, 7, B.PLANKS_OAK);
-    sim.advance(2);
-    const ship = assembleAtHelm(sim, helm);
+    if (raised) fillBox(wg, 7, SEA_TOP, 1, 10, SEA_TOP + 1, 7, B.PLANKS_OAK);
+    w.tick(2);
+    const ship = assembleAtHelm(w, helm);
     expect(ship.grid.count).toBe(121 + 1 + 1 + 9 + (raised ? 56 : 0));
-    sim.advance(20);
-    releaseWheelByClick(sim);
+    w.tick(20);
+    releaseWheelByClick(w);
     // walk to a spot from which the bearing shows under the platform, start it from there
-    walkTo(sim, () => ship.grid.toWorld(vec3(5.5, SEA_TOP, 8.2)));
-    sim.advance(5);
-    expect(sim.useOn(5, SEA_TOP, 4, PZ, ship.id)).toBe(true);
-    expect(sim.view.preview?.kind).toBe('rotor');
-    expect(sim.useOn(5, SEA_TOP, 4, PZ, ship.id)).toBe(true);
+    walkTo(w, () => ship.grid.toWorld(vec3(5.5, SEA_TOP, 8.2)));
+    w.tick(5);
+    expect(me.useOn(5, SEA_TOP, 4, PZ, ship.id)).toBe(true);
+    expect(me.view.preview?.kind).toBe('rotor');
+    expect(me.useOn(5, SEA_TOP, 4, PZ, ship.id)).toBe(true);
     const rotors = sim.structures.rotors();
     expect(rotors.length).toBe(1);
     const rotor = rotors[0]!;
     expect(rotor.parent).toBe(ship);
     expect(rotor.grid.count).toBe(9);
     // board the platform (a step up of two blocks: placed there)
-    sim.teleport(...xyz(rotor.grid.toWorld(vec3(5.5, SEA_TOP + 2, 4.5))));
-    sim.advance(10);
-    expect(sim.player.carrierId).toBe(rotor.id);
-    return { sim, ship, rotor };
+    me.teleport(...xyz(rotor.grid.toWorld(vec3(5.5, SEA_TOP + 2, 4.5))));
+    w.tick(10);
+    expect(me.player.carrierId).toBe(rotor.id);
+    return { w, sim, me, ship, rotor };
   }
 
   it('转盘装在船上：骑在船上的转盘上的人跟着转盘转，也跟着船走', () => {
-    const { sim, ship, rotor } = turntableShip();
-    const p = sim.player;
+    const { w, sim, me, ship, rotor } = turntableShip();
+    const p = me.player;
     ship.throttle = 1;
     ship.rudder = 0.3;
-    sim.advance(20);
+    w.tick(20);
     const r0 = local(rotor, p.pos);
     const start = copy(ship.grid.position);
     const shipYaw = new YawTrack(ship.grid);
@@ -631,7 +650,7 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
     let spun = 0;
     let lastAngle = rotor.angle;
     for (let i = 0; i < 120; i++) {
-      sim.tick();
+      w.tick();
       shipYaw.update();
       spun += wrap(rotor.angle - lastAngle);
       lastAngle = rotor.angle;
@@ -645,35 +664,35 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
   });
 
   it('从转盘走到甲板会切换到跟船走，不会掉穿甲板', () => {
-    const { sim, ship, rotor } = turntableShip();
-    const p = sim.player;
+    const { w, sim, me, ship, rotor } = turntableShip();
+    const p = me.player;
     ship.throttle = 1;
     ship.rudder = 0.3;
-    sim.advance(10);
+    w.tick(10);
     // walk straight off the platform (the look turns with the platform, so the walk is straight in its frame)
-    p.input.yaw = yawToward(rotor.grid.toWorld(vec3(5.5, 0, 4.5)), rotor.grid.toWorld(vec3(9.5, 0, 4.5)));
-    p.input.forward = 1;
+    me.input.yaw = yawToward(rotor.grid.toWorld(vec3(5.5, 0, 4.5)), rotor.grid.toWorld(vec3(9.5, 0, 4.5)));
+    me.input.forward = 1;
     let switchedAt = -1;
     let minDeckY = Infinity;
     // walk until a few steps past the switch (the deck is 4 blocks wider than the platform there)
     for (let i = 0; i < 60 && (switchedAt < 0 || i < switchedAt + 6); i++) {
-      sim.tick();
+      w.tickWhile();
       const l = local(ship, p.pos);
       minDeckY = Math.min(minDeckY, l.y);
       expect(p.carrierId === rotor.id || p.carrierId === ship.id, `carried by the turntable or the ship (tick ${i})`).toBe(true);
       if (switchedAt < 0 && p.carrierId === ship.id) switchedAt = i;
     }
-    stopInput(sim);
+    stopInput(w);
     expect(switchedAt, 'switched to the ship').toBeGreaterThanOrEqual(0);
     expect(minDeckY).toBeGreaterThan(DECK_TOP - 0.05); // never below the deck surface
-    sim.advance(10);
+    w.tick(10);
     expect(p.carrierId).toBe(ship.id);
     // now it follows the ship, not the turntable: fixed deck spot while both keep moving
     const l0 = local(ship, p.pos);
     const rl0 = local(rotor, p.pos);
     expect(Math.abs(l0.y - DECK_TOP)).toBeLessThan(0.03);
     for (let i = 0; i < 100; i++) {
-      sim.tick();
+      w.tick();
       expect(p.carrierId).toBe(ship.id);
       const l = local(ship, p.pos);
       expect(Math.hypot(l.x - l0.x, l.z - l0.z)).toBeLessThan(0.03);
@@ -684,29 +703,29 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
   });
 
   it('从转盘走到甲板会切换到跟船走，不会掉穿甲板: walking from the platform onto a deck flush with it (level walk)', () => {
-    const { sim, ship, rotor } = turntableShip(true);
-    const p = sim.player;
+    const { w, sim, me, ship, rotor } = turntableShip(true);
+    const p = me.player;
     const top = SEA_TOP + 2; // deck-local top of the platform and of the raised deck
     ship.throttle = 1;
     ship.rudder = 0.3;
-    sim.advance(10);
+    w.tick(10);
     // toward ship-local east, onto the raised deck (the platform turns the look while on it)
-    p.input.yaw = yawToward(ship.grid.toWorld(vec3(5.5, 0, 4.5)), ship.grid.toWorld(vec3(9.5, 0, 4.5)));
-    p.input.forward = 1;
+    me.input.yaw = yawToward(ship.grid.toWorld(vec3(5.5, 0, 4.5)), ship.grid.toWorld(vec3(9.5, 0, 4.5)));
+    me.input.forward = 1;
     let switchedAt = -1;
     let minY = Infinity;
     for (let i = 0; i < 60; i++) {
-      sim.tick();
+      w.tickWhile();
       const l = local(ship, p.pos);
       minY = Math.min(minY, l.y);
       expect(p.carrierId === rotor.id || p.carrierId === ship.id, `carried by the turntable or the ship (tick ${i})`).toBe(true);
       if (switchedAt < 0 && p.carrierId === ship.id) switchedAt = i;
       if (Math.hypot(l.x - 5.5, l.z - 4.5) > 3.2) break; // clear of the platform's sweep (radius 2.12)
     }
-    stopInput(sim);
+    stopInput(w);
     expect(switchedAt, 'switched to the ship').toBeGreaterThanOrEqual(0);
     expect(minY).toBeGreaterThan(top - 0.05); // a level walk: never dipped, never fell through
-    sim.advance(10);
+    w.tick(10);
     const l0 = local(ship, p.pos);
     expect(l0.x).toBeGreaterThan(7); // on the raised deck, east of the platform
     // standing on it (the block lists the ship a few degrees: the world-axis body box rests on
@@ -714,7 +733,7 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
     expect(Math.abs(l0.y - top)).toBeLessThan(0.08);
     expect(p.carrierId).toBe(ship.id);
     for (let i = 0; i < 100; i++) {
-      sim.tick();
+      w.tick();
       expect(p.carrierId).toBe(ship.id);
       const l = local(ship, p.pos);
       expect(Math.hypot(l.x - l0.x, l.z - l0.z)).toBeLessThan(0.03);
@@ -728,12 +747,12 @@ describe('20. 竖直轴的转盘会带人转。转盘装在船上时，从转盘
 describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时舵会松开；暂停时甲板上的人和物品都不动。', () => {
   it('掌舵时死亡会脱离船，复活在出生点', () => {
     const spawn = vec3(3.5, SEA_TOP, 9.5); // on the pier
-    const { sim, ship } = raftA('survival', { pier: true, spawn });
-    const p = sim.player;
+    const { w, sim, me, ship } = raftA('survival', { pier: true, spawn });
+    const p = me.player;
     const ev = new Events(sim);
-    p.input.forward = 1;
-    p.input.strafe = 1;
-    sim.advance(60);
+    me.input.forward = 1;
+    me.input.strafe = 1;
+    w.tick(60);
     expect(ship.throttle).toBe(1);
     expect(ship.rudder).toBe(1);
     expect(p.steeringShipId).toBe(ship.id);
@@ -749,47 +768,48 @@ describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时
     // the body is no longer carried: the ship coasts on, the body stays
     const body = copy(p.pos);
     const ship0 = copy(ship.grid.position);
-    sim.advance(30);
+    w.tick(30);
     expect(hdist(ship.grid.position, ship0)).toBeGreaterThan(0.05);
     expect(hdist(p.pos, body)).toBe(0);
     expect(ship.throttle).toBe(0); // the held W no longer reaches the ship
     // respawn at the spawn point
-    stopInput(sim);
-    sim.respawn();
+    stopInput(w);
+    me.respawn();
     expect(p.dead).toBe(false);
     expect(p.pos).toEqual(spawn);
     expect(p.health).toBe(20);
     expect(p.steeringShipId).toBe(0);
     expect(p.carrierId).toBe(0);
-    sim.advance(10);
+    w.tick(10);
     expect(hdist(p.pos, spawn)).toBeLessThan(1e-6);
     expect(p.onWorldGround).toBe(true);
     expect(p.carrierId).toBe(0);
   });
 
   it('打开背包时舵会松开: the client calls releaseHelm() when the inventory opens; throttle and rudder drop to zero, the player stays aboard', () => {
-    const { sim, ship } = raftA('survival');
-    const p = sim.player;
-    p.input.forward = 1;
-    p.input.strafe = -1;
-    sim.advance(40);
+    const { w, sim, me, ship } = raftA('survival');
+    const p = me.player;
+    me.input.forward = 1;
+    me.input.strafe = -1;
+    w.tick(40);
     expect(ship.throttle).toBe(1);
     expect(ship.rudder).toBe(-1);
-    // the inventory opens: the client lets go of the wheel and zeroes the movement keys
-    sim.releaseHelm();
-    stopInput(sim);
+    // the inventory opens: the client zeroes the movement keys and lets go of the wheel (the
+    // release takes a tick, in which no key may walk the player)
+    stopInput(w);
+    me.releaseHelm();
     expect(p.steeringShipId).toBe(0);
     expect(ship.helmsmanId).toBe(0);
     expect(ship.throttle).toBe(0);
     expect(ship.rudder).toBe(0);
-    expect(sim.helmView()).toBeNull();
+    expect(me.helmView()).toBeNull();
     // the sim keeps ticking while the inventory is open: the player stays aboard, carried
     // while the ship coasts and turns on its momentum
     expect(p.carrierId).toBe(ship.id);
     const l0 = local(ship, p.pos);
     const s0 = copy(ship.grid.position);
     for (let i = 0; i < 40; i++) {
-      sim.tick();
+      w.tick();
       expect(p.carrierId).toBe(ship.id);
       expect(ship.throttle).toBe(0);
       expect(ship.rudder).toBe(0);
@@ -798,32 +818,32 @@ describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时
     const l = local(ship, p.pos);
     expect(Math.hypot(l.x - l0.x, l.z - l0.z)).toBeLessThan(0.02);
     // inventory closed: W / A now walk the player, they no longer reach the ship
-    p.input.forward = 1;
-    p.input.strafe = -1;
-    sim.advance(5);
+    me.input.forward = 1;
+    me.input.strafe = -1;
+    w.tick(5);
     expect(ship.throttle).toBe(0);
     expect(ship.rudder).toBe(0);
     expect(hdist(local(ship, p.pos), l)).toBeGreaterThan(0.3);
   });
 
   /** Raft A sailing and turning (remembered throttle), the player on deck, a stack of planks lying on the deck. */
-  function pauseScene(): { sim: Simulation; ship: Ship; item: ItemEntity } {
-    const { sim, ship } = raftA('survival');
-    releaseWheelByClick(sim);
+  function pauseScene(): { w: TestWorld; sim: Simulation; me: Me; ship: Ship; item: ItemEntity } {
+    const { w, sim, me, ship } = raftA('survival');
+    releaseWheelByClick(w);
     const at = ship.grid.toWorld(vec3(1.5, SEA_TOP + 0.3, 5.5));
     const item = sim.entities.spawnItem(at.x, at.y, at.z, B.PLANKS_OAK, 5, vec3(0, 0, 0));
-    sim.advance(20);
+    w.tick(20);
     expect(item.carrierId).toBe(ship.id);
     ship.throttle = 1;
     ship.rudder = 0.5;
-    sim.advance(40);
-    return { sim, ship, item };
+    w.tick(40);
+    return { w, sim, me, ship, item };
   }
 
   it('暂停时甲板上的人和物品都不动: no ticks while paused (the client autosaves); after resuming nothing jumps, both stay on the deck', () => {
     const a = pauseScene();
     const b = pauseScene(); // twin that is never paused
-    const p = a.sim.player;
+    const p = a.me.player;
     const pl0 = local(a.ship, p.pos);
     const il0 = local(a.ship, a.item.pos);
     const pw0 = copy(p.pos);
@@ -832,19 +852,19 @@ describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时
     // ---- pause: the client stops calling tick(), saves, keeps drawing
     const save = exportSave(a.sim);
     expect(save.blobs.length).toBeGreaterThan(0);
-    void a.sim.helmView();
-    void a.sim.targetCell();
+    void a.me.helmView();
+    void a.me.targetCell();
     expect(p.pos).toEqual(pw0);
     expect(a.item.pos).toEqual(iw0);
     expect(a.ship.grid.position).toEqual(sp0);
     // ---- resume
-    a.sim.tick();
-    b.sim.tick();
+    a.w.tick();
+    b.w.tick();
     expect(hdist(local(a.ship, p.pos), pl0)).toBeLessThan(0.005);
     expect(hdist(local(a.ship, a.item.pos), il0)).toBeLessThan(0.005);
     for (let i = 0; i < 100; i++) {
-      a.sim.tick();
-      b.sim.tick();
+      a.w.tick();
+      b.w.tick();
       expect(p.carrierId).toBe(a.ship.id);
       expect(a.item.removed).toBe(false);
       expect(a.item.carrierId).toBe(a.ship.id);
@@ -853,7 +873,7 @@ describe('21. 掌舵时死亡会脱离船，复活在出生点；打开背包时
     expect(Math.abs(local(a.ship, a.item.pos).y - il0.y)).toBeLessThan(0.02);
     expect(hdist(local(a.ship, a.item.pos), il0)).toBeLessThan(0.02);
     // the pause changed nothing at all: same state as the twin that was never paused
-    expect(p.pos).toEqual(b.sim.player.pos);
+    expect(p.pos).toEqual(b.me.player.pos);
     expect(a.item.pos).toEqual(b.item.pos);
     expect(a.ship.grid.position).toEqual(b.ship.grid.position);
   });
@@ -867,24 +887,25 @@ describe('22. 沉船上的舵手会溺水。', () => {
    * hold, helm in the hold (2, ., 2) facing north; the seat (2.5, ., 3.5) is in the hold. Built
    * with its floor at `y`; the player spawns at the seat and takes the wheel by assembling.
    */
-  function deepHull(block: number, y: number, wall: number): { sim: Simulation; ship: Ship; ev: Events } {
-    const sim = seaSim('survival', vec3(2.5, y + 1, 3.5));
+  function deepHull(block: number, y: number, wall: number): { w: TestWorld; sim: Simulation; me: Me; ship: Ship; ev: Events } {
+    const w = seaWorld('survival', vec3(2.5, y + 1, 3.5));
+    const { sim, me } = w;
     const ev = new Events(sim);
     const helm = buildHull(sim, { x0: 0, z0: 0, x1: 4, z1: 4, y, block, gunwale: ['N', 'S', 'E', 'W'], gunwaleHeight: wall, helm: { x: 2, z: 2 } });
-    sim.advance(2);
-    const ship = assembleAtHelm(sim, helm);
-    return { sim, ship, ev };
+    w.tick(2);
+    const ship = assembleAtHelm(w, helm);
+    return { w, sim, me, ship, ev };
   }
 
   it('沉船上的舵手会溺水: survival, a stone-brick hull that cannot float sinks with the helmsman at the wheel; air runs out, drowning damage follows', () => {
-    const { sim, ship, ev } = deepHull(B.STONE_BRICKS, SEA_TOP - 1, 3);
-    const p = sim.player;
+    const { w, sim, me, ship, ev } = deepHull(B.STONE_BRICKS, SEA_TOP - 1, 3);
+    const p = me.player;
     expect(ship.hull?.floats).toBe(false);
     let submergedAt = -1;
     let airOutAt = -1;
     let lastAir = p.air;
     for (let i = 0; i < 700 && !p.dead; i++) {
-      sim.tick();
+      w.tickWhile();
       if (!p.dead) expect(p.steeringShipId, `still at the wheel (tick ${i})`).toBe(ship.id);
       if (p.headWet && submergedAt < 0) submergedAt = i;
       if (submergedAt >= 0 && !p.dead) {
@@ -904,11 +925,11 @@ describe('22. 沉船上的舵手会溺水。', () => {
   });
 
   it('对照：浮着的船，水线以下的干舱里掌舵不掉气', () => {
-    const { sim, ship, ev } = deepHull(B.GLASS, SEA_TOP, 6);
-    const p = sim.player;
+    const { w, sim, me, ship, ev } = deepHull(B.GLASS, SEA_TOP, 6);
+    const p = me.player;
     expect(ship.hull?.floats).toBe(true);
     for (let i = 0; i < 700; i++) {
-      sim.tick();
+      w.tick();
       expect(p.steeringShipId).toBe(ship.id);
       expect(p.headWet).toBe(false);
       expect(p.air).toBe(p.maxAir);

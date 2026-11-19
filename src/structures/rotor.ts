@@ -12,7 +12,8 @@
  * The angular speed eases toward a target that grows mildly with the number of sails, so a
  * bigger windmill turns a little faster but never wildly so.
  *
- * Everything here is allocation-free: it runs for every rotor on every tick.
+ * The per-tick functions are allocation-free: they run for every rotor on every tick.
+ * measureSweep (the swept cylinder) is O(cells) and cached by its callers.
  */
 import { ROTOR_MIN_SAILS } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, type Dir } from '../core/dirs';
@@ -139,4 +140,56 @@ export function advanceRotor(rotor: Rotor, dt: number): void {
 /** A frozen rotor (unloaded surroundings) keeps its pose and reports no motion. */
 export function holdRotor(rotor: Rotor): void {
   applyRotorPose(rotor, false);
+}
+
+/**
+ * The cylinder a rotor's cells sweep about its spin axis, in rotor-local terms: the extent along
+ * the axis's positive direction relative to the pivot [a0, a1], and the radius about the axis line.
+ */
+export interface RotorSweep {
+  a0: number;
+  a1: number;
+  radius: number;
+}
+
+/**
+ * Measure the swept cylinder of a rotor's cells (see RotorSweep). Per cell, the corner farthest
+ * from the axis line; per axis, the farther of the two faces: exact for the cells themselves,
+ * unlike the corner of their bounding box. All zero for a rotor without cells. O(cells): callers
+ * cache it by grid.version. The structure manager (freeze box of world rotors) and the network
+ * interest (bounding spheres) both measure with it.
+ */
+export function measureSweep(rotor: Rotor, out: RotorSweep = { a0: 0, a1: 0, radius: 0 }): RotorSweep {
+  const g = rotor.grid;
+  const k = rotor.axis >> 1;
+  const px = g.pivot.x;
+  const py = g.pivot.y;
+  const pz = g.pivot.z;
+  let a0 = 0;
+  let a1 = 0;
+  let r2 = 0;
+  let first = true;
+  g.forEachCell((x, y, z) => {
+    const lo = k === 0 ? x - px : k === 1 ? y - py : z - pz;
+    if (first || lo < a0) a0 = lo;
+    if (first || lo + 1 > a1) a1 = lo + 1;
+    first = false;
+    const fx = k === 0 ? 0 : Math.max(Math.abs(x - px), Math.abs(x + 1 - px));
+    const fy = k === 1 ? 0 : Math.max(Math.abs(y - py), Math.abs(y + 1 - py));
+    const fz = k === 2 ? 0 : Math.max(Math.abs(z - pz), Math.abs(z + 1 - pz));
+    const d2 = fx * fx + fy * fy + fz * fz;
+    if (d2 > r2) r2 = d2;
+  });
+  out.a0 = a0;
+  out.a1 = a1;
+  out.radius = Math.sqrt(r2);
+  return out;
+}
+
+/**
+ * Radius of the sphere about the pivot that holds every cell of the rotor at every angle:
+ * hypot(swept radius, farthest extent along the axis) (NETCODE section 7).
+ */
+export function sweepSphereRadius(s: RotorSweep): number {
+  return Math.hypot(s.radius, Math.max(Math.abs(s.a0), Math.abs(s.a1)));
 }

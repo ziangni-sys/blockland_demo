@@ -14,24 +14,47 @@
  * Both bases are poses THIS CACHE remembered, not the grid's own prevPosition / prevRotation:
  * riders then follow exactly the motion that happened between two entity ticks even if some
  * structure skipped snapshotPose() (a sleeping ship), entity ticks were skipped, or a pose was
- * nudged with setPoseImmediate(). A structure seen for the first time uses renderPose(0).
+ * nudged with setPoseImmediate(). A structure seen for the first time during a tick uses its pose
+ * at the start of the tick (renderPose(0)); one first seen BETWEEN ticks (rebuild(.., 'now'): a
+ * correction raised before the first tick after a load) uses its pose now, the end of the last
+ * tick: renderPose(0) is then the start of a tick that already ended, and the next tick would
+ * measure two ticks of motion as one (twice the carrier's velocity).
  *
  * Pose convention (StructureGrid.renderPose): world = p + rotate(q, local - pivot), with p / q
- * the composed WORLD pose (parents included). The current pose is renderPose(1).
+ * the composed WORLD pose (parents included). The current pose is renderPose(1). The cache reads
+ * both with readWorldPose(), the same arithmetic without allocating.
  */
 import { TICK_DT } from '../core/constants';
-import { qconj, qmul, qrotate, qrotateInv, quat, vec3, wrapAngle, type AABB, type Quat, type Vec3 } from '../core/math';
-import type { Ship, Structure } from '../structures/structure';
-import type { StructureGrid } from '../voxel/sgrid';
+import { qconj, qmul, qrotate, qrotateInv, qslerp, quat, vec3, wrapAngle, type AABB, type Quat, type Vec3 } from '../core/math';
+import type { HullInfo } from '../structures/hull';
+import { StructureGrid } from '../voxel/sgrid';
+
+/**
+ * A structure as moving bodies see it: its cells and pose (the grid), what it is mounted on, and
+ * for a ship its dry-volume analysis. The simulation's Ship and Rotor are BodyStructures; so is a
+ * client's replica of them.
+ */
+export interface BodyStructure {
+  readonly id: number;
+  readonly grid: StructureGrid;
+  readonly parent: BodyStructure | null;
+  /** Structures mounted on it. */
+  readonly children: readonly BodyStructure[];
+  readonly removed: boolean;
+  /** A ship's hull analysis (water inside its dry cells does not wet a body); absent or null otherwise. */
+  readonly hull?: HullInfo | null;
+}
 
 export class StructRec {
-  structure!: Structure;
+  structure!: BodyStructure;
   grid!: StructureGrid;
   id = 0;
+  /** StructureCache generation that filled the record (a record of an older one is stale). */
+  gen = 0;
   /** Nesting depth: 0 = mounted on the world, 1 = mounted on a ship ... */
   depth = 0;
-  /** The structure as a Ship (it has a hull), else null. */
-  ship: Ship | null = null;
+  /** The structure's hull analysis (ships), else null. */
+  hull: HullInfo | null = null;
   /** Record of the structure it is mounted on. */
   parent: StructRec | null = null;
   /** World AABB of all its cells at the current pose. */
@@ -156,6 +179,63 @@ function samePose(pa: Vec3, qa: Quat, va: Vec3, pb: Vec3, qb: Quat, vb: Vec3): b
   );
 }
 
+/** Heading of a world rotation: its twist about world +Y (radians, CCW from above). */
+export function headingOf(q: Quat): number {
+  return wrapAngle(2 * Math.atan2(q.y, q.w));
+}
+
+/**
+ * The composed WORLD pose of a grid at blend `alpha` (0 = start of the tick, 1 = now) into outP /
+ * outQ: exactly the arithmetic of StructureGrid.renderPose (same operations in the same order, so
+ * the same bits), without allocating. `chain` is caller-owned scratch.
+ */
+function readWorldPose(grid: StructureGrid, alpha: number, outP: Vec3, outQ: Quat, chain: StructureGrid[], rel: Vec3, r: Quat): void {
+  // `chain` is written by index, never emptied: V8 releases an array's storage on length = 0.
+  let n = 0;
+  let g: StructureGrid = grid;
+  chain[n++] = g;
+  for (let guard = 0; guard < 8; guard++) {
+    const par = g.parent;
+    if (par.isWorld || !(par instanceof StructureGrid)) break;
+    g = par;
+    chain[n++] = g;
+  }
+  let top = chain[n - 1]!;
+  outP.x = top.prevPosition.x + (top.position.x - top.prevPosition.x) * alpha;
+  outP.y = top.prevPosition.y + (top.position.y - top.prevPosition.y) * alpha;
+  outP.z = top.prevPosition.z + (top.position.z - top.prevPosition.z) * alpha;
+  qslerp(top.prevRotation, top.rotation, alpha, outQ);
+  for (let i = n - 2; i >= 0; i--) {
+    const c = chain[i]!;
+    rel.x = c.prevPosition.x + (c.position.x - c.prevPosition.x) * alpha - top.pivot.x;
+    rel.y = c.prevPosition.y + (c.position.y - c.prevPosition.y) * alpha - top.pivot.y;
+    rel.z = c.prevPosition.z + (c.position.z - c.prevPosition.z) * alpha - top.pivot.z;
+    qslerp(c.prevRotation, c.rotation, alpha, r);
+    qrotate(outQ, rel, rel);
+    outP.x += rel.x;
+    outP.y += rel.y;
+    outP.z += rel.z;
+    qmul(outQ, r, outQ);
+    top = c;
+  }
+}
+
+/**
+ * Innermost first: depth descending, then id ascending. An insertion sort (no comparator closure,
+ * no work array; the list is short and keeps its order from tick to tick, so it is nearly sorted).
+ */
+function sortInnermostFirst(recs: StructRec[]): void {
+  for (let i = 1; i < recs.length; i++) {
+    const r = recs[i]!;
+    let j = i - 1;
+    while (j >= 0 && (recs[j]!.depth < r.depth || (recs[j]!.depth === r.depth && recs[j]!.id > r.id))) {
+      recs[j + 1] = recs[j]!;
+      j--;
+    }
+    recs[j + 1] = r;
+  }
+}
+
 /** Strict AABB overlap of a box (grown by `margin`) with a record's world bounds. */
 export function boxNearRec(b: AABB, r: StructRec, margin: number): boolean {
   return (
@@ -195,9 +275,13 @@ export class StructureCache {
   private generation = 0;
   private readonly tmp: Vec3 = vec3();
   private readonly tmpQ: Quat = quat();
+  private readonly poseChain: StructureGrid[] = [];
+  private readonly poseRel: Vec3 = vec3();
+  private readonly poseQ: Quat = quat();
 
   get(id: number): StructRec | undefined {
-    return this.byId.get(id);
+    const r = this.byId.get(id);
+    return r !== undefined && r.gen === this.generation && r.id === id ? r : undefined;
   }
 
   /** Forget the remembered poses of a structure (it was re-gridded: its riders were released). */
@@ -210,16 +294,19 @@ export class StructureCache {
     this.last.clear();
     this.recs.length = 0;
     this.byId.clear();
+    this.generation++;
   }
 
   /**
    * Read every structure's current pose. The carry base becomes the pose of the previous
    * rebuild; the velocity base stays at the last commit().
+   *
+   * Allocates nothing in the steady state: records are pooled, the id map keeps its entries
+   * (get() checks the generation), arrays are written by index (V8 releases an array's storage
+   * on length = 0, and the next push allocates a new one).
    */
-  rebuild(structures: readonly Structure[]): void {
+  rebuild(structures: readonly BodyStructure[], firstSeen: 'tickStart' | 'now' = 'tickStart'): void {
     const recs = this.recs;
-    recs.length = 0;
-    this.byId.clear();
     const gen = ++this.generation;
     let used = 0;
     for (let i = 0; i < structures.length; i++) {
@@ -236,17 +323,18 @@ export class StructureCache {
       r.structure = s;
       r.grid = s.grid;
       r.id = s.id;
-      r.ship = s.kind === 'ship' ? (s as Ship) : null;
+      r.gen = gen;
+      r.hull = s.hull ?? null;
       r.parent = null;
       let depth = 0;
       for (let p = s.parent; p !== null && depth < 8; p = p.parent) depth++;
       r.depth = depth;
-      s.grid.renderPose(1, r.p1, r.q1);
+      readWorldPose(s.grid, 1, r.p1, r.q1, this.poseChain, this.poseRel, this.poseQ);
       copy3(r.pivot, s.grid.pivot);
       let snap = this.last.get(r.id);
       if (snap === undefined) {
         snap = new PoseSnap();
-        s.grid.renderPose(0, snap.carry.p, snap.carry.q);
+        readWorldPose(s.grid, firstSeen === 'now' ? 1 : 0, snap.carry.p, snap.carry.q, this.poseChain, this.poseRel, this.poseQ);
         copy3(snap.carry.pivot, r.pivot);
         copy3(snap.vel.p, snap.carry.p);
         copy4(snap.vel.q, snap.carry.q);
@@ -283,18 +371,24 @@ export class StructureCache {
         r.headZ = 0;
       }
       this.bounds(r, b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ);
-      recs.push(r);
-      this.byId.set(r.id, r);
+      if (used - 1 < recs.length) recs[used - 1] = r;
+      else recs.push(r);
+      if (this.byId.get(r.id) !== r) this.byId.set(r.id, r);
     }
-    for (let i = 0; i < recs.length; i++) {
+    if (recs.length !== used) recs.length = used;
+    for (let i = 0; i < used; i++) {
       const r = recs[i]!;
       const p = r.structure.parent;
-      if (p !== null) r.parent = this.byId.get(p.id) ?? null;
+      if (p !== null) r.parent = this.get(p.id) ?? null;
     }
-    recs.sort((a, b) => b.depth - a.depth || a.id - b.id);
-    // Drop poses of structures that are gone (ids are never reused within a world).
-    if (this.last.size > recs.length) {
-      for (const [id, snap] of this.last) if (snap.seen !== gen) this.last.delete(id);
+    sortInnermostFirst(recs);
+    // Drop poses (and id entries) of structures that are gone (ids are never reused within a world).
+    if (this.last.size > used) {
+      for (const [id, snap] of this.last) {
+        if (snap.seen === gen) continue;
+        this.last.delete(id);
+        if (this.get(id) === undefined) this.byId.delete(id);
+      }
     }
   }
 
@@ -348,14 +442,18 @@ export class StructureCache {
     r.maxZ = maxZ + e;
   }
 
-  /** Records whose bounds come within `margin` of the box, innermost first. Reuses `out`. */
+  /** Records whose bounds come within `margin` of the box, innermost first. Reuses `out` (written by index, see rebuild()). */
   near(b: AABB, margin: number, out: StructRec[]): StructRec[] {
-    out.length = 0;
     const recs = this.recs;
+    let n = 0;
     for (let i = 0; i < recs.length; i++) {
       const r = recs[i]!;
-      if (boxNearRec(b, r, margin)) out.push(r);
+      if (!boxNearRec(b, r, margin)) continue;
+      if (n < out.length) out[n] = r;
+      else out.push(r);
+      n++;
     }
+    if (out.length !== n) out.length = n;
     return out;
   }
 }

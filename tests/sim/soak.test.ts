@@ -7,10 +7,11 @@ import { Rng } from '../../src/core/rng';
 import { Simulation } from '../../src/sim/simulation';
 import { TerrainGenerator } from '../../src/worldgen/generator';
 import { fill } from './helpers';
+import { soloSim } from '../solo';
 
 /** Every input the random walk may have left set. */
 function releaseInput(sim: Simulation): void {
-  const inp = sim.player.input;
+  const inp = sim.soloPlayer.player.input;
   inp.forward = 0;
   inp.strafe = 0;
   inp.jump = false;
@@ -30,39 +31,39 @@ function releaseInput(sim: Simulation): void {
  */
 function playRound(sim: Simulation): void {
   releaseInput(sim);
-  if (sim.player.dead) sim.respawn();
-  const mode = sim.mode;
-  sim.setMode('creative');
-  const p = sim.player;
+  if (sim.soloPlayer.player.dead) sim.soloPlayer.respawn();
+  const mode = sim.soloPlayer.player.mode;
+  sim.soloPlayer.setMode('creative');
+  const p = sim.soloPlayer.player;
   const w = sim.world;
   const bx = Math.floor(p.pos.x);
   const bz = Math.floor(p.pos.z);
   const by = Math.min(100, Math.floor(p.pos.y) + 8);
   fill(w, bx - 7, by - 1, bz - 8, bx + 8, by + 9, bz + 7, B.AIR);
   fill(w, bx - 2, by - 1, bz - 2, bx + 2, by - 1, bz + 2, B.STONE);
-  sim.teleport(bx + 0.5, by, bz + 0.5);
+  sim.soloPlayer.teleport(bx + 0.5, by, bz + 0.5);
   p.flying = false;
   sim.advance(2);
 
   // glue: anchor, then the neighbour
   w.setCell(bx, by, bz - 3, makeCell(B.PLANKS_OAK));
   w.setCell(bx + 1, by, bz - 3, makeCell(B.PLANKS_OAK));
-  sim.hold(I.GLUE, 8);
-  sim.useOn(bx, by, bz - 3, PY);
-  sim.useOn(bx + 1, by, bz - 3, PY);
+  sim.soloPlayer.hold(I.GLUE, 8);
+  sim.soloPlayer.useOn(bx, by, bz - 3, PY);
+  sim.soloPlayer.useOn(bx + 1, by, bz - 3, PY);
 
   // bucket: pour onto a stone, scoop the source back
   w.setCell(bx - 2, by, bz - 3, makeCell(B.STONE));
-  sim.hold(I.BUCKET_WATER, 1);
-  sim.useOn(bx - 2, by, bz - 3, PY);
-  sim.hold(I.BUCKET, 1);
-  sim.useOn(bx - 2, by + 1, bz - 3);
+  sim.soloPlayer.hold(I.BUCKET_WATER, 1);
+  sim.soloPlayer.useOn(bx - 2, by, bz - 3, PY);
+  sim.soloPlayer.hold(I.BUCKET, 1);
+  sim.soloPlayer.useOn(bx - 2, by + 1, bz - 3);
 
   // blast crate: light it with an empty hand, back off, wait for the bang
   w.setCell(bx + 3, by, bz - 3, makeCell(B.TNT));
-  sim.emptyHand();
-  sim.useOn(bx + 3, by, bz - 3, PY);
-  sim.teleport(bx - 5, by + 6, bz + 6);
+  sim.soloPlayer.emptyHand();
+  sim.soloPlayer.useOn(bx + 3, by, bz - 3, PY);
+  sim.soloPlayer.teleport(bx - 5, by + 6, bz + 6);
   p.flying = true;
   sim.advance(85);
 
@@ -70,17 +71,17 @@ function playRound(sim: Simulation): void {
   const ry = by + 4;
   fill(w, bx - 2, ry, bz - 4, bx + 1, ry, bz - 1, B.PLANKS_OAK);
   w.setCell(bx - 1, ry + 1, bz - 1, makeCell(B.HELM, facingState(NZ)));
-  sim.teleport(bx - 0.5, ry + 1, bz + 1.5);
+  sim.soloPlayer.teleport(bx - 0.5, ry + 1, bz + 1.5);
   p.flying = true;
   sim.tick();
-  sim.useOn(bx - 1, ry + 1, bz - 1, PZ);
-  sim.useOn(bx - 1, ry + 1, bz - 1, PZ);
+  sim.soloPlayer.useOn(bx - 1, ry + 1, bz - 1, PZ);
+  sim.soloPlayer.useOn(bx - 1, ry + 1, bz - 1, PZ);
   p.input.forward = 1;
   p.input.strafe = 1;
   sim.advance(20);
   p.input.forward = 0;
   p.input.strafe = 0;
-  sim.use();
+  sim.soloPlayer.use();
   sim.tick();
 
   // windmill on the world: preview, start, run, stop
@@ -90,13 +91,13 @@ function playRound(sim: Simulation): void {
   for (const [dy, dz] of [[0, 0], [1, 0], [2, 0], [-1, 0], [-2, 0], [0, 1], [0, -1]] as const) {
     w.setCell(bx + 6, wy + dy, bz + 3 + dz, makeCell(B.CANVAS));
   }
-  sim.teleport(bx + 5.5, wy - 1, bz + 6.5);
+  sim.soloPlayer.teleport(bx + 5.5, wy - 1, bz + 6.5);
   p.flying = true;
   sim.tick();
-  sim.useOn(bx + 5, wy, bz + 3, PZ);
-  sim.useOn(bx + 5, wy, bz + 3, PZ);
+  sim.soloPlayer.useOn(bx + 5, wy, bz + 3, PZ);
+  sim.soloPlayer.useOn(bx + 5, wy, bz + 3, PZ);
   sim.advance(40);
-  sim.useOn(bx + 5, wy, bz + 3, PZ);
+  sim.soloPlayer.useOn(bx + 5, wy, bz + 3, PZ);
 
   // a blast off the raft's bow (pushes it, may tear off its front), then a docking attempt from
   // above its helm at the stern
@@ -107,17 +108,17 @@ function playRound(sim: Simulation): void {
     sim.advance(10);
     if (!ship.removed) {
       const h = ship.grid.toWorld({ x: ship.helmX + 0.5, y: ship.helmY + 0.5, z: ship.helmZ + 0.5 });
-      sim.teleport(h.x, h.y + 1.5, h.z);
+      sim.soloPlayer.teleport(h.x, h.y + 1.5, h.z);
       p.flying = true;
-      sim.emptyHand();
+      sim.soloPlayer.emptyHand();
       p.input.sneak = true;
-      sim.lookAtCell(ship.helmX, ship.helmY, ship.helmZ, PY, ship.id);
-      sim.use();
+      sim.soloPlayer.lookAtCell(ship.helmX, ship.helmY, ship.helmZ, PY, ship.id);
+      sim.soloPlayer.use();
       sim.tick();
       p.input.sneak = false;
     }
   }
-  sim.setMode(mode);
+  sim.soloPlayer.setMode(mode);
   if (mode === 'survival') p.flying = false;
 }
 
@@ -131,9 +132,9 @@ function playRound(sim: Simulation): void {
 describe('soak', () => {
   it('2000 ticks of random and scripted play on generated terrain', () => {
     const seed = 424242;
-    const sim = new Simulation({ seed, mode: 'survival', generator: new TerrainGenerator(seed), syncChunks: true, loadRadius: 3 });
+    const sim = soloSim({ seed, mode: 'survival', generator: new TerrainGenerator(seed), syncChunks: true, loadRadius: 3 });
     const rng = new Rng(99);
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     const kit: Array<number | null> = [B.PLANKS_OAK, B.STONE, B.TORCH, B.SAND, I.GLUE, I.BUCKET_WATER, B.TNT, null, B.CANVAS];
     for (let i = 0; i < kit.length; i++) {
       const it = kit[i];
@@ -153,7 +154,7 @@ describe('soak', () => {
     const t0 = performance.now();
     for (let tick = 0; tick < 2000; tick++) {
       if (rounds.has(tick)) playRound(sim);
-      const inp = sim.player.input;
+      const inp = sim.soloPlayer.player.input;
       if (tick % 10 === 0) {
         inp.forward = rng.int(-1, 1);
         inp.strafe = rng.int(-1, 1);
@@ -171,27 +172,27 @@ describe('soak', () => {
       inp.use = rng.chance(0.2);
       if (rng.chance(0.08)) inp.usePresses++;
       if (rng.chance(0.08)) inp.attackPresses++;
-      if (tick % 500 === 499) sim.setMode(sim.mode === 'survival' ? 'creative' : 'survival');
-      if (sim.player.dead) sim.respawn();
+      if (tick % 500 === 499) sim.soloPlayer.setMode(sim.soloPlayer.player.mode === 'survival' ? 'creative' : 'survival');
+      if (sim.soloPlayer.player.dead) sim.soloPlayer.respawn();
       // keep the kit stocked
       for (let i = 0; i < kit.length; i++) {
         const k = kit[i];
         if (k === null || k === undefined) continue;
-        const s = sim.player.inventory.hotbar[i];
-        if (s === null || s === undefined) sim.player.inventory.hotbar[i] = { item: k, count: k === I.BUCKET_WATER ? 1 : 64 };
+        const s = sim.soloPlayer.player.inventory.hotbar[i];
+        if (s === null || s === undefined) sim.soloPlayer.player.inventory.hotbar[i] = { item: k, count: k === I.BUCKET_WATER ? 1 : 64 };
       }
       const a = performance.now();
       sim.tick();
       const dt = performance.now() - a;
       if (tick > 50 && dt > worst) worst = dt;
-      expect(Number.isFinite(sim.player.pos.x + sim.player.pos.y + sim.player.pos.z)).toBe(true);
+      expect(Number.isFinite(sim.soloPlayer.player.pos.x + sim.soloPlayer.player.pos.y + sim.soloPlayer.player.pos.z)).toBe(true);
     }
     const ticks = sim.ticks - ticks0;
     const avg = (performance.now() - t0) / ticks;
     console.log(
       `soak: ${ticks} ticks, avg tick ${avg.toFixed(2)} ms, worst random-walk tick ${worst.toFixed(1)} ms, chunks ${sim.world.chunks.size}, ` +
         `entities ${sim.entities.all().length}, structures ${sim.structures.all().length}, events ${JSON.stringify(Object.fromEntries(kinds))}, ` +
-        `sounds ${JSON.stringify(Object.fromEntries(sounds))}, toasts ${JSON.stringify(Object.fromEntries(toasts))}, player (${sim.player.pos.x.toFixed(1)}, ${sim.player.pos.y.toFixed(1)}, ${sim.player.pos.z.toFixed(1)})`,
+        `sounds ${JSON.stringify(Object.fromEntries(sounds))}, toasts ${JSON.stringify(Object.fromEntries(toasts))}, player (${sim.soloPlayer.player.pos.x.toFixed(1)}, ${sim.soloPlayer.player.pos.y.toFixed(1)}, ${sim.soloPlayer.player.pos.z.toFixed(1)})`,
     );
     // Every kind of gameplay happened, not just walking and mining.
     for (const k of ['blockBroken', 'blockPlaced', 'explosion', 'structureAdded', 'structureRemoved', 'toast']) {

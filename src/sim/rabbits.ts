@@ -1,8 +1,10 @@
 /**
- * Ambient rabbits: a few rabbits appear on turf in loaded chunks around the player by day and
- * vanish again once the player is far away. Deterministic: every random choice comes from
- * sim.rng, and attempts happen on fixed world ticks, so the same world and the same inputs
- * give the same rabbits.
+ * Ambient rabbits: a few rabbits appear on turf in loaded chunks around every joined player by
+ * day and vanish again once no player is near. Deterministic: every random choice comes from
+ * sim.rng, attempts happen on fixed world ticks and players are served in ascending entity id
+ * order (sim.players.online()), so the same world, the same players and the same inputs give the
+ * same rabbits. The rng is consumed per player, so the rabbits depend on the join order when
+ * several players are in the world.
  */
 import { AIR, ID_MASK } from '../blocks/cell';
 import { B } from '../blocks/defs';
@@ -13,12 +15,12 @@ import type { Simulation } from './simulation';
 
 /** World ticks between two spawn attempts (and despawn sweeps). */
 export const RABBIT_SPAWN_INTERVAL = 40;
-/** At most this many rabbits within RABBIT_DESPAWN_DISTANCE of the player. */
+/** A spawn attempt around a player is made only while fewer rabbits than this are within RABBIT_DESPAWN_DISTANCE of it. */
 export const RABBIT_CAP = 6;
-/** Spawn ring around the player (horizontal blocks): never in sight right next to them. */
+/** Spawn ring around a player (horizontal blocks); never closer than the inner radius to any other player either. */
 export const RABBIT_SPAWN_MIN = 16;
 export const RABBIT_SPAWN_MAX = 40;
-/** Rabbits farther than this (horizontally) from the player are removed. */
+/** Rabbits farther than this (horizontally) from every joined player are removed. */
 export const RABBIT_DESPAWN_DISTANCE = 96;
 /** Columns tried per attempt. */
 const TRIES = 4;
@@ -37,33 +39,68 @@ export class RabbitSpawner {
   tick(): void {
     const sim = this.sim;
     if (sim.world.time % RABBIT_SPAWN_INTERVAL !== 0) return;
-    const p = sim.entities.player;
-    if (p === null || p.removed) return;
-    let near = 0;
+    const players = sim.players.online();
+    if (players.length === 0) return;
+    const far2 = RABBIT_DESPAWN_DISTANCE * RABBIT_DESPAWN_DISTANCE;
+    const rabbits: Rabbit[] = [];
     const far: Rabbit[] = [];
     for (const e of sim.entities.all()) {
       if (!(e instanceof Rabbit) || e.removed) continue;
-      const dx = e.pos.x - p.pos.x;
-      const dz = e.pos.z - p.pos.z;
-      if (dx * dx + dz * dz > RABBIT_DESPAWN_DISTANCE * RABBIT_DESPAWN_DISTANCE) far.push(e);
-      else near++;
+      let near = false;
+      for (const c of players) {
+        const p = c.player;
+        const dx = e.pos.x - p.pos.x;
+        const dz = e.pos.z - p.pos.z;
+        if (dx * dx + dz * dz <= far2) {
+          near = true;
+          break;
+        }
+      }
+      if (near) rabbits.push(e);
+      else far.push(e);
     }
     // Removed after the scan: outside the entity update, remove() splices the live list.
     for (const e of far) sim.entities.remove(e);
-    if (!this.enabled || near >= RABBIT_CAP || p.dead) return;
+    if (!this.enabled) return;
     const t = sim.dayTime;
     if (t >= 0.5) return; // night: 0.5 sunset .. 1.0 sunrise
     const rng = sim.rng;
-    for (let i = 0; i < TRIES; i++) {
-      const a = rng.range(0, Math.PI * 2);
-      const d = rng.range(RABBIT_SPAWN_MIN, RABBIT_SPAWN_MAX);
-      const x = Math.floor(p.pos.x + Math.cos(a) * d);
-      const z = Math.floor(p.pos.z + Math.sin(a) * d);
-      const y = this.turfTop(x, z);
-      if (y < 0) continue;
-      sim.entities.spawnRabbit(x + 0.5, y + 1, z + 0.5);
-      return;
+    for (const c of players) {
+      const p = c.player;
+      if (p.dead) continue;
+      let near = 0;
+      for (const r of rabbits) {
+        const dx = r.pos.x - p.pos.x;
+        const dz = r.pos.z - p.pos.z;
+        if (dx * dx + dz * dz <= far2) near++;
+      }
+      if (near >= RABBIT_CAP) continue;
+      for (let i = 0; i < TRIES; i++) {
+        const a = rng.range(0, Math.PI * 2);
+        const d = rng.range(RABBIT_SPAWN_MIN, RABBIT_SPAWN_MAX);
+        const x = Math.floor(p.pos.x + Math.cos(a) * d);
+        const z = Math.floor(p.pos.z + Math.sin(a) * d);
+        // The ring keeps it out of this player's sight; no other player may stand right next to it either.
+        if (this.nearOtherPlayer(c.player, x + 0.5, z + 0.5)) continue;
+        const y = this.turfTop(x, z);
+        if (y < 0) continue;
+        rabbits.push(sim.entities.spawnRabbit(x + 0.5, y + 1, z + 0.5));
+        break;
+      }
     }
+  }
+
+  /** Is a column centre closer than RABBIT_SPAWN_MIN (horizontally) to a joined player other than `self`? */
+  private nearOtherPlayer(self: object, x: number, z: number): boolean {
+    const min2 = RABBIT_SPAWN_MIN * RABBIT_SPAWN_MIN;
+    for (const c of this.sim.players.online()) {
+      const p = c.player;
+      if (p === self) continue;
+      const dx = x - p.pos.x;
+      const dz = z - p.pos.z;
+      if (dx * dx + dz * dz < min2) return true;
+    }
+    return false;
   }
 
   /** y of a turf cell with two free cells above it, the top of its column; -1 when there is none. */

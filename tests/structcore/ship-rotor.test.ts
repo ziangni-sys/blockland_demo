@@ -140,8 +140,9 @@ describe('rotors on ships', () => {
     const s = scene({ dynamics: true });
     const { ship, rotor } = shipThenMill(s);
     expect(rotor.parent).toBe(ship);
-    expect(rotor.hubGlue).toBe(true);
-    expect(ship.glue.has(BX, BY, BZ, PZ)).toBe(false);
+    // The hub glue stays on the ship's bearing (in the ship's store), not duplicated into the rotor.
+    expect(ship.glue.has(BX, BY, BZ, PZ)).toBe(true);
+    expect(rotor.glue.has(BX, BY, BZ + 1, 5 /* -Z */)).toBe(false);
     expect(ship.grid.count).toBe(SHIP_CELLS);
     expect(rotor.grid.count).toBe(MILL_CELLS);
     expect(s.dyn!.woken).toContain(ship);
@@ -156,7 +157,7 @@ describe('rotors on ships', () => {
     expect(rep).toEqual({ placed: MILL_CELLS, dropped: 0, overwritten: 0 });
     expect(ship.grid.count).toBe(SHIP_CELLS + MILL_CELLS);
     expect(ship.children).toEqual([]);
-    expect(ship.glue.has(BX, BY, BZ, PZ)).toBe(true); // hub glue restored in the SHIP's store
+    expect(ship.glue.has(BX, BY, BZ, PZ)).toBe(true); // the hub glue holds the hub again, in the SHIP's store
     // Quarter turn about +Z in ship-local coordinates.
     const [x2, y2] = rotZ(2, 0, 1);
     expect(ship.grid.getCell(BX + x2, BY + y2, BZ + 1)).toBe(c(B.WOOL_RED));

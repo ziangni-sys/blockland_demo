@@ -2,7 +2,7 @@
 
 Original voxel sandbox in the browser. Core gameplay: multi-block structures (physical ships, kinematic rotors) held together by auto-sticking rules and glue.
 
-Read before changing code: `docs/ARCHITECTURE.md` (code conventions, layering, tick order), `docs/DESIGN.md` (gameplay rules), `docs/LESSONS.md` (bugs the prototype had), `docs/ACCEPTANCE.md` (scenarios, automated in `tests/acceptance/`), `docs/ROADMAP.md` (milestones).
+Read before changing code: `docs/ARCHITECTURE.md` (code conventions, layering, tick order), `docs/DESIGN.md` (gameplay rules), `docs/LESSONS.md` (bugs the prototype had), `docs/ACCEPTANCE.md` (scenarios, automated in `tests/acceptance/`), `docs/ROADMAP.md` (milestones). For anything under `src/net/` or touching multiplayer, `docs/NETCODE.md` is the specification.
 
 ## Tracking
 
@@ -11,7 +11,7 @@ Read before changing code: `docs/ARCHITECTURE.md` (code conventions, layering, t
 
 ## Commands
 
-- `npm test` — every headless test, including the 24 acceptance scenarios
+- `npm test` — every headless test, including the acceptance scenarios (`tests/acceptance/`)
 - `npm run typecheck`
 - `npm run build:artifact` — single-file build, `dist-artifact/blocklands.html`
 - `node scripts/e2e-smoke.mjs` — browser smoke test (WebGL2 and WebGPU launch configurations)

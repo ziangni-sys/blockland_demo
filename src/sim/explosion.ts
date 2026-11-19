@@ -14,14 +14,15 @@
  *     hull keeps out.
  *  2. DESTRUCTION, inside structures.beginBatch(): every marked world cell, then every marked
  *     structure cell, is set to AIR with SET_EXPLOSION. Explosive blocks become primed blast
- *     crates with a short random fuse (chain reactions); in survival a 1/power share of the
- *     other blocks drop their item.
+ *     crates with a short random fuse (chain reactions); when the world's drops are on
+ *     (WorldRules.dropsEnabled) a 1/power share of the other blocks drop their item.
  *  3. structures.endBatch(): rotors whose bearing was destroyed blockify now — after the wave
  *     has gone through every structure, so surviving blades land where they should — and
  *     emptied ships are removed (one that still carries rotor remains survives).
  *  4. PUSH: surviving ships get an impulse summed over their cells (rotors are never pushed);
- *     entities within 2 * power take damage (survival; players and rabbits) scaled by distance
- *     and line-of-sight exposure, and are knocked back (item drops are only pushed).
+ *     entities within 2 * power take damage scaled by distance and line-of-sight exposure —
+ *     players by their own mode (EntityManager.damage), rabbits only in a survival world
+ *     (WorldRules.defaultMode) — and are knocked back (item drops are only pushed).
  *  5. The 'explosion' event; queued block updates (sand over the crater, torches) run.
  */
 import { AIR, ID_MASK } from '../blocks/cell';
@@ -258,7 +259,7 @@ function removeCell(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: n
     tnt.setPosition(tmp.x, tmp.y - tnt.height * 0.5, tmp.z);
     return;
   }
-  if (!sim.creative && sim.rng.next() < dropChance) spawnBlockDrop(sim, grid, x, y, z, cell, tmp);
+  if (sim.rules.dropsEnabled && sim.rng.next() < dropChance) spawnBlockDrop(sim, grid, x, y, z, cell, tmp);
 }
 
 /** Phase 4a: every live ship in reach gets the impulses of its cells, applied at their impact-weighted centre. */
@@ -317,10 +318,10 @@ function pushShips(sim: Simulation, centre: Vec3, power: number): void {
   }
 }
 
-/** Phase 4b: damage (survival) and knock-back of every entity in reach. */
+/** Phase 4b: damage and knock-back of every entity in reach. */
 function pushEntities(sim: Simulation, centre: Vec3, power: number): void {
   const radius = power * ENTITY_RADIUS_FACTOR;
-  const creative = sim.creative;
+  const harmsCreatures = sim.rules.defaultMode === 'survival';
   const grids = sim.grids();
   // Damage can remove entities (rabbits), which mutates the live list: iterate a copy.
   const list = sim.entities.all().slice();
@@ -345,7 +346,7 @@ function pushEntities(sim: Simulation, centre: Vec3, power: number): void {
       dy = 1;
       dz = 0;
     }
-    if (!creative && (e.kind === 'player' || e.kind === 'rabbit')) {
+    if (e.kind === 'player' || (e.kind === 'rabbit' && harmsCreatures)) {
       // Classic falloff: quadratic in impact, scaled with the blast radius.
       const damage = Math.floor(((impact * impact + impact) / 2) * 7 * radius + 1);
       sim.entities.damage(e, damage, 'explosion');
@@ -353,9 +354,7 @@ function pushEntities(sim: Simulation, centre: Vec3, power: number): void {
     }
     if (e instanceof Player && e.dead) continue;
     const k = impact * KNOCKBACK_SPEED;
-    e.vel.x += dx * k;
-    e.vel.y += dy * k;
-    e.vel.z += dz * k;
+    sim.entities.knock(e, dx * k, dy * k, dz * k);
   }
 }
 

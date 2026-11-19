@@ -1,5 +1,7 @@
 /**
- * Settings: render distance, FOV, mouse sensitivity, invert Y, language, debug overlay.
+ * Settings: render distance, FOV, mouse sensitivity, invert Y, language, debug overlay, and the
+ * player's name (package 11: kept when the field is left or Enter pressed, if the client's rule
+ * accepts it; otherwise the field goes back to the stored name).
  * Sliders report live (on 'input') so FOV and distance can be previewed while dragging.
  *
  * Every control shows the stored setting from UiState, never just the player's click: the
@@ -12,7 +14,7 @@ import { settingsEq } from '../diff';
 import { clamp, formatFov, formatSensitivity } from '../format';
 import { LANGUAGE_NAMES, type StringKey } from '../i18n';
 import type { Language, Settings, UiState } from '../model';
-import { h } from '../dom';
+import { h, setHidden } from '../dom';
 import { focusInto, type ScreenView } from './screen';
 import { button, ICON_BACK, Segmented, Switch } from './widgets';
 
@@ -89,11 +91,18 @@ export class SettingsView implements ScreenView {
   private readonly invert: Switch;
   private readonly debug: Switch;
   private readonly lang: Segmented<Language>;
+  private readonly nameInput: HTMLInputElement;
+  private readonly nameRow: HTMLElement;
+  private playerName = '';
   private last: Settings | null = null;
   /** Settings of the most recent update (reference, not a copy), for the focus-out re-sync. */
   private latest: Settings | null = null;
 
-  constructor(private readonly ctx: UiContext) {
+  /** `nameOk`: the client's rule for names (client/names.ts, given by the root). */
+  constructor(
+    private readonly ctx: UiContext,
+    nameOk: (text: string) => boolean,
+  ) {
     const d = ctx.doc;
     const a = ctx.actions;
     const titleId = ctx.id('settings');
@@ -125,6 +134,31 @@ export class SettingsView implements ScreenView {
     const field = (labelId: string, key: StringKey, ctl: HTMLElement): HTMLElement =>
       h(d, 'div', 'bl-field', null, [ctx.text(h(d, 'span', 'bl-field-label', { id: labelId }), key), ctl]);
 
+    const nameId = ctx.id('pname');
+    this.nameInput = h(d, 'input', 'bl-input bl-field-ctl bl-settings-name', { id: nameId, type: 'text', autocomplete: 'off', spellcheck: 'false', 'data-field': 'settings-name' });
+    // The rule counts code points (no maxlength: it counts UTF-16 units); while the text breaks
+    // it, the note under the field says the rule instead of when the name is used.
+    const nameNote = ctx.text(h(d, 'span', 'bl-field-note'), 'settings.nameHint');
+    const nameBad = ctx.text(h(d, 'span', 'bl-field-note bl-field-note--bad', { role: 'alert', hidden: true }), 'name.invalid');
+    const showNameOk = (ok: boolean): void => {
+      setHidden(nameNote, !ok);
+      setHidden(nameBad, ok);
+      this.nameInput.setAttribute('aria-invalid', ok ? 'false' : 'true');
+    };
+    const commitName = (): void => {
+      const v = this.nameInput.value;
+      if (v.trim() !== this.playerName && nameOk(v)) a.setPlayerName(v);
+      else this.nameInput.value = this.playerName;
+      showNameOk(true);
+    };
+    this.nameInput.addEventListener('input', () => showNameOk(nameOk(this.nameInput.value)));
+    this.nameInput.addEventListener('change', commitName);
+    this.nameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.nameInput.blur();
+    });
+    // Only a build that can go online uses the name (UiState.online.available).
+    this.nameRow = h(d, 'div', 'bl-field bl-field--name', null, [ctx.text(h(d, 'label', 'bl-field-label', { for: nameId }), 'settings.name'), this.nameInput, nameNote, nameBad]);
+
     const back = button(ctx, { variant: 'primary', icon: ICON_BACK, label: 'settings.back', onClick: () => a.closeSettings() });
     this.panel = h(d, 'div', 'bl-panel bl-panel-modal bl-settings-panel', { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1' }, [
       ctx.text(h(d, 'h2', 'bl-panel-title bl-title-lg', { id: titleId }), 'settings.title'),
@@ -132,6 +166,7 @@ export class SettingsView implements ScreenView {
       h(d, 'section', 'bl-settings-sec', null, [ctx.text(h(d, 'h3', 'bl-subtitle'), 'settings.secInput'), sens.row, field(invertLbl, 'settings.invertY', this.invert.el)]),
       h(d, 'section', 'bl-settings-sec', null, [
         ctx.text(h(d, 'h3', 'bl-subtitle'), 'settings.secGeneral'),
+        this.nameRow,
         field(langLbl, 'settings.language', this.lang.el),
         field(debugLbl, 'settings.debug', this.debug.el),
       ]),
@@ -151,6 +186,11 @@ export class SettingsView implements ScreenView {
   }
 
   update(s: UiState): void {
+    setHidden(this.nameRow, !s.online.available);
+    if (s.online.playerName !== this.playerName) {
+      this.playerName = s.online.playerName;
+      if (this.ctx.doc.activeElement !== this.nameInput) this.nameInput.value = this.playerName;
+    }
     const st = s.settings;
     this.latest = st;
     if (this.last && settingsEq(this.last, st)) return;

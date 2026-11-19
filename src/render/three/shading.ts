@@ -288,12 +288,21 @@ export function worldNormal(): N<'vec3'> {
   return vertexStage(normalize(modelWorldMatrix.mul(vec4(n, 0)).xyz));
 }
 
+/**
+ * lighting.ts shadedBrightness, tinted: sky light (0..1, scaled by the time of day) against
+ * block light (0..1), each through the light curve and tint, the brighter wins, over the
+ * ambient floor. No AO, no face term.
+ */
+export function skyBlockLightNode(u: SharedUniforms, sky: N<'float'>, block: N<'float'>): N<'vec3'> {
+  const s = lightCurveNode(sky.mul(u.dayLight));
+  const b = lightCurveNode(block);
+  const tinted = max(u.skyTint.mul(s), u.blockTint.mul(b));
+  return tinted.mul(1 - AMBIENT_FLOOR).add(AMBIENT_FLOOR);
+}
+
 /** Terrain light colour (before albedo) — lighting.ts shadedBrightness, tinted, with AO and face term. */
 function lightColor(u: SharedUniforms, vl: VertexLight, n: N<'vec3'>): N<'vec3'> {
-  const s = lightCurveNode(vl.sky.mul(u.dayLight));
-  const b = lightCurveNode(vl.block);
-  const tinted = max(u.skyTint.mul(s), u.blockTint.mul(b));
-  const floored = tinted.mul(1 - AMBIENT_FLOOR).add(AMBIENT_FLOOR);
+  const floored = skyBlockLightNode(u, vl.sky, vl.block);
   // The contract delivers AO as linear openness (level * 85); the soft response is ours.
   const ao = mix(float(0.45), float(1), vl.ao);
   const lit = floored.mul(ao).mul(faceShadeNode(n));
@@ -307,10 +316,7 @@ function lightColor(u: SharedUniforms, vl: VertexLight, n: N<'vec3'>): N<'vec3'>
  * sky / block come from the per-object uniform (x = sky 0..1, y = block 0..1).
  */
 export function modelLightNode(u: SharedUniforms, obj: N<'vec4'>, n: N<'vec3'>): N<'vec3'> {
-  const s = lightCurveNode(obj.x.mul(u.dayLight));
-  const b = lightCurveNode(obj.y);
-  const tinted = max(u.skyTint.mul(s), u.blockTint.mul(b));
-  return tinted.mul(1 - AMBIENT_FLOOR).add(AMBIENT_FLOOR).mul(faceShadeNode(n));
+  return skyBlockLightNode(u, obj.x, obj.y).mul(faceShadeNode(n));
 }
 
 /**

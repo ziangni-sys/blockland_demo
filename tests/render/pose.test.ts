@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { DryVolume, StructurePose } from '../../src/render/backend';
-import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix, transformPoint, worldToLocal } from '../../src/render/three/pose';
+import { dryVolumeCenter, dryVolumeMatrix, dryVolumeRadius, poseToMatrix } from '../../src/render/three/pose';
+
+/** Applies a column-major matrix to a point (x, y, z, 1). */
+function transformPoint(m: ArrayLike<number>, x: number, y: number, z: number, out: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  out.x = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
+  out.y = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
+  out.z = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
+  return out;
+}
 import { qfromAxisAngle, qrotate, vec3, vnormalize } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
 
@@ -104,29 +112,7 @@ describe('dry volume matrix', () => {
   });
 });
 
-describe('camera-relative and inverse transforms', () => {
-  it('worldToLocal inverts poseToMatrix (also for non-unit quaternions)', () => {
-    const rng = new Rng(7);
-    const m = new Float64Array(16);
-    const w = vec3();
-    const l = vec3();
-    for (let i = 0; i < 100; i++) {
-      const axis = vnormalize(vec3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)));
-      const q = qfromAxisAngle(axis, rng.range(-Math.PI, Math.PI));
-      const s = rng.range(0.98, 1.02);
-      const ps = pose([rng.range(-1e5, 1e5), rng.range(0, 128), rng.range(-1e5, 1e5)], { x: q.x * s, y: q.y * s, z: q.z * s, w: q.w * s }, [rng.range(-5, 5), 1.5, rng.range(-5, 5)]);
-      poseToMatrix(ps, m);
-      const lx = rng.range(-10, 10);
-      const ly = rng.range(-10, 10);
-      const lz = rng.range(-10, 10);
-      transformPoint(m, lx, ly, lz, w);
-      worldToLocal(ps, w.x, w.y, w.z, l);
-      expect(l.x).toBeCloseTo(lx, 6);
-      expect(l.y).toBeCloseTo(ly, 6);
-      expect(l.z).toBeCloseTo(lz, 6);
-    }
-  });
-
+describe('camera-relative transforms', () => {
   // Review finding (float32 far from the origin): the dry-volume matrix takes camera-relative
   // positions, so its translation stays small and its float32 copy is exact enough.
   it('dry volume matrix with an origin maps (world - origin) like the plain matrix maps world', () => {

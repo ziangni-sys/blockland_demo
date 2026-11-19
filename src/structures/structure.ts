@@ -24,6 +24,7 @@ import type { VoxelGrid } from '../voxel/grid';
 import { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
 import { GlueStore } from './glue';
+import type { SnapTransform } from './assembly';
 import type { HullInfo } from './hull';
 
 export type StructureKind = 'ship' | 'rotor';
@@ -78,11 +79,6 @@ export class Rotor extends Structure {
   angularSpeed = 0;
   /** Number of sail cells (wool / canvas). */
   sails = 0;
-  /**
-   * There was glue between the hub and the bearing when the rotor started. The glue is
-   * removed while it spins and restored when it stops (LESSONS "风车停下后…胶没了").
-   */
-  hubGlue = false;
 
   /** Rotating mechanical structures cannot be edited. */
   get editable(): boolean {
@@ -171,8 +167,11 @@ export interface StructureHost {
   /** Glue between world cells. */
   readonly worldGlue: GlueStore;
   readonly rng: Rng;
-  /** True in creative mode: blocks displaced by a blockify do not drop items. */
-  readonly creative: boolean;
+  /**
+   * The world rule (sim/rules.ts): blocks displaced by a blockify or a dock, or destroyed by a
+   * pinned ship, drop their item. False in a creative world.
+   */
+  readonly dropsEnabled: boolean;
   /** Spawn an item drop with its centre at a world position. */
   spawnDrop(x: number, y: number, z: number, item: number, count: number): void;
   /**
@@ -184,7 +183,9 @@ export interface StructureHost {
   /**
    * Called BEFORE a structure's cells leave it (blockify / dock / destroyed) or its frame
    * is re-gridded: every entity carried by it, and its helmsman, must let go now
-   * (LESSONS "停靠时站在转盘上的人被瞬移").
+   * (LESSONS "停靠时站在转盘上的人被瞬移"). A blockify or dock passes its snap (the structure's
+   * local cells -> its parent grid's): the riders are moved by it too, so they stay on the cells
+   * they stood on; null when the cells do not move (destroyed).
    */
-  releaseRiders(structure: Structure): void;
+  releaseRiders(structure: Structure, snap: SnapTransform | null): void;
 }

@@ -18,10 +18,9 @@ interface Internals {
   width: number;
   height: number;
   pixelRatio: number;
-  structures: Map<number, { group: THREE.Group; prevMatrix: Float64Array; hasPrev: boolean; hasPose: boolean }>;
-  structureList: { group: THREE.Group; prevMatrix: Float64Array; hasPrev: boolean; hasPose: boolean }[];
+  structures: Map<number, { group: THREE.Group; hasPose: boolean }>;
+  structureList: { group: THREE.Group; hasPose: boolean }[];
   pendingPoses: Map<number, StructurePose>;
-  selfMotion(x: number, y: number, z: number, dx: number, dy: number, dz: number, out: { x: number; y: number; z: number }): void;
   endFrame(): void;
   primeUploads(): void;
   releaseUploaded(): void;
@@ -107,8 +106,8 @@ describe('lifecycle', () => {
     be.setStructureMesh(9, 0, 0, 0, mesh());
     be.setStructurePose(9, pose(0, 0, 0));
     be.setStructureDryVolume(9, { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, mask: new Uint8Array([1]) });
-    be.setEntities([{ id: 1, kind: 'rabbit', x: 0, y: 0, z: 0, yaw: 0, payload: 0, flash: 0, sky: 15, block: 0 }]);
-    be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0 }, breakProgress: 0.5, preview: [], conflicts: [], glue: [], glueAnchor: null });
+    be.setEntities([{ id: 1, kind: 'rabbit', x: 0, y: 0, z: 0, yaw: 0, vx: 0, vy: 0, vz: 0, payload: 0, flash: 0, sky: 15, block: 0, headYaw: 0, headPitch: 0, held: 0, posture: 'stand', label: null }]);
+    be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0 }, breakProgress: 0.5, preview: [], conflicts: [], glue: [] });
     be.render();
     be.dispose(); // twice is fine
     expect(be.stats()).toEqual({ drawCalls: 0, triangles: 0, sections: 0, structures: 0 });
@@ -197,61 +196,11 @@ describe('floating render origin (review: float32 precision far from the world o
     expect(g.matrix.elements[12]).toBeCloseTo(10.25 - 768, 9);
     expect(i.entities.group.matrix.elements[12]).toBe(-(far + 768));
     // World overlays: root at (anchor - origin), anchor near the camera.
-    be.setOverlays({ target: { structureId: 0, x: far + 1001, y: 59, z: far + 1 }, breakProgress: 0, preview: [], conflicts: [], glue: [], glueAnchor: null });
+    be.setOverlays({ target: { structureId: 0, x: far + 1001, y: 59, z: far + 1 }, breakProgress: 0, preview: [], conflicts: [], glue: [] });
     const outline = i.overlayRoot.children.find((c) => c instanceof THREE.LineSegments)!;
     i.overlayRoot.updateMatrixWorld(true);
     const p = new THREE.Vector3().setFromMatrixPosition(outline.matrixWorld);
     expect(p.toArray()).toEqual([far + 1001 - i.origin.x, 59, 1]);
-  });
-});
-
-describe('entity carrier compensation (review: carried rabbits hopped in place)', () => {
-  /** A 10 x 1 x 6 deck spanning local [0,10] x [0,1] x [0,6]. */
-  function deck(): MeshData {
-    const g = quad(1);
-    g.positions.set([0, 1, 0, 10, 1, 0, 10, 1, 6, 0, 1, 6]);
-    return { opaque: g, cutout: null, translucent: null };
-  }
-
-  it('a passenger standing on a moving, turning ship has no self motion; one walking on it does', () => {
-    const be = readyBackend();
-    be.setStructureMesh(1, 0, 0, 0, deck());
-    const p0 = pose(100, 47, 50, 0.3, [5, 0, 3]);
-    be.setStructurePose(1, p0);
-    endFrame(be);
-    // Next frame: the ship moved 0.4 blocks and turned a little.
-    const p1 = pose(100.4, 47.02, 50.1, 0.33, [5, 0, 3]);
-    be.setStructurePose(1, p1);
-    const toWorld = (p: StructurePose, lx: number, ly: number, lz: number): THREE.Vector3 => {
-      const m = new THREE.Matrix4();
-      const q = new THREE.Quaternion(p.qx, p.qy, p.qz, p.qw);
-      m.compose(new THREE.Vector3(p.px, p.py, p.pz), q, new THREE.Vector3(1, 1, 1));
-      return new THREE.Vector3(lx - p.pivotX, ly - p.pivotY, lz - p.pivotZ).applyMatrix4(m);
-    };
-    const out = { x: 0, y: 0, z: 0 };
-    // Standing at local (8, 1, 2) both frames.
-    const a = toWorld(p0, 8, 1, 2);
-    const b = toWorld(p1, 8, 1, 2);
-    internals(be).selfMotion(b.x, b.y, b.z, b.x - a.x, b.y - a.y, b.z - a.z, out);
-    expect(Math.hypot(out.x, out.y, out.z)).toBeLessThan(1e-9);
-    // Walking 0.2 blocks along local +x on the deck.
-    const c = toWorld(p1, 8.2, 1, 2);
-    internals(be).selfMotion(c.x, c.y, c.z, c.x - a.x, c.y - a.y, c.z - a.z, out);
-    expect(Math.hypot(out.x, out.y, out.z)).toBeCloseTo(0.2, 6);
-  });
-
-  it('entities away from every structure keep their raw motion; one standing on the shore stays still', () => {
-    const be = readyBackend();
-    be.setStructureMesh(1, 0, 0, 0, deck());
-    be.setStructurePose(1, pose(100, 47, 50));
-    endFrame(be);
-    be.setStructurePose(1, pose(100.5, 47, 50));
-    const out = { x: 0, y: 0, z: 0 };
-    internals(be).selfMotion(0, 60, 0, 0.1, 0, 0.05, out);
-    expect(out).toEqual({ x: 0.1, y: 0, z: 0.05 });
-    // Right next to the ship (inside its padded bounds) but not moving: no motion invented.
-    internals(be).selfMotion(99.6, 48, 52, 0, 0, 0, out);
-    expect(out).toEqual({ x: 0, y: 0, z: 0 });
   });
 });
 
@@ -299,5 +248,60 @@ describe('upload primer and CPU array release (review: turn hitch, retained mesh
     draw(m);
     i.releaseUploaded();
     expect(m.geometry.getAttribute('position').array.length).toBe(0);
+  });
+});
+
+describe('glue on block surfaces (review: decals glowed at night and lay on top of water)', () => {
+  const decalOf = (root: THREE.Object3D): THREE.InstancedMesh | undefined => {
+    let found: THREE.InstancedMesh | undefined;
+    root.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh && o.visible && (o.material as THREE.Material).name === 'overlay-glue-decal') found = o;
+    });
+    return found;
+  };
+
+  it('the glue decal and bead are drawn before water, which then tints them like the block under them', () => {
+    const be = readyBackend();
+    const i = internals(be);
+    be.setSectionMesh(1, 0, 0, 0, { opaque: quad(0), cutout: null, translucent: quad(3) });
+    const water = i.sections.get(1)!.meshes[2]!;
+    expect((water.material as THREE.Material).transparent).toBe(true);
+    be.setOverlays({
+      target: null,
+      breakProgress: 0,
+      preview: [{ structureId: 0, x: 5, y: 0, z: 0 }],
+      conflicts: [],
+      glue: [
+        { structureId: 0, x: 0, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0 },
+        { structureId: 0, x: 2, y: 0, z: 0, face: 2, covered: true, sky: 0, block: 0 },
+      ],
+    });
+    const orders = new Map<string, number>();
+    i.overlayRoot.traverse((o) => {
+      if (o instanceof THREE.InstancedMesh && o.visible) orders.set((o.material as THREE.Material).name, o.renderOrder);
+    });
+    // Transparent objects are drawn by ascending renderOrder: glue on surfaces first, then water,
+    // then the markers (preview cells) which must stay readable through water.
+    expect(orders.get('overlay-glue-decal')).toBeLessThan(water.renderOrder);
+    expect(orders.get('overlay-glue')).toBeLessThan(water.renderOrder);
+    expect(orders.get('overlay-cells')).toBeGreaterThan(water.renderOrder);
+    be.dispose();
+  });
+
+  it("a decal on a structure is lit with the structure's pose light; a world decal with the world's", () => {
+    const be = readyBackend();
+    const i = internals(be);
+    be.setStructureMesh(4, 0, 0, 0, mesh());
+    be.setStructurePose(4, { ...pose(10, 50, 10), sky: 6, block: 3 });
+    const face = { x: 1, y: 0, z: 1, face: 2, covered: false, sky: 15, block: 0 };
+    be.setOverlays({ target: null, breakProgress: 0, preview: [], conflicts: [], glue: [{ structureId: 4, ...face }, { structureId: 0, ...face }] });
+    const ship = decalOf(i.structures.get(4)!.group)!;
+    const bl = ship.userData.bl as THREE.Vector4;
+    expect([bl.x, bl.y]).toEqual([6 / 15, 3 / 15]);
+    // The pose light changes in place: the decal follows without a new overlay list.
+    be.setStructurePose(4, { ...pose(10, 50, 10), sky: 15, block: 0 });
+    expect([bl.x, bl.y]).toEqual([1, 0]);
+    expect(decalOf(i.overlayRoot)!.userData.bl).toBeUndefined(); // the backend's world light
+    be.dispose();
   });
 });

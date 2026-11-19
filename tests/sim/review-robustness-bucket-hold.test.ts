@@ -42,8 +42,8 @@ function boat(): { sim: Simulation; shipId: number } {
   expect(res.ok).toBe(true);
   if (!res.ok) throw new Error('assembly failed');
   sim.structures.dynamics = null;
-  sim.teleport(2.5, 31, 0.5);
-  sim.player.flying = true;
+  sim.soloPlayer.teleport(2.5, 31, 0.5);
+  sim.soloPlayer.player.flying = true;
   sim.advance(2);
   // Precondition of the scene: the hold is empty in the ship grid, world water is inside it.
   expect(idAt(res.structure.grid, 2, 29, 3)).toBe(B.AIR);
@@ -54,27 +54,27 @@ function boat(): { sim: Simulation; shipId: number } {
 describe('review: buckets and the world water inside a ship hold', () => {
   it('an empty bucket aimed into the dry hold does not scoop the hidden world water', () => {
     const { sim } = boat();
-    sim.hold(I.BUCKET, 1);
-    sim.lookAt(2.5, 29.9, 3.5);
+    sim.soloPlayer.hold(I.BUCKET, 1);
+    sim.soloPlayer.lookAt(2.5, 29.9, 3.5);
     sim.tick();
     const before = sim.world.getCell(2, 29, 3);
-    sim.use();
+    sim.soloPlayer.use();
     sim.tick();
     expect(sim.world.getCell(2, 29, 3)).toBe(before);
-    expect(sim.player.inventory.selectedStack()?.item).toBe(I.BUCKET);
+    expect(sim.soloPlayer.player.inventory.selectedStack()?.item).toBe(I.BUCKET);
   });
 
   it('a water bucket aimed into the dry hold does not pour into the structure', () => {
     const { sim } = boat();
     const w = sim.world;
     const wet = countId(w, B.WATER, 1, 28, 1, 3, 31, 5);
-    sim.hold(I.BUCKET_WATER, 1);
-    sim.lookAt(2.5, 29.9, 3.5);
+    sim.soloPlayer.hold(I.BUCKET_WATER, 1);
+    sim.soloPlayer.lookAt(2.5, 29.9, 3.5);
     sim.tick();
-    sim.use();
+    sim.soloPlayer.use();
     sim.tick();
     expect(idAt(w, 2, 30, 3)).toBe(B.AIR);
     expect(countId(w, B.WATER, 1, 28, 1, 3, 31, 5)).toBe(wet);
-    expect(sim.player.inventory.selectedStack()?.item).toBe(I.BUCKET_WATER);
+    expect(sim.soloPlayer.player.inventory.selectedStack()?.item).toBe(I.BUCKET_WATER);
   });
 });

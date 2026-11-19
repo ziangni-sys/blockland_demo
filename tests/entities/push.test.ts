@@ -37,9 +37,8 @@ describe('ACCEPTANCE 17 — a blade sweeping through players', () => {
   it('pushes a free-standing player aside without damage', () => {
     const b = new Bench();
     floor(b);
-    b.entities.createPlayer('survival', 15.5, 61, 15.5); // the local player decides the mode
     const r = bladeRotor(b, 1.5);
-    const p = b.entities.createPlayer('survival', 0.5, 61, -3.0);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, -3.0);
     noOverlapCheck(b, r, p);
     const start = vec3(p.pos.x, p.pos.y, p.pos.z);
     b.tick(40);
@@ -62,7 +61,7 @@ describe('ACCEPTANCE 17 — a blade sweeping through players', () => {
       ]) fill(b.world, x!, 61, z!, x!, 62, z!, B.STONE);
       fill(b.world, -1, 63, -4, 1, 63, -2, B.STONE);
       const r = bladeRotor(b, 1.2);
-      const p = b.entities.createPlayer(mode, 0.5, 61, -2.5);
+      const p = b.entities.spawnPlayer(mode, 0.5, 61, -2.5);
       b.checks.push(() => {
         expect(inWorld(b.world, p)).toBe(false);
       });
@@ -102,7 +101,7 @@ describe('ACCEPTANCE 17 — a blade sweeping through players', () => {
     const paddle = b.rotor(20, null, [-8, 61, 0], 2, paddleCells);
     const p0 = vec3(-7.5, 62, 0.5);
     b.drive(paddle, (t) => ({ p: vec3(p0.x + 3 * t * TICK_DT, p0.y, p0.z), q: qfromYaw(0.35) }));
-    const p = b.entities.createPlayer('survival', -4.5, 61, -1.65);
+    const p = b.entities.spawnPlayer('survival', -4.5, 61, -1.65);
     b.tick(3);
     expect(p.carrierId).toBe(ship.id);
     b.checks.push(() => {
@@ -120,7 +119,7 @@ describe('ACCEPTANCE 18 — rabbits and item drops', () => {
   function cagedRabbitBench(mode: 'survival' | 'creative'): { b: Bench; reset: () => void; rabbit: ReturnType<Bench['entities']['spawnRabbit']> } {
     const b = new Bench();
     floor(b);
-    b.entities.createPlayer(mode, 15.5, 61, 15.5);
+    b.host.harmsCreatures = mode === 'survival'; // the world rules (a survival world harms creatures)
     // 1x1x1 cage around cell (0, 61, -3)
     for (const [x, z] of [
       [-1, -3],
@@ -179,7 +178,7 @@ describe('ACCEPTANCE 18 — rabbits and item drops', () => {
   it('item drops are pushed by blades, never destroyed (free or caged)', () => {
     const b = new Bench();
     floor(b);
-    b.entities.createPlayer('survival', 15.5, 61, 15.5);
+    b.entities.spawnPlayer('survival', 15.5, 61, 15.5);
     fill(b.world, 2, 61, -4, 2, 62, -4, B.STONE);
     fill(b.world, 3, 61, -4, 3, 61, -4, B.STONE);
     bladeRotor(b, 2);
@@ -213,7 +212,7 @@ describe('ACCEPTANCE 20 — turntables', () => {
     for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) cells.push([x, 61, z, B.PLANKS_OAK]);
     const r = b.rotor(5, null, [0, 61, 0], 2, cells);
     b.spin(r, 0.8, UP);
-    const p = b.entities.createPlayer('survival', 2.1, 62, 0.5);
+    const p = b.entities.spawnPlayer('survival', 2.1, 62, 0.5);
     b.tick(30);
     expect(p.carrierId).toBe(r.id);
     const l0 = r.grid.toLocal(p.pos, vec3());
@@ -239,7 +238,7 @@ describe('ACCEPTANCE 20 — turntables', () => {
     b.spin(tt, 0.7, UP);
     b.tick();
     const start = ship.grid.toWorld(vec3(0.5, 62, 0.5));
-    const p = b.entities.createPlayer('survival', start.x, start.y + 0.01, start.z);
+    const p = b.entities.spawnPlayer('survival', start.x, start.y + 0.01, start.z);
     b.tick(30);
     expect(p.carrierId).toBe(tt.id);
     // walk off the platform onto the deck (1 block down)
@@ -275,7 +274,7 @@ describe('ACCEPTANCE 20 — turntables', () => {
     b.spin(tt, 1.2, UP);
     b.tick();
     const start = ship.grid.toWorld(vec3(1.4, 62, 1.4));
-    const p = b.entities.createPlayer('survival', start.x, start.y, start.z);
+    const p = b.entities.spawnPlayer('survival', start.x, start.y, start.z);
     let sawRelease = false;
     b.checks.push(() => {
       expect(inStructure(ship, p)).toBe(false);
@@ -304,7 +303,7 @@ describe('LESSONS 站在行驶的船上被风车误推', () => {
     // on the yawing deck its corner reaches up to 0.3 * sqrt(2) = 0.42 toward the blades:
     // standing at z = -1.55 it stays 0.03 clear. Judged at last tick's position (the ship
     // moves 0.25 per tick toward +Z) it would be inside the blades every time they pass.
-    const p = b.entities.createPlayer('survival', 0.5, 61, -1.55);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, -1.55);
     p.carrierId = ship.id; // aboard from the start (no slip while it would attach)
     const l0 = ship.grid.toLocal(p.pos, vec3());
     for (let i = 0; i < 240; i++) {
@@ -323,12 +322,12 @@ describe('a ship moving into a standing player', () => {
   it('pushes the player along; against a wall it is a crush', () => {
     const b = new Bench();
     floor(b);
-    b.entities.createPlayer('survival', 15.5, 61, 15.5);
+    b.entities.spawnPlayer('survival', 15.5, 61, 15.5);
     const cells: Array<[number, number, number, number]> = [];
     for (let z = -2; z <= 2; z++) for (let y = 61; y <= 63; y++) cells.push([-6, y, z, B.PLANKS_OAK]);
     const wallShip = b.ship(3, cells, vec3(-5.5, 62.5, 0.5));
     b.drive(wallShip, (t) => ({ p: vec3(-5.5 + 2.5 * t * TICK_DT, 62.5, 0.5), q: qfromYaw(0) }));
-    const p = b.entities.createPlayer('survival', -3.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', -3.5, 61, 0.5);
     fill(b.world, 2, 61, -3, 2, 63, 3, B.STONE); // wall at x = 2
     b.checks.push(() => expect(inWorld(b.world, p)).toBe(false));
     b.tick(30);

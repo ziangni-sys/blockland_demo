@@ -62,15 +62,15 @@ describe('review: buckets never reach world water hidden inside a hull', () => {
     sim.advance(200);
     const g = ship.grid;
     const stand = g.toWorld({ x: 2.5, y: SEA_TOP - 1, z: 2.5 });
-    sim.teleport(stand.x, stand.y + 0.01, stand.z);
+    sim.soloPlayer.teleport(stand.x, stand.y + 0.01, stand.z);
     sim.advance(5); // stands on the floor, carried by the boat
-    sim.hold(I.BUCKET, 1);
+    sim.soloPlayer.hold(I.BUCKET, 1);
     // Aim at the top face of the floor cell right in front of the feet.
-    sim.lookAtCell(2, SEA_TOP - 2, 3, PY, ship.id);
-    sim.use();
+    sim.soloPlayer.lookAtCell(2, SEA_TOP - 2, 3, PY, ship.id);
+    sim.soloPlayer.use();
     sim.tick();
     // What did the player aim at? The ship floor is what is visible.
-    expect(sim.player.inventory.selectedStack()).toEqual({ item: I.BUCKET, count: 1 });
+    expect(sim.soloPlayer.player.inventory.selectedStack()).toEqual({ item: I.BUCKET, count: 1 });
   });
 
   it('a water bucket aimed at the floor of the hold does not pour a world source into the hull', () => {
@@ -78,12 +78,12 @@ describe('review: buckets never reach world water hidden inside a hull', () => {
     sim.advance(200);
     const g = ship.grid;
     const stand = g.toWorld({ x: 2.5, y: SEA_TOP - 1, z: 2.5 });
-    sim.teleport(stand.x, stand.y + 0.01, stand.z);
+    sim.soloPlayer.teleport(stand.x, stand.y + 0.01, stand.z);
     sim.advance(5);
-    sim.hold(I.BUCKET_WATER, 1);
-    sim.lookAtCell(2, SEA_TOP - 2, 3, PY, ship.id);
-    sim.use();
+    sim.soloPlayer.hold(I.BUCKET_WATER, 1);
+    sim.soloPlayer.lookAtCell(2, SEA_TOP - 2, 3, PY, ship.id);
+    sim.soloPlayer.use();
     sim.tick();
-    expect(sim.player.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
+    expect(sim.soloPlayer.player.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
   });
 });

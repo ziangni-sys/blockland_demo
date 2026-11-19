@@ -10,8 +10,9 @@
 ## 分层与依赖方向
 
 ```
-core ─▶ blocks ─▶ voxel ─▶ { worldgen, light, liquid, structures, entities } ─▶ sim ─▶ client ─▶ ui
-                     └──▶ mesh（纯函数，Worker 里跑）──▶ render（three.js）
+core ─▶ blocks ─▶ voxel ─▶ { worldgen, light, liquid, structures, entities } ─▶ sim ─▶ net/server ─▶ net/host
+                     ├──▶ mesh（纯函数，Worker 里跑）──▶ render（three.js）
+                     └──▶ net/client（副本、时钟、预测、意图；不引用 sim 的运行时）──▶ client ─▶ ui
 art（程序化贴图，纯函数）      save（codec 纯函数 + 存储适配器）
 ```
 
@@ -19,7 +20,7 @@ art（程序化贴图，纯函数）      save（codec 纯函数 + 存储适配�
 
 1. **模拟层**（`core blocks voxel worldgen light liquid structures entities sim mesh art` 以及 `save` 的 codec）**不得**引用 DOM、`window`、`three`、`performance`、`Math.random()`、`Date`。它必须能在 Node 里无头步进。随机数一律用 `core/rng.ts`，时间一律用 `world.time`（tick 计数）。
 2. **渲染层**（`render/`）只消费 `mesh/types.ts` 的 `MeshData` 和 `render/backend.ts` 里的状态结构，不引用任何模拟对象。换渲染器 = 重写 `render/three/`。
-3. `client/` 是唯一同时认识模拟和渲染的地方：驱动 tick、做插值、把模拟状态翻译成 backend 调用。`ui/` 只做 DOM。
+3. `client/` 是唯一同时认识游戏状态和渲染的地方，但它认识的是 `net/client` 的**副本**，不是模拟：页面启动一个服务器（Worker；不行就退到主线程，中间仍然是字节），通过协议连上去，读副本、做插值、把副本翻译成 backend 调用。tick 由服务器自己的时钟驱动。`ui/` 只做 DOM。`net/` 的分层和消息见 [NETCODE.md](NETCODE.md) 第 15 节。
 4. 下层不得 import 上层。
 5. 数学对象是普通对象（`{x,y,z}` / `{x,y,z,w}`）。**没有全局共享的临时向量**；`out` 参数由调用者持有（LESSONS“临时向量被改写”）。
 
@@ -45,19 +46,20 @@ art（程序化贴图，纯函数）      save（codec 纯函数 + 存储适配�
 
 - `World`（`voxel/world.ts`）：区块存储、光照存储、**唯一的方块改动钩子** `onCellChange`、待处理方块 tick 队列 `TickQueue`、网格脏标记（用 `takeDirtySections()` 取）。未加载位置 `getCell` 返回 `CELL_UNLOADED`（实心、不可破坏）；`y<0` 是界岩，`y≥128` 是空气。
 - `StructureGrid`（`voxel/sgrid.ts`）：结构体的稠密存储 + 位姿。`父空间点 = position + rotate(rotation, 局部点 − pivot)`；可嵌套（`parent` 是另一个 `StructureGrid`）。每 tick 移动前先 `snapshotPose()`，渲染用 `renderPose(alpha)`。
+- 胶（`structures/glue.ts` 的 `GlueStore`）按面存储，世界一份、每个结构体一份。所有增删都经过存储并发出变更事件；格子变化时由 `StructureManager` 的钩子按“至少一侧是可涂胶方块”的规则清理。
 - 射线、盒体相交、推出向量等查询**只写一份**，对任意 `VoxelGrid` 生效（`voxel/raycast.ts`、`voxel/shape.ts`）。实体的身体永远是**世界轴对齐的盒子**；对旋转的网格，把盒子变换到网格局部空间做 OBB-格子 SAT。站立 / 推开 / 附着 / 挤压四种判定用同一个盒子定义，只是内缩量不同，且附着盒严格在推开盒之内（LESSONS“携带与实体”第一条）。
 
 ## 模拟 tick 的顺序（`sim/`）
 
 每个 tick 严格按此顺序（LESSONS：“先移动结构体，再把被携带的实体同步到新位置，最后做推开和挤压判定”）：
 
-1. `world.time++`；应用玩家输入产生的动作（放置、挖掘、使用、涂胶、组装、掌舵）。
+1. `world.time++`；按玩家编号从小到大，依次应用每个玩家的输入产生的动作（放置、挖掘、使用、涂胶、组装、掌舵）。后一个玩家看到的是前一个玩家动作之后的世界。
 2. 到期的方块 tick（液体、下落方块检查）。
 3. 结构体：所有结构体 `snapshotPose()`；机械结构体按机构推进；物理结构体分子步积分（子步内转子姿态插值）；嵌套子结构跟随父结构。
 4. 被携带的实体同步到载体的新位姿（位置 + 绕 Y 的转角）。
 5. 实体自身运动（输入 / AI / 重力），与世界做扫掠碰撞，与结构体做 SAT 推出。
 6. 推开与挤压判定；站立检测决定附着 / 脱离。
-7. 光照增量更新、事件派发。
+7. 事件派发；为每个已加入的玩家各生成一份交互视图。光照不在服务器上算：玩法从不读光照，它只在客户端的副本上计算。
 
 世界尚未加载完的区域：实体与结构体物理冻结（LESSONS“船被弹飞”）。
 
@@ -71,15 +73,19 @@ art（程序化贴图，纯函数）      save（codec 纯函数 + 存储适配�
 
 `save/`：codec（纯函数，区块 RLE、tick 队列、结构体、胶水、实体）+ 存储适配器（`MemoryStorage` 给测试，`IdbStorage` 给浏览器）。新世界必须清空一切全局状态（LESSONS“同种子开新世界”）—— 模拟层**不允许模块级可变状态**，一切状态挂在 `Simulation` 实例上。
 
+存档不向后兼容：格式一变就提高 `SAVE_VERSION`，解码器只读当前版本，旧档给出提示后拒绝打开，不写迁移代码。
+
 ## 测试
 
 - 单元测试放 `tests/<模块>/`；验收场景放 `tests/acceptance/`，一条场景一个 `describe`，全部无头。
 - 修 bug 先写复现测试；每轮修改后跑全量 `npm test` 和 `npm run typecheck`。
 - 浏览器冒烟：`scripts/e2e-smoke.mjs`（Playwright，headless Chromium 走 WebGL2 回退）。
 
-## M2 计划中的变化
+## 联机（M2.1 已完成）和后面的变化
 
-M2 会动地基，细节在 [ROADMAP.md](ROADMAP.md) 的“M2 细化”和 [DESIGN.md](DESIGN.md) 的“M2 规则”。两点先记在这里：
+- **模拟就是服务器**。模拟层里没有“本地玩家”：`sim/players.ts` 是玩家注册表，每个玩家有自己的控制器、交互状态和视图；`sim/rules.ts` 是按世界决定的规则；和玩家有关的事件都带收件人。`tests/sim/single-player-guard.test.ts` 会拦住 `src/` 里重新出现的单玩家假设。
+- **身体移动和服务器规则分开**。`entities/body.ts` 的 `BodyMover` 只管身体怎么动，不含规则、随机数和事件，服务器和客户端跑同一份；`entities/manager.ts` 是服务器的规则；`entities/drive.ts` 是“由客户端驱动”的玩家：服务器接受相对脚下结构体的移动上报，检查后采用，自己动了玩家时发校正。
+- **单机和联机走同一套协议**。`net/` 下面：协议和编码、服务器端的同步（变化收集、兴趣、每个 tick 一个包）、服务器宿主（连接、时钟、存读档、Worker 入口）、客户端（副本、时钟、区块装载、自己角色的预测、意图、背包预测）。规格、消息和模块布局都在 [NETCODE.md](NETCODE.md)。
+- **验收测试跑两遍**：直接驱动模拟一遍，经由真正的客户端和服务器（零延迟、锁步）再一遍，两种模式的 tick 数相同，每个测试结束时副本必须和服务器一致。
 
-- **联机优先**：`Simulation` 变成服务器，在 Worker 里运行；`client/` 不再直接读模拟层对象，改为通过消息协议维护一份副本（世界、结构体、实体），光照在副本上计算。分层里会多出 `net/`（协议、传输、同步）。
 - **材质 + 形状**：格子值加上“缺口”位和多部件标志；按 id 查的实心 / 不透明表由统一的形状查询取代。

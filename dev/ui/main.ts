@@ -3,7 +3,8 @@
  *
  * URL parameters (all optional):
  *   screen=none|mainMenu|loading|pause|inventory|settings|death   lang=zh|en   mode=creative|survival
- *   helm=1  air=<0..300>  health=<0..20>  hint=<text|1>  toasts=<n>  debug=1  locked=1  drag=1
+ *   helm=1  air=<0..300>  health=<0..20>  hint=<text|1>  notice=<text|1>  toasts=<n>  debug=1  locked=1  drag=1
+ *   stopped=1 (the world's server failed: the pause screen says so)
  *   worlds=<n>  icons=placeholder  panel=1  cursor=<itemId>  from=pause|mainMenu  progress=<0..1>
  *   animate=1 (helm / debug values change every frame, like a running game)
  *   clamp=1   (the fake client caps FOV at 100, to test that the UI shows what the client kept)
@@ -12,6 +13,10 @@
  *   async=<ms> (world actions switch screens / update the list after a delay, like IndexedDB)
  *   newest=1  (toasts are kept newest-first)
  *   icons=art (real procedural icons from src/art; icons=placeholder: no provider)
+ *   playing together (package 11): online=0 (a build that cannot go online)  role=host|guest|none
+ *     room=closed|opening|open|lost|error|manual|manual-making|manual-invite|manual-answered
+ *     players=<1..4>  traffic=1 (the server's numbers next to each guest)  join=service|host|answer|world|reconnecting|failed|ended|build
+ *     diag=1 (diagnostics shown)  plist=1 (Tab held: the player list over the HUD)  name=<text>
  *
  * window.harness: { state(), set(patch), show(screen), toast(text, kind), log, clearLog(), perf(n) }
  * Every UiActions call is appended to window.harness.log as { name, args }.
@@ -23,6 +28,10 @@ import {
   DEFAULT_SETTINGS,
   INVENTORY_SIZE,
   type GameMode,
+  type JoinView,
+  type OnlineView,
+  type PlayerRow,
+  type RoomView,
   type Screen,
   type SlotView,
   type Toast,
@@ -55,6 +64,77 @@ function stack(item: number, count: number): SlotView {
   return { item, count };
 }
 
+const PLAYER_NAMES = ['Brass Helmsman', '琥珀水手', 'Cedar Joiner', 'Quartz Lookout'];
+
+/** The online part of the state from the URL (see the header). */
+function onlineFromParams(lang: 'zh' | 'en'): OnlineView {
+  const roleParam = params.get('role');
+  const role = roleParam === 'guest' ? 'guest' : roleParam === 'none' ? null : 'host';
+  const n = Math.max(1, Math.min(4, num('players', 2)));
+  const players: PlayerRow[] = [];
+  for (let i = 0; i < n; i++) {
+    players.push({
+      entityId: i + 1,
+      name: PLAYER_NAMES[i]!,
+      host: i === 0,
+      you: role === 'guest' ? i === 1 : i === 0,
+      mode: i % 2 === 0 ? 'creative' : 'survival',
+      traffic: role === 'host' && i > 0 && flag('traffic') ? { bytesPerSec: 4200 + i * 310, backlogBytes: i === 2 ? 2600 : 0, rttMs: 38 + i * 21 } : null,
+    });
+  }
+  const r = params.get('room') ?? 'closed';
+  const manual = r.startsWith('manual');
+  const status = r === 'opening' || r === 'open' || r === 'lost' ? r : manual ? 'open' : 'closed';
+  const invitation = r === 'manual-invite' ? `BL1I.${'eyJpIjoiOWYzYzEyYTQ1YjYwIiwicyI6InY9MFxyXG5vPS0gNDYyMzE'.repeat(14)}` : null;
+  const room: RoomView | null =
+    role !== 'host'
+      ? null
+      : {
+          status,
+          signal: manual ? 'manual' : 'cloud',
+          code: !manual && status !== 'closed' ? 'RXAM-CDEF' : null,
+          link: !manual && status !== 'closed' ? 'https://example.org/blocklands/?join=RXAMCDEF' : null,
+          invitation,
+          inviting: r === 'manual-making',
+          answered: r === 'manual-answered',
+          rules: status === 'closed' && players.length < 2 ? null : params.get('rules') === 'survival' ? 'survival' : 'creative',
+          error: r === 'error' ? (lang === 'en' ? 'Could not reach the signalling service (it may be blocked) — try again later, or use a manual invitation code' : '连不上信令服务（可能被网络屏蔽）：稍后再试，或改用手动邀请码') : null,
+        };
+  const j = params.get('join');
+  const answer = `BL1A.${'eyJpIjoiOWYzYzEyYTQ1YjYwIiwicyI6InY9MFxyXG5vPS0gNzc0MTA'.repeat(13)}`;
+  const failures: Record<string, { en: string; zh: string; retry: boolean; wasIn: boolean }> = {
+    failed: { en: 'No room has this code — check it; the host may have closed the room', zh: '没有找到这个房间：请检查房间码，房主可能已经关闭了房间', retry: true, wasIn: false },
+    ended: { en: 'The host removed you from the room', zh: '房主把你移出了房间', retry: false, wasIn: true },
+    build: { en: 'The host runs a different version of the game — both of you, reload the page', zh: '房主的游戏版本和你的不同：请双方都刷新页面', retry: false, wasIn: false },
+  };
+  const f = j !== null ? failures[j] : undefined;
+  const join: JoinView | null =
+    j === null
+      ? null
+      : {
+          stage: f ? 'failed' : j === 'answer' ? 'host' : (j as JoinView['stage']),
+          signal: j === 'answer' ? 'manual' : 'cloud',
+          answer: j === 'answer' ? answer : null,
+          error: f ? f[lang] : null,
+          canRetry: f ? f.retry : true,
+          wasIn: f ? f.wasIn : j === 'reconnecting',
+        };
+  return {
+    available: params.get('online') !== '0',
+    playerName: params.get('name') ?? (lang === 'en' ? 'Brass Helmsman' : '黄铜舵手'),
+    role: j !== null ? 'guest' : role,
+    pauses: role === 'host' && (status === 'closed' && n === 1),
+    room: j !== null ? null : room,
+    players: role === null ? [] : players,
+    maxPlayers: 4,
+    join,
+    diagnostics: flag('diag')
+      ? 'Blocklands connection diagnostics\nbuild: 594a143\nrole: guest\nsignalling: cloud\nwebrtc host: srflx -> host (udp), rtt 38 ms; out 1.2 KB/s, in 14.8 KB/s\ngame rtt: 41 ms, loss: 0.0 %, interpolation delay: 1.42 ticks\ngame traffic: in 14.6 KB/s, out 1.1 KB/s\nserver tps: 20.0\nconnection: ready\nlast error: none'
+      : null,
+    diagnosticsBusy: false,
+  };
+}
+
 function initialState(): UiState {
   const hotbar: Array<SlotView | null> = [
     stack(B.PLANKS_OAK, 64), stack(B.CANVAS, 32), stack(B.HELM, 1), stack(B.BEARING, 2), stack(I.GLUE, 48),
@@ -73,6 +153,7 @@ function initialState(): UiState {
   for (let i = 0; i < toastCount; i++) toasts.push({ id: i + 1, text: samples[i % samples.length]![0], kind: samples[i % samples.length]![1] });
   const lang = params.get('lang') === 'en' ? 'en' : 'zh';
   const hintParam = params.get('hint');
+  const noticeParam = params.get('notice');
   const cursorItem = params.has('cursor') ? Number(params.get('cursor')) : -1;
   return {
     screen: (params.get('screen') as Screen | null) ?? 'none',
@@ -81,12 +162,22 @@ function initialState(): UiState {
     hotbar,
     selected: 2,
     inventory,
+    offhand: params.has('offhand') ? stack(Number(params.get('offhand')), 24) : null,
     cursor: cursorItem >= 0 ? stack(cursorItem, 24) : null,
     health: num('health', 14),
     maxHealth: 20,
     air: num('air', 300),
     maxAir: 300,
     hint: hintParam === null ? null : hintParam === '1' ? (lang === 'en' ? 'Right-click again to assemble (42 blocks)' : '再次右键确认组装（42 格）') : hintParam,
+    notice:
+      noticeParam === null
+        ? null
+        : noticeParam === '1'
+          ? lang === 'en'
+            ? 'The host’s server is being slowed down (its page may be in the background)'
+            : '房主的服务器运行受限（页面可能在后台）'
+          : noticeParam,
+    worldStopped: flag('stopped'),
     toasts,
     debug: flag('debug') ? debugLines(0) : null,
     helm: flag('helm') ? { throttle: 0.62, rudder: -0.35, speed: 4.26, sails: 12 } : null,
@@ -95,6 +186,8 @@ function initialState(): UiState {
     loading: { text: lang === 'en' ? 'Generating terrain… (chunk 37 / 81)' : '正在生成地形……（区块 37 / 81）', progress: num('progress', 0.46) },
     pointerLocked: flag('locked'),
     dragLook: flag('drag'),
+    online: onlineFromParams(lang),
+    playerList: flag('plist'),
     renderer: 'WebGPU',
     version: '0.1.0',
   };
@@ -225,7 +318,8 @@ const actions: UiActions = {
     record('slotClick', [area, index, button, shift]);
     const hotbar = state.hotbar.slice();
     const inventory = state.inventory.slice();
-    const arr = area === 'hotbar' ? hotbar : inventory;
+    const offhand = [state.offhand];
+    const arr = area === 'hotbar' ? hotbar : area === 'offhand' ? offhand : inventory;
     const slot = arr[index] ?? null;
     let cursor = state.cursor;
     if (shift && slot && !cursor) {
@@ -261,7 +355,7 @@ const actions: UiActions = {
         cursor = cursor.count > 1 ? stack(cursor.item, cursor.count - 1) : null;
       }
     }
-    set({ hotbar, inventory, cursor });
+    set({ hotbar, inventory, offhand: offhand[0] ?? null, cursor });
   },
   creativePick(item, shift) {
     record('creativePick', [item, shift]);
@@ -280,7 +374,71 @@ const actions: UiActions = {
   },
   closeScreen() {
     record('closeScreen', []);
-    set({ screen: 'none', cursor: null });
+    set({ screen: state.screen === 'room' ? 'pause' : state.screen === 'join' ? 'mainMenu' : 'none', cursor: null });
+  },
+  setPlayerName(name) {
+    record('setPlayerName', [name]);
+    set({ online: { ...state.online, playerName: name.trim() }, screen: state.screen === 'name' ? 'mainMenu' : state.screen });
+  },
+  openRoomScreen() {
+    record('openRoomScreen', []);
+    set({ screen: 'room' });
+  },
+  openJoinScreen() {
+    record('openJoinScreen', []);
+    set({ screen: 'join' });
+  },
+  openRoom(way) {
+    record('openRoom', [way]);
+    const room = state.online.room;
+    if (!room) return;
+    set({ online: { ...state.online, pauses: false, room: { ...room, status: 'opening', signal: way === 'manual' ? 'manual' : 'cloud', error: null } } });
+    setTimeout(() => {
+      const r = state.online.room!;
+      const service = r.signal !== 'manual';
+      set({ online: { ...state.online, room: { ...r, status: 'open', code: service ? 'RXAM-CDEF' : null, link: service ? 'https://example.org/blocklands/?join=RXAMCDEF' : null } } });
+    }, 600);
+  },
+  closeRoom() {
+    record('closeRoom', []);
+    const room = state.online.room;
+    if (room) set({ online: { ...state.online, room: { ...room, status: 'closed', code: null, link: null, invitation: null, answered: false } } });
+  },
+  makeInvitation() {
+    record('makeInvitation', []);
+  },
+  acceptAnswer(code) {
+    record('acceptAnswer', [code]);
+  },
+  setPlayerMode(entityId, mode) {
+    record('setPlayerMode', [entityId, mode]);
+    set({ online: { ...state.online, players: state.online.players.map((p) => (p.entityId === entityId ? { ...p, mode } : p)) } });
+  },
+  setWorldRules(mode) {
+    record('setWorldRules', [mode]);
+    const room = state.online.room;
+    if (room) set({ online: { ...state.online, room: { ...room, rules: mode } } });
+  },
+  kickPlayer(entityId) {
+    record('kickPlayer', [entityId]);
+    set({ online: { ...state.online, players: state.online.players.filter((p) => p.entityId !== entityId) } });
+  },
+  join(text) {
+    record('join', [text]);
+  },
+  retryJoin() {
+    record('retryJoin', []);
+  },
+  abandonJoin() {
+    record('abandonJoin', []);
+    set({ screen: 'mainMenu' });
+  },
+  leaveRoom() {
+    record('leaveRoom', []);
+    set({ screen: 'mainMenu' });
+  },
+  copyDiagnostics() {
+    record('copyDiagnostics', []);
   },
 };
 
@@ -354,7 +512,7 @@ function addButton(label: string, fn: () => void): void {
   });
   panel.appendChild(b);
 }
-for (const s of ['none', 'mainMenu', 'loading', 'pause', 'inventory', 'settings', 'death'] as const) addButton(s, () => set({ screen: s }));
+for (const s of ['none', 'mainMenu', 'loading', 'pause', 'inventory', 'settings', 'death', 'room', 'join', 'name'] as const) addButton(s, () => set({ screen: s }));
 addButton('lang', () => actions.changeSettings({ language: state.settings.language === 'zh' ? 'en' : 'zh' }));
 addButton('mode', () => set({ mode: state.mode === 'creative' ? 'survival' : 'creative' }));
 addButton('helm', () => set({ helm: state.helm ? null : { throttle: 0.5, rudder: 0.2, speed: 3.4, sails: 8 } }));
@@ -364,6 +522,8 @@ addButton('air-', () => set({ air: Math.max(0, state.air - 60) }));
 addButton('air+', () => set({ air: state.maxAir }));
 addButton('toast', () => toast(['世界已保存', '找不到可组装的方块', '停靠失败'][toastSeq % 3]!, (['info', 'warn', 'error'] as const)[toastSeq % 3]));
 addButton('hint', () => set({ hint: state.hint ? null : '再次右键确认组装（42 格）' }));
+addButton('notice', () => set({ notice: state.notice ? null : '房主的服务器运行受限（页面可能在后台）' }));
+addButton('stopped', () => set({ worldStopped: !state.worldStopped }));
 addButton('lock', () => set({ pointerLocked: !state.pointerLocked }));
 addButton('drag', () => set({ dragLook: !state.dragLook }));
 panel.appendChild(logEl);

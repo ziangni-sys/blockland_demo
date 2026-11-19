@@ -20,7 +20,7 @@
  *    hub is glued to the bearing (DESIGN 轴心和轴承之间涂胶) so a stopped windmill comes along
  *    when the helm assembles the boat.
  *
- * The site is found by a deterministic search outward from the player's spawn: a rectangle of
+ * The site is found by a deterministic search outward from the world spawn: a rectangle of
  * open water (every column water at least two deep with air above) as big as the boat plus a
  * margin, with the whole boat between MIN_DISTANCE and MAX_DISTANCE blocks from the spawn. The
  * bow points along the longest run of open water from the boat's centre, and a site with a long
@@ -281,7 +281,7 @@ function build(sim: Simulation, site: Site): { x: number; y: number; z: number }
     if (cell === B.HELM || cell === B.BEARING) cell = makeCell(cell, facingState(f.bow));
     w.setCell(colX(f, ox, p.u, p.v), p.y, colZ(f, oz, p.u, p.v), cell);
   }
-  // Glue after the blocks: writing a cell removes the glue on its faces.
+  // Glue after the blocks: a glued face needs a glueable block on one side to stay.
   const mx = colX(f, ox, 0, MAST_V);
   const mz = colZ(f, oz, 0, MAST_V);
   sim.worldGlue.add(mx, DECK_Y, mz, NY); // mast foot <-> floor plank
@@ -292,13 +292,13 @@ function build(sim: Simulation, site: Site): { x: number; y: number; z: number }
 }
 
 /**
- * Stamp the example windmill boat into a NEW world near the player's spawn. Returns the helm's
+ * Stamp the example windmill boat into a NEW world near the world spawn (sim.spawnPoint). Returns the helm's
  * world cell, or null when no suitable open water was found (then nothing is written). Never
  * throws: a failure must not stop the world from being created.
  */
 export function placeExampleShip(sim: Simulation): { x: number; y: number; z: number } | null {
   try {
-    const spawn = sim.player.spawn;
+    const spawn = sim.spawnPoint;
     const sx = spawn.x;
     const sz = spawn.z;
     if (!Number.isFinite(sx) || !Number.isFinite(sz)) return null;

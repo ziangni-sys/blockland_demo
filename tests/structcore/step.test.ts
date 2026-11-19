@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { B } from '../../src/blocks/defs';
-import { PX } from '../../src/core/dirs';
+import { NY, PX, PY } from '../../src/core/dirs';
 import { qclone, qfromYaw, vclone, vec3 } from '../../src/core/math';
 import { GlueStore } from '../../src/structures/glue';
 import type { Rotor, Ship } from '../../src/structures/structure';
@@ -171,27 +171,66 @@ describe('world rotor freeze box: the cells\' world box over a full turn, grown 
   });
 });
 
-describe('glue hooks', () => {
-  it('world: removal or a different block id clears glue; state-only changes and bulk moves keep it', () => {
+describe('glue hooks: the lifetime rule (a glued face stays while one side is a glueable block)', () => {
+  it('world: replacing or removing one side keeps the glue; it goes once neither side is glueable', () => {
     const s = scene();
     const g = s.host.worldGlue;
     s.world.setCell(0, 70, 0, c(B.STONE_BRICKS));
     s.world.setCell(1, 70, 0, c(B.STONE_BRICKS));
     g.add(0, 70, 0, PX);
-    s.world.setCell(1, 70, 0, c(B.BRICKS));
-    expect(g.size).toBe(0);
-    s.world.setCell(0, 72, 0, log(0));
-    s.world.setCell(1, 72, 0, log(0));
-    g.add(0, 72, 0, PX);
-    s.world.setCell(1, 72, 0, log(1)); // same id, new state
-    expect(g.has(0, 72, 0, PX)).toBe(true);
-    s.world.setCell(1, 72, 0, 0, SET_STRUCTURE_MOVE); // a bulk move transfers glue itself
-    expect(g.has(0, 72, 0, PX)).toBe(true);
-    s.world.setCell(0, 72, 0, 0);
+    s.world.setCell(1, 70, 0, c(B.BRICKS)); // replaced by another glueable block
+    expect(g.has(0, 70, 0, PX)).toBe(true);
+    s.world.setCell(1, 70, 0, 0); // removed: the other side still holds it
+    expect(g.has(0, 70, 0, PX)).toBe(true);
+    s.world.setCell(1, 70, 0, c(B.TORCH)); // a soft block on the open side changes nothing
+    expect(g.has(0, 70, 0, PX)).toBe(true);
+    s.world.setCell(0, 70, 0, c(B.SAND)); // the remaining side swapped for another glueable block
+    expect(g.has(0, 70, 0, PX)).toBe(true);
+    s.world.setCell(0, 70, 0, 0); // neither side glueable now
     expect(g.size).toBe(0);
   });
 
-  it('ship and rotor grids: removing a cell clears its glue', () => {
+  it('world: state-only changes keep it; a liquid or a soft block is not glueable', () => {
+    const s = scene();
+    const g = s.host.worldGlue;
+    s.world.setCell(0, 72, 0, log(0));
+    g.add(0, 72, 0, PY); // top face, open
+    s.world.setCell(0, 72, 0, log(1)); // same id, new state
+    expect(g.has(0, 72, 0, PY)).toBe(true);
+    s.world.setCell(0, 72, 0, c(B.WATER));
+    expect(g.size).toBe(0);
+    s.world.setCell(2, 72, 0, c(B.STONE));
+    g.add(2, 72, 0, NY);
+    s.world.setCell(2, 72, 0, c(B.SNOW_LAYER));
+    expect(g.size).toBe(0);
+  });
+
+  it('world: bulk structure writes (SET_STRUCTURE_MOVE) follow the same rule', () => {
+    const s = scene();
+    const g = s.host.worldGlue;
+    s.world.setCell(0, 74, 0, c(B.STONE));
+    s.world.setCell(1, 74, 0, c(B.STONE));
+    g.add(0, 74, 0, PX);
+    s.world.setCell(1, 74, 0, 0, SET_STRUCTURE_MOVE);
+    expect(g.has(0, 74, 0, PX)).toBe(true);
+    s.world.setCell(0, 74, 0, 0, SET_STRUCTURE_MOVE);
+    expect(g.size).toBe(0);
+  });
+
+  it('world: an unloaded neighbour counts as glueable, so glue at the edge of the loaded area is kept', () => {
+    const s = scene(); // chunks loaded for x in -32..31
+    const g = s.host.worldGlue;
+    s.world.setCell(31, 70, 0, c(B.STONE));
+    g.add(31, 70, 0, PX); // towards the unloaded column x = 32
+    s.world.setCell(31, 70, 0, 0);
+    expect(g.has(31, 70, 0, PX)).toBe(true);
+    s.world.setCell(30, 70, 0, c(B.STONE));
+    g.add(30, 70, 0, PX); // towards (31, 70, 0), loaded and air
+    s.world.setCell(30, 70, 0, 0);
+    expect(g.has(30, 70, 0, PX)).toBe(false);
+  });
+
+  it('ship and rotor grids: the same rule on their own glue', () => {
     const s = scene();
     windmill(s.world, 10, 64, 10, 3);
     s.host.worldGlue.add(11, 64, 11, PX); // between two felt cells of the +X arm
@@ -200,16 +239,39 @@ describe('glue hooks', () => {
     const r = rr.structure;
     expect(r.glue.has(11, 64, 11, PX)).toBe(true);
     r.grid.setCell(12, 64, 11, 0);
+    expect(r.glue.has(11, 64, 11, PX)).toBe(true); // (11, 64, 11) is still felt
+    r.grid.setCell(11, 64, 11, 0);
     expect(r.glue.size).toBe(0);
-    expect(r.sails).toBe(12);
+    expect(r.sails).toBe(11);
 
     const { ship } = shipWithRunningMill(s);
     expect(ship.glue.has(2, 61, 0, 3)).toBe(true);
     ship.grid.setCell(2, 60, 0, c(B.PLANKS_PINE)); // replaced by another id
+    expect(ship.glue.has(2, 61, 0, 3)).toBe(true);
+    ship.grid.setCell(2, 60, 0, 0);
+    expect(ship.glue.has(2, 61, 0, 3)).toBe(true); // (2, 61, 0) still holds it
+    ship.grid.setCell(2, 61, 0, 0);
     expect(ship.glue.has(2, 61, 0, 3)).toBe(false);
-    expect(ship.glue.size).toBe(1);
-    ship.grid.setCell(-3, 60, -2, 0);
-    expect(ship.glue.size).toBe(0);
+  });
+
+  it('costs nothing noticeable with an empty store: terrain writes never look up a face', () => {
+    const s = scene();
+    const g = s.host.worldGlue;
+    const lookups = (['has', 'dirMaskAt', 'forEach', 'forEachInBox', 'facesInBox'] as const).map((m) => vi.spyOn(g, m));
+    const looked = (): number => lookups.reduce((n, spy) => n + spy.mock.calls.length, 0);
+    const writeLayer = (): void => {
+      for (let x = -20; x < 20; x++) for (let z = -20; z < 20; z++) s.world.setCell(x, 65, z, c(B.STONE));
+      for (let x = -20; x < 20; x++) for (let z = -20; z < 20; z++) s.world.setCell(x, 65, z, 0);
+    };
+    writeLayer();
+    expect(looked()).toBe(0);
+    expect(g.size).toBe(0);
+    // The same writes with one face stored far away do run the lifetime check (one lookup per
+    // changed cell), so the zero above comes from the empty-store shortcut, not a missing hook.
+    g.add(0, 10, 0, PY);
+    writeLayer();
+    expect(looked()).toBe(2 * 40 * 40);
+    expect(g.size).toBe(1);
   });
 
   it('glueFor answers for the world, live and just-removed structures, and rejects foreign grids', () => {

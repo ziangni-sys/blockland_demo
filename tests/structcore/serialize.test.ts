@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { B } from '../../src/blocks/defs';
+import { STRUCTURE_MAX_BOX_CELLS } from '../../src/core/constants';
 import { PX } from '../../src/core/dirs';
 import { qfromAxisAngle, qfromYaw, qmul, qrotate, vec3, vsub } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
@@ -31,7 +32,7 @@ function describeAll(mgr: StructureManager): unknown[] {
     if (s instanceof Rotor) {
       return {
         ...base,
-        rotor: [s.bearingX, s.bearingY, s.bearingZ, s.axis, { ...s.baseRotation }, s.angle, s.angularSpeed, s.sails, s.hubGlue],
+        rotor: [s.bearingX, s.bearingY, s.bearingZ, s.axis, { ...s.baseRotation }, s.angle, s.angularSpeed, s.sails],
       };
     }
     const sh = s as Ship;
@@ -176,7 +177,7 @@ function shipSave(cells: (w: ByteWriter) => void, format = STRUCTURES_FORMAT): U
 
 const P = c(B.PLANKS_OAK);
 
-/** Format 2 cell section: box, then runs of [gap, cells]. */
+/** Cell section: box, then runs of [gap, cells]. */
 function runs(box: [number, number, number, number, number, number], list: Array<[number, number[]]>): (w: ByteWriter) => void {
   return (w) => {
     w.varint(box[0]).varint(box[1]).varint(box[2]).varuint(box[3]).varuint(box[4]).varuint(box[5]);
@@ -199,10 +200,10 @@ describe('structure cells on disk: proportional to the cell count, always readab
     const r = s.mgr.assembleShip(0, 61, 0);
     if (!r.ok) throw new Error(r.reason);
     const g = r.structure.grid;
-    // Plain ship edits (allowed at any time). Tight box 421 x 68 x 601 = 17.2M cells, far
-    // beyond the 2^24-cell box the dense format 1 reader accepted.
-    g.setCell(-210, 60, -300, P);
-    g.setCell(210, 127, 300, c(B.PLANKS_PINE));
+    // Plain ship edits (allowed at any time). Tight box 128 x 68 x 240 = 2.09M cells, just under
+    // STRUCTURE_MAX_BOX_CELLS (DESIGN 组装与方块化): a dense box would take 4 MB.
+    g.setCell(-63, 60, -120, P);
+    g.setCell(64, 127, 119, c(B.PLANKS_PINE));
     expect(g.count).toBe(28);
     const bytes = save(s.mgr);
     expect(bytes.length).toBeLessThan(2048);
@@ -212,6 +213,38 @@ describe('structure cells on disk: proportional to the cell count, always readab
     expect(cellMap(ship.grid)).toEqual(cellMap(g));
     expect(ship.grid.cellBounds()).toEqual(g.cellBounds());
     expect(save(b.mgr)).toEqual(bytes);
+  });
+
+  it('a ship whose box is exactly STRUCTURE_MAX_BOX_CELLS round-trips; one cell more is refused on both ends', () => {
+    const s = scene();
+    fill(s.world, -2, 60, -2, 2, 60, 2, P);
+    s.world.setCell(0, 61, 0, facing(B.HELM, 5));
+    const r = s.mgr.assembleShip(0, 61, 0);
+    if (!r.ok) throw new Error(r.reason);
+    const g = r.structure.grid;
+    // Tight box 128 x 128 x 128 (direct edits: test setup).
+    g.setCell(125, 60, -2, P);
+    g.setCell(-2, 187, -2, P);
+    g.setCell(-2, 60, 125, c(B.PLANKS_PINE));
+    const b0 = g.cellBounds()!;
+    expect((b0.maxX - b0.minX) * (b0.maxY - b0.minY) * (b0.maxZ - b0.minZ)).toBe(STRUCTURE_MAX_BOX_CELLS);
+    const bytes = save(s.mgr);
+    const b = scene();
+    b.mgr.deserialize(new ByteReader(bytes));
+    expect(cellMap(b.mgr.ships()[0]!.grid)).toEqual(cellMap(g));
+    expect(save(b.mgr)).toEqual(bytes);
+    // One cell wider: the game never builds it, and the save refuses to write it ...
+    g.setCell(126, 60, -2, P);
+    expect(() => save(s.mgr)).toThrow(/STRUCTURE_MAX_BOX_CELLS/);
+    // ... and to read it.
+    const over = shipSave(runs([0, 60, 0, 129, 128, 128], [[0, [P]], [129 * 128 * 128 - 2, [P]]]));
+    const t = scene();
+    expect(() => t.mgr.deserialize(new ByteReader(over))).toThrow(/STRUCTURE_MAX_BOX_CELLS/);
+    expect(t.mgr.all()).toEqual([]);
+    // The same hand-written section at exactly the limit loads (its first and last cells span the box).
+    expect(loadedCells(shipSave(runs([0, 60, 0, 128, 128, 128], [[0, [P]], [STRUCTURE_MAX_BOX_CELLS - 2, [P]]])))).toEqual(
+      new Map([['0,60,0', P], ['127,187,127', P]]),
+    );
   });
 
   it('random structures round-trip exactly (runs across rows and layers)', () => {
@@ -245,12 +278,13 @@ describe('structure cells on disk: proportional to the cell count, always readab
     expect(cells).toEqual(new Map([['7,60,7', P], ['5,60,8', c(B.COBBLE)]]));
   });
 
-  it('format 1 saves (dense boxes) still load', () => {
-    const bytes = shipSave((w) => {
-      w.varint(5).varint(60).varint(7).varuint(2).varuint(1).varuint(2);
-      w.u16Array([P, 0, 0, c(B.COBBLE)]);
-    }, 1);
-    expect(loadedCells(bytes)).toEqual(new Map([['5,60,7', P], ['6,60,8', c(B.COBBLE)]]));
+  it('older formats are not read (no backward compatibility)', () => {
+    for (const format of [1, 2]) {
+      const bytes = shipSave(runs([5, 60, 7, 1, 1, 1], [[0, [P]]]), format);
+      const s = scene();
+      expect(() => s.mgr.deserialize(new ByteReader(bytes))).toThrow(SaveFormatError);
+      expect(s.mgr.all()).toEqual([]);
+    }
   });
 
   it('malformed cell sections throw SaveFormatError', () => {
@@ -265,7 +299,6 @@ describe('structure cells on disk: proportional to the cell count, always readab
       ['cells without a box', shipSave(runs([0, 60, 0, 0, 0, 0], [[0, [P]]]))],
       ['unknown block id', shipSave(runs([0, 60, 0, 1, 1, 1], [[0, [1000]]]))],
       ['absurd box', shipSave(runs([0, 0, 0, 1 << 28, 1 << 28, 1], [[0, [P]]]))],
-      ['format 1 size mismatch', shipSave((w) => w.varint(0).varint(60).varint(0).varuint(2).varuint(1).varuint(1).u16Array([P]), 1)],
     ];
     for (const [what, bytes] of bad) {
       const s = scene();

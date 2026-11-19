@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { cellState, stateAxis, stateFacing } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { DIR_X, DIR_Z, nearestDir, type Dir } from '../../src/core/dirs';
+import { DIR_X, DIR_Z, nearestDir, PZ, type Dir } from '../../src/core/dirs';
 import { qfromAxisAngle, qfromYaw, qmul, qrotate, vec3, vsub, type Vec3 } from '../../src/core/math';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import {
@@ -184,7 +184,7 @@ describe('dockShip (ACCEPTANCE 8)', () => {
     expect(third.ok && third.structure.glue.size).toBe(glue);
   });
 
-  it('a hub-glued windmill running on a docked ship gets its hub glue back in the WORLD when it stops', () => {
+  it('the hub glue of a windmill running on a docking ship travels with the bearing into the WORLD and holds the hub when it stops', () => {
     const s = scene();
     millShip(s.world, s.host.worldGlue, true);
     const sr = s.mgr.assembleShip(HX, HY, HZ);
@@ -193,17 +193,21 @@ describe('dockShip (ACCEPTANCE 8)', () => {
     const rr = s.mgr.startRotor(ship.grid, BX, BY, BZ);
     if (!rr.ok) throw new Error(rr.reason);
     const rotor = rr.structure;
-    expect(rotor.hubGlue).toBe(true);
+    // The face stays on the ship's bearing (a glueable block left behind) while the hub spins.
+    expect(ship.glue.has(BX, BY, BZ, PZ)).toBe(true);
+    expect(rotor.glue.size).toBe(0);
     for (let i = 0; i < 11; i++) s.mgr.step();
     poseExact(ship, -Math.PI / 2, vec3(3, 62, 7));
     expect(s.mgr.dockShip(ship).ok).toBe(true);
     const b = vec3(rotor.bearingX, rotor.bearingY, rotor.bearingZ);
     expect(s.mgr.startRotor(s.world, b.x, b.y, b.z)).toEqual({ ok: false, reason: 'has_rotor' });
-    const glueBefore = s.host.worldGlue.size;
-    s.mgr.stopRotor(rotor);
+    // Its other side (the hub's cell of the ship) was empty, so it travelled, turned with the bearing.
     const f = yawDir(4, 3);
     expect(s.host.worldGlue.has(b.x, b.y, b.z, f)).toBe(true);
-    expect(s.host.worldGlue.size).toBe(glueBefore + 1);
+    const glueBefore = s.host.worldGlue.size;
+    s.mgr.stopRotor(rotor);
+    expect(s.host.worldGlue.has(b.x, b.y, b.z, f)).toBe(true);
+    expect(s.host.worldGlue.size).toBe(glueBefore);
     expect(s.world.getCell(b.x + DIR_X[f]!, b.y, b.z + DIR_Z[f]!)).toBe(c(B.CANVAS));
   });
 
@@ -283,9 +287,9 @@ describe('dockShip liquids and soft blocks', () => {
     expect(s.host.updateKeys().has('0,45,0')).toBe(true);
   });
 
-  it('creative mode: overwritten soft blocks do not drop', () => {
+  it('drops off (a creative world): overwritten soft blocks do not drop', () => {
     const s = scene();
-    s.host.creative = true;
+    s.host.dropsEnabled = false;
     const ship = openBoat(s);
     s.world.setCell(2, 45, 0, c(B.TORCH));
     const res = s.mgr.dockShip(ship);

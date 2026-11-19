@@ -11,9 +11,9 @@ const T = FLAT_TOP;
 describe('buckets', () => {
   it('survival: pour a source, scoop it back; flowing liquid cannot be scooped', () => {
     const sim = flatSim({ mode: 'survival' });
-    const p = sim.player;
-    sim.hold(I.BUCKET_WATER, 1);
-    sim.lookAtCell(0, T - 1, -2, PY);
+    const p = sim.soloPlayer.player;
+    sim.soloPlayer.hold(I.BUCKET_WATER, 1);
+    sim.soloPlayer.lookAtCell(0, T - 1, -2, PY);
     click(sim);
     expect(idAt(sim.world, 0, T, -2)).toBe(B.WATER);
     expect(isLiquidSource(cellState(sim.world.getCell(0, T, -2)))).toBe(true);
@@ -22,11 +22,11 @@ describe('buckets', () => {
     expect(idAt(sim.world, 1, T, -2)).toBe(B.WATER);
 
     // Aiming at a flowing cell goes through it to the ground: nothing to scoop there.
-    sim.lookAt(1.5, T + 0.05, -1.5);
+    sim.soloPlayer.lookAt(1.5, T + 0.05, -1.5);
     click(sim);
     expect(p.inventory.selectedStack()).toEqual({ item: I.BUCKET, count: 1 });
     // The source itself can be scooped.
-    sim.lookAt(0.5, T + 0.6, -1.5);
+    sim.soloPlayer.lookAt(0.5, T + 0.6, -1.5);
     click(sim);
     expect(idAt(sim.world, 0, T, -2)).not.toBe(B.WATER);
     expect(p.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
@@ -36,21 +36,21 @@ describe('buckets', () => {
 
   it('a stack of empty buckets fills one; lava works the same; creative keeps the bucket', () => {
     const sim = flatSim({ mode: 'survival' });
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     sim.world.setCell(0, T, -2, makeCell(B.LAVA));
-    sim.hold(I.BUCKET, 3);
-    sim.lookAt(0.5, T + 0.6, -1.5);
+    sim.soloPlayer.hold(I.BUCKET, 3);
+    sim.soloPlayer.lookAt(0.5, T + 0.6, -1.5);
     click(sim);
     expect(idAt(sim.world, 0, T, -2)).toBe(B.AIR);
     expect(p.inventory.count(I.BUCKET)).toBe(2);
     expect(p.inventory.count(I.BUCKET_LAVA)).toBe(1);
 
     const c = flatSim({ mode: 'creative' });
-    c.hold(I.BUCKET_WATER, 1);
-    c.lookAtCell(0, T - 1, -2, PY);
+    c.soloPlayer.hold(I.BUCKET_WATER, 1);
+    c.soloPlayer.lookAtCell(0, T - 1, -2, PY);
     click(c);
     expect(idAt(c.world, 0, T, -2)).toBe(B.WATER);
-    expect(c.player.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
+    expect(c.soloPlayer.player.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
   });
 
   it('a structure in the line of sight is never looked through, and liquid is never put on it', () => {
@@ -65,22 +65,22 @@ describe('buckets', () => {
     const ship = res.structure;
     sim.advance(5);
     const log = new EventLog(sim);
-    const p = sim.player;
+    const p = sim.soloPlayer.player;
     // Empty bucket aimed at the deck, with sea water right behind it.
-    sim.hold(I.BUCKET, 1);
-    sim.lookAtCell(1, SEA_TOP - 1, 4, PY, ship.id);
+    sim.soloPlayer.hold(I.BUCKET, 1);
+    sim.soloPlayer.lookAtCell(1, SEA_TOP - 1, 4, PY, ship.id);
     sim.tick();
-    expect(sim.view.target?.gridId).toBe(ship.id);
-    expect(sim.view.hint?.key).toBe('hint.bucket.structure');
+    expect(sim.soloPlayer.view.target?.gridId).toBe(ship.id);
+    expect(sim.soloPlayer.view.hint?.key).toBe('hint.bucket.structure');
     click(sim);
     expect(log.toastKeys()).toContain('toast.bucket.structure');
     expect(p.inventory.selectedStack()).toEqual({ item: I.BUCKET, count: 1 });
     // The same aim at open water works.
-    sim.lookAtCell(5, SEA_TOP - 1, 6, PY); // the sea just east of the dock
+    sim.soloPlayer.lookAtCell(5, SEA_TOP - 1, 6, PY); // the sea just east of the dock
     click(sim);
     expect(p.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
     // A full bucket aimed at the deck: nothing is poured onto the ship.
-    sim.lookAtCell(1, SEA_TOP - 1, 4, PY, ship.id);
+    sim.soloPlayer.lookAtCell(1, SEA_TOP - 1, 4, PY, ship.id);
     click(sim);
     expect(p.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
     let water = 0;
@@ -118,8 +118,8 @@ function openBoat(): { sim: Simulation; shipId: number } {
   expect(res.ok).toBe(true);
   if (!res.ok) throw new Error('assembly failed');
   sim.structures.dynamics = null;
-  sim.teleport(2.5, 31, 1.5);
-  sim.player.flying = true;
+  sim.soloPlayer.teleport(2.5, 31, 1.5);
+  sim.soloPlayer.player.flying = true;
   sim.advance(2);
   expect(idAt(res.structure.grid, 2, 28, 3)).toBe(B.AIR);
   expect(idAt(w, 2, 28, 3)).toBe(B.WATER);
@@ -133,11 +133,11 @@ describe('buckets and the world water hidden inside a hull', () => {
     // A world block standing in the hold, behind two hidden water cells. The ray comes down
     // steeply but enters it through its north face (a face the ray's dominant axis would not name).
     sim.world.setCell(2, 28, 4, makeCell(B.STONE));
-    sim.hold(I.BUCKET_WATER, 1);
-    sim.lookAt(2.5, 28.5, 4.0);
+    sim.soloPlayer.hold(I.BUCKET_WATER, 1);
+    sim.soloPlayer.lookAt(2.5, 28.5, 4.0);
     sim.tick();
-    expect(sim.targetCell()).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
-    expect(sim.view.target).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
+    expect(sim.soloPlayer.targetCell()).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
+    expect(sim.soloPlayer.view.target).toEqual({ gridId: 0, x: 2, y: 28, z: 4, face: NZ });
   });
 
   it('no liquid is poured into the hold, even when the clicked block is a world block', () => {
@@ -146,17 +146,17 @@ describe('buckets and the world water hidden inside a hull', () => {
     sim.world.setCell(2, 28, 4, makeCell(B.STONE));
     const wet = countId(w, B.WATER, 1, 28, 1, 3, 31, 5);
     const log = new EventLog(sim);
-    sim.hold(I.BUCKET_WATER, 1);
-    sim.lookAt(2.5, 28.5, 4.0); // the stone's north face: the new source would go to (2, 28, 3)
+    sim.soloPlayer.hold(I.BUCKET_WATER, 1);
+    sim.soloPlayer.lookAt(2.5, 28.5, 4.0); // the stone's north face: the new source would go to (2, 28, 3)
     click(sim);
     expect(log.toastKeys()).toContain('toast.bucket.structure');
-    expect(sim.player.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
+    expect(sim.soloPlayer.player.inventory.selectedStack()).toEqual({ item: I.BUCKET_WATER, count: 1 });
     expect(countId(w, B.WATER, 1, 28, 1, 3, 31, 5)).toBe(wet);
     // And an empty bucket finds nothing to scoop there: the stone is what it sees.
-    sim.hold(I.BUCKET, 1);
-    sim.lookAt(2.5, 28.5, 4.0);
+    sim.soloPlayer.hold(I.BUCKET, 1);
+    sim.soloPlayer.lookAt(2.5, 28.5, 4.0);
     click(sim);
-    expect(sim.player.inventory.selectedStack()).toEqual({ item: I.BUCKET, count: 1 });
+    expect(sim.soloPlayer.player.inventory.selectedStack()).toEqual({ item: I.BUCKET, count: 1 });
     expect(countId(w, B.WATER, 1, 28, 1, 3, 31, 5)).toBe(wet);
   });
 });

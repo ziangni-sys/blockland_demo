@@ -10,8 +10,10 @@
  *   persist    serialize / deserialize
  *
  * HOOKS. Every cell change of every grid goes through one listener per grid:
- *  - glue: a cell removed or replaced by another block id loses its glue (任一侧方块被移除或替换，
- *    胶就消失) — except bulk moves flagged SET_STRUCTURE_MOVE, which transfer glue themselves;
+ *  - glue: when a cell changes block id, by whatever path (bulk structure moves included), the
+ *    glue lifetime rule runs on its faces (pruneGlueAt: a glued face stays while one side is a
+ *    glueable block); when a chunk is added to the world, it runs on the world's faces in and on
+ *    the border of that chunk (pruneGlueInBox), whose cells were unknown until then;
  *  - bearings: when the bearing of a running rotor is removed or replaced, by whatever path
  *    (mining, explosion, physics damage ...), the rotor blockifies in place — immediately, or at
  *    endBatch() inside a batch (LESSONS: 先等冲击波处理完所有结构体，再把转子方块化，最后统一重算);
@@ -26,33 +28,33 @@
  */
 import { cellState, ID_MASK, stateFacing } from '../blocks/cell';
 import { B } from '../blocks/defs';
-import { TICK_DT } from '../core/constants';
+import { CHUNK_SIZE, TICK_DT, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
 import { aabb, qidentity, qrotate, qtoMat3, vec3, vset, type AABB } from '../core/math';
 import type { ByteReader, ByteWriter } from '../save/bytes';
-import { SET_STRUCTURE_MOVE, type VoxelGrid } from '../voxel/grid';
+import type { VoxelGrid } from '../voxel/grid';
+import type { Chunk } from '../voxel/chunk';
 import type { World } from '../voxel/world';
 import {
   blockifyGrid,
   commitDock,
   emptyReport,
   hullCavityCells,
-  identityMap,
   planDock,
   refillWater,
   remountRotor,
-  restoreHubGlue,
   rotorSnap,
   transferCells,
   type BlockifyReport,
   type DockPlan,
+  type GridFace,
 } from './assembly';
 import { CellSet, collectRotor, collectShip, type CollectReason, type CollectResult } from './collect';
 import type { GlueStore } from './glue';
 import { analyzeHull, type HullInfo } from './hull';
-import { advanceRotor, applyRotorPose, holdRotor } from './rotor';
+import { advanceRotor, applyRotorPose, holdRotor, measureSweep, type RotorSweep } from './rotor';
 import { readStructures, writeStructures } from './serialize';
-import { cellFunc, isSailCell } from './stick';
+import { cellFunc, isSailCell, pruneGlueAt, pruneGlueInBox } from './stick';
 import { Rotor, Ship, type ShipDynamics, type Structure, type StructureHost } from './structure';
 
 export type { BlockifyReport } from './assembly';
@@ -109,15 +111,9 @@ interface Entry {
    * (wake / freeze tests). World rotors: the box of everything they sweep (freeze test).
    */
   readonly box: AABB;
-  /**
-   * Rotors only: the cylinder swept by the cells about the spin axis, in rotor-local terms —
-   * extent along the axis's positive direction relative to the pivot [sweepA0, sweepA1] and
-   * radius about the axis line. Valid while grid.version === sweepVersion.
-   */
+  /** Rotors only: the cylinder swept by the cells (rotor.ts measureSweep). Valid while grid.version === sweepVersion. */
   sweepVersion: number;
-  sweepA0: number;
-  sweepA1: number;
-  sweepRadius: number;
+  readonly sweep: RotorSweep;
 }
 type ShipEntry = Entry & { readonly s: Ship };
 
@@ -160,6 +156,7 @@ export class StructureManager {
   /** Rotors that lost their bearing inside a batch, in the order it happened. */
   private readonly pending: Rotor[] = [];
   private unsubWorld: (() => void) | null = null;
+  private unsubChunks: (() => void) | null = null;
   // Scratch for the per-tick box maths only (never used across a call that can re-enter).
   private readonly mat = new Float64Array(9);
   private readonly tmp = vec3();
@@ -169,6 +166,7 @@ export class StructureManager {
     this.world = host.world;
     this.dynamics = dynamics;
     this.unsubWorld = host.world.onCellChange(this.onWorldCell);
+    this.unsubChunks = host.world.onChunkAdd(this.onWorldChunk);
   }
 
   // ------------------------------------------------------------ queries
@@ -264,8 +262,7 @@ export class StructureManager {
       const r = rotors[i]!;
       if (r.parent === null && inSet.has(r.bearingX, r.bearingY, r.bearingZ)) this.reparentToShip(r, ship);
     }
-    transferCells(world, ship.grid, res.cells, res.count, res.bounds);
-    host.worldGlue.moveTo(ship.glue, (gx, gy, gz) => inSet.has(gx, gy, gz), identityMap());
+    transferCells(world, host.worldGlue, ship.grid, ship.glue, res.cells, res.count, res.bounds);
     this.register(ship);
 
     const dyn = this.dynamics;
@@ -314,15 +311,13 @@ export class StructureManager {
     rotor.bearingZ = z;
     rotor.axis = facing;
     rotor.sails = res.sails;
-    // LESSONS 风车停下后轴心和轴承之间的胶没了: remember it, it comes back on stop.
-    rotor.hubGlue = glue.remove(x, y, z, facing);
     const g = rotor.grid;
     vset(g.pivot, x + DIR_X[facing]! + 0.5, y + DIR_Y[facing]! + 0.5, z + DIR_Z[facing]! + 0.5);
     g.setPoseImmediate(g.pivot, qidentity());
 
-    const inSet = CellSet.fromCells(res.cells, res.count);
-    transferCells(grid, g, res.cells, res.count, res.bounds);
-    glue.moveTo(rotor.glue, (gx, gy, gz) => inSet.has(gx, gy, gz), identityMap());
+    // The glue between the hub and the bearing stays on the bearing (DESIGN 强力胶: the bearing is
+    // a glueable block that stays behind), so it is there again when the rotor stops.
+    transferCells(grid, glue, g, rotor.glue, res.cells, res.count, res.bounds);
     if (ship !== null) ship.children.push(rotor);
     else this.worldRotors.push(rotor);
     applyRotorPose(rotor);
@@ -345,18 +340,26 @@ export class StructureManager {
    */
   stopRotor(rotor: Rotor): BlockifyReport {
     if (!this.isLive(rotor)) return emptyReport();
-    this.host.releaseRiders(rotor);
+    // Riders follow the snap (NETCODE section 9 item 7): taken before anything moves.
+    const t = rotorSnap(rotor.grid);
+    this.host.releaseRiders(rotor, t);
     if (!this.isLive(rotor)) return emptyReport(); // stopped re-entrantly by the host
     const ship = rotor.parent instanceof Ship ? rotor.parent : null;
     const dst: VoxelGrid = ship !== null ? ship.grid : this.world;
     const dstGlue = ship !== null ? ship.glue : this.host.worldGlue;
-    const t = rotorSnap(rotor.grid);
+    // The face between the bearing and the hub's place keeps the glue the parent already holds
+    // on it (it stayed on the bearing when the rotor started: ACCEPTANCE 14). Read before the
+    // writes: a bearing that is gone, or replaced, has no such face.
+    const bearing = dst.getCell(rotor.bearingX, rotor.bearingY, rotor.bearingZ);
+    const bearingFace: GridFace | null =
+      (bearing & ID_MASK) === BEARING_ID
+        ? { x: rotor.bearingX, y: rotor.bearingY, z: rotor.bearingZ, dir: stateFacing(cellState(bearing)) }
+        : null;
     // Unregister first: the writes below run the parent grid's hooks (and any listener the
     // host attached), which must no longer see this rotor as running.
     this.detachRotor(rotor);
     this.unregister(rotor);
-    const out = blockifyGrid(this.host, rotor.grid, rotor.glue, dst, dstGlue, t, ship !== null);
-    if (rotor.hubGlue) restoreHubGlue(dst, dstGlue, rotor, t, out.placedSrc);
+    const out = blockifyGrid(this.host, rotor.grid, rotor.glue, dst, dstGlue, t, ship !== null, bearingFace);
     if (ship !== null) {
       if (this.isLive(ship)) this.dynamics?.wake(ship);
     } else {
@@ -384,9 +387,11 @@ export class StructureManager {
     const verdict = planVerdict(plan);
     if (!verdict.ok) return verdict;
     const host = this.host;
-    host.releaseRiders(ship);
+    // Riders follow the snap, those of its rotors too (they ride the ship's frame); the rotors
+    // themselves stay running in the world, re-mounted by the same snap.
+    host.releaseRiders(ship, plan.t);
     const children = ship.children.slice();
-    for (let i = 0; i < children.length; i++) host.releaseRiders(children[i]!);
+    for (let i = 0; i < children.length; i++) host.releaseRiders(children[i]!, null);
     if (!this.isLive(ship)) return { ok: false, reason: 'blocked', conflicts: [] };
     const hull = this.currentHull(ship);
     this.unregister(ship);
@@ -521,6 +526,10 @@ export class StructureManager {
       this.unsubWorld();
       this.unsubWorld = null;
     }
+    if (this.unsubChunks !== null) {
+      this.unsubChunks();
+      this.unsubChunks = null;
+    }
     for (const e of this.entries.values()) {
       e.unsub();
       e.unsub = noop;
@@ -529,12 +538,9 @@ export class StructureManager {
 
   // ------------------------------------------------------------ hooks
 
-  private readonly onWorldCell = (x: number, y: number, z: number, oldCell: number, newCell: number, flags: number): void => {
+  private readonly onWorldCell = (x: number, y: number, z: number, oldCell: number, newCell: number): void => {
     const oldId = oldCell & ID_MASK;
-    if ((flags & SET_STRUCTURE_MOVE) === 0 && oldId !== (newCell & ID_MASK)) {
-      const glue = this.host.worldGlue;
-      if (glue.size > 0) glue.removeAllAt(x, y, z);
-    }
+    if (oldId !== (newCell & ID_MASK)) pruneGlueAt(this.world, this.host.worldGlue, x, y, z, newCell);
     if (oldId === BEARING_ID && this.worldRotors.length > 0) this.bearingChanged(this.worldRotors, x, y, z, oldCell, newCell);
     const dyn = this.dynamics;
     if (dyn !== null) {
@@ -555,21 +561,30 @@ export class StructureManager {
     }
   };
 
+  /**
+   * A chunk arrived (generated or restored): glue kept on its border while it was unloaded, or
+   * restored with a save before its cells, now meets the real cells. Nothing to do on an empty
+   * store; otherwise one box query over the chunk's columns.
+   */
+  private readonly onWorldChunk = (chunk: Chunk): void => {
+    const glue = this.host.worldGlue;
+    if (glue.size === 0) return;
+    const x0 = chunk.cx * CHUNK_SIZE;
+    const z0 = chunk.cz * CHUNK_SIZE;
+    pruneGlueInBox(this.world, glue, x0, 0, z0, x0 + CHUNK_SIZE - 1, WORLD_HEIGHT - 1, z0 + CHUNK_SIZE - 1);
+  };
+
   private watchShip(ship: Ship): () => void {
-    return ship.grid.onCellChange((x, y, z, oldCell, newCell, flags) => {
+    return ship.grid.onCellChange((x, y, z, oldCell, newCell) => {
       const oldId = oldCell & ID_MASK;
-      if ((flags & SET_STRUCTURE_MOVE) === 0 && oldId !== (newCell & ID_MASK) && ship.glue.size > 0) {
-        ship.glue.removeAllAt(x, y, z);
-      }
+      if (oldId !== (newCell & ID_MASK)) pruneGlueAt(ship.grid, ship.glue, x, y, z, newCell);
       if (oldId === BEARING_ID && ship.children.length > 0) this.bearingChanged(ship.children, x, y, z, oldCell, newCell);
     });
   }
 
   private watchRotor(rotor: Rotor): () => void {
-    return rotor.grid.onCellChange((x, y, z, oldCell, newCell, flags) => {
-      if ((flags & SET_STRUCTURE_MOVE) === 0 && (oldCell & ID_MASK) !== (newCell & ID_MASK) && rotor.glue.size > 0) {
-        rotor.glue.removeAllAt(x, y, z);
-      }
+    return rotor.grid.onCellChange((x, y, z, oldCell, newCell) => {
+      if ((oldCell & ID_MASK) !== (newCell & ID_MASK)) pruneGlueAt(rotor.grid, rotor.glue, x, y, z, newCell);
       const was = isSailCell(oldCell);
       if (was !== isSailCell(newCell)) rotor.sails += was ? -1 : 1;
     });
@@ -610,7 +625,7 @@ export class StructureManager {
 
   private register(s: Structure): void {
     const unsub = s instanceof Ship ? this.watchShip(s) : this.watchRotor(s as Rotor);
-    const e: Entry = { s, unsub, box: aabb(), sweepVersion: -1, sweepA0: 0, sweepA1: 0, sweepRadius: 0 };
+    const e: Entry = { s, unsub, box: aabb(), sweepVersion: -1, sweep: { a0: 0, a1: 0, radius: 0 } };
     this.entries.set(s.id, e);
     this.owners.set(s.grid, s);
     this.list = this.list.concat(s);
@@ -678,7 +693,7 @@ export class StructureManager {
     for (let i = 0; i < ships.length; i++) {
       const s = ships[i]!;
       if (s.grid.count !== 0 || s.children.length !== 0 || !this.isLive(s)) continue;
-      this.host.releaseRiders(s);
+      this.host.releaseRiders(s, null);
       this.unregister(s);
     }
   }
@@ -759,14 +774,17 @@ export class StructureManager {
    */
   private computeRotorBox(e: Entry, r: Rotor): AABB {
     const g = r.grid;
-    if (e.sweepVersion !== g.version) this.measureSweep(e, r);
+    if (e.sweepVersion !== g.version) {
+      measureSweep(r, e.sweep);
+      e.sweepVersion = g.version;
+    }
     // Spin axis (positive direction) in the parent (= world) frame. Taken from baseRotation,
     // not grid.rotation, so the box is bit-identical at every angle.
     const k = r.axis >> 1;
     const a = qrotate(r.baseRotation, vset(this.tmp, k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0), this.tmp);
-    const mid = (e.sweepA0 + e.sweepA1) * 0.5;
-    const half = (e.sweepA1 - e.sweepA0) * 0.5;
-    const rad = e.sweepRadius;
+    const mid = (e.sweep.a0 + e.sweep.a1) * 0.5;
+    const half = (e.sweep.a1 - e.sweep.a0) * 0.5;
+    const rad = e.sweep.radius;
     const p = g.position; // the pivot, in the parent frame
     // AABB of a cylinder: per axis i, half-height * |a_i| + radius * sqrt(1 - a_i^2).
     const ex = half * Math.abs(a.x) + rad * Math.sqrt(Math.max(0, 1 - a.x * a.x));
@@ -780,35 +798,5 @@ export class StructureManager {
     box.minZ = p.z + a.z * mid - ez;
     box.maxZ = p.z + a.z * mid + ez;
     return box;
-  }
-
-  /** Rotor-local swept cylinder of the cells (see Entry); recomputed when the cells change. */
-  private measureSweep(e: Entry, r: Rotor): void {
-    const g = r.grid;
-    const k = r.axis >> 1;
-    const px = g.pivot.x;
-    const py = g.pivot.y;
-    const pz = g.pivot.z;
-    let a0 = 0;
-    let a1 = 0;
-    let r2 = 0;
-    let first = true;
-    // Per cell, the corner farthest from the axis line; per axis, the farther of the two
-    // faces. Exact for the cells themselves, unlike the corner of their bounding box.
-    g.forEachCell((x, y, z) => {
-      const lo = k === 0 ? x - px : k === 1 ? y - py : z - pz;
-      if (first || lo < a0) a0 = lo;
-      if (first || lo + 1 > a1) a1 = lo + 1;
-      first = false;
-      const fx = k === 0 ? 0 : Math.max(Math.abs(x - px), Math.abs(x + 1 - px));
-      const fy = k === 1 ? 0 : Math.max(Math.abs(y - py), Math.abs(y + 1 - py));
-      const fz = k === 2 ? 0 : Math.max(Math.abs(z - pz), Math.abs(z + 1 - pz));
-      const d2 = fx * fx + fy * fy + fz * fz;
-      if (d2 > r2) r2 = d2;
-    });
-    e.sweepA0 = a0;
-    e.sweepA1 = a1;
-    e.sweepRadius = Math.sqrt(r2);
-    e.sweepVersion = g.version;
   }
 }

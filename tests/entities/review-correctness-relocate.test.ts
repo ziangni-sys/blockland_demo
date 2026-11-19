@@ -42,7 +42,7 @@ describe('review: relocation ignores structures beyond the 0.5 gather margin', (
     }
     const blade = b.rotor(10, null, [0, 61, 0], 2, cells);
     b.spin(blade, 1.2, UP);
-    const p = b.entities.createPlayer('survival', 0.5, 61, -2.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, -2.5);
     let crushTick = -1;
     for (let i = 0; i < 80 && crushTick < 0; i++) {
       b.tick();
@@ -67,7 +67,7 @@ describe('review: relocation ignores structures beyond the 0.5 gather margin', (
     }
     // A ship cell at (0, 64, 0): 1.2 above the head (box top 62.8) -> not in the 0.5 margin.
     const hanging = b.ship(4, [[0, 64, 0, B.PLANKS_OAK]]);
-    const p = b.entities.createPlayer('survival', 0.5, 61, 0.5);
+    const p = b.entities.spawnPlayer('survival', 0.5, 61, 0.5);
     b.tick(3);
     expect(p.onGround).toBe(true);
     // A block appears in the head cell (placed / flowed / blockified): step aside.

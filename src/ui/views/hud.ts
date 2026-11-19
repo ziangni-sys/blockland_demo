@@ -1,6 +1,7 @@
 /**
- * In-game HUD: crosshair, context hint, hotbar with the fading item name, survival gauges,
- * helm instrument, debug overlay and the click-to-play veil.
+ * In-game HUD: crosshair, context hint (with a status notice under it), hotbar with the fading item name, the off-hand slot
+ * (left of the hotbar, with its swap key), survival gauges, helm instrument, debug overlay and
+ * the click-to-play veil, and the player list while Tab is held (views/players.ts).
  *
  * Only the hotbar slots are interactive, and only in drag-to-look mode (where clicks reach
  * the DOM); everything else lets pointer events fall through to the 3D view. Where the
@@ -13,6 +14,7 @@ import { h, Retrigger, setHidden, svg, TextSlot } from '../dom';
 import { DebugOverlay } from './debug';
 import { BreathGauge, VitalGauge } from './gauges';
 import { HelmInstrument } from './helm';
+import { PlayerListOverlay } from './players';
 import { SlotWidget } from './widgets';
 
 const CROSSHAIR =
@@ -35,15 +37,20 @@ export class Hud {
   readonly debugEl: HTMLElement;
 
   private readonly slots: SlotWidget[] = [];
+  private readonly offhand: SlotWidget;
   private readonly nameEl: HTMLElement;
   private readonly name: TextSlot;
   private readonly nameFlash: Retrigger;
   private readonly hint: TextSlot;
+  private readonly hintLine: HTMLElement;
+  private readonly notice: TextSlot;
+  private readonly noticeLine: HTMLElement;
   private readonly gaugesEl: HTMLElement;
   private readonly vital: VitalGauge;
   private readonly breath: BreathGauge;
   private readonly helm: HelmInstrument;
   private readonly debug: DebugOverlay;
+  private readonly players: PlayerListOverlay;
   private readonly veilMouse: SVGSVGElement;
   private readonly veilDrag: SVGSVGElement;
   private readonly veilTitle: HTMLElement;
@@ -56,6 +63,7 @@ export class Hud {
   private nameLang: string | null = null;
   private survival: boolean | null = null;
   private hintText: string | null | undefined = undefined;
+  private noticeText: string | null | undefined = undefined;
   private veilShown: boolean | null = null;
   private veilDragMode: boolean | null = null;
 
@@ -64,9 +72,14 @@ export class Hud {
     this.debug = new DebugOverlay(d);
     this.debugEl = this.debug.el;
 
+    // One pill, two lines: the context hint, and under it the status notice (never in its place).
     this.hint = new TextSlot(d);
-    this.hintEl = h(d, 'div', 'bl-hint bl-play', { 'data-show': '0', 'aria-live': 'polite' });
-    this.hintEl.appendChild(this.hint.node);
+    this.hintLine = h(d, 'span', 'bl-hint-line');
+    this.hintLine.appendChild(this.hint.node);
+    this.notice = new TextSlot(d);
+    this.noticeLine = h(d, 'span', 'bl-hint-line bl-hint-notice', { hidden: true });
+    this.noticeLine.appendChild(this.notice.node);
+    this.hintEl = h(d, 'div', 'bl-hint bl-play', { 'data-show': '0', 'aria-live': 'polite' }, [this.hintLine, this.noticeLine]);
 
     this.name = new TextSlot(d);
     this.nameEl = h(d, 'div', 'bl-itemname', { 'aria-hidden': 'true' });
@@ -89,8 +102,17 @@ export class Hud {
       hotbarEl.appendChild(slot.el);
     }
 
+    // The off-hand: a separate socket hanging left of the hotbar (absolutely placed, so the
+    // hotbar stays centred), engraved with the swap key. Shown even when empty.
+    this.offhand = new SlotWidget(ctx, null, { tabindex: '-1', 'data-area': 'offhand', 'data-index': '0' });
+    this.offhand.el.addEventListener('mousedown', (e) => e.preventDefault());
+    const offhandEl = h(d, 'div', 'bl-offhand', { role: 'group' }, [this.offhand.el, h(d, 'span', 'bl-offhand-key', { 'aria-hidden': 'true' }, ['F'])]);
+    ctx.attr(offhandEl, 'aria-label', 'hud.offhand');
+    const hands = h(d, 'div', 'bl-hands', null, [offhandEl, hotbarEl]);
+
     this.helm = new HelmInstrument(ctx);
     this.helmEl = this.helm.el;
+    this.players = new PlayerListOverlay(ctx);
 
     this.veilMouse = svg(d, VEIL_MOUSE, 'bl-veil-icon');
     this.veilDrag = svg(d, VEIL_DRAG, 'bl-veil-icon');
@@ -100,13 +122,14 @@ export class Hud {
     this.veil = h(d, 'div', 'bl-veil bl-play', { 'data-show': '0', 'data-drag': '0' }, [this.veilCard]);
 
     this.crosshair = svg(d, CROSSHAIR, 'bl-crosshair bl-play');
-    this.cluster = h(d, 'div', 'bl-bottom bl-play', null, [this.nameEl, this.gaugesEl, hotbarEl]);
+    this.cluster = h(d, 'div', 'bl-bottom bl-play', null, [this.nameEl, this.gaugesEl, hands]);
     this.el = h(d, 'div', 'bl-hud', { 'data-play': '0', 'data-drag': '0' }, [
       this.debug.el,
       this.crosshair,
       this.hintEl,
       this.cluster,
       this.helm.el,
+      this.players.el,
       this.veil,
     ]);
   }
@@ -126,6 +149,7 @@ export class Hud {
 
     const hotbar = s.hotbar;
     for (let i = 0; i < HOTBAR_SIZE; i++) this.slots[i]!.set(hotbar[i]);
+    this.offhand.set(s.offhand);
     const sel = Math.min(HOTBAR_SIZE - 1, Math.max(0, s.selected | 0));
     if (sel !== this.selected) {
       if (this.selected >= 0) this.slots[this.selected]!.setSelected(false);
@@ -144,20 +168,30 @@ export class Hud {
       this.breath.update(s.air, s.maxAir);
     }
 
-    if (s.hint !== this.hintText) {
+    if (s.hint !== this.hintText || s.notice !== this.noticeText) {
       this.hintText = s.hint;
-      // Keep the old text while fading out so the pill does not collapse mid-fade.
-      if (s.hint) this.hint.set(s.hint);
-      this.hintEl.dataset.show = s.hint ? '1' : '0';
+      this.noticeText = s.notice;
+      const show = !!s.hint || !!s.notice;
+      // While something shows, each line shows only with its text. When neither does, the
+      // lines keep their old text while the pill fades out, so it does not collapse mid-fade.
+      if (show) {
+        if (s.hint) this.hint.set(s.hint);
+        if (s.notice) this.notice.set(s.notice);
+        setHidden(this.hintLine, !s.hint);
+        setHidden(this.noticeLine, !s.notice);
+      }
+      this.hintEl.dataset.show = show ? '1' : '0';
     }
 
     this.helm.update(s.helm);
+    this.players.update(s.playerList, s.online);
     this.updateVeil(!s.pointerLocked, s.dragLook);
   }
 
   /** Re-render the hotbar icons at the context's current icon size. */
   repaintIcons(): void {
     for (const s of this.slots) s.repaint();
+    this.offhand.repaint();
   }
 
   private updateItemName(s: UiState, sel: number): void {

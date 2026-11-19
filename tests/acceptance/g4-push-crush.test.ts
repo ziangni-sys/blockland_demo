@@ -22,11 +22,14 @@ import type { Rabbit } from '../../src/entities/entity';
 import type { Rotor, Ship } from '../../src/structures/structure';
 import type { Simulation } from '../../src/sim/simulation';
 import type { SimEvent } from '../../src/sim/view';
+import { ME, type TestWorld } from './world';
 import {
   LAND_TOP,
   assemble,
   bodyIn,
   buildBoat,
+  depthIn,
+  TOUCH,
   buildWindmill,
   cellMap,
   copy,
@@ -40,8 +43,8 @@ import {
   hullSamples,
   hurtEvents,
   idAt,
-  landSim,
-  seaSim,
+  landWorld,
+  seaWorld,
   shipStats,
   startWindmillByClicks,
   watchCrushes,
@@ -116,10 +119,11 @@ interface ShipRun extends ShipTrace {
   rest: Vec3;
 }
 
-function traceShip(sim: Simulation, ship: Ship, ticks: number, each?: () => void): ShipTrace {
+function traceShip(w: TestWorld, ship: Ship, ticks: number, each?: () => void): ShipTrace {
+  const { sim } = w;
   const out: ShipTrace = { ship, counts: [], dropCounts: [], contacts: [], pinned: [], positions: [], extents: [], destroyedStat: 0 };
   for (let i = 0; i < ticks; i++) {
-    sim.tick();
+    w.tickWhile(); // until the ship is gone
     out.counts.push(ship.removed ? 0 : ship.grid.count);
     out.dropCounts.push(drops(sim).count);
     if (ship.removed) break;
@@ -149,34 +153,36 @@ describe('15. 风车推开阔水面上的船，船不受损。', () => {
   beforeAll(() => {
     {
       // The player stands on a single block high above the water (out of reach of boat and blades).
-      const sim = seaSim('survival', vec3(1.5, 34, -1.5));
+      const w = seaWorld('survival', vec3(1.5, 34, -1.5));
+      const { sim, me } = w;
       sim.world.setCell(1, 33, -2, makeCell(B.STONE));
       const helm = buildBoat(sim, -3, 4, -1, 6, 29, NZ); // x -3..-1, z 4..6
       const bearing = seaPaddle(sim);
-      sim.advance(2);
+      w.tick(2);
       const ship = assemble(sim, helm);
-      sim.advance(60); // float to rest
+      w.tick(60); // float to rest
       const n0 = ship.grid.count;
       const cells0 = cellMap(ship.grid);
       const rest = copy(ship.grid.position);
-      startWindmillByClicks(sim, bearing, PY);
-      paddle = { ...traceShip(sim, ship, 300), n0, cells0, rest };
+      startWindmillByClicks(w, bearing, PY);
+      paddle = { ...traceShip(w, ship, 300), n0, cells0, rest };
     }
     {
-      const sim = seaSim('survival', vec3(1.5, 34, -2.5));
+      const w = seaWorld('survival', vec3(1.5, 34, -2.5));
+      const { sim, me } = w;
       sim.world.setCell(1, 33, -3, makeCell(B.STONE));
       const helm = buildBoat(sim, -4, -1, -2, 1, 29, NZ); // x -4..-2, z -1..1: astride the blade plane z = 0
-      sim.advance(2);
+      w.tick(2);
       const ship = assemble(sim, helm);
-      sim.advance(60);
+      w.tick(60);
       // Hub (0, 32, 0): the lowest arm reaches down to y = 28, two blocks into the sea.
       const bearing = windmill(sim, 0, 32, -1);
-      sim.advance(2);
+      w.tick(2);
       const n0 = ship.grid.count;
       const cells0 = cellMap(ship.grid);
       const rest = copy(ship.grid.position);
-      startWindmillByClicks(sim, bearing, PY);
-      mill = { ...traceShip(sim, ship, 250), n0, cells0, rest };
+      startWindmillByClicks(w, bearing, PY);
+      mill = { ...traceShip(w, ship, 250), n0, cells0, rest };
     }
   });
 
@@ -247,22 +253,23 @@ describe('16. 叶片把船顶在墙角：先推；推不动时逐格损毁，不
   }
 
   beforeAll(() => {
-    const sim = seaSim('survival', vec3(1.5, 34, -1.5));
+    const w = seaWorld('survival', vec3(1.5, 34, -1.5));
+    const { sim, me } = w;
     sim.world.setCell(1, 33, -2, makeCell(B.STONE));
     fill(sim, WEST.x, Y0, WEST.z0, WEST.x, Y1, WEST.z1, B.STONE);
     fill(sim, NORTH.x0, Y0, NORTH.z, NORTH.x1, Y1, NORTH.z, B.STONE);
     const helm = buildBoat(sim, -3, 4, -1, 6, 29, NZ);
     const bearing = seaPaddle(sim);
-    sim.advance(2);
+    w.tick(2);
     const ship = assemble(sim, helm);
-    sim.advance(60);
+    w.tick(60);
     const n0 = ship.grid.count;
     const cells0 = cellMap(ship.grid);
     const rest = copy(ship.grid.position);
     restExtent = extent(hullSamples(ship));
-    startWindmillByClicks(sim, bearing, PY);
+    startWindmillByClicks(w, bearing, PY);
     const isWall = (p: Vec3): boolean => idAt(sim.world, Math.floor(p.x), Math.floor(p.y), Math.floor(p.z)) === B.STONE;
-    const t = traceShip(sim, ship, 450, () => {
+    const t = traceShip(w, ship, 450, () => {
       for (const p of hullSamples(ship)) maxPen = Math.max(maxPen, wallPenetration(p));
       for (const c of hullCentres(ship)) if (isWall(c)) centresInWall++;
     });
@@ -331,18 +338,19 @@ interface PlayerRun {
   insideBlade: number;
 }
 
-function tracePlayer(sim: Simulation, rotor: Rotor, ticks: number): PlayerRun {
+function tracePlayer(w: TestWorld, rotor: Rotor, ticks: number): PlayerRun {
+  const { sim, me } = w;
   const events = watchEvents(sim);
   const crushes = watchCrushes(sim);
-  const start = copy(sim.player.pos);
+  const start = copy(me.player.pos);
   let maxAway = 0;
-  let minHealth = sim.player.health;
+  let minHealth = me.player.health;
   let insideBlade = 0;
   for (let i = 0; i < ticks; i++) {
-    sim.tick();
-    maxAway = Math.max(maxAway, hdist(sim.player.pos, start));
-    minHealth = Math.min(minHealth, sim.player.health);
-    if (bodyIn(rotor.grid, sim.player)) insideBlade++;
+    w.tick();
+    maxAway = Math.max(maxAway, hdist(me.player.pos, start));
+    minHealth = Math.min(minHealth, me.player.health);
+    if (bodyIn(rotor.grid, me.player)) insideBlade++;
   }
   return { start, maxAway, minHealth, hurts: hurtEvents(events), crushes, insideBlade };
 }
@@ -364,10 +372,11 @@ interface CageRun {
  * Runs until the first crush.
  */
 function cageRun(mode: 'survival' | 'creative'): CageRun {
-  const sim = landSim(mode, vec3(0.5, T, 3.5));
+  const w = landWorld(mode, vec3(0.5, T, 3.5));
+  const { sim, me } = w;
   const bearing = landPaddle(sim);
-  sim.advance(2);
-  const rotor = startWindmillByClicks(sim, bearing, PZ);
+  w.tick(2);
+  const rotor = startWindmillByClicks(w, bearing, PZ);
   for (const [x, z] of [
     [-1, 3],
     [1, 3],
@@ -379,22 +388,22 @@ function cageRun(mode: 'survival' | 'creative'): CageRun {
   fill(sim, -1, T + 2, 2, 1, T + 2, 4, B.STONE);
   const events = watchEvents(sim);
   const crushes = watchCrushes(sim);
-  let before = copy(sim.player.pos);
-  let healthBefore = sim.player.health;
+  let before = copy(me.player.pos);
+  let healthBefore = me.player.health;
   for (let i = 0; i < 200 && crushes.length === 0; i++) {
-    before = copy(sim.player.pos);
-    healthBefore = sim.player.health;
-    sim.tick();
+    before = copy(me.player.pos);
+    healthBefore = me.player.health;
+    w.tickWhile();
   }
   return {
     crush: crushes[0],
     before,
-    after: copy(sim.player.pos),
+    after: copy(me.player.pos),
     healthBefore,
-    healthAfter: sim.player.health,
+    healthAfter: me.player.health,
     hurts: hurtEvents(events),
-    inWorld: bodyIn(sim.world, sim.player),
-    inBlade: bodyIn(rotor.grid, sim.player),
+    inWorld: bodyIn(sim.world, me.player),
+    inBlade: bodyIn(rotor.grid, me.player),
   };
 }
 
@@ -404,7 +413,7 @@ interface GunwaleRun {
   l1: Vec3;
   maxDz: number;
   carrierAtEnd: boolean;
-  /** Ticks at whose end the body overlapped the ship's cells. */
+  /** Ticks at whose end the body was inside the ship's cells (deeper than TOUCH). */
   inShip: number;
   shipRotorContacts: number;
   crushes: CrushRecord[];
@@ -422,22 +431,24 @@ describe('17. 叶片扫过玩家时把人推开。玩家被关在笼子里时，
   beforeAll(() => {
     {
       // A survival player standing free on open ground, 3 blocks south of the paddle's hub.
-      const sim = landSim('survival', vec3(0.5, T, 3.5));
+      const w = landWorld('survival', vec3(0.5, T, 3.5));
+      const { sim, me } = w;
       const bearing = landPaddle(sim);
-      sim.advance(2);
-      const rotor = startWindmillByClicks(sim, bearing, PZ);
-      sweep = tracePlayer(sim, rotor, 200);
+      w.tick(2);
+      const rotor = startWindmillByClicks(w, bearing, PZ);
+      sweep = tracePlayer(w, rotor, 200);
     }
     {
       // A survival player standing free on open ground in the plane of a windmill on a tower; the
       // blades sweep down to about a block above the ground (through the player's head and chest).
-      const sim = landSim('survival', vec3(-1.5, T, 1.5));
+      const w = landWorld('survival', vec3(-1.5, T, 1.5));
+      const { sim, me } = w;
       const hy = hubAbove(T, 4, 0.05); // T + 5
       fill(sim, 0, T, 0, 0, hy - 1, 0, B.STONE_BRICKS); // the tower under the bearing
       const bearing = windmill(sim, 0, hy, 0);
-      sim.advance(2);
-      const rotor = startWindmillByClicks(sim, bearing, NX);
-      millOver = tracePlayer(sim, rotor, 200);
+      w.tick(2);
+      const rotor = startWindmillByClicks(w, bearing, NX);
+      millOver = tracePlayer(w, rotor, 200);
     }
     cageSurvival = cageRun('survival');
     cageCreative = cageRun('creative');
@@ -447,38 +458,42 @@ describe('17. 叶片扫过玩家时把人推开。玩家被关在笼子里时，
       // against the gunwale. A windmill hangs from a bearing above the gunwale; its blades turn in
       // the plane z = 1, just inside the gunwale and clear of the deck, so the lowest arm sweeps
       // east along the gunwale over the deck — through the player, never through the ship.
-      const sim = seaSim('survival', vec3(-1.5, 31, 1.31));
+      const w = seaWorld('survival', vec3(-1.5, 31, 1.31));
+      const { sim, me } = w;
       fill(sim, -6, 29, 0, 8, 29, 4, B.PLANKS_OAK);
       fill(sim, -6, 30, 0, 8, 31, 0, B.PLANKS_OAK);
       sim.world.setCell(6, 30, 3, makeCell(B.HELM, facingState(NZ)));
-      sim.advance(2);
+      w.tick(2);
       const ship = assemble(sim, [6, 30, 3]);
-      sim.advance(80); // float to rest, the player riding on the deck
-      if (sim.player.carrierId !== ship.id) throw new Error('scene: the player is not aboard');
+      w.tick(80); // float to rest, the player riding on the deck
+      if (me.player.carrierId !== ship.id) throw new Error('scene: the player is not aboard');
       const deckTop = ship.grid.toWorld(vec3(0, 30, 2)).y;
       const bearing = windmill(sim, 0, hubAbove(deckTop, 4, 0.05), 0);
-      sim.advance(2);
-      startWindmillByClicks(sim, bearing, NX);
+      w.tick(2);
+      startWindmillByClicks(w, bearing, NX);
       const events = watchEvents(sim);
       const crushes = watchCrushes(sim);
-      const local = (): Vec3 => ship.grid.toLocal(copy(sim.player.pos), vec3());
+      const local = (): Vec3 => ship.grid.toLocal(copy(me.player.pos), vec3());
       const l0 = local();
       let maxDz = 0;
       let inShip = 0;
       let shipRotorContacts = 0;
-      let minHealth = sim.player.health;
+      let minHealth = me.player.health;
       for (let i = 0; i < 200; i++) {
-        sim.tick();
+        w.tick();
         maxDz = Math.max(maxDz, Math.abs(local().z - l0.z));
-        if (bodyIn(ship.grid, sim.player)) inShip++;
+        // Inside the ship's hard cells by more than a touch. (The body is a world-axis box resting on
+        // a deck that rocks a little; in network mode the client placed it against the deck's
+        // previous pose, and the same deck-local feet touch the deck of this tick by ~1e-5.)
+        if (depthIn(ship.grid, me.player) > TOUCH) inShip++;
         shipRotorContacts += shipStats(sim, ship).rotorContacts;
-        minHealth = Math.min(minHealth, sim.player.health);
+        minHealth = Math.min(minHealth, me.player.health);
       }
       gunwale = {
         l0,
         l1: local(),
         maxDz,
-        carrierAtEnd: sim.player.carrierId === ship.id,
+        carrierAtEnd: me.player.carrierId === ship.id,
         inShip,
         shipRotorContacts,
         crushes,
@@ -507,7 +522,7 @@ describe('17. 叶片扫过玩家时把人推开。玩家被关在笼子里时，
     expect(cageSurvival.crush?.kind).toBe('player');
     expect(cageSurvival.healthBefore).toBe(PLAYER_MAX_HEALTH);
     expect(cageSurvival.healthAfter).toBe(PLAYER_MAX_HEALTH - CRUSH_DAMAGE);
-    expect(cageSurvival.hurts).toEqual([{ type: 'playerHurt', amount: CRUSH_DAMAGE, cause: 'crush' }]);
+    expect(cageSurvival.hurts).toEqual([{ type: 'playerHurt', player: ME, amount: CRUSH_DAMAGE, cause: 'crush' }]);
   });
 
   it('关在笼子里，生存模式挪位: the crushed survival player is moved out of the cage to a free spot', () => {
@@ -572,20 +587,21 @@ interface RabbitRun {
  * The player starts the paddle from the top of the stone block, above the blade.
  */
 function rabbitRun(mode: 'survival' | 'creative', ticks: number): RabbitRun {
-  const sim = landSim(mode, vec3(0.5, T + 4, 1.6));
+  const w = landWorld(mode, vec3(0.5, T + 4, 1.6));
+  const { sim, me } = w;
   const bearing = landPaddle(sim);
   fill(sim, -4, T, 1, 4, T + 3, 7, B.STONE);
   fill(sim, -1, T, 4, 1, T, 4, 0);
-  sim.advance(2);
+  w.tick(2);
   const rabbit = sim.entities.spawnRabbit(1.5, T, 4.5) as Rabbit;
   const crushes = watchCrushes(sim);
-  const rotor = startWindmillByClicks(sim, bearing, PY);
+  const rotor = startWindmillByClicks(w, bearing, PY);
   const out: RabbitRun = { crushes: [], removed: false, removedAtTick: -1, crushCountEnd: 0 };
   const mine = (): number => crushes.filter((c) => c.entityId === rabbit.id).length;
   for (let i = 0; i < ticks && !rabbit.removed; i++) {
     const before = copy(rabbit.pos);
     const n = mine();
-    sim.tick();
+    w.tickWhile();
     for (let k = n; k < mine(); k++) {
       out.crushes.push({
         tick: sim.ticks,
