@@ -167,13 +167,23 @@ describe('sand on partial cells (docs/SHAPES.md 9.3: sand rests on any hard part
       w.setCell(2 * i, T + 4, -5, makeCell(B.SAND));
       w.setCell(2 * i, T + 5, -5, makeCell(B.GRAVEL));
     });
-    sim.advance(FALL_DELAY + 10);
+    // Never at any tick: a sand that fell and landed back in its cell would look the same at the
+    // end, so every write to these columns and every falling entity over the whole window counts.
+    const changes: string[] = [];
+    const off = w.onCellChange((x, y, z) => {
+      if (z === -5 && y >= T + 3 && y <= T + 5 && x >= 0 && x <= 2 * (supports.length - 1)) changes.push(`${x},${y},${z}`);
+    });
+    for (let t = 0; t < 3 * FALL_DELAY + 20; t++) {
+      sim.tick();
+      expect(sim.entities.all().filter((e) => e.kind === 'falling'), `falling entities at tick ${t}`).toHaveLength(0);
+    }
+    off();
+    expect(changes, 'writes to the sand columns').toEqual([]);
     supports.forEach((c, i) => {
       expect(getPacked(w, 2 * i, T + 3, -5)).toBe(c);
       expect(idAt(w, 2 * i, T + 4, -5)).toBe(B.SAND);
       expect(idAt(w, 2 * i, T + 5, -5)).toBe(B.GRAVEL);
     });
-    expect(sim.entities.all().filter((e) => e.kind === 'falling')).toHaveLength(0);
   });
 
   it('sand whose support is carved away to the last octant stays; once the last part goes, it falls', () => {

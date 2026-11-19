@@ -22,7 +22,10 @@
  *     crates with a short random fuse (chain reactions); when the world's drops are on
  *     (WorldRules.dropsEnabled) each other removed part drops its item with chance 1/power, one
  *     draw from sim.rng per part. In a world of full blocks every cell has one part, so the
- *     marks, their order and the random sequence are exactly those of the whole-cell blast.
+ *     marks, their order and the random sequence are exactly those of the whole-cell blast, with
+ *     one exception (docs/SHAPES.md 19.8): a soft whole-cell block (a torch, a flower) standing in
+ *     a ship's dry hold no longer stops a ray in the world water refilled there, since the dry
+ *     hold is asked whatever the ship's cell holds (it used to be asked only in empty cells).
  *  3. structures.endBatch(): rotors whose bearing was destroyed blockify now — after the wave
  *     has gone through every structure, so surviving blades land where they should — and
  *     emptied ships are removed (one that still carries rotor remains survives).
@@ -101,29 +104,19 @@ function destructible(part: number): boolean {
 }
 
 /**
- * The part of grid cell (x, y, z) that fills `octant`, or AIR when the octant is empty. Reads the
- * cell value and, for a two-part cell, the second part; it never forms the packed value of a
- * two-part cell (docs/SHAPES.md section 4.4: this runs at every step of 1352 rays). Air and full
- * blocks (values below FULL_LIMIT: no holes, no second part) fill every octant.
+ * The part of the cell whose value is `c` (>= FULL_LIMIT: it has holes or a second part) that
+ * fills `octant`, or AIR when the octant is empty. Reads the second part only for a two-part cell;
+ * it never forms the packed value of a two-part cell (docs/SHAPES.md section 4.4: this runs at
+ * ray steps). Values below FULL_LIMIT (air, full blocks) never come here: a full block's single
+ * part fills every octant, so the caller uses the value itself.
  */
-function partIn(grid: VoxelGrid, x: number, y: number, z: number, octant: number): number {
-  const c = grid.getCell(x, y, z);
-  if (c < FULL_LIMIT) return c;
+function partOf(grid: VoxelGrid, c: number, x: number, y: number, z: number, octant: number): number {
   if (((c >>> (HOLES_SHIFT + octant)) & 1) === 0) return c & PART_MASK;
   if (c >= CELL_MULTI_BIT) {
     const p2 = grid.getPart2(x, y, z);
     if (((p2 >>> (HOLES_SHIFT + octant)) & 1) === 0) return p2;
   }
   return AIR;
-}
-
-/**
- * The octant of the cell containing the point whose coordinates are (px, py, pz), the cell being
- * (cx, cy, cz) = their floors. p - floor(p) is exact in floating point, so this is the octant of
- * the half-cell grid point floor(2p) (docs/SHAPES.md section 1.1).
- */
-function octantOf(px: number, py: number, pz: number, cx: number, cy: number, cz: number): number {
-  return (px - cx >= 0.5 ? 1 : 0) | (py - cy >= 0.5 ? 2 : 0) | (pz - cz >= 0.5 ? 4 : 0);
 }
 
 /**
@@ -158,7 +151,10 @@ interface Target {
   /** Hull analysis of a ship when current (dry hold keeps world water out of the hull). */
   readonly hull: HullInfo | null;
   readonly marks: Marks;
-  /** Part the current ray step's point is in (AIR for an empty octant), its cell and octant. */
+  /**
+   * Part the current ray step's point is in (AIR for an empty octant), its cell and octant (0 for
+   * a full block: its one part fills every octant).
+   */
   part: number;
   lx: number;
   ly: number;
@@ -239,34 +235,50 @@ function markCells(sim: Simulation, x: number, y: number, z: number, power: numb
       const wz = Math.floor(p.z);
       let cost = 0;
       let displaced = false;
+      // What the point is in, per grid. A value below FULL_LIMIT (air, a full block) is used as it
+      // is: a full block's one part fills every octant, so its mark goes on octant 0, which the
+      // removal treats like any other. Only a cell with holes or a second part has its octant
+      // worked out (p - floor(p) >= 0.5 per axis, exact in floating point: the octant of
+      // floor(2p)) and the part filling it selected. Written out in place on purpose: this runs
+      // at every ray step, and a version that called helpers for the octant and the part at every
+      // step made a blast near a ship cost about 1.5 times M1 in a world of full blocks.
       for (let t = 0; t < nt; t++) {
         const tg = targets[t]!;
         tg.grid.toLocal(p, l);
         const lx = Math.floor(l.x);
         const ly = Math.floor(l.y);
         const lz = Math.floor(l.z);
-        const o = octantOf(l.x, l.y, l.z, lx, ly, lz);
-        const part = partIn(tg.grid, lx, ly, lz, o);
+        let part = tg.grid.getCell(lx, ly, lz);
+        let o = 0;
+        if (part >= FULL_LIMIT) {
+          o = (l.x - lx >= 0.5 ? 1 : 0) | (l.y - ly >= 0.5 ? 2 : 0) | (l.z - lz >= 0.5 ? 4 : 0);
+          part = partOf(tg.grid, part, lx, ly, lz, o);
+        }
         tg.part = part;
+        // World liquid is kept out by the hull where the point is in a hard octant of a ship or
+        // in its dry hold, whatever else the ship's cell holds (docs/SHAPES.md 19.8; for a ship
+        // whose hull analysis is current, the same condition as sim/rays.ts displacedByHull; a
+        // stale analysis counts as no dry hold here, and a rotor's hard octants count too).
+        // The part filling the point's octant is hard exactly when solidAtHalf(grid, floor(2 *
+        // local)) is; the dry hold is asked at those half-cell coordinates.
         if (part !== AIR) {
           tg.lx = lx;
           tg.ly = ly;
           tg.lz = lz;
           tg.octant = o;
           cost += partCost(part);
-        }
-        // World liquid where the point is in a hard octant of a ship, or in its dry hold, is kept
-        // out by the hull (the same condition as sim/rays.ts displacedByHull). The part filling
-        // the point's octant is hard exactly when solidAtHalf(grid, floor(2 * local)) is true, so
-        // that read is not repeated; the dry hold is asked at the same half-cell coordinates.
-        if (!displaced) {
-          displaced =
-            SOLID[part & ID_MASK] === 1 ||
-            (tg.hull !== null && isDryHalf(tg.hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2)));
+          if (SOLID[part & ID_MASK] === 1) displaced = true;
+          else if (tg.hull !== null && isDryHalf(tg.hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) displaced = true;
+        } else if (tg.hull !== null && isDryHalf(tg.hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) {
+          displaced = true;
         }
       }
-      const wo = octantOf(p.x, p.y, p.z, wx, wy, wz);
-      const wp = partIn(world, wx, wy, wz, wo);
+      let wp = world.getCell(wx, wy, wz);
+      let wo = 0;
+      if (wp >= FULL_LIMIT) {
+        wo = (p.x - wx >= 0.5 ? 1 : 0) | (p.y - wy >= 0.5 ? 2 : 0) | (p.z - wz >= 0.5 ? 4 : 0);
+        wp = partOf(world, wp, wx, wy, wz, wo);
+      }
       // World liquid where a hull is (or in its dry hold) is kept out by the hull: not in the way.
       if (!(displaced && LIQUID[wp & ID_MASK] !== 0)) cost += partCost(wp);
       f -= (cost + 0.3) * 0.3;
@@ -297,14 +309,25 @@ function destroy(sim: Simulation, worldMarks: Marks, targets: Target[], power: n
   }
 }
 
-/** Remove the marked parts of one grid, cell by cell in first-mark order. */
+/**
+ * Remove the marked parts of one grid, cell by cell in first-mark order. Each cell is read again
+ * here: it may have changed since it was marked (by a hook, or an earlier removal). A full block
+ * (a value below FULL_LIMIT: one part filling every octant) meets any marked octant, so it goes
+ * when a blast can destroy it, without looking at the marks: the M1 path, kept short because
+ * nearly every marked cell is one.
+ */
 function removeMarked(sim: Simulation, grid: VoxelGrid, marks: Marks, dropChance: number, tmp: Vec3): void {
   const l = marks.list;
   for (let i = 0; i < l.length; i += 3) {
     const x = l[i]!;
     const y = l[i + 1]!;
     const z = l[i + 2]!;
-    removeParts(sim, grid, x, y, z, marks.mask(x, y, z), dropChance, tmp);
+    const cell = grid.getCell(x, y, z);
+    if (cell < FULL_LIMIT) {
+      if (destructible(cell) && grid.setCell(x, y, z, AIR, SET_EXPLOSION)) blastedPart(sim, grid, x, y, z, cell, dropChance, tmp);
+    } else {
+      removeParts(sim, grid, x, y, z, cell, marks.mask(x, y, z), dropChance, tmp);
+    }
   }
 }
 
@@ -314,13 +337,11 @@ function blasted(part: number, mask: number): boolean {
 }
 
 /**
- * Remove every part of cell (x, y, z) that fills one of the marked octants `mask` (and that a
- * blast can destroy), in one setCell; then, first part before second, prime it (a blast crate)
- * or let it drop. The cell is read again here: it may have changed since it was marked (by a
- * hook, or an earlier removal).
+ * Remove every part of cell (x, y, z), whose value is `cell` (>= FULL_LIMIT: it has holes or a
+ * second part), that fills one of the marked octants `mask` and that a blast can destroy, in one
+ * setCell; then, first part before second, prime it (a blast crate) or let it drop.
  */
-function removeParts(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: number, mask: number, dropChance: number, tmp: Vec3): void {
-  const cell = grid.getCell(x, y, z);
+function removeParts(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: number, cell: number, mask: number, dropChance: number, tmp: Vec3): void {
   const p1 = cell & PART_MASK;
   const p2 = cell < CELL_MULTI_BIT ? AIR : grid.getPart2(x, y, z);
   const r1 = blasted(p1, mask);
