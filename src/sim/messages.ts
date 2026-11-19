@@ -63,6 +63,7 @@ const EN = {
   'toast.bucket.structure': 'Buckets cannot be used on structures',
   // ---- toasts: multiplayer
   'toast.host.only': 'Only the host can do that',
+  'toast.host.setCell': 'This cell cannot be changed like that',
 
   // ---- assembly failures (fail.<kind>.<reason>)
   'fail.ship.not_a_helm': 'That is not a helm',
@@ -126,6 +127,7 @@ const ZH: Record<MessageKey, string> = {
   'toast.glue.spinning': '转动中的转子不能涂胶',
   'toast.bucket.structure': '桶不能用在结构体上',
   'toast.host.only': '只有房主能这样做',
+  'toast.host.setCell': '这个格子不能这样改',
 
   'fail.ship.not_a_helm': '这不是舵轮',
   'fail.ship.too_big': '太大了：船最多 {max} 格',

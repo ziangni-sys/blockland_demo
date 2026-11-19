@@ -1,6 +1,7 @@
 /** Test helpers for the mesher: building inputs and decoding MeshData into quads. */
 import { expect } from 'vitest';
 import type { GeometryData, MeshData, MeshInput } from '../../src/mesh/types';
+import { cellPrimary, cellSecond, partHoles } from '../../src/blocks/cell';
 
 export type GroupName = 'opaque' | 'cutout' | 'translucent';
 export const GROUPS: readonly GroupName[] = ['opaque', 'cutout', 'translucent'];
@@ -33,7 +34,7 @@ export interface Quad {
 export function makeInput(sx: number, sy: number, sz: number, light: boolean | number = false): MeshInput {
   const n = (sx + 2) * (sy + 2) * (sz + 2);
   const l = light === false ? null : new Uint8Array(n).fill(light === true ? 0xf0 : light);
-  return { sx, sy, sz, cells: new Uint16Array(n), light: l };
+  return { sx, sy, sz, cells: new Uint16Array(n), holes: null, part2: null, light: l };
 }
 
 /** Padded index of cell (x,y,z) given in INTERIOR coordinates (margin = -1 and s). */
@@ -43,8 +44,20 @@ export function idx(input: MeshInput, x: number, y: number, z: number): number {
   return x + 1 + (z + 1) * px + (y + 1) * px * pz;
 }
 
-export function put(input: MeshInput, x: number, y: number, z: number, cell: number): void {
-  input.cells[idx(input, x, y, z)] = cell;
+/**
+ * Write a packed cell (blocks/cell.ts: both parts) into all three layers of the input; the holes and
+ * second-part layers are allocated the first time a cell needs them (docs/SHAPES.md 8.1).
+ */
+export function put(input: MeshInput, x: number, y: number, z: number, packed: number): void {
+  const i = idx(input, x, y, z);
+  const cell = cellPrimary(packed);
+  const p2 = cellSecond(packed);
+  input.cells[i] = cell & 0xffff;
+  const h = partHoles(cell);
+  if (h !== 0 && input.holes === null) input.holes = new Uint8Array(input.cells.length);
+  if (input.holes !== null) input.holes[i] = h;
+  if (p2 !== 0 && input.part2 === null) input.part2 = new Uint32Array(input.cells.length);
+  if (input.part2 !== null) input.part2[i] = p2;
 }
 
 export function putLight(input: MeshInput, x: number, y: number, z: number, sky: number, block = 0): void {

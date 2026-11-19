@@ -15,7 +15,7 @@
  *    entry point turns any failure into a ProtocolError, the only error it throws (the
  *    connection then ends with protocol_error / bad_hello). Every decode* ends with expectEnd().
  *  - The decoder accepts exactly what the encoder can produce for the field domains the layout
- *    defines (enumerations, flag bits, Cell < 2^16, coordinates within MAX_COORD, i8 / i16 never
+ *    defines (enumerations, flag bits, the Cell layout of save/cells.ts, coordinates within MAX_COORD, i8 / i16 never
  *    -128 / -32768, a non-zero Rot64, ascending chunk delta indices, ...). Semantic checks
  *    (does this id exist, is the name acceptable) are the receiver's. Floats pass through as they
  *    are, NaN included: a non-finite movement report is a failed check, not a protocol error.
@@ -27,7 +27,9 @@
  * allocating and enforced by the encoder too:
  *  - the run-length CellVolume lets a few bytes describe a whole column: its volume is fixed by
  *    the context (32768 for a chunk, a structure box of at most MAX_STRUCTURE_BOX_CELLS) and all
- *    CellVolumes of one TickBatch together may describe at most MAX_BATCH_CELLS cells;
+ *    CellVolumes of one TickBatch together may cost at most MAX_BATCH_CELLS (save/cells.ts
+ *    volumeCost: a cell 1, plus 1/2 for a holes layer and 2 for a second-part layer, charged only
+ *    when the layer is allocated);
  *  - the preview bitmap turns one bit into three coordinates: at most MAX_PREVIEW_CELLS set bits
  *    in a box of at most MAX_STRUCTURE_BOX_CELLS.
  *
@@ -38,7 +40,9 @@ import type { Axis, Dir } from '../core/dirs';
 import type { Quat, Vec3 } from '../core/math';
 import type { ItemStack } from '../blocks/items';
 import type { Message } from '../sim/view';
+import { FULL_LIMIT, PART_LIMIT } from '../blocks/cell';
 import { ByteReader, ByteWriter } from '../save/bytes';
+import { readCell, readCellVolume, volumeCost, writeCell, writeCellVolume, type CellBudget } from '../save/cells';
 import {
   ENTITY_KINDS,
   HOST_COMMAND_KINDS,
@@ -58,7 +62,6 @@ import {
   MESSAGE_CHANNEL,
   MODES,
   MSG,
-  PALETTE_LIMIT,
   REFUSE_REASONS,
   SECTION,
   STRUCTURE_KINDS,
@@ -115,7 +118,6 @@ export class ProtocolError extends Error {
 
 const TWO_PI = 2 * Math.PI;
 const HALF_PI = Math.PI / 2;
-const CELL_LIMIT = 0x10000;
 /** Largest chunk delta glue value: face (17 bits) + added << 17. */
 const CHUNK_GLUE_FACE_LIMIT = 1 << 17;
 
@@ -135,11 +137,6 @@ function varuintSize(v: number): number {
     n++;
   }
   return n;
-}
-
-/** Number of bits needed for the values 0..n (0 for n = 0). */
-function bitLength(n: number): number {
-  return n === 0 ? 0 : 32 - Math.clz32(n);
 }
 
 /** Read an enumeration value (wire value = index + offset). */
@@ -187,14 +184,31 @@ export function readI16(r: ByteReader): number {
   return b >= 0x8000 ? b - 0x10000 : b;
 }
 
-/** Cell: varuint. M2.1 stores 16 bits: the encoder asserts v < 2^16, the decoder rejects more (never truncates). */
-export function writeCell(w: ByteWriter, v: Cell): void {
-  if (!isUint(v, CELL_LIMIT - 1)) bad('cell (M2.1 stores 16 bits)', v);
-  w.varuint(v);
+/**
+ * Cell and CellVolume: the one implementation is save/cells.ts (shared with the save format);
+ * these are its functions under the protocol's names (docs/SHAPES.md 13.1).
+ */
+export { cellSize, readCell, readCellVolume, volumeCost, writeCell, writeCellVolume, type CellBudget } from '../save/cells';
+
+/** A Cell that must be a full single part (falling blocks, flat generator layers): below FULL_LIMIT. */
+function writeFullCell(w: ByteWriter, v: Cell, what: string): void {
+  if (!(v < FULL_LIMIT)) bad(`${what} (must be a full block, < 2^16)`, v);
+  writeCell(w, v);
 }
-export function readCell(r: ByteReader): Cell {
-  const v = r.varuint();
-  if (v >= CELL_LIMIT) r.fail(`cell value ${v} does not fit the 16-bit cells of this build`);
+function readFullCell(r: ByteReader, what: string): Cell {
+  const v = readCell(r);
+  if (v >= FULL_LIMIT) r.fail(`${what} ${v} is not a full block`);
+  return v;
+}
+
+/** A Cell that must be one part value (blockBroken / blockPlaced): below PART_LIMIT, no second part. */
+function writePartCell(w: ByteWriter, v: Cell, what: string): void {
+  if (!(v < PART_LIMIT)) bad(`${what} (must be one part, < 2^24)`, v);
+  writeCell(w, v);
+}
+function readPartCell(r: ByteReader, what: string): Cell {
+  const v = readCell(r);
+  if (v >= PART_LIMIT) r.fail(`${what} ${v} is not one part`);
   return v;
 }
 
@@ -469,116 +483,25 @@ export function readMessage(r: ByteReader): Message {
 
 // ====================================================================== CellVolume
 
-const VOLUME_PALETTE = 0;
-const VOLUME_RAW = 1;
-
-/**
- * CellVolume(n), n = cells.length known to both ends: u8 enc; 0 = palette run-length: vu P
- * (1..n), P x Cell (first-appearance order), then vu tokens until n cells are covered,
- * token = (len - 1) * 2^B + index, B = bit length of P - 1; 1 = raw: n x Cell. The encoder takes
- * whichever is smaller (raw on a tie, and always raw above PALETTE_LIMIT distinct values): the
- * save codec's algorithm (save/codec.ts encodeChunk) with Cell palette entries and no envelope.
- */
-export function writeCellVolume(w: ByteWriter, cells: CellVolume): void {
-  const n = cells.length;
-  if (n < 1) bad('CellVolume length', n);
-  const paletteIndex = new Map<number, number>();
-  const palette: number[] = [];
-  const runIndex: number[] = [];
-  const runLength: number[] = [];
-  let prev = cells[0]!;
-  let prevIndex = 0;
-  paletteIndex.set(prev, 0);
-  palette.push(prev);
-  let start = 0;
-  let rawBytes = 0;
-  let rle = true;
-  for (let i = 0; i < n; i++) {
-    const v = cells[i]!;
-    rawBytes += v < 0x80 ? 1 : v < 0x4000 ? 2 : 3;
-    if (v === prev || !rle) continue;
-    runIndex.push(prevIndex);
-    runLength.push(i - start);
-    start = i;
-    prev = v;
-    let index = paletteIndex.get(v);
-    if (index === undefined) {
-      index = palette.length;
-      if (index >= PALETTE_LIMIT) {
-        rle = false; // keep counting rawBytes
-        continue;
-      }
-      paletteIndex.set(v, index);
-      palette.push(v);
-    }
-    prevIndex = index;
-  }
-  let rleBytes = Infinity;
-  if (rle) {
-    runIndex.push(prevIndex);
-    runLength.push(n - start);
-    const scale = 2 ** bitLength(palette.length - 1);
-    rleBytes = varuintSize(palette.length);
-    for (let k = 0; k < palette.length; k++) rleBytes += varuintSize(palette[k]!);
-    for (let k = 0; k < runIndex.length; k++) rleBytes += varuintSize((runLength[k]! - 1) * scale + runIndex[k]!);
-  }
-  if (rleBytes < rawBytes) {
-    const scale = 2 ** bitLength(palette.length - 1);
-    w.u8(VOLUME_PALETTE).varuint(palette.length);
-    for (let k = 0; k < palette.length; k++) w.varuint(palette[k]!);
-    for (let k = 0; k < runIndex.length; k++) w.varuint((runLength[k]! - 1) * scale + runIndex[k]!);
-  } else {
-    w.u8(VOLUME_RAW);
-    for (let i = 0; i < n; i++) w.varuint(cells[i]!);
-  }
+/** The decode budget a volume of n cells is charged by both ends (save/cells.ts volumeCost). */
+function volumeCharge(v: CellVolume): number {
+  return volumeCost(v.base.length, v.holes !== null, v.part2 !== null);
 }
 
-/** Cells left to decode in one message (see the file comment, BOUNDED DECODING). */
-export interface CellBudget {
-  cells: number;
-}
-
-/** Inverse of writeCellVolume for a volume of `n` cells; charges `n` to the budget first. */
-export function readCellVolume(r: ByteReader, n: number, budget: CellBudget): CellVolume {
-  if (!(n >= 1 && n <= budget.cells)) r.fail(`cell volume of ${n} cells exceeds what one message may carry (${budget.cells} left)`);
-  budget.cells -= n;
-  const enc = r.u8();
-  if (enc === VOLUME_PALETTE) {
-    const p = r.count(1);
-    if (p < 1 || p > n || p > PALETTE_LIMIT) r.fail(`invalid palette size ${p}`);
-    const palette = new Uint16Array(p);
-    for (let k = 0; k < p; k++) palette[k] = readCell(r);
-    const scale = 2 ** bitLength(p - 1);
-    const out = new Uint16Array(n);
-    let filled = 0;
-    while (filled < n) {
-      const token = r.varuint();
-      const index = token % scale;
-      const len = Math.floor(token / scale) + 1;
-      if (index >= p) r.fail(`palette index ${index} out of range (palette has ${p})`);
-      if (len > n - filled) r.fail(`run of ${len} cells overflows the volume (${filled} of ${n} filled)`);
-      const v = palette[index]!;
-      if (v !== 0) out.fill(v, filled, filled + len);
-      filled += len;
-    }
-    return out;
+/** RangeError unless the volume's layers all have `n` entries. */
+function checkVolumeLength(v: CellVolume, n: number, what: string): void {
+  if (v.base.length !== n || (v.holes !== null && v.holes.length !== n) || (v.part2 !== null && v.part2.length !== n)) {
+    bad(`${what} (every layer must have ${n} cells)`, v.base.length);
   }
-  if (enc === VOLUME_RAW) {
-    if (n > r.remaining) r.fail(`raw cell volume of ${n} cells exceeds the ${r.remaining} remaining bytes`);
-    const out = new Uint16Array(n);
-    for (let i = 0; i < n; i++) out[i] = readCell(r);
-    return out;
-  }
-  return r.fail(`unknown cell volume encoding ${enc}`);
 }
 
 /** A CellVolume on its own (sizes, tests). */
 export function encodeCellVolume(cells: CellVolume): Uint8Array {
-  const w = new ByteWriter(64 + (cells.length >> 3));
+  const w = new ByteWriter(64 + (cells.base.length >> 3));
   writeCellVolume(w, cells);
   return w.finish();
 }
-/** Inverse of encodeCellVolume. Throws ProtocolError. */
+/** Inverse of encodeCellVolume, with a whole TickBatch's budget. Throws ProtocolError. */
 export function decodeCellVolume(bytes: Uint8Array, n: number): CellVolume {
   return decoding(bytes, 'cell volume', (r) => readCellVolume(r, n, { cells: MAX_BATCH_CELLS }));
 }
@@ -626,13 +549,17 @@ export function readGlueList(r: ByteReader): GlueList {
 
 // ====================================================================== GeneratorSpec
 
-/** u8 kind: 0 terrain u32 seed; 1 flat u32 seed, vu n, n x (vu cell, vu thickness); 2 void u32 seed. */
+/**
+ * u8 kind: 0 terrain u32 seed; 1 flat u32 seed, vu n, n x (Cell cell, vu thickness); 2 void u32 seed.
+ * A flat layer's cell must be a full block (< FULL_LIMIT); whether it is a valid block is
+ * generatorSpecProblem's question (worldgen/generator.ts), asked by the receiver.
+ */
 export function writeGeneratorSpec(w: ByteWriter, g: GeneratorSpec): void {
   if (g.kind === 'terrain') w.u8(0).u32(g.seed);
   else if (g.kind === 'flat') {
     w.u8(1).u32(g.seed).varuint(g.layers.length);
     for (const l of g.layers) {
-      writeCell(w, l.cell);
+      writeFullCell(w, l.cell, 'flat generator layer cell');
       w.varuint(l.thickness);
     }
   } else if (g.kind === 'void') w.u8(2).u32(g.seed);
@@ -646,7 +573,7 @@ export function readGeneratorSpec(r: ByteReader): GeneratorSpec {
     const n = r.count(2);
     const layers: Array<{ cell: Cell; thickness: number }> = [];
     for (let i = 0; i < n; i++) {
-      const cell = readCell(r);
+      const cell = readFullCell(r, 'flat generator layer cell');
       const thickness = r.varuint();
       layers.push({ cell, thickness });
     }
@@ -741,6 +668,13 @@ function writeHostCommand(w: ByteWriter, c: HostCommand): void {
     case 'kick':
       w.varuint(c.entityId);
       break;
+    case 'setCell':
+      w.varuint(c.gridId);
+      writeCoord(w, c.x);
+      writeCoord(w, c.y);
+      writeCoord(w, c.z);
+      writeCell(w, c.cell);
+      break;
   }
 }
 function readHostCommand(r: ByteReader): HostCommand {
@@ -767,6 +701,13 @@ function readHostCommand(r: ByteReader): HostCommand {
     }
     case 'kick':
       return { kind, entityId: r.varuint() };
+    case 'setCell': {
+      const gridId = r.varuint();
+      const x = readCoord(r);
+      const y = readCoord(r);
+      const z = readCoord(r);
+      return { kind, gridId, x, y, z, cell: readCell(r) };
+    }
   }
 }
 
@@ -1008,7 +949,7 @@ function writeEntityRecord(w: ByteWriter, e: EntityRecord): void {
       w.varuint(e.item).varuint(e.count);
       break;
     case 'falling':
-      writeCell(w, e.cell);
+      writeFullCell(w, e.cell, 'falling block cell');
       break;
     case 'tnt':
       w.varuint(e.fuse);
@@ -1033,7 +974,7 @@ function readEntityRecord(r: ByteReader): EntityRecord {
       return { id, kind, carrierId, pos, yaw, item, count: r.varuint() };
     }
     case 'falling':
-      return { id, kind, carrierId, pos, yaw, cell: readCell(r) };
+      return { id, kind, carrierId, pos, yaw, cell: readFullCell(r, 'falling block cell') };
     case 'tnt':
       return { id, kind, carrierId, pos, yaw, fuse: r.varuint() };
     case 'rabbit':
@@ -1076,7 +1017,7 @@ function writeStructureRecord(w: ByteWriter, s: StructureRecord, budget: CellBud
   w.varuint(s.id).varuint(s.parentId);
   const empty = s.sx === 0 || s.sy === 0 || s.sz === 0;
   if (empty) {
-    if (s.sx !== 0 || s.sy !== 0 || s.sz !== 0 || s.minX !== 0 || s.minY !== 0 || s.minZ !== 0 || s.cells.length !== 0) {
+    if (s.sx !== 0 || s.sy !== 0 || s.sz !== 0 || s.minX !== 0 || s.minY !== 0 || s.minZ !== 0 || s.cells.base.length !== 0) {
       bad('empty structure box (all of minX..sz must be 0)', s.id);
     }
   }
@@ -1087,9 +1028,10 @@ function writeStructureRecord(w: ByteWriter, s: StructureRecord, budget: CellBud
   if (!empty) {
     const volume = boxVolume(s.sx, s.sy, s.sz);
     if (volume < 0) bad('structure box volume', s.sx * s.sy * s.sz);
-    if (s.cells.length !== volume) bad('structure cell count (must be sx * sy * sz)', s.cells.length);
-    if (volume > budget.cells) bad('cells in one TickBatch (MAX_BATCH_CELLS)', volume);
-    budget.cells -= volume;
+    checkVolumeLength(s.cells, volume, 'structure cell count (must be sx * sy * sz)');
+    const cost = volumeCharge(s.cells);
+    if (cost > budget.cells) bad('cells in one TickBatch (MAX_BATCH_CELLS)', cost);
+    budget.cells -= cost;
     writeCellVolume(w, s.cells);
   }
   writeF64x3(w, s.pivot);
@@ -1132,7 +1074,7 @@ function readStructureRecord(r: ByteReader, budget: CellBudget): StructureRecord
   let cells: CellVolume;
   if (sx === 0 || sy === 0 || sz === 0) {
     if (sx !== 0 || sy !== 0 || sz !== 0 || minX !== 0 || minY !== 0 || minZ !== 0) r.fail('an empty structure box must be all zero');
-    cells = new Uint16Array(0);
+    cells = { base: new Uint16Array(0), holes: null, part2: null };
   } else {
     const volume = boxVolume(sx, sy, sz);
     if (volume < 0) r.fail(`structure box ${sx} x ${sy} x ${sz} is too large`);
@@ -1284,9 +1226,10 @@ function writeSnapshot(w: ByteWriter, s: ChunkSnapshot, budget: CellBudget): voi
   writeCoord(w, s.cz);
   if (s.cells === 'pristine') w.u8(0);
   else {
-    if (s.cells.length !== CHUNK_VOLUME) bad('chunk snapshot cell count', s.cells.length);
-    if (CHUNK_VOLUME > budget.cells) bad('cells in one TickBatch (MAX_BATCH_CELLS)', CHUNK_VOLUME);
-    budget.cells -= CHUNK_VOLUME;
+    checkVolumeLength(s.cells, CHUNK_VOLUME, 'chunk snapshot cell count');
+    const cost = volumeCharge(s.cells);
+    if (cost > budget.cells) bad('cells in one TickBatch (MAX_BATCH_CELLS)', cost);
+    budget.cells -= cost;
     w.u8(1);
     writeCellVolume(w, s.cells);
   }
@@ -1691,7 +1634,7 @@ function writeWorldEvent(w: ByteWriter, e: WorldEvent): void {
       writeCoord(w, e.x);
       writeCoord(w, e.y);
       writeCoord(w, e.z);
-      writeCell(w, e.cell);
+      writePartCell(w, e.cell, 'block event part');
       break;
     case 'explosion':
       w.u8(2).f32(e.x).f32(e.y).f32(e.z).f32(e.power);
@@ -1710,7 +1653,7 @@ function readWorldEvent(r: ByteReader): WorldEvent {
       const x = readCoord(r);
       const y = readCoord(r);
       const z = readCoord(r);
-      return { type: type === 0 ? 'blockBroken' : 'blockPlaced', gridId, x, y, z, cell: readCell(r) };
+      return { type: type === 0 ? 'blockBroken' : 'blockPlaced', gridId, x, y, z, cell: readPartCell(r, 'block event part') };
     }
     case 2: {
       const x = r.f32();

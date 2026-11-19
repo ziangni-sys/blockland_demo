@@ -57,12 +57,16 @@
  * the rest). HOST COMMANDS: only from the host's connection (NetServer join's `host`); from anyone
  * else a toast 'toast.host.only'. Kick (package 11) asks NetServer to end that guest's connection
  * with Kick('kicked') (kicks(), drained after beforeTick): never the host's own player; the
- * player leaves at the start of the next tick like any ended connection.
+ * player leaves at the start of the next tick like any ended connection. SetCell (a debug command,
+ * docs/SHAPES.md 14.1) writes a cell bypassing the interaction rules, so it is checked here
+ * (setCellProblem) and refused with 'toast.host.setCell'.
  */
-import { ID_MASK } from '../../blocks/cell';
+import { AIR, cellSecond, ID_MASK, PART_MASK } from '../../blocks/cell';
+import { CELL_UNLOADED } from '../../blocks/defs';
 import { isItem } from '../../blocks/items';
-import { LIQUID } from '../../blocks/registry';
-import { TPS } from '../../core/constants';
+import { BLOCKS, LIQUID } from '../../blocks/registry';
+import { cellProblem } from '../../blocks/shapes';
+import { TPS, WORLD_HEIGHT } from '../../core/constants';
 import { vec3, type Vec3 } from '../../core/math';
 import type { AcceptedReport } from '../../entities/drive';
 import type { Player } from '../../entities/entity';
@@ -73,6 +77,10 @@ import type { Simulation } from '../../sim/simulation';
 import type { AimTarget, PlayerKey } from '../../sim/view';
 import { HOTBAR_SLOTS, MAIN_SLOTS } from '../../entities/inventory';
 import type { VoxelGrid } from '../../voxel/grid';
+import { getPacked } from '../../voxel/parts';
+import { boxCellsWith } from '../../structures/collect';
+import { canJoinStructure } from '../../structures/stick';
+import { Ship } from '../../structures/structure';
 import {
   INTENT_QUEUE_LIMIT,
   INTENTS_PER_TICK,
@@ -496,6 +504,67 @@ export class IntentQueue {
         if (!this.kicked.includes(target.key)) this.kicked.push(target.key);
         return;
       }
+      case 'setCell': {
+        const grid = this.setCellTarget(c);
+        if (grid === null) {
+          sim.events.emit({ type: 'toast', player: ctrl.key, message: msg('toast.host.setCell'), kind: 'warn' });
+          return;
+        }
+        // An ordinary write: the hooks run (the last cell of a structure written as air goes the way mining it would).
+        grid.setCell(c.x, c.y, c.z, c.cell);
+        return;
+      }
     }
   }
+
+  /**
+   * The grid a SetCell may write, or null when one of the checks of docs/SHAPES.md 14.1 fails:
+   *  1. the cell is valid (cellProblem) and the grid is the world or a live structure;
+   *  2. neither the cell there now nor the new one is a functional block (helm, bearing,
+   *     propeller): breaking a helm must release its helmsman, a bearing carries a rotor, and the
+   *     command has none of those flows;
+   *  3. world: 0 <= y < WORLD_HEIGHT and the column is loaded;
+   *  4. structure: it is editable (not a spinning rotor); every part of a non-empty cell may
+   *     join a structure (canJoinStructure: no liquid, no unbreakable block, as placing by
+   *     hand refuses them); and an empty cell written non-empty stays within the assembly limits
+   *     (cell count, tight box), as placing a block does; otherwise StructureGrid.setCell would
+   *     grow the storage to reach any coordinate.
+   */
+  private setCellTarget(c: Extract<HostCommand, { kind: 'setCell' }>): VoxelGrid | null {
+    const sim = this.sim;
+    if (cellProblem(c.cell) !== null) return null;
+    const grid = sim.structures.gridById(c.gridId);
+    if (grid === undefined) return null;
+    const { x, y, z } = c;
+    if (grid.isWorld) {
+      if (y < 0 || y >= WORLD_HEIGHT || grid.getCell(x, y, z) === CELL_UNLOADED) return null;
+    }
+    const now = getPacked(grid, x, y, z);
+    if (isFunctionalPacked(now) || isFunctionalPacked(c.cell)) return null;
+    const s = sim.structures.structureOf(grid);
+    if (s !== null) {
+      if (!s.editable) return null;
+      if (c.cell !== AIR && !canJoinPacked(c.cell)) return null;
+      if (now === AIR && c.cell !== AIR) {
+        const max = s instanceof Ship ? sim.shipMaxCells : sim.rotorMaxCells;
+        if (s.grid.count >= max || boxCellsWith(s.grid.cellBounds(), x, y, z) > sim.structureMaxBoxCells) return null;
+      }
+    }
+    return grid;
+  }
+}
+
+/** Every part of the (non-empty) packed cell may be part of a structure. */
+function canJoinPacked(packed: number): boolean {
+  const second = cellSecond(packed);
+  return canJoinStructure(packed & PART_MASK) && (second === 0 || canJoinStructure(second));
+}
+
+/** A part of the packed cell is a functional block (helm, bearing, propeller: BlockDef.func). */
+function isFunctionalPacked(packed: number): boolean {
+  return isFunctionalPart(packed & PART_MASK) || isFunctionalPart(cellSecond(packed));
+}
+function isFunctionalPart(part: number): boolean {
+  const id = part & ID_MASK;
+  return id !== AIR && (BLOCKS[id]?.func ?? 'none') !== 'none';
 }

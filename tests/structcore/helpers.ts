@@ -14,6 +14,7 @@ import { StructureManager } from '../../src/structures/manager';
 import type { Rotor, Ship, ShipDynamics, Structure, StructureHost } from '../../src/structures/structure';
 import { Chunk } from '../../src/voxel/chunk';
 import type { VoxelGrid } from '../../src/voxel/grid';
+import { getPacked } from '../../src/voxel/parts';
 import { World } from '../../src/voxel/world';
 
 export const c = (id: number, state = 0): number => makeCell(id, state);
@@ -116,18 +117,18 @@ export function fill(g: VoxelGrid, x0: number, y0: number, z0: number, x1: numbe
   for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) g.setCell(x, y, z, cell);
 }
 
-/** Map "x,y,z" -> cell of every non-air cell of a structure grid or of a world box. */
+/** Map "x,y,z" -> packed cell (both parts) of every non-air cell of a structure grid or of a world box. */
 export function cellMap(g: VoxelGrid, box?: [number, number, number, number, number, number]): Map<string, number> {
   const m = new Map<string, number>();
   if (box) {
     const [x0, y0, z0, x1, y1, z1] = box;
     for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
-      const cell = g.getCell(x, y, z);
+      const cell = getPacked(g, x, y, z);
       if (cell !== 0) m.set(`${x},${y},${z}`, cell);
     }
     return m;
   }
-  const sg = g as unknown as { forEachCell(fn: (x: number, y: number, z: number, cell: number) => void): void };
+  const sg = g as unknown as { forEachCell(fn: (x: number, y: number, z: number, packed: number) => void): void };
   sg.forEachCell((x, y, z, cell) => m.set(`${x},${y},${z}`, cell));
   return m;
 }
@@ -137,10 +138,10 @@ export function worldCentre(g: VoxelGrid, x: number, y: number, z: number): Vec3
   return g.toWorld(vec3(x + 0.5, y + 0.5, z + 0.5));
 }
 
-/** Snapshot of a world box (every cell, air included) for "nothing changed" checks. */
+/** Snapshot of a world box (every cell, air included; packed: both parts) for "nothing changed" checks. */
 export function snapshotBox(g: VoxelGrid, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): number[] {
   const out: number[] = [];
-  for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) out.push(g.getCell(x, y, z));
+  for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) out.push(getPacked(g, x, y, z));
   return out;
 }
 

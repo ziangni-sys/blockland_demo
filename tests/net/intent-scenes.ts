@@ -22,7 +22,7 @@ import type { PlayerControl } from '../../src/sim/players';
 import type { Simulation } from '../../src/sim/simulation';
 import { giveStarterItems } from '../../src/sim/starter';
 import { Ship } from '../../src/structures/structure';
-import { hashCells } from './digest';
+import { hashColumn } from './digest';
 import { fill, loadArea } from './e2e-scenes';
 import { NetHarness, testMeta, type ClientLink, type HeadlessClient } from './harness';
 import { OWN_SEA, OWN_SEA_TOP, SEA_FLOOR } from './own-scenes';
@@ -77,7 +77,7 @@ export function outcome(sim: Simulation, key: string): Outcome {
   for (let cx = AREA.x0 >> 4; cx <= AREA.x1 >> 4; cx++) {
     for (let cz = AREA.z0 >> 4; cz <= AREA.z1 >> 4; cz++) {
       const ch = sim.world.getChunk(cx, cz);
-      cols.push(`${cx},${cz}:${ch === undefined ? 'missing' : hashCells(ch.cells)}`);
+      cols.push(`${cx},${cz}:${ch === undefined ? 'missing' : hashColumn(ch.layers())}`);
     }
   }
   const glue = Array.from(sim.worldGlue.toArray()).join(',');

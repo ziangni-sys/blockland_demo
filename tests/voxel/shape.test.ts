@@ -953,6 +953,9 @@ class ProxyWorld implements VoxelGrid {
   getCell(x: number, y: number, z: number): number {
     return this.w.getCell(x, y, z);
   }
+  getPart2(x: number, y: number, z: number): number {
+    return this.w.getPart2(x, y, z);
+  }
   setCell(x: number, y: number, z: number, cell: number, flags?: number): boolean {
     return this.w.setCell(x, y, z, cell, flags);
   }

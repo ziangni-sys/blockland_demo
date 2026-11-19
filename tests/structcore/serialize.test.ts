@@ -5,6 +5,7 @@ import { PX } from '../../src/core/dirs';
 import { qfromAxisAngle, qfromYaw, qmul, qrotate, vec3, vsub } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
 import { ByteReader, ByteWriter, SaveFormatError } from '../../src/save/bytes';
+import { writeCell } from '../../src/save/cells';
 import { STRUCTURES_FORMAT } from '../../src/structures/serialize';
 import { Rotor, Ship, type Structure } from '../../src/structures/structure';
 import type { StructureManager } from '../../src/structures/manager';
@@ -177,12 +178,15 @@ function shipSave(cells: (w: ByteWriter) => void, format = STRUCTURES_FORMAT): U
 
 const P = c(B.PLANKS_OAK);
 
-/** Cell section: box, then runs of [gap, cells]. */
+/** Cell section: box, then runs of [gap, cells] (each run: varuint gap, varuint length, that many Cells). */
 function runs(box: [number, number, number, number, number, number], list: Array<[number, number[]]>): (w: ByteWriter) => void {
   return (w) => {
     w.varint(box[0]).varint(box[1]).varint(box[2]).varuint(box[3]).varuint(box[4]).varuint(box[5]);
     w.varuint(list.length);
-    for (const [gap, cells] of list) w.varuint(gap).u16Array(cells);
+    for (const [gap, cells] of list) {
+      w.varuint(gap).varuint(cells.length);
+      for (const cell of cells) writeCell(w, cell);
+    }
   };
 }
 
@@ -279,7 +283,7 @@ describe('structure cells on disk: proportional to the cell count, always readab
   });
 
   it('older formats are not read (no backward compatibility)', () => {
-    for (const format of [1, 2]) {
+    for (const format of [1, 2, 3]) {
       const bytes = shipSave(runs([5, 60, 7, 1, 1, 1], [[0, [P]]]), format);
       const s = scene();
       expect(() => s.mgr.deserialize(new ByteReader(bytes))).toThrow(SaveFormatError);

@@ -1,12 +1,11 @@
 /**
  * The 24 axis-aligned rotations ("grid rotations"), used when a structure is snapped back
  * onto a grid (blockify / dock) or re-parented: cell coordinates, glue faces and block
- * states (log axis, facing) all rotate with the same GridRot.
+ * states (log axis, facing) and shapes (holes, both parts) all rotate with the same GridRot.
  */
 import { dirAxis, dirOf, dirSign, nearestDir, DIR_X, DIR_Y, DIR_Z, type Axis, type Dir } from '../core/dirs';
 import { qnormalize, qrotate, quat, vec3, type Quat, type Vec3 } from '../core/math';
-import { cellId, cellState, makeCell, STATE_MASK } from '../blocks/cell';
-import { BLOCKS } from '../blocks/registry';
+import { rotatePacked } from '../blocks/shapes';
 
 /** Images of the local +X, +Y, +Z axes. Always a proper rotation (right-handed). */
 export interface GridRot {
@@ -154,24 +153,13 @@ export function rotToQuat(r: GridRot, out: Quat = quat()): Quat {
 }
 
 /**
- * Rotate a cell's block state: 'axis' blocks get the rotated axis, 'facing' blocks the
- * rotated facing. Other state kinds are unchanged.
+ * Rotate a packed cell (blocks/cell.ts, both parts) by `r`: each part's state ('axis' blocks the
+ * rotated axis, 'facing' blocks the rotated facing, other state kinds unchanged) and its holes
+ * rotate, then the parts are put back in canonical order (blocks/shapes.ts rotatePacked). A full
+ * block keeps its value except for the state.
  */
-export function rotCell(r: GridRot, cell: number): number {
-  const id = cellId(cell);
-  const def = BLOCKS[id];
-  if (!def) return cell;
-  const state = cellState(cell);
-  if (def.stateKind === 'axis') {
-    const axis = (state & 3) > 2 ? 1 : state & 3;
-    const img = rotDir(r, dirOf(axis as Axis, true));
-    return makeCell(id, (state & (STATE_MASK & ~3)) | dirAxis(img));
-  }
-  if (def.stateKind === 'facing') {
-    const f = (state & 7) > 5 ? 0 : state & 7;
-    return makeCell(id, (state & (STATE_MASK & ~7)) | rotDir(r, f as Dir));
-  }
-  return cell;
+export function rotCell(r: GridRot, packed: number): number {
+  return rotatePacked(packed, r.ax, r.ay, r.az);
 }
 
 /**

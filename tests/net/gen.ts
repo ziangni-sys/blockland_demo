@@ -4,6 +4,9 @@
  * Rot64 quaternions that quantise exactly), so decode(encode(m)) must deep-equal m.
  */
 import { CHUNK_VOLUME } from '../../src/core/constants';
+import { CELL_MULTI_BIT, makePart, PACK_SCALE, type CellLayers } from '../../src/blocks/cell';
+import { CUTTABLE } from '../../src/blocks/registry';
+import { canonCell } from '../../src/blocks/shapes';
 import type { Axis, Dir } from '../../src/core/dirs';
 import type { Quat, Vec3 } from '../../src/core/math';
 import { Rng } from '../../src/core/rng';
@@ -126,8 +129,52 @@ export class Gen {
   pose(): Pose {
     return { pos: this.pos32v(), rot: { ...this.pick(EXACT_QUATS) } };
   }
+  /**
+   * A Cell (packed: both parts) whose LAYOUT is valid (save/cells.ts), so it round-trips through the
+   * codec: full 16-bit values, valid parts with holes, valid two-part cells, and layout-valid
+   * values that are semantically invalid (holes on any id, overlapping parts), which the codec
+   * passes through as they are.
+   */
   cell(): number {
+    switch (this.int(0, 5)) {
+      case 0:
+        return this.int(0, 127);
+      case 1:
+        return this.int(0, 0xffff);
+      case 2:
+        return this.partialCell();
+      case 3:
+        return this.twoPartCell();
+      default: {
+        // Layout only: any id and state, holes not 0xff; maybe a second part with id != 0 and holes not 0xff.
+        const v = makePart(this.int(0, 1023), this.int(0, 63), this.int(0, 254));
+        if (this.bool()) return v;
+        const p2 = makePart(this.int(1, 1023), this.int(0, 63), this.int(0, 254));
+        return (v | CELL_MULTI_BIT) + p2 * PACK_SCALE;
+      }
+    }
+  }
+  /** A full block value (< FULL_LIMIT): falling blocks, flat generator layers. */
+  fullCell(): number {
     return this.bool() ? this.int(0, 127) : this.int(0, 0xffff);
+  }
+  /** One part value (< PART_LIMIT): the parts carried by blockBroken / blockPlaced. */
+  partValue(): number {
+    return this.bool() ? this.fullCell() : this.partialCell();
+  }
+  /** A semantically valid single part with holes (cellProblem === null): a cuttable block, holes 1..254. */
+  partialCell(): number {
+    return makePart(this.pick(CUTTABLE_IDS), 0, this.int(1, 254));
+  }
+  /** A semantically valid two-part cell (cellProblem === null): two disjoint cuttable parts in canonical order. */
+  twoPartCell(): number {
+    const fa = this.int(1, 254);
+    const rest = ~fa & 0xff;
+    // A non-empty subset of the octants fa leaves free.
+    let fb = 0;
+    for (let o = 0; o < 8; o++) if ((rest >> o) & 1 && this.bool()) fb |= 1 << o;
+    if (fb === 0) fb = rest & -rest;
+    return canonCell(makePart(this.pick(CUTTABLE_IDS), 0, ~fa & 0xff), makePart(this.pick(CUTTABLE_IDS), 0, ~fb & 0xff));
   }
   dir(): Dir {
     return this.int(0, 5) as Dir;
@@ -190,7 +237,7 @@ export class Gen {
   }
 
   hostCommand(): HostCommand {
-    switch (this.int(0, 5)) {
+    switch (this.int(0, 6)) {
       case 0:
         return { kind: 'setRules', rules: { defaultMode: this.mode(), dropsEnabled: this.bool() } };
       case 1:
@@ -201,6 +248,8 @@ export class Gen {
         return { kind: 'teleport', x: this.f64(), y: this.f64(), z: this.f64() };
       case 4:
         return { kind: 'give', item: this.int(1, 1100), count: this.int(1, 640) };
+      case 5:
+        return { kind: 'setCell', gridId: this.int(0, 3000), x: this.coord(), y: this.coord(), z: this.coord(), cell: this.cell() };
       default:
         return { kind: 'kick', entityId: this.id() };
     }
@@ -242,19 +291,23 @@ export class Gen {
       case 0:
         return { kind: 'terrain', seed };
       case 1:
-        return { kind: 'flat', seed, layers: this.list(() => ({ cell: this.cell(), thickness: this.int(0, 200) }), 5) };
+        return { kind: 'flat', seed, layers: this.list(() => ({ cell: this.fullCell(), thickness: this.int(0, 200) }), 5) };
       default:
         return { kind: 'void', seed };
     }
   }
 
-  /** A column of terrain-like layers with a few specks (compresses like real chunks). */
-  chunkCells(): Uint16Array {
-    const cells = new Uint16Array(CHUNK_VOLUME);
+  /**
+   * A column of terrain-like layers with a few specks (compresses like real chunks); about half of
+   * the columns also have specks with holes and two-part cells (the extra layers).
+   */
+  chunkCells(): CellLayers {
+    const l = layersOf(CHUNK_VOLUME);
     const top = this.int(10, 100);
-    for (let y = 0; y < top; y++) cells.fill(y < top - 4 ? 1 : y < top - 1 ? 3 : 4, y << 8, (y + 1) << 8);
-    for (let k = this.int(0, 60); k > 0; k--) cells[this.int(0, CHUNK_VOLUME - 1)] = this.cell();
-    return cells;
+    for (let y = 0; y < top; y++) l.base.fill(y < top - 4 ? 1 : y < top - 1 ? 3 : 4, y << 8, (y + 1) << 8);
+    const layered = this.bool();
+    for (let k = this.int(0, 60); k > 0; k--) putPacked(l, this.int(0, CHUNK_VOLUME - 1), layered ? this.cell() : this.fullCell());
+    return tidy(l);
   }
 
   chunkFace(): number {
@@ -289,8 +342,9 @@ export class Gen {
     const sx = empty ? 0 : this.int(1, 9);
     const sy = empty ? 0 : this.int(1, 5);
     const sz = empty ? 0 : this.int(1, 9);
-    const cells = new Uint16Array(sx * sy * sz);
-    for (let i = 0; i < cells.length; i++) cells[i] = this.int(0, 2) === 0 ? 0 : this.pick([10, 11, 8, 14, 50, 51, 40, this.cell()]);
+    const cells = layersOf(sx * sy * sz);
+    for (let i = 0; i < cells.base.length; i++) putPacked(cells, i, this.int(0, 2) === 0 ? 0 : this.pick([10, 11, 8, 14, 50, 51, 40, this.cell()]));
+    tidy(cells);
     const base = {
       id: this.id(),
       parentId: this.bool() ? 0 : this.id(),
@@ -368,7 +422,7 @@ export class Gen {
       case 'item':
         return { ...base, kind: 'item', item: this.int(1, 1100), count: this.int(1, 64) };
       case 'falling':
-        return { ...base, kind: 'falling', cell: this.cell() };
+        return { ...base, kind: 'falling', cell: this.fullCell() };
       case 'tnt':
         return { ...base, kind: 'tnt', fuse: this.int(0, 80) };
       default:
@@ -459,9 +513,9 @@ export class Gen {
   worldEvent(): WorldEvent {
     switch (this.int(0, 3)) {
       case 0:
-        return { type: 'blockBroken', gridId: this.int(0, 99), x: this.coord(), y: this.coord(), z: this.coord(), cell: this.cell() };
+        return { type: 'blockBroken', gridId: this.int(0, 99), x: this.coord(), y: this.coord(), z: this.coord(), cell: this.partValue() };
       case 1:
-        return { type: 'blockPlaced', gridId: this.int(0, 99), x: this.coord(), y: this.coord(), z: this.coord(), cell: this.cell() };
+        return { type: 'blockPlaced', gridId: this.int(0, 99), x: this.coord(), y: this.coord(), z: this.coord(), cell: this.partValue() };
       case 2:
         return { type: 'explosion', x: this.f32(), y: this.f32(), z: this.f32(), power: this.f32() };
       default:
@@ -527,4 +581,31 @@ export class Gen {
       { type: 'samples', tick: this.vu(), seq: this.vu(), ships: this.list(() => ({ id: this.id(), pose: this.pose() }), 3), entities: this.list(() => this.entitySample(), 6) },
     ];
   }
+}
+
+/** Every registered block id that can be cut (partial parts are made of these). */
+const CUTTABLE_IDS: readonly number[] = Array.from(CUTTABLE.keys()).filter((id) => CUTTABLE[id] === 1);
+
+/** Empty layers of n cells (the extra layers allocated by putPacked when needed). */
+export function layersOf(n: number): CellLayers {
+  return { base: new Uint16Array(n), holes: null, part2: null };
+}
+
+/** Store a packed cell at index i of a volume's layers, allocating holes / part2 when first needed. */
+export function putPacked(l: CellLayers, i: number, packed: number): void {
+  const v = packed % PACK_SCALE;
+  const p2 = Math.floor(packed / PACK_SCALE);
+  l.base[i] = v & 0xffff;
+  const h = (v >>> 16) & 0xff;
+  if (h !== 0 && l.holes === null) l.holes = new Uint8Array(l.base.length);
+  if (l.holes !== null) l.holes[i] = h;
+  if (p2 !== 0 && l.part2 === null) l.part2 = new Uint32Array(l.base.length);
+  if (l.part2 !== null) l.part2[i] = p2;
+}
+
+/** A layer with no non-zero entry becomes null (as a decoder hands it out), so round trips compare equal. */
+export function tidy(l: CellLayers): CellLayers {
+  if (l.holes !== null && l.holes.every((v) => v === 0)) l.holes = null;
+  if (l.part2 !== null && l.part2.every((v) => v === 0)) l.part2 = null;
+  return l;
 }

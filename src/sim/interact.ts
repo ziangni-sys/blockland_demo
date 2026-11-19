@@ -61,7 +61,7 @@
  * All state is on the instances; nothing here is saved (a timed glue operation, previews and
  * mining progress do not survive a reload or a rejoin by design).
  */
-import { AIR, ID_MASK, axisState, cellState, facingState, isLiquidSource, layersState, liquidState, makeCell, stateLayers } from '../blocks/cell';
+import { AIR, ID_MASK, PART_MASK, axisState, cellPrimary, cellState, facingState, isLiquidSource, layersState, liquidState, makeCell, stateLayers } from '../blocks/cell';
 import { B } from '../blocks/defs';
 import { I, isBlockItem } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID, type BlockDef } from '../blocks/registry';
@@ -77,6 +77,7 @@ import { analyzeHull, type HullInfo } from '../structures/hull';
 import { canGlue, canJoinStructure, sticksWithoutGlue } from '../structures/stick';
 import { Ship, type Structure } from '../structures/structure';
 import type { CellBounds, VoxelGrid } from '../voxel/grid';
+import { getPacked } from '../voxel/parts';
 import { placementCell, targetable, type CellPredicate, type GridHit } from '../voxel/raycast';
 import { CONTACT_EPS, boxOverlapsSolid } from '../voxel/shape';
 import type { StructureGrid } from '../voxel/sgrid';
@@ -141,6 +142,10 @@ class CellProbe implements VoxelGrid {
   }
   getCell(x: number, y: number, z: number): number {
     return x === this.x && y === this.y && z === this.z ? PROBE_CELL : AIR;
+  }
+  /** The probe's cell is a full block: no second part (docs/SHAPES.md 4.4; P8b makes it the placed content's). */
+  getPart2(): number {
+    return 0;
   }
   setCell(): boolean {
     return false;
@@ -517,12 +522,14 @@ export class Hands {
     if (t === null) return null;
     const grid = this.sim.structures.gridById(t.gridId);
     if (grid === undefined) return null;
-    const cell = grid.getCell(t.x, t.y, t.z);
+    // The whole packed cell (docs/SHAPES.md 16.3): it flows into the comparisons and predicates below.
+    const cell = getPacked(grid, t.x, t.y, t.z);
     const id = cell & ID_MASK;
     if (id !== (t.cell & ID_MASK) || id === AIR || id === B.UNLOADED) return null;
     const point = vec3(t.x + 0.5, t.y + 0.5, t.z + 0.5);
     grid.toWorld(point, point);
-    return { grid, x: t.x, y: t.y, z: t.z, face: t.face, cell, dist: 0, point };
+    // Until the octant-level ray (P8a/P8b): octant 0, the part is the first part.
+    return { grid, x: t.x, y: t.y, z: t.z, face: t.face, octant: 0, cell, part: cellPrimary(cell) & PART_MASK, dist: 0, point };
   }
 
   private castRay(p: Player, ray: RayKind): GridHit | null {
@@ -537,10 +544,11 @@ export class Hands {
   /** A hit taken before the right-click, if it still stands: its grid is live, its cell still matches `pred`. */
   private recheck(h: GridHit | null, pred: CellPredicate): GridHit | null {
     if (h === null || !this.isLive(h.grid)) return null;
-    const cell = h.grid.getCell(h.x, h.y, h.z);
+    const cell = getPacked(h.grid, h.x, h.y, h.z);
     if (cell === h.cell) return h;
     if (!pred(cell)) return null;
     h.cell = cell;
+    h.part = cellPrimary(cell) & PART_MASK;
     return h;
   }
 
@@ -1189,7 +1197,7 @@ export class Hands {
   private offhandGlue(p: Player, grid: VoxelGrid, hit: GridHit, placed: number): void {
     const off = p.inventory.offhand;
     if (off === null || off.item !== I.GLUE) return;
-    const clicked = grid.getCell(hit.x, hit.y, hit.z);
+    const clicked = getPacked(grid, hit.x, hit.y, hit.z);
     if (!canGlue(clicked) || !canGlue(placed)) return;
     // Spares survival glue: blocks that connect anyway (auto-stick, mounting) are not glued.
     const alreadySticks = sticksWithoutGlue(clicked, placed, hit.face);
@@ -1270,7 +1278,7 @@ export class Hands {
     // A grid whose structure is gone is detached: its cells are already back in the world.
     if (!this.isLive(grid)) return;
     const { x, y, z } = hit;
-    const cell = grid.getCell(x, y, z);
+    const cell = getPacked(grid, x, y, z);
     if (cell === AIR) return;
     // The wheel of a helm that is being broken lets go first.
     if ((cell & ID_MASK) === B.HELM && !grid.isWorld) {
@@ -1281,9 +1289,12 @@ export class Hands {
       }
     }
     if (!grid.setCell(x, y, z, AIR)) return;
+    // Until mining works per part (P8b), the whole cell goes and the drop and the event carry the
+    // first part's value (without CELL_MULTI_BIT: one part value, docs/SHAPES.md 16.3).
+    const first = cellPrimary(cell) & PART_MASK;
     // The mining player's mode decides (sim/rules.ts): a creative player's blocks never drop.
-    if (this.player.mode !== 'creative') spawnBlockDrop(sim, grid, x, y, z, cell, this.tmp);
-    sim.events.emit({ type: 'blockBroken', gridId: grid.gridId, x, y, z, cell });
+    if (this.player.mode !== 'creative') spawnBlockDrop(sim, grid, x, y, z, first, this.tmp);
+    sim.events.emit({ type: 'blockBroken', gridId: grid.gridId, x, y, z, cell: first });
   }
 
   // ================================================================== hints

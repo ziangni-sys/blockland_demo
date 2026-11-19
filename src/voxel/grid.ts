@@ -37,10 +37,19 @@ export interface VoxelGrid {
   /** True only for the world grid (identity transform, unbounded). */
   readonly isWorld: boolean;
 
-  /** Cell at integer local coordinates. Never throws; outside storage returns AIR (structures). */
+  /**
+   * Cell value at integer local coordinates: the first part plus CELL_MULTI_BIT when the cell has
+   * a second part (< 2^25, blocks/cell.ts). Never throws; outside storage returns AIR (structures).
+   */
   getCell(x: number, y: number, z: number): number;
-  /** Write a cell. Returns false when the position cannot be written (e.g. unloaded chunk). */
-  setCell(x: number, y: number, z: number, cell: number, flags?: number): boolean;
+  /** Value of the cell's second part, 0 when it has none. Never throws. */
+  getPart2(x: number, y: number, z: number): number;
+  /**
+   * Write a PACKED cell (both parts; read one with voxel/parts.ts getPacked) with one change event.
+   * Returns false when the position cannot be written (e.g. unloaded chunk) or nothing changed.
+   * Throws RangeError for a value that is not in canonical form (docs/SHAPES.md 4.2).
+   */
+  setCell(x: number, y: number, z: number, packed: number, flags?: number): boolean;
 
   /** Local point -> world point. `out` may alias `p`. */
   toWorld(p: Vec3, out?: Vec3): Vec3;

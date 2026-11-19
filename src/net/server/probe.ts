@@ -48,7 +48,7 @@ export function probeServer(sim: Simulation, radius: number): ServerProbe {
     for (let dz = -radius; dz <= radius; dz++) {
       for (let dx = -radius; dx <= radius; dx++) {
         const chunk = sim.world.chunks.get(chunkKey(cx0 + dx, cz0 + dz));
-        if (chunk !== undefined) columns[`${cx0 + dx},${cz0 + dz}`] = columnHash(chunk.cells);
+        if (chunk !== undefined) columns[`${cx0 + dx},${cz0 + dz}`] = columnHash(chunk);
       }
     }
   }

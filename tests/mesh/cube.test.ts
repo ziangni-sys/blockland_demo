@@ -216,9 +216,9 @@ describe('face culling', () => {
 
 describe('robustness', () => {
   it('rejects inputs whose arrays do not match the dimensions', () => {
-    const bad: MeshInput = { sx: 2, sy: 2, sz: 2, cells: new Uint16Array(10), light: null };
+    const bad: MeshInput = { sx: 2, sy: 2, sz: 2, cells: new Uint16Array(10), holes: null, part2: null, light: null };
     expect(() => buildMesh(bad)).toThrow(RangeError);
-    const badLight: MeshInput = { sx: 1, sy: 1, sz: 1, cells: new Uint16Array(27), light: new Uint8Array(3) };
+    const badLight: MeshInput = { sx: 1, sy: 1, sz: 1, cells: new Uint16Array(27), holes: null, part2: null, light: new Uint8Array(3) };
     expect(() => buildMesh(badLight)).toThrow(RangeError);
   });
 

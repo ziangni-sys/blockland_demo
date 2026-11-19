@@ -39,7 +39,6 @@ import {
   blockifyGrid,
   commitDock,
   emptyReport,
-  hullCavityCells,
   planDock,
   refillWater,
   remountRotor,
@@ -51,7 +50,7 @@ import {
 } from './assembly';
 import { CellSet, collectRotor, collectShip, type CollectReason, type CollectResult } from './collect';
 import type { GlueStore } from './glue';
-import { analyzeHull, type HullInfo } from './hull';
+import { analyzeHull, hullCavityCells, type HullInfo } from './hull';
 import { advanceRotor, applyRotorPose, holdRotor, measureSweep, type RotorSweep } from './rotor';
 import { readStructures, writeStructures } from './serialize';
 import { cellFunc, isSailCell, pruneGlueAt, pruneGlueInBox } from './stick';

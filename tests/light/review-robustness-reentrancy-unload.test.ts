@@ -9,7 +9,7 @@ import { ID_MASK, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { LightEngine } from '../../src/light/engine';
 import { World } from '../../src/voxel/world';
-import { Chunk } from '../../src/voxel/chunk';
+import { Chunk, cellIndex } from '../../src/voxel/chunk';
 import { describeMismatches, diffAgainstReference, heightmapErrors } from './reference';
 import { makeFlatChunk } from './terrain';
 
@@ -109,8 +109,8 @@ describe('review: chunk unloading with pending work', () => {
     // A tunnel crossing the x = 16 chunk border, lit by a lamp in chunk 0.
     const make = (cx: number): Chunk => {
       const c = makeFlatChunk(cx, 0, 60);
-      for (let lx = 0; lx < 16; lx++) c.set(lx, 30, 8, AIR);
-      if (cx === 0) c.set(14, 30, 8, LAMP);
+      for (let lx = 0; lx < 16; lx++) c.cells[cellIndex(lx, 30, 8)] = AIR;
+      if (cx === 0) c.cells[cellIndex(14, 30, 8)] = LAMP;
       return c;
     };
     const world = new World(1);

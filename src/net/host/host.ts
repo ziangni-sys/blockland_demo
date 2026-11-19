@@ -47,7 +47,7 @@ import { placeExampleShip } from '../../sim/exampleShip';
 import { exportSave, importSave, SAVE_BLOBS, type SaveBundle } from '../../sim/persist';
 import { Simulation } from '../../sim/simulation';
 import { giveStarterItems } from '../../sim/starter';
-import { generatorFromSpec, type GeneratorSpec } from '../../worldgen/generator';
+import { generatorFromSpec, generatorSpecProblem, type GeneratorSpec } from '../../worldgen/generator';
 import { readGeneratorSpec, writeGeneratorSpec } from '../codec';
 import { AUTOSAVE_TICKS, MAX_CATCHUP_TICKS } from '../protocol';
 import { IntentQueue } from '../server/intents';
@@ -634,5 +634,7 @@ function decodeGeneratorBlob(bytes: Uint8Array): GeneratorSpec {
   if (v !== GENERATOR_BLOB_VERSION) r.fail(`unsupported generator blob version ${v}`);
   const spec = readGeneratorSpec(r);
   r.expectEnd();
+  const problem = generatorSpecProblem(spec);
+  if (problem !== null) r.fail(problem);
   return spec;
 }

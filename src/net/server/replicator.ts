@@ -90,6 +90,7 @@ import {
   ROTOR_RESYNC_TICKS,
   SNAPSHOT_BUDGET,
   STRUCTURE_RESEND_CELLS,
+  type CellVolume,
   type ChunkDelta,
   type ChunkPos,
   type ChunkSnapshot,
@@ -1053,7 +1054,9 @@ export class Replicator {
     const chunk = sim.world.getChunk(cx, cz);
     let cells: ChunkSnapshot['cells'] = 'pristine';
     if (chunk !== undefined) {
-      if (chunk.modified) cells = chunk.cells;
+      // The layers by reference: the snapshot is encoded right away (snapshotPiece), before any
+      // further write to the chunk.
+      if (chunk.modified) cells = chunk.layers();
     } else {
       cells = sim.chunks.stashedCells(cx, cz) ?? 'pristine';
     }
@@ -1650,7 +1653,7 @@ function structureRecord(s: Structure): StructureRecord {
   let sx = 0;
   let sy = 0;
   let sz = 0;
-  let cells = new Uint16Array(0);
+  let cells: CellVolume = { base: new Uint16Array(0), holes: null, part2: null };
   if (b !== null) {
     minX = b.minX;
     minY = b.minY;
@@ -1658,13 +1661,7 @@ function structureRecord(s: Structure): StructureRecord {
     sx = b.maxX - b.minX;
     sy = b.maxY - b.minY;
     sz = b.maxZ - b.minZ;
-    cells = new Uint16Array(sx * sy * sz);
-    let i = 0;
-    for (let y = 0; y < sy; y++) {
-      for (let z = 0; z < sz; z++) {
-        for (let x = 0; x < sx; x++) cells[i++] = g.getCell(minX + x, minY + y, minZ + z);
-      }
-    }
+    cells = g.copyBox(minX, minY, minZ, sx, sy, sz);
   }
   const base = {
     id: s.id,

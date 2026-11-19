@@ -21,7 +21,7 @@
  * that every tick is followed by Replicator.endTick().
  */
 import { expect } from 'vitest';
-import { ID_MASK } from '../../src/blocks/cell';
+import { cellSecond, ID_MASK } from '../../src/blocks/cell';
 import type { Dir } from '../../src/core/dirs';
 import { applyBatch, applySamples, applyWelcome, ReplicaState } from '../../src/net/client/apply';
 import { ClientChunks } from '../../src/net/client/chunks';
@@ -309,21 +309,29 @@ function countWorld(world: World, id: number, box: Box): number {
     const lz0 = Math.max(0, z0 - bz);
     const lz1 = Math.min(15, z1 - bz);
     if (lx0 > lx1 || lz0 > lz1) continue;
+    // Parts, not cells: a two-part cell holds two blocks (its second part is in the part2 layer).
     const cells = chunk.cells;
+    const part2 = chunk.part2;
     for (let y = Math.max(0, y0); y <= Math.min(127, y1); y++) {
       for (let lz = lz0; lz <= lz1; lz++) {
-        for (let lx = lx0; lx <= lx1; lx++) if ((cells[lx | (lz << 4) | (y << 8)]! & ID_MASK) === id) n++;
+        for (let lx = lx0; lx <= lx1; lx++) {
+          const i = lx | (lz << 4) | (y << 8);
+          if ((cells[i]! & ID_MASK) === id) n++;
+          if (part2 !== null && part2[i] !== 0 && (part2[i]! & ID_MASK) === id) n++;
+        }
       }
     }
   }
   return n;
 }
 
-function countStructures(structures: Iterable<{ grid: { forEachCell(fn: (x: number, y: number, z: number, c: number) => void): void } }>, id: number): number {
+function countStructures(structures: Iterable<{ grid: { forEachCell(fn: (x: number, y: number, z: number, packed: number) => void): void } }>, id: number): number {
   let n = 0;
   for (const s of structures) {
-    s.grid.forEachCell((_x, _y, _z, c) => {
-      if ((c & ID_MASK) === id) n++;
+    s.grid.forEachCell((_x, _y, _z, packed) => {
+      if ((packed & ID_MASK) === id) n++;
+      const p2 = cellSecond(packed);
+      if (p2 !== 0 && (p2 & ID_MASK) === id) n++;
     });
   }
   return n;
@@ -332,7 +340,7 @@ function countStructures(structures: Iterable<{ grid: { forEachCell(fn: (x: numb
 /** An inclusive box of world cells: x0, y0, z0, x1, y1, z1. */
 export type Box = [number, number, number, number, number, number];
 
-/** Cells of block `id` in a replica: in its world (inside the box) plus in all its structures. */
+/** Parts of block `id` in a replica (a two-part cell can count twice): in its world (inside the box) plus in all its structures. */
 export function countReplica(state: ReplicaState, id: number, box: Box): number {
   return countWorld(state.world, id, box) + countStructures([...state.structures.values()].map((r) => r.structure), id);
 }

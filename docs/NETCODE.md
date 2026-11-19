@@ -200,12 +200,11 @@ export interface Transport {
 
 **客户端的区块装载**（`src/net/client/chunks.ts`，取代现在的 `client/chunkstream.ts` 的拉取逻辑）：订阅表和每列的代号、原样区块的生成请求（经 `ChunkSource` 接口：浏览器里是地形 Worker 池，测试里是同步生成器）、等待生成时的增量队列（第 5 节）、插入时调 `LightEngine.initChunk`。客户端从不自己决定加载或卸载哪一列。
 
-**格子值的格式**（为 M2.3 留好）
+**格子值的格式**
 
-- 网络上一个格子是 `Cell`：一个 varuint `v`。低 16 位是现在的格子（id 10 位 + 状态 6 位）；16～23 位是 M2.3 的“缺口”（哪几个八分格空着）；第 24 位 `CELL_MULTI_BIT` 表示这一格还有第二个部件，为 1 时紧跟一个 varuint，就是第二个部件（同样的 id + 状态 + 缺口）。所有值都小于 2²⁵（ROADMAP M2.3）。
-- 整格方块的值和现在完全相同：空气 1 字节，id < 128 且无状态的方块 1 字节，其余 2～3 字节。
-- M2.1 的副本还是 16 位存储：编码端断言 `v < 2¹⁶`；解码端遇到 `v ≥ 2¹⁶` 按协议错误断开（绝不截断）。M2.3 只改两端的存储，协议字节不变。
-- 网络格式不复用存档的区块编码：`encodeChunk` 的调色板是 u16，外面还有 magic、版本和 CRC。网络上照搬它的调色板游程算法，调色板项换成 `Cell`，不要外壳（可靠通道保证完整）。
+- 网络上一个格子是 `Cell`：一个 varuint `v`。低 16 位是第一个部件的 id（10 位）+ 状态（6 位）；16～23 位是它的“缺口”（哪几个八分格空着）；第 24 位 `CELL_MULTI_BIT` 表示这一格还有第二个部件，为 1 时紧跟一个 varuint，就是第二个部件（同样的 id + 状态 + 缺口）。所有 `v` 都小于 2²⁵。内存里的 `Cell` 是“整格内容”`v + 第二部件 × 2²⁵`（[SHAPES.md](SHAPES.md) 第 1.2 节）。
+- 整格方块的值和 M2.2 完全相同：空气 1 字节，id < 128 且无状态的方块 1 字节，其余 2～3 字节。
+- 两端检查布局、绝不截断，副本按 `cellProblem` 检查语义；`Cell` 和 `CellVolume` 的编解码只有一份实现（`save/cells.ts`），存档的区块和协议共用。规则、上限和解码时的内存计价见 [SHAPES.md](SHAPES.md) 第 13.1、13.2 节。
 
 ## 7. 结构体
 
@@ -493,7 +492,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 - 所有格子坐标和区块坐标（包括差分累加后的，以及预览盒子的远角）|v| ≤ `MAX_COORD = 2^28`，超出按协议错误。
 - 范围超出布局规定的值域（枚举、标志位、视距 0～17、选中格 0～8、按键 0/2）按协议错误，不夹到范围内。
-- 解码时 RLE 是不按输入比例分配内存的地方之一：结构体的盒子 sx·sy·sz ≤ `MAX_STRUCTURE_BOX_CELLS`（= `STRUCTURE_MAX_BOX_CELLS` = 2^21，第 7 节）；一个 `TickBatch` 里所有 `CellVolume` 合计 ≤ `MAX_BATCH_CELLS = 2^25` 格（1024 列）。编码端同样拒绝，`Replicator` 打包时不得超过（超过的快照推到下一个包）。另一处是预览位图（见 `PrivateState` 位 3）。
+- 解码时 RLE 是不按输入比例分配内存的地方之一：结构体的盒子 sx·sy·sz ≤ `MAX_STRUCTURE_BOX_CELLS`（= `STRUCTURE_MAX_BOX_CELLS` = 2^21，第 7 节）；一个 `TickBatch` 里所有 `CellVolume` 的计价合计 ≤ `MAX_BATCH_CELLS = 2^25`（只有基础层时一格计 1，即 1024 列）。计价 `volumeCost(n) = n + (有缺口层 ? ceil(n/2) : 0) + (有第二部件层 ? 2n : 0)`：解码端先扣 `n`，第一次要分配某一层之前再扣那一层的份额，不够就按协议错误。编码端用同一个函数计价，同样拒绝，`Replicator` 打包时不得超过（超过的快照推到下一个包）。另一处是预览位图（见 `PrivateState` 位 3）。
 
 **基本类型**
 
@@ -502,18 +501,18 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | `vu` / `vi` / `str` | `varuint` / `varint` / `string`（bytes.ts 的约定） |
 | `u8` `u16` `u32` `i32` `f32` `f64` `bool` | bytes.ts 的同名方法 |
 | `i8` / `i16` | 用 `u8` / `u16` 写补码，读时做符号扩展（`net/codec.ts` 的小函数，bytes.ts 没有） |
-| `Cell` | `vu v`；`v & CELL_MULTI_BIT` 时再一个 `vu` 第二部件（第 6 节） |
+| `Cell` | `vu v`；`v & CELL_MULTI_BIT` 时再一个 `vu` 第二部件（第 6 节）。两端检查：`v < 2^25`，`v` 的缺口不是 `0xff`；有第二部件时它在 `[1, 2^24)` 里、缺口不是 `0xff`、id 不是 0。编码端抛 `RangeError`，解码端按协议错误 |
 | `Pos32` | `i32 round(v × 512)`：1/512 格，范围 [−4 194 304, +4 194 304)，正好是世界的坐标范围 |
 | `Rot64` | 4 × `i16 round_half_away_from_zero(q × 32767)`，读出后归一化 |
 | `Ang16` | `u16`：角度 /(2π) × 65536 取模 |
 | `Pose` | `Pos32 ×3` + `Rot64`（20 字节） |
-| `Target` | `vu gridId, vi x, vi y, vi z, u8 face, u8 sub, Cell cell` |
+| `Target` | `vu gridId, vi x, vi y, vi z, u8 face, u8 sub, Cell cell`。`sub` = 命中的八分格 0～7，高 5 位必须是 0（这项校验由 SHAPES 的 P8b 实现，合并前编解码还不检查）；`cell` = 客户端看到的这一格的整格内容（[SHAPES.md](SHAPES.md) 第 6.3 节） |
 | `OptTarget` | `u8 有无` + `Target` |
 | `Stack` | `vu (item + 1，0 = 空)`，非空时再 `vu count` |
 | `Message` | `str key, vu n`，每个参数 `str name, u8 tag`（0 数字后跟 `f64`，1 文字后跟 `str`）。没有参数时解码出的 `Message` 不带 `params`；参数名重复按协议错误 |
-| `CellVolume(n)` | `u8 enc`；0 = 调色板：`vu P`（1..n）、`P × Cell`、游程 `vu token` 直到覆盖 n 格，`token = (len − 1) × 2^B + idx`，`B` = `P − 1` 的位数（用乘除，不用位运算：结构体的盒子可以很大）；1 = 原样：`n × Cell`。调色板超过 `PALETTE_LIMIT = 4096` 项时用 1 |
+| `CellVolume(n)` | `u8 enc`；0 = 调色板：`vu P`（1..n）、`P × Cell`、游程 `vu token` 直到覆盖 n 格，`token = (len − 1) × 2^B + idx`，`B` = `P − 1` 的位数（用乘除，不用位运算：结构体的盒子可以很大）；1 = 原样：`n × Cell`。内存里是三层（基础层、缺口层、第二部件层，后两层不需要时为 `null`），调色板的键是整格内容。编码器一遍扫描：整格内容变了就切游程，同时累加原样形式的字节数；调色板超过 `PALETTE_LIMIT = 4096` 项后只累加、结果是 1；调色板形式严格更小才用 0，否则 1 |
 | `GlueList` | `vu n`，每面 `vi dx, vi dy, vi dz, u8 axis`，和前一面的坐标差（从 0,0,0 起），规范顺序 |
-| `GeneratorSpec` | `u8 kind`：0 地形 `u32 seed`；1 平地 `u32 seed, vu n, n × (vu cell, vu thickness)`；2 虚空 `u32 seed`。生成器类加一个 `spec()` 方法给出它 |
+| `GeneratorSpec` | `u8 kind`：0 地形 `u32 seed`；1 平地 `u32 seed, vu n, n × (Cell cell, vu thickness)`，层的 `cell` 必须是整格方块（`< 2^16`，两端检查），接收方用它造生成器之前调 `generatorSpecProblem`（客户端不合法时按协议错误断开）；2 虚空 `u32 seed`。生成器类加一个 `spec()` 方法给出它 |
 
 **客户端 → 服务器**
 
@@ -524,7 +523,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | 0x03 | `Ping` | 不可靠 | `u32 clientMs, vu rttMs`（客户端量到的往返，0 = 还没有；房主页面的状态显示它） | 6～8 B |
 | 0x10 | `MoveReport` | 不可靠 | `vu seq, vu epoch, vu viewTick, vu carrierId, f64×3 pos, f32×3 vel, f32 yaw, f32 pitch, u8 flags`（0 着地 1 潜行 2 疾跑 3 飞行 4 输入 sneak）`, i8 forward, i8 strafe, u8 landings` | ~57 B |
 | 0x20 | `Aim` | 可靠 | `vu seq, vu moveSeq, OptTarget use, bool mineSame, [OptTarget mine]`（两个目标相同时必须用 `mineSame`：标志为假又重复同一个目标按协议错误） | 6～40 B |
-| 0x21 | `Use` | 可靠 | `vu seq, vu moveSeq, u8 slot, u8 flags`（0 sneak）`, OptTarget` | 7～24 B |
+| 0x21 | `Use` | 可靠 | `vu seq, vu moveSeq, u8 slot, u8 flags`（位 0 sneak；位 1～3 半砖方向 `slabMode` 0～6，7 和更高的位按协议错误，[SHAPES.md](SHAPES.md) 第 14.2 节；位 1～3 由 SHAPES 的 P8b 实现，合并前编解码还不检查）`, OptTarget` | 7～24 B |
 | 0x22 | `UseRelease` | 可靠 | `vu seq` | 2～4 B |
 | 0x23 | `Attack` | 可靠 | `vu seq, vu moveSeq, u8 slot, OptTarget` | 6～23 B |
 | 0x24 | `AttackRelease` | 可靠 | `vu seq` | 2～4 B |
@@ -538,7 +537,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | 0x2C | `ReleaseHelm` | 可靠 | `vu seq` | |
 | 0x2D | `Respawn` | 可靠 | `vu seq` | |
 | 0x2E | `SetViewRadius` | 可靠 | `vu seq, u8 r` | |
-| 0x30 | `HostCommand` | 可靠 | `vu seq, u8 kind` + 载荷：0 `SetRules`（`u8 mode, bool drops`）；1 `SetPlayerMode`（`vu entityId, u8 mode`）；2 `SetDayTime`（`f32 t`）；3 `Teleport`（`f64×3`）；4 `Give`（`vu item, vu count`）；5 `Kick`（`vu entityId`） | |
+| 0x30 | `HostCommand` | 可靠 | `vu seq, u8 kind` + 载荷：0 `SetRules`（`u8 mode, bool drops`）；1 `SetPlayerMode`（`vu entityId, u8 mode`）；2 `SetDayTime`（`f32 t`）；3 `Teleport`（`f64×3`）；4 `Give`（`vu item, vu count`）；5 `Kick`（`vu entityId`）；6 `SetCell`（`vu gridId, vi x, vi y, vi z, Cell`，调试命令：服务器自己检查格子、网格、功能方块、加载状态和结构体的上限，不满足就不写，回提示 `toast.host.setCell`，[SHAPES.md](SHAPES.md) 第 14.1 节） | |
 
 模式的编号 0 = creative、1 = survival（和 `save/codec.ts` 的 `MODES` 同序）。
 
@@ -573,9 +572,9 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 **记录**
 
-- `StructureRecord`：`u8 kind`（0 ship 1 rotor）`, vu id, vu parentId, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, [CellVolume(sx·sy·sz)，盒子为空时没有], f64×3 pivot, f64×3 position, f64×4 rotation, GlueList`；转子再加 `vi bx, vi by, vi bz, u8 axis, f64×4 baseRotation, f64 angle, f64 angularSpeed, vu sails, bool frozen`；船再加 `vi hx, vi hy, vi hz, u8 forward, f32 throttle, f32 rudder, vu helmsmanId`。头约 130 字节 + 格子 + 胶。
-- `StructureDelta`：`vu id, u8 mask`；位 0 `vu n, n × (vi dx, vi dy, vi dz, Cell)`（与上一格的差，从 0,0,0 起）；位 1 `vu n, n × (vi dx, vi dy, vi dz, u8 axis + added × 4)`；位 2 `f64×3 pivot`；位 3 `vi hx, vi hy, vi hz, u8 forward, vu helmsmanId`；位 4 `f32 throttle, f32 rudder`；位 5 `f64 angle, f64 angularSpeed, vu sails, bool frozen`。
-- `EntityRecord`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`；player 再加 `i16 pitch`（round_half_away_from_zero(pitch/(π/2)×32767)）`, u8 flags`（0 潜行 1 疾跑 2 飞行 3 死亡 4 着地）`, vu steeringShipId, vu heldItem+1`；item `vu item, vu count`；falling `Cell`；tnt `vu fuse`；rabbit 无。
+- `StructureRecord`：`u8 kind`（0 ship 1 rotor）`, vu id, vu parentId, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, [CellVolume(sx·sy·sz)，盒子为空时没有], f64×3 pivot, f64×3 position, f64×4 rotation, GlueList`；转子再加 `vi bx, vi by, vi bz, u8 axis, f64×4 baseRotation, f64 angle, f64 angularSpeed, vu round(sails × 8), bool frozen`（帆数读出来除以 8：帆数按体积，半块帆布 0.5；由 SHAPES 的 P7 实现，合并前仍发整数帆数）；船再加 `vi hx, vi hy, vi hz, u8 forward, f32 throttle, f32 rudder, vu helmsmanId`。头约 130 字节 + 格子 + 胶。
+- `StructureDelta`：`vu id, u8 mask`；位 0 `vu n, n × (vi dx, vi dy, vi dz, Cell)`（与上一格的差，从 0,0,0 起）；位 1 `vu n, n × (vi dx, vi dy, vi dz, u8 axis + added × 4)`；位 2 `f64×3 pivot`；位 3 `vi hx, vi hy, vi hz, u8 forward, vu helmsmanId`；位 4 `f32 throttle, f32 rudder`；位 5 `f64 angle, f64 angularSpeed, vu round(sails × 8), bool frozen`（`round(sails × 8)` 同上，由 P7 实现）。
+- `EntityRecord`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`；player 再加 `i16 pitch`（round_half_away_from_zero(pitch/(π/2)×32767)）`, u8 flags`（0 潜行 1 疾跑 2 飞行 3 死亡 4 着地）`, vu steeringShipId, vu heldItem+1`；item `vu item, vu count`；falling `Cell`（必须是整格方块，`< 2^16`，两端检查）；tnt `vu fuse`；rabbit 无。
 - `EntitySample`：`vu id, u8 kind, vu carrierId, Pos32×3, Ang16 yaw`，`kind` 是 player 时再加 `i16 pitch, u8 flags`。约 18～21 字节。
 - `EntityUpdate`：`vu id, u8 mask`；位 0 最终状态（同 `EntitySample` 去掉 id，含 `kind`）；位 1 `vu item, vu count`；位 2 `vu fuse`；位 3 `u8 flags, vu steeringShipId, vu heldItem+1`。
 - `PrivateState`：`u8 mask`，按位依次：
@@ -587,7 +586,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
   - 4 事件：`vu n`，每个 `u8 type`：0 toast `Message, u8 kind`（0 info 1 warn 2 error）；1 受伤 `f32 amount, str cause`；2 死亡 `str cause`；3 拾取 `vu item, vu count`；4 松舵 `str cause`。
   - 5 `vu ack`。
   - 6 `vu moveAck`。
-- `WorldEvent`：`u8 type`；0 blockBroken、1 blockPlaced：`vu gridId, vi x, vi y, vi z, Cell`；2 explosion：`f32×3, f32 power`；3 sound：`str name, f32×3`。
+- `WorldEvent`：`u8 type`；0 blockBroken、1 blockPlaced：`vu gridId, vi x, vi y, vi z, Cell`（被挖掉 / 放下的那一个部件的值：`< 2^24`，没有第二部件，两端检查）；2 explosion：`f32×3, f32 power`；3 sound：`str name, f32×3`。
 
 **大小估计**（实测）：空包 4～6 字节（tick < 2^21，约 29 小时）；平常的包 6～60 字节；原样快照 6 字节 + 每个胶面 3 字节；改过的快照中位约 2.0 KB（p90 约 2.85 KB，最大可到 4.8 KB；玩家轻度改动的列中位 2.6～2.7 KB；调色板游程和存档相同，比存档编码小 17～29 字节）；区块增量每列约 6 字节 + 每格 2～4 字节；结构体生成约 130 字节 + 格子（木板船实测每格约 0.3～0.4 字节，3700 格整条约 1.2～1.35 KB；按存档的量法每格 2.4 字节是上限）+ 每个胶面 3～7 字节；结构体增量约 3 字节 + 每格约 5 字节；采样消息约 5 字节 + 每条船 22 字节 + 每个实体 18～21 字节；校正约 75 字节（坐着时约 100）；玩家表每项（`Welcome` 里，或者全局区的加入）约 4 字节 + 名字的 UTF-8 字节，模式变化 3 字节；预览位图最多 256 KiB（盒子上限 2^21 格）。
 

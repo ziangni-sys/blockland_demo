@@ -70,7 +70,7 @@ describe('the server probe (debug tooling for the browser tests)', () => {
     const replica = host.net.replica!;
     for (const [key, hash] of Object.entries(probe.columns)) {
       const [cx, cz] = key.split(',').map(Number) as [number, number];
-      expect(columnHash(replica.world.chunks.get(chunkKey(cx, cz))!.cells), key).toBe(hash);
+      expect(columnHash(replica.world.chunks.get(chunkKey(cx, cz))!), key).toBe(hash);
     }
     // Every structure, as the replica has it (e2e-room compares them on a real raft).
     expect(probe.structures.length).toBe(h.sim.structures.all().length);

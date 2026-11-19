@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { Chunk, chunkKey } from '../../src/voxel/chunk';
+import { Chunk, cellIndex, chunkKey } from '../../src/voxel/chunk';
 import { SaveFormatError } from '../../src/save/bytes';
 import {
   SAVE_VERSION,
@@ -339,7 +339,7 @@ function storageSuite(label: string, make: () => Promise<SaveStorage>): void {
     it('round-trips real codec output end to end', async () => {
       const chunk = new Chunk(-2, 3);
       for (let y = 0; y < 40; y++) for (let i = 0; i < 256; i++) chunk.cells[(y << 8) | i] = y === 0 ? 7 : y < 36 ? 1 : 3;
-      chunk.set(5, 40, 5, 8 | (1 << 10));
+      chunk.cells[cellIndex(5, 40, 5)] = 8 | (1 << 10);
       const m = meta('e2e', 123);
       await s.putAll(
         'e2e',
@@ -352,7 +352,7 @@ function storageSuite(label: string, make: () => Promise<SaveStorage>): void {
       );
       const [stored] = await s.getChunks('e2e', [chunkKey(-2, 3)]);
       const back = decodeChunk(stored!);
-      expect(back.cells).toEqual(chunk.cells);
+      expect(back.layers).toEqual({ base: chunk.cells, holes: null, part2: null });
       expect(decodeMeta((await s.getBlob('e2e', 'meta-copy'))!)).toEqual(m);
       expect(decodeTicks((await s.getBlob('e2e', 'ticks'))!, 0)).toEqual([{ x: -30, y: 41, z: 50, id: 40, at: 10 }]);
     });

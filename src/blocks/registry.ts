@@ -118,6 +118,8 @@ export const BLOCKS: Array<BlockDef | undefined> = new Array(MAX_BLOCK_ID + 1);
 export const BLOCK_BY_KEY: Map<string, BlockDef> = new Map();
 
 // ---- flat per-id tables (index with a block ID, or `cell & ID_MASK`)
+// These are properties of the MATERIAL. A cell's geometry (which octants a part fills) comes
+// from the shape queries of shapes.ts, never from these tables alone (docs/SHAPES.md 1.4).
 export const SOLID = new Uint8Array(MAX_BLOCK_ID + 1);
 export const OPAQUE = new Uint8Array(MAX_BLOCK_ID + 1);
 export const LIGHT_OPACITY = new Uint8Array(MAX_BLOCK_ID + 1);
@@ -125,7 +127,12 @@ export const EMIT = new Uint8Array(MAX_BLOCK_ID + 1);
 export const LIQUID = new Uint8Array(MAX_BLOCK_ID + 1);
 export const REPLACEABLE = new Uint8Array(MAX_BLOCK_ID + 1);
 export const GRAVITY_BLOCK = new Uint8Array(MAX_BLOCK_ID + 1);
-export const UNBREAKABLE = new Uint8Array(MAX_BLOCK_ID + 1);
+/**
+ * 1 = the material can be cut into octants (docs/SHAPES.md 1.4): a full cube that is hard, not
+ * a gravity block, not a functional block, not a blast crate and not unbreakable. Every other
+ * block is always a single full part (holes 0, no second part, alone in its cell).
+ */
+export const CUTTABLE = new Uint8Array(MAX_BLOCK_ID + 1);
 
 // ---- tile name registry (texture array layers)
 export const TILE_NAMES: string[] = [];
@@ -150,6 +157,9 @@ export function registerBlock(id: number, key: string, init: BlockInit): BlockDe
   if (BLOCK_BY_KEY.has(key)) throw new Error(`duplicate block key ${key}`);
   const solid = init.solid ?? true;
   const opaque = init.opaque ?? solid;
+  const lightOpacity = init.lightOpacity ?? (opaque ? 15 : 0);
+  // "Opaque" has one meaning: blocks all light (docs/SHAPES.md 7.1 relies on it).
+  if (opaque !== lightOpacity >= 15) throw new Error(`block ${key}: opaque (${opaque}) must equal lightOpacity >= 15 (${lightOpacity})`);
   const def: BlockDef = {
     id,
     key,
@@ -157,7 +167,7 @@ export function registerBlock(id: number, key: string, init: BlockInit): BlockDe
     nameEn: init.nameEn ?? key,
     solid,
     opaque,
-    lightOpacity: init.lightOpacity ?? (opaque ? 15 : 0),
+    lightOpacity,
     emit: init.emit ?? 0,
     liquid: init.liquid ?? LIQUID_NONE,
     replaceable: init.replaceable ?? false,
@@ -188,7 +198,8 @@ export function registerBlock(id: number, key: string, init: BlockInit): BlockDe
   LIQUID[id] = def.liquid;
   REPLACEABLE[id] = def.replaceable ? 1 : 0;
   GRAVITY_BLOCK[id] = def.gravity ? 1 : 0;
-  UNBREAKABLE[id] = def.unbreakable ? 1 : 0;
+  CUTTABLE[id] =
+    def.shape === 'cube' && def.solid && !def.gravity && def.func === 'none' && !def.explosive && !def.unbreakable ? 1 : 0;
   return def;
 }
 

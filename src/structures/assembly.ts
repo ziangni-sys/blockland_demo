@@ -31,11 +31,12 @@ import { STRUCTURE_MAX_BOX_CELLS, WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, NX, NZ, PX, PY, PZ, type Dir } from '../core/dirs';
 import { qmul, vclone, vec3, vset, type Quat, type Vec3 } from '../core/math';
 import { SET_NO_NEIGHBOR_UPDATE, SET_STRUCTURE_MOVE, type CellBounds, type VoxelGrid } from '../voxel/grid';
+import { copyCell } from '../voxel/parts';
 import type { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
 import { boxCellsWith, CellSet, inBounds } from './collect';
 import type { GlueStore } from './glue';
-import { HULL_BILGE, HULL_SEALED, isDryCell, type HullInfo } from './hull';
+import { isDryCell, type HullInfo } from './hull';
 import { nearestRot, rotCell, rotCellPos, rotToQuat, rotVec, type GridRot } from './orient';
 import { applyRotorPose } from './rotor';
 import { holdsGlue, pruneGlueAt } from './stick';
@@ -113,7 +114,7 @@ export function transferCells(
     const x = cells[i * 3]!;
     const y = cells[i * 3 + 1]!;
     const z = cells[i * 3 + 2]!;
-    dst.setCell(x, y, z, src.getCell(x, y, z), SET_STRUCTURE_MOVE);
+    copyCell(src, x, y, z, dst, x, y, z, SET_STRUCTURE_MOVE);
   }
   if (srcGlue.size > 0) {
     const inSet = CellSet.fromCells(cells, count);
@@ -266,26 +267,6 @@ export function refillWater(world: World, candidates: Int32Array, count: number)
   return filled;
 }
 
-/** Bilge and sealed cells of a hull (x,y,z triples, local coordinates). */
-export function hullCavityCells(hull: HullInfo): Int32Array {
-  const n = hull.bilgeCount + hull.sealedCount;
-  const out = new Int32Array(n * 3);
-  const { sx, sz, kind } = hull;
-  const layer = sx * sz;
-  let o = 0;
-  for (let i = 0; i < kind.length && o < out.length; i++) {
-    const k = kind[i]!;
-    if (k !== HULL_BILGE && k !== HULL_SEALED) continue;
-    const y = Math.floor(i / layer);
-    const rem = i - y * layer;
-    const z = Math.floor(rem / sx);
-    out[o++] = hull.ox + rem - z * sx;
-    out[o++] = hull.oy + y;
-    out[o++] = hull.oz + z;
-  }
-  return out;
-}
-
 // ------------------------------------------------------------ snapping
 
 /**
@@ -361,11 +342,11 @@ export interface BlockifyOutcome {
   placedSrc: CellSet;
 }
 
-/** Snapshot of a grid's non-air cells: coordinates and values. */
-function gridCells(grid: StructureGrid): { xyz: Int32Array; cells: Uint16Array; n: number } {
+/** Snapshot of a grid's non-air cells: coordinates and packed cells (both parts, blocks/cell.ts). */
+function gridCells(grid: StructureGrid): { xyz: Int32Array; cells: Float64Array; n: number } {
   const n = grid.count;
   const xyz = new Int32Array(n * 3);
-  const cells = new Uint16Array(n);
+  const cells = new Float64Array(n);
   let i = 0;
   grid.forEachCell((x, y, z, cell) => {
     xyz[i * 3] = x;

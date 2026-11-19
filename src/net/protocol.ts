@@ -18,6 +18,7 @@ import { ROTOR_MAX_CELLS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../cor
 import type { Axis, Dir } from '../core/dirs';
 import type { Quat, Vec3 } from '../core/math';
 import type { ItemStack } from '../blocks/items';
+import type { CellLayers } from '../blocks/cell';
 import type { MoveReport } from '../entities/drive';
 import type { Message } from '../sim/view';
 import type { GeneratorSpec } from '../worldgen/generator';
@@ -64,8 +65,8 @@ export const STRUCTURE_RESEND_CELLS = 1024;
 export const MAX_VIEW_RADIUS = 17;
 /** The server loads and simulates at most this many chunks around each player (section 6). */
 export const SIM_RADIUS_CAP = 10;
-/** Cell bit 24: a second part follows (M2.3; section 6). */
-export const CELL_MULTI_BIT = 1 << 24;
+/** Cell bit 24: a second part follows (M2.3; section 6). Defined in blocks/cell.ts. */
+export { CELL_MULTI_BIT } from '../blocks/cell';
 /** A rotor's state is resent this often even when nothing changed (section 7). */
 export const ROTOR_RESYNC_TICKS = 100;
 /** Pose samples kept per ship / entity on the client (section 7). */
@@ -124,8 +125,8 @@ export const DEFAULT_RTO_MS = 400;
  * structure save uses: keeps all integer arithmetic downstream exact.
  */
 export const MAX_COORD = 1 << 28;
-/** A CellVolume with more distinct values than this is sent raw (section 14). */
-export const PALETTE_LIMIT = 4096;
+/** A CellVolume with more distinct values than this is sent raw (section 14). Defined in save/cells.ts. */
+export { PALETTE_LIMIT } from '../save/cells';
 /**
  * Largest structure cell box (sx * sy * sz) a StructureRecord or an assembly preview may carry:
  * the game rule STRUCTURE_MAX_BOX_CELLS (2^21), so every structure the game can hold can be sent.
@@ -244,14 +245,18 @@ export const MESSAGE_CHANNEL: Readonly<Record<MessageType, Channel>> = Object.fr
 
 // ====================================================================== shared records
 
-/** A cell value on the wire (section 6). M2.1: below 2^16 (id 10 bits + state 6 bits). */
+/**
+ * A cell on the wire (section 6; docs/SHAPES.md 13.1): the PACKED cell of blocks/cell.ts, both
+ * parts in one number (first part + CELL_MULTI_BIT, plus the second part * 2^25), below 2^49.
+ */
 export type Cell = number;
 
 /**
  * Cells of a box, dense, in the box's index order (chunk: lx | lz<<4 | y<<8; structure:
- * (x-minX) + (z-minZ)*sx + (y-minY)*sx*sz). Its length is the box volume.
+ * (x-minX) + (z-minZ)*sx + (y-minY)*sx*sz), as the three storage layers. Every layer's length is
+ * the box volume; the holes and second-part layers are null when no cell needs them.
  */
-export type CellVolume = Uint16Array;
+export type CellVolume = CellLayers;
 
 /** Glue faces in GlueStore.toArray() form: (x, y, z, axis) quadruples in canonical order. */
 export type GlueList = Int32Array;
@@ -439,7 +444,12 @@ export type HostCommand =
   | { kind: 'setDayTime'; t: number }
   | { kind: 'teleport'; x: number; y: number; z: number }
   | { kind: 'give'; item: number; count: number }
-  | { kind: 'kick'; entityId: number };
+  | { kind: 'kick'; entityId: number }
+  /**
+   * Debug command (docs/SHAPES.md 14.1): write a packed cell into the world (gridId 0) or a
+   * structure. The server checks it (net/server/intents.ts) and refuses with toast.host.setCell.
+   */
+  | { kind: 'setCell'; gridId: number; x: number; y: number; z: number; cell: Cell };
 
 /** Wire value of each HostCommand kind = index. */
 export const HOST_COMMAND_KINDS: readonly HostCommand['kind'][] = Object.freeze([
@@ -449,6 +459,7 @@ export const HOST_COMMAND_KINDS: readonly HostCommand['kind'][] = Object.freeze(
   'teleport',
   'give',
   'kick',
+  'setCell',
 ] as const);
 
 export interface HostCommandMsg {

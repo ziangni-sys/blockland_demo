@@ -25,7 +25,8 @@
  */
 import { CHUNK_SIZE, CHUNK_VOLUME, SEA_LEVEL, WORLD_HEIGHT } from '../core/constants';
 import { hash3 } from '../core/rng';
-import { AIR, ID_MASK, layersState, makeCell } from '../blocks/cell';
+import { AIR, FULL_LIMIT, ID_MASK, layersState, makeCell } from '../blocks/cell';
+import { cellProblem } from '../blocks/shapes';
 import { B } from '../blocks/defs';
 import { GRAVITY_BLOCK, LIQUID, SOLID } from '../blocks/registry';
 import { biomeName, BIOME, type Biome } from './biome';
@@ -54,6 +55,24 @@ export type GeneratorSpec =
   | { kind: 'terrain'; seed: number }
   | { kind: 'flat'; seed: number; layers: Array<{ cell: number; thickness: number }> }
   | { kind: 'void'; seed: number };
+
+/**
+ * Why a generator spec cannot build a generator, or null when it can (docs/SHAPES.md 13.2): every
+ * flat layer's cell must be a valid cell (cellProblem) and a full block (< FULL_LIMIT): generators
+ * make full blocks only. Other kinds have nothing to check. The flat generator's constructor
+ * (RangeError), the network client on Welcome (protocol error) and the host reading a save
+ * (SaveFormatError) call it, each with its own error.
+ */
+export function generatorSpecProblem(spec: GeneratorSpec): string | null {
+  if (spec.kind !== 'flat') return null;
+  for (let i = 0; i < spec.layers.length; i++) {
+    const cell = spec.layers[i]!.cell;
+    const problem = cellProblem(cell);
+    if (problem !== null) return `flat layer ${i}: ${problem}`;
+    if (cell >= FULL_LIMIT) return `flat layer ${i}: cell ${cell} is not a full block`;
+  }
+  return null;
+}
 
 /** A source of chunk columns. */
 export interface ChunkGenerator {
@@ -314,6 +333,8 @@ export class TerrainGenerator implements ChunkGenerator {
     }
 
     // ---- 8. safety: nothing that falls may rest on air or liquid
+    // (Generators make full blocks only: the base array is the whole content, and reading ids from
+    // it is exact. docs/SHAPES.md 4.5.)
     for (let ci = 0; ci < 256; ci++) {
       for (let y = 1; y < WORLD_HEIGHT; y++) {
         const i = ci | (y << 8);
@@ -462,7 +483,8 @@ export class FlatGenerator implements ChunkGenerator {
 
   /**
    * @param layers bottom-up; `id` is a block id (or a full cell value including state bits).
-   *   Default: deeprock 1, stone 30, dirt 3, turf 1.
+   *   Default: deeprock 1, stone 30, dirt 3, turf 1. Throws RangeError when a layer is not a
+   *   valid full block (generatorSpecProblem).
    */
   constructor(
     layers: Array<{ id: number; thickness: number }> = [
@@ -474,10 +496,12 @@ export class FlatGenerator implements ChunkGenerator {
     seed = 0,
   ) {
     this.seed = seed >>> 0;
+    const problem = generatorSpecProblem({ kind: 'flat', seed: this.seed, layers: layers.map((l) => ({ cell: l.id, thickness: l.thickness })) });
+    if (problem !== null) throw new RangeError(`flat generator: ${problem}`);
     const col: number[] = [];
     for (const layer of layers) {
       const n = Math.max(0, Math.floor(layer.thickness));
-      for (let k = 0; k < n && col.length < WORLD_HEIGHT; k++) col.push(layer.id & 0xffff);
+      for (let k = 0; k < n && col.length < WORLD_HEIGHT; k++) col.push(layer.id);
     }
     this.column = Uint16Array.from(col);
   }

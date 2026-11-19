@@ -13,7 +13,7 @@ import { GlueStore } from '../../src/structures/glue';
 import { displacesWater } from '../../src/structures/hull';
 import { Rotor, Ship, type StructureHost } from '../../src/structures/structure';
 import { createShipDynamics, type DynamicsOptions } from '../../src/structures/physics';
-import { Chunk } from '../../src/voxel/chunk';
+import { Chunk, cellIndex } from '../../src/voxel/chunk';
 import { World } from '../../src/voxel/world';
 
 /** Sea layout used by most tests: stone up to FLOOR_TOP (exclusive), water up to WATER_TOP (exclusive). */
@@ -45,7 +45,7 @@ export function makeWorld(spec: WorldSpec): World {
       const ch = new Chunk(cx, cz);
       for (let y = 0; y < Math.max(floorTop, waterTop); y++) {
         const cell = y < floorTop ? stone : water;
-        for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) ch.set(x, y, z, cell);
+        for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) ch.cells[cellIndex(x, y, z)] = cell;
       }
       world.addChunk(ch);
     }

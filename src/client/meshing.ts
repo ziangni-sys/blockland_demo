@@ -13,7 +13,7 @@ import { AIR, ID_MASK } from '../blocks/cell';
 import { OPAQUE } from '../blocks/registry';
 import { sectionNeighborsLoaded, snapshotSection } from '../mesh/snapshot';
 import { Mesher } from '../mesh/mesher';
-import type { MeshData, MeshInput, MeshRequest, MeshResponse } from '../mesh/types';
+import { meshInputTransferables, type MeshData, type MeshInput, type MeshRequest, type MeshResponse } from '../mesh/types';
 import type { MeshErrorResponse } from '../mesh/worker';
 import type { RenderBackend } from '../render/backend';
 import { sectionKey } from '../voxel/chunk';
@@ -205,7 +205,7 @@ export class SectionMesher {
     if (pool) {
       const accepted = pool.submit(
         (id): MeshRequest => ({ type: 'mesh', id, input }),
-        input.light ? [input.cells.buffer as ArrayBuffer, input.light.buffer as ArrayBuffer] : [input.cells.buffer as ArrayBuffer],
+        meshInputTransferables(input),
         (res) => this.onReply(key, res),
         () => {
           // Worker died (the buffers went with it): snapshot again later, maybe on the main thread.

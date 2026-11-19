@@ -13,7 +13,7 @@
  * fill that had to look at an unloaded cell reports 'unloaded' (ok = false): assembling it
  * would leave the rest of the structure behind and delete the glue across the chunk border.
  */
-import { cellState, ID_MASK, stateFacing } from '../blocks/cell';
+import { CELL_MULTI_BIT, cellState, ID_MASK, PACK_SCALE, stateFacing } from '../blocks/cell';
 import { CELL_UNLOADED } from '../blocks/defs';
 import { ROTOR_MAX_CELLS, ROTOR_MIN_SAILS, SHIP_MAX_CELLS, STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z, dirSign, type Dir } from '../core/dirs';
@@ -218,7 +218,8 @@ const INITIAL_CAPACITY = 256;
  */
 class FillQueue {
   xyz: Int32Array;
-  values: Uint16Array;
+  /** Packed cells (blocks/cell.ts: both parts). */
+  values: Float64Array;
   n = 0;
   private cap: number;
   private readonly limit: number;
@@ -228,7 +229,7 @@ class FillQueue {
     // Start small so tiny structures stay cheap; grows by doubling up to the limit.
     this.cap = Math.min(limit, INITIAL_CAPACITY);
     this.xyz = new Int32Array(this.cap * 3);
-    this.values = new Uint16Array(this.cap);
+    this.values = new Float64Array(this.cap);
   }
 
   push(x: number, y: number, z: number, cell: number): void {
@@ -245,7 +246,7 @@ class FillQueue {
     const q = new Int32Array(this.cap * 3);
     q.set(this.xyz);
     this.xyz = q;
-    const v = new Uint16Array(this.cap);
+    const v = new Float64Array(this.cap);
     v.set(this.values);
     this.values = v;
   }
@@ -283,7 +284,7 @@ function flood(
 ): Fill {
   const q = new FillQueue(maxCells + 1);
   const visited = new CellSet(Math.min(maxCells + 1, INITIAL_CAPACITY));
-  q.push(sx, sy, sz, start);
+  q.push(sx, sy, sz, start < CELL_MULTI_BIT ? start : start + grid.getPart2(sx, sy, sz) * PACK_SCALE);
   visited.add(sx, sy, sz);
   let tooBig = maxCells < 1;
   let tooSpread = maxBoxCells < 1;
@@ -320,8 +321,10 @@ function flood(
       }
       if (excludeFunc && isFunctionalCell(nc)) continue;
       if (visited.has(nx, ny, nz)) continue;
-      if (!connectedCells(cell, nc, d as Dir, glue, x, y, z)) continue;
-      q.push(nx, ny, nz, nc);
+      // The queue keeps packed cells (both parts); a two-part cell's second part is read only here.
+      const np = nc < CELL_MULTI_BIT ? nc : nc + grid.getPart2(nx, ny, nz) * PACK_SCALE;
+      if (!connectedCells(cell, np, d as Dir, glue, x, y, z)) continue;
+      q.push(nx, ny, nz, np);
       visited.add(nx, ny, nz);
       // A neighbour differs from its cell in one coordinate by one, so it grows the box by at
       // most one layer; only then can the volume have changed.

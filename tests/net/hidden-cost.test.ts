@@ -141,7 +141,7 @@ describe('costs (package 5)', () => {
       sx: 37,
       sy: 1,
       sz: 100,
-      cells,
+      cells: { base: cells, holes: null, part2: null },
       pivot: { x: 18.5, y: 47.5, z: 50 },
       position: { x: 18.5, y: 47.5, z: 50 },
       rotation: { x: 0, y: 0, z: 0, w: 1 },
@@ -173,7 +173,7 @@ describe('costs (package 5)', () => {
       for (const [cx, cz] of cols) {
         const c = gen.generate(cx, cz);
         c[(5 << 8) | 17] = makeCell(B.LAMP);
-        b.snapshots.push({ cx, cz, cells: c, glue: [] });
+        b.snapshots.push({ cx, cz, cells: { base: c, holes: null, part2: null }, glue: [] });
       }
       return wire(b);
     };

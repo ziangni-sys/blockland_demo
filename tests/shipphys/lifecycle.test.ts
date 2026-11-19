@@ -4,7 +4,7 @@ import { B } from '../../src/blocks/defs';
 import { NZ, PY, PZ } from '../../src/core/dirs';
 import { qfromAxisAngle, qtoMat3, vec3 } from '../../src/core/math';
 import type { Rotor, Ship } from '../../src/structures/structure';
-import { Chunk } from '../../src/voxel/chunk';
+import { Chunk, cellIndex } from '../../src/voxel/chunk';
 import {
   fillWorld,
   hullExtent,
@@ -60,7 +60,7 @@ describe('freezing near unloaded chunks (LESSONS 船被弹飞)', () => {
     expect(dyn.getStats(boat)!.simulated).toBe(false);
     for (let cz = -1; cz <= 0; cz++) {
       const ch = new Chunk(1, cz);
-      for (let y = 0; y < 48; y++) for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) ch.set(x, y, z, makeCell(y < 36 ? B.STONE : B.WATER));
+      for (let y = 0; y < 48; y++) for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) ch.cells[cellIndex(x, y, z)] = makeCell(y < 36 ? B.STONE : B.WATER);
       world.addChunk(ch);
     }
     run(dyn, [boat], 5);

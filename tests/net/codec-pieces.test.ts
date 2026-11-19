@@ -4,14 +4,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import { CHUNK_VOLUME } from '../../src/core/constants';
-import { decodeServerMessage, encodeServerMessage, encodeSnapshotPiece, encodeStructureRecordPiece, encodeTickBatch } from '../../src/net/codec';
+import { decodeServerMessage, encodeServerMessage, encodeSnapshotPiece, encodeStructureRecordPiece, encodeTickBatch, volumeCost } from '../../src/net/codec';
 import { emptyTickBatch, MAX_BATCH_CELLS, SECTION, type ChunkSnapshot, type StructureRecord, type TickBatchMsg } from '../../src/net/protocol';
 import { RELIABLE } from '../../src/net/transport';
 
 function column(cx: number, seed: number): ChunkSnapshot {
   const cells = new Uint16Array(CHUNK_VOLUME);
   for (let i = 0; i < cells.length; i++) cells[i] = i < 40 * 256 ? 1 + ((i * seed) % 3) : 0;
-  return { cx, cz: -cx, cells, glue: [5, 70000] };
+  return { cx, cz: -cx, cells: { base: cells, holes: null, part2: null }, glue: [5, 70000] };
 }
 
 function ship(id: number): StructureRecord {
@@ -25,7 +25,7 @@ function ship(id: number): StructureRecord {
     sx: 2,
     sy: 1,
     sz: 2,
-    cells: Uint16Array.from([5, 5, 0, 50]),
+    cells: { base: Uint16Array.from([5, 5, 0, 50]), holes: null, part2: null },
     pivot: { x: 1.25, y: 10.5, z: 4.75 },
     position: { x: 1.25, y: 10.5, z: 4.75 },
     rotation: { x: 0, y: 0, z: 0, w: 1 },
@@ -57,8 +57,25 @@ describe('TickBatch with pre-encoded pieces', () => {
     expect(sections.reduce((n, x) => n + (x ?? 0), 0)).toBe(shared.length - header);
   });
 
+  it('a volume with holes and second parts is charged volumeCost (both ends): the extra layers count', () => {
+    const cells = { base: new Uint16Array(CHUNK_VOLUME).fill(1), holes: new Uint8Array(CHUNK_VOLUME), part2: new Uint32Array(CHUNK_VOLUME) };
+    cells.base[5] = 1;
+    cells.holes[5] = 0x33;
+    cells.part2[5] = 2 | (0xcc << 16); // dirt filling the octants stone leaves
+    const p = encodeSnapshotPiece({ cx: 0, cz: 0, cells, glue: [] });
+    expect(p.cells).toBe(volumeCost(CHUNK_VOLUME, true, true));
+    expect(encodeSnapshotPiece({ cx: 0, cz: 0, cells: { ...cells, part2: null }, glue: [] }).cells).toBe(volumeCost(CHUNK_VOLUME, true, false));
+    // What the decoder may allocate for it is what the encoder charged: a batch of such columns
+    // fits exactly as many as MAX_BATCH_CELLS / volumeCost.
+    const fits = Math.floor(MAX_BATCH_CELLS / p.cells);
+    expect(() => encodeTickBatch(emptyTickBatch(1), { snapshots: Array.from({ length: fits }, () => p), structureSpawns: [] })).not.toThrow();
+    expect(() => encodeTickBatch(emptyTickBatch(1), { snapshots: Array.from({ length: fits + 1 }, () => p), structureSpawns: [] })).toThrow(RangeError);
+    const bytes = encodeTickBatch(emptyTickBatch(1), { snapshots: Array.from({ length: fits }, () => p), structureSpawns: [] });
+    expect((decodeServerMessage(bytes, RELIABLE) as TickBatchMsg).snapshots).toHaveLength(fits);
+  });
+
   it('charges the pieces to MAX_BATCH_CELLS like the objects', () => {
-    const p = encodeSnapshotPiece({ cx: 0, cz: 0, cells: new Uint16Array(CHUNK_VOLUME).fill(1), glue: [] }); // a few bytes, 32768 cells
+    const p = encodeSnapshotPiece({ cx: 0, cz: 0, cells: { base: new Uint16Array(CHUNK_VOLUME).fill(1), holes: null, part2: null }, glue: [] }); // a few bytes, 32768 cells
     const many = Array.from({ length: MAX_BATCH_CELLS / CHUNK_VOLUME + 1 }, () => p);
     expect(() => encodeTickBatch(emptyTickBatch(1), { snapshots: many, structureSpawns: [] })).toThrow(RangeError);
     expect(() => encodeTickBatch(emptyTickBatch(1), { snapshots: many.slice(1), structureSpawns: [] })).not.toThrow();

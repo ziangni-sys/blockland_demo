@@ -40,7 +40,8 @@
 import { TICK_DT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
 import { aabb, vec3, type AABB, type Vec3 } from '../core/math';
-import { ID_MASK } from '../blocks/cell';
+import { FULL_LIMIT, ID_MASK } from '../blocks/cell';
+import { cellProblem } from '../blocks/shapes';
 import { isItem } from '../blocks/items';
 import { BLOCKS, LIQUID, REPLACEABLE, SOLID } from '../blocks/registry';
 import type { ByteReader, ByteWriter } from '../save/bytes';
@@ -111,8 +112,11 @@ import { attachInset, boxAt } from './physics';
 import { headingOf, pointVelocity, type StructRec } from './structs';
 
 const DT = TICK_DT;
-/** Layout of the entity blob. Version 2: players are no longer part of it. */
-const SAVE_VERSION = 2;
+/**
+ * Layout of the entity blob. Version 2: players are no longer part of it. Version 3: a falling
+ * block's cell is a varuint (a full block, < FULL_LIMIT, checked with cellProblem on reading).
+ */
+const SAVE_VERSION = 3;
 const KIND_TAG: Readonly<Record<EntityKind, number>> = Object.freeze({ player: 1, item: 2, falling: 3, tnt: 4, rabbit: 5 });
 /** spawnItem() splits a count above the item's stack size into at most this many drops. */
 const MAX_SPAWN_STACKS = 64;
@@ -1200,7 +1204,9 @@ export class EntityManager {
         w.varuint(uint(e.stack.count));
         w.varuint(uint(e.pickupDelay));
       } else if (e instanceof FallingBlockEntity) {
-        w.u16(e.cell & 0xffff);
+        // Only sand and gravel fall, and they cannot be cut: the cell is always a full block.
+        if (!(e.cell >= 0 && e.cell < FULL_LIMIT && Number.isInteger(e.cell))) throw new RangeError(`falling block ${e.id} carries ${e.cell}, not a full block`);
+        w.varuint(e.cell);
       } else if (e instanceof TntEntity) {
         w.varuint(uint(e.fuse));
       } else if (e instanceof Rabbit) {
@@ -1246,7 +1252,10 @@ export class EntityManager {
         }
         e = it;
       } else if (tag === KIND_TAG.falling) {
-        e = new FallingBlockEntity(id, r.u16());
+        const cell = r.varuint();
+        const problem = cell >= FULL_LIMIT ? 'not a full block' : cellProblem(cell);
+        if (problem !== null) r.fail(`falling block ${id} carries cell ${cell}: ${problem}`);
+        e = new FallingBlockEntity(id, cell);
       } else if (tag === KIND_TAG.tnt) {
         e = new TntEntity(id, r.varuint());
       } else if (tag === KIND_TAG.rabbit) {

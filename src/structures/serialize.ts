@@ -14,7 +14,8 @@
  *     cells    varint minX minY minZ, varuint sx sy sz: the TIGHT cell box (all 0 when empty),
  *              then the box in index order (index = (x-minX) + (z-minZ)*sx + (y-minY)*sx*sz)
  *              as runs of non-air cells: varuint run count, per run varuint gap (air cells
- *              since the end of the previous run, or since index 0) + u16Array of the cells.
+ *              since the end of the previous run, or since index 0), varuint length and that
+ *              many Cells (save/cells.ts: the packed cell, both parts; docs/SHAPES.md 13.3).
  *              Proportional to the cell count, so a sparse structure stays small. The box
  *              holds at most STRUCTURE_MAX_BOX_CELLS cells (the game rule, DESIGN 组装与方块化),
  *              on both ends: writing refuses a bigger one, reading rejects it.
@@ -35,19 +36,21 @@
  * on malformed data; it builds fresh objects and touches no live state, so a failed load
  * leaves the caller's structures intact.
  */
-import { AIR, ID_MASK } from '../blocks/cell';
-import { BLOCKS } from '../blocks/registry';
+import { AIR } from '../blocks/cell';
+import { cellProblem } from '../blocks/shapes';
 import { STRUCTURE_MAX_BOX_CELLS } from '../core/constants';
 import type { Dir } from '../core/dirs';
 import type { Quat, Vec3 } from '../core/math';
 import type { ByteReader, ByteWriter } from '../save/bytes';
+import { readCell, writeCell } from '../save/cells';
 import { SET_STRUCTURE_MOVE } from '../voxel/grid';
 import type { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
 import type { GlueStore } from './glue';
 import { Rotor, Ship, type Structure } from './structure';
 
-export const STRUCTURES_FORMAT = 3;
+/** 4: each cell is a Cell (both parts) in runs of varuint gap, varuint length, cells (SAVE_VERSION 4). */
+export const STRUCTURES_FORMAT = 4;
 
 const KIND_SHIP = 0;
 const KIND_ROTOR = 1;
@@ -124,12 +127,12 @@ function writeCells(w: ByteWriter, g: StructureGrid): void {
   const layer = sx * sz;
   // forEachCell walks the storage box y-major, then z, then x: the same order as the tight
   // box's index, so the indices arrive strictly increasing and runs are found in one pass.
-  const values = new Uint16Array(g.count);
+  const values = new Float64Array(g.count);
   const gaps: number[] = [];
   const lens: number[] = [];
   let next = 0; // index just past the previous run
   let n = 0;
-  g.forEachCell((x, y, z, cell) => {
+  g.forEachCell((x, y, z, packed) => {
     const idx = x - b.minX + (z - b.minZ) * sx + (y - b.minY) * layer;
     if (n > 0 && idx === next) {
       lens[lens.length - 1]!++;
@@ -138,15 +141,15 @@ function writeCells(w: ByteWriter, g: StructureGrid): void {
       lens.push(1);
     }
     next = idx + 1;
-    values[n++] = cell;
+    values[n++] = packed;
   });
   w.varint(b.minX).varint(b.minY).varint(b.minZ).varuint(sx).varuint(sy).varuint(sz);
   w.varuint(gaps.length);
   let o = 0;
   for (let i = 0; i < gaps.length; i++) {
     const len = lens[i]!;
-    w.varuint(gaps[i]!);
-    w.u16Array(values.subarray(o, o + len));
+    w.varuint(gaps[i]!).varuint(len);
+    for (let k = 0; k < len; k++) writeCell(w, values[o + k]!);
     o += len;
   }
 }
@@ -286,8 +289,9 @@ function readBox(r: ByteReader): { minX: number; minY: number; minZ: number; sx:
 }
 
 /**
- * Allocate the grid's storage for the box (at most STRUCTURE_MAX_BOX_CELLS cells, 4 MiB). Should
- * even that fail under memory pressure, it is reported as malformed data, not a crash.
+ * Allocate the grid's storage for the box (at most STRUCTURE_MAX_BOX_CELLS cells: 4 MiB of base
+ * layer; the holes and second-part layers come with the first cell that needs them). Should even
+ * that fail under memory pressure, it is reported as malformed data, not a crash.
  */
 function allocate(r: ByteReader, g: StructureGrid, minX: number, minY: number, minZ: number, sx: number, sy: number, sz: number): void {
   try {
@@ -298,16 +302,18 @@ function allocate(r: ByteReader, g: StructureGrid, minX: number, minY: number, m
   }
 }
 
-function checkCell(r: ByteReader, cell: number): void {
-  if (cell === AIR) r.fail('air inside a run of structure cells');
-  if (BLOCKS[cell & ID_MASK] === undefined) r.fail(`unknown block id ${cell & ID_MASK} in structure`);
+/** A cell of a run: not air, and valid (cellProblem: registered ids, canonical parts ...). */
+function checkCell(r: ByteReader, packed: number): void {
+  if (packed === AIR) r.fail('air inside a run of structure cells');
+  const problem = cellProblem(packed);
+  if (problem !== null) r.fail(`invalid structure cell: ${problem}`);
 }
 
-/** Format 2: tight box + runs of non-air cells (see the header). */
+/** Tight box + runs of non-air cells (see the header). */
 function readCells(r: ByteReader, g: StructureGrid): void {
   const { minX, minY, minZ, sx, sy, sz, volume } = readBox(r);
-  // A run takes at least 4 bytes: a gap byte, a length byte and one u16 cell.
-  const runs = r.count(4);
+  // A run takes at least 3 bytes: a gap byte, a length byte and one Cell of at least one byte.
+  const runs = r.count(3);
   if (runs === 0) {
     if (volume !== 0) r.fail('empty structure with a non-empty cell box');
     return;
@@ -316,16 +322,20 @@ function readCells(r: ByteReader, g: StructureGrid): void {
   // Decode and validate everything before allocating, so the box is known to be the tight
   // box of real cells (as written) before memory is committed to it.
   const idx: number[] = [];
-  const vals: Uint16Array[] = [];
+  const vals: Float64Array[] = [];
   let next = 0;
   for (let i = 0; i < runs; i++) {
     const gap = r.varuint();
     if (i > 0 && gap === 0) r.fail('adjacent runs of structure cells');
-    const run = r.u16Array();
-    if (run.length === 0) r.fail('empty run of structure cells');
+    const len = r.count(1); // each Cell takes at least one byte
+    if (len === 0) r.fail('empty run of structure cells');
     const start = next + gap;
-    if (start + run.length > volume) r.fail(`structure cells run past the end of the ${volume}-cell box`);
-    for (let k = 0; k < run.length; k++) checkCell(r, run[k]!);
+    if (start + len > volume) r.fail(`structure cells run past the end of the ${volume}-cell box`);
+    const run = new Float64Array(len);
+    for (let k = 0; k < len; k++) {
+      run[k] = readCell(r);
+      checkCell(r, run[k]!);
+    }
     idx.push(start);
     vals.push(run);
     next = start + run.length; // runs are strictly increasing, so they never overlap

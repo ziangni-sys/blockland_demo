@@ -269,7 +269,7 @@ export function withOctant(c: number, partOctant: number, octant: number): numbe
 export function cellProblem(c: number): string | null; // 合法返回 null，否则是给日志看的英文原因
 ```
 
-检查：值是 < 2⁴⁹ 的非负整数；I1～I6（含“id 为 0 的值只能是 0”）；两个部件的 id 都已注册；状态位对这个 `stateKind` 合法的检查沿用现有做法（不新增）。它是所有“不可信的格子”进入存储、进入副本之前的同一道关：网络客户端应用包里的每一处格子（快照、增量、结构体记录和增量、下落方块实体带的格子、`blockBroken` / `blockPlaced` 事件带的部件值，都抛 `ReplicaError`）、存档解码（`SaveFormatError`）、平地生成器的层（经 `generatorSpecProblem`：构造时 `RangeError`，客户端收到 `Welcome` 时按协议错误断开，主机读存档时 `SaveFormatError`，第 13.2 节）、调试命令（第 14.1 节）。
+检查：值是 < 2⁴⁹ 的非负整数；I1～I6（含“id 为 0 的值只能是 0”）；两个部件的 id 都已注册，并且都不是 `B.UNLOADED`（1023，`getCell` 对未加载位置的读数：它是读数，从不是内容）；状态位对这个 `stateKind` 合法的检查沿用现有做法（不新增）。它是所有“不可信的格子”进入存储、进入副本之前的同一道关：网络客户端应用包里的每一处格子（快照、增量、结构体记录和增量、下落方块实体带的格子、`blockBroken` / `blockPlaced` 事件带的部件值，都抛 `ReplicaError`）、存档解码（`SaveFormatError`）、平地生成器的层（经 `generatorSpecProblem`：构造时 `RangeError`，客户端收到 `Welcome` 时按协议错误断开，主机读存档时 `SaveFormatError`，第 13.2 节）、调试命令（第 14.1 节）。
 
 `setCell` 自己只检查 I1～I6（I3、I5 查 `CUTTABLE` 表），不查 id 是否注册；`c < FULL_LIMIT` 时完全跳过，走今天的路径。这个范围里唯一可能不合法的是“id 为 0 而状态不为 0”，可信的代码从不产生它（M1 也不检查），不可信的来源由 `cellProblem` 拦住。
 
@@ -311,12 +311,12 @@ export class Chunk {
 ```
 
 - `new Chunk(cx, cz, cells)` 仍然表示“只有整格方块的一列”：地形生成器、地形 Worker、`ChunkSource` 的签名都不变（`Uint16Array`）。带层构造时检查长度，并数出两层的非零项；全为 0 的层按 `null` 收下。
-- `Chunk.get` / `Chunk.set` 在 `src/` 里没有调用者，删掉。测试里有三处在用，P2 改成直接写 `cells[lx | lz << 4 | y << 8]`：`tests/liquid/helpers.ts:29`、`tests/save/storage.test.ts:342`、`tests/save/codec.test.ts`（`terrainChunk` 的几处 `c.set`，以及 193-194、231 行的 `back.get` / `c.set`）。
+- `Chunk.get` / `Chunk.set` 在 `src/` 里没有调用者，已删掉。测试里的调用（存档、液体、光照、船体物理、`World` 的测试，共八个文件）都改成直接写 `cells[cellIndex(lx, y, lz)]`。
 - `World.getCell`：`c.holes === null && c.part2 === null` 时就是今天的一次读取；否则 `c.cells[i] | (holes ? holes[i] << 16 : 0) | (part2 && part2[i] !== 0 ? CELL_MULTI_BIT : 0)`。
 - `World.getPart2(x, y, z)`：区块没有第二部件层、未加载、越界时为 0。
 - `World.setCell(x, y, z, packed, flags?)`：参数是整格内容。
-  1. `packed < FULL_LIMIT` 且这一列没有两层：今天的路径，一字不差。
-  2. 否则拆成格子值和第二部件，按 I1～I6 检查（不合法抛 `RangeError`），和三层里的旧内容比较；三层都相同返回 `false`，不发事件。
+  1. `packed < FULL_LIMIT`（整格方块）从不检查，不管这一列有没有两层。没有两层时走今天的路径，一字不差；有两层时基础层写 `packed & 0xffff`，这一格的缺口和第二部件清零。同一次写入在内容相同的两列里结果相同，和层有没有分配无关。
+  2. 其余的值（含 `NaN`）拆成格子值和第二部件，按 I1～I6 检查（不合法抛 `RangeError`），和三层里的旧内容比较；三层都相同返回 `false`，不发事件。`StructureGrid.setCell` 同样，并且检查在扩存储之前做：被拒绝的写入不会改变盒子。
   3. 写三层（需要时分配，更新非零项计数；不释放，见 4.1），`modified = true`，`markDirty`，然后发**一次**变更事件。
 - 越界、未加载的规则不变（返回 `false`）。`y < 0` 的界岩、未加载的哨兵都是整格方块。
 - 变更事件的签名不变，新旧值换成整格内容：
@@ -381,6 +381,7 @@ export function restoreOctantAt(grid: VoxelGrid, x: number, y: number, z: number
 
 - 对一格的任何修改都是“读整格内容 → 用第 3.3 节的函数算出新内容 → 一次 `setCell`”。同一格的两个部件一起变（合并、旋转后落下）也只发一次事件，钩子不会看到合并到一半的格子。
 - **点查询只收整数**。“网格局部坐标里的一个点在不在硬八分格里”由调用方写成 `solidAtHalf(grid, Math.floor(lx * 2), Math.floor(ly * 2), Math.floor(lz * 2))`，船体的 `isDryHalf`（第 12.1 节）同样。不提供收小数坐标的版本：V8 把刚算出来的非整数传给没被内联的函数时要装箱（`shape.ts:345-348` 的说明）。实测一个收小数坐标的点查询（照第 12.1 节的船体结构写的）被内联时每次 0.01 字节，不被内联时（`node --max-inlined-bytecode-size=40`）每次 48 字节；收整数的写法两种情况下都是 0.00～0.02 字节。潜行护边每 tick 对每个结构体调几百次，不能靠“碰巧被内联”。`>> 1` 和 `& 1` 对负坐标也正确（算术右移）。
+- **每 tick 运行的代码不构造、不传递双部件格子的整格内容**。它 ≥ 2³¹，在 V8 里是堆上的数，传给没被内联的函数每次装箱 16 字节（实测 `solidFill`、`solidCover`、`partAt` 对双部件的值每次 16 字节，`cellsTouch` 32 字节；整格方块和单个部件是小整数，0.01 字节）。这类代码读 `getCell` 和 `getPart2`（部件值 < 2²⁴）再查表，现成的入口是 `solidFillAt` 和 `solidAtHalf`，两者都不构造整格内容。`getPacked`、`solidFill(packed)`、`partAt`、`cellsTouch` 这些按值的查询只给一次性的工作用：组装的泛洪、放置、挖掘、编解码。
 - `addPartAt` 不替调用方判断软方块：目标格是不可替换的软方块（火把、花）时它照样直接写。放置的流程（第 14.2 节 `planPlacement`）在调它之前已经把这种目标拒绝了；方块化和停靠（第 11.3 节）按“覆盖并掉落”处理。
 - 实现 `VoxelGrid` 的类都要补 `getPart2`，P2 一并改：`src/sim/interact.ts:112` 的 `CellProbe`（过渡期返回 0；P8b 再改成返回要放的内容的第二部件，第 6.2 节）、`tests/voxel/shape.test.ts:948` 的 `ProxyWorld`（转给 `World.getPart2`）、`tests/voxel/robustness.test.ts:141` 的对象字面量（返回 0）。后两个文件其余部分归 P3，P2 只加这一个方法。
 
@@ -1190,7 +1191,7 @@ export function cellSize(packed: number): number;                      // 这个
 export function writeCell(w: ByteWriter, packed: number): void;
 export function readCell(r: ByteReader): number;                       // 返回整格内容
 export function writeCellVolume(w: ByteWriter, v: CellLayers): void;   // 格数 = v.base.length
-export function readCellVolume(r: ByteReader, n: number, budget: CellBudget): CellLayers;
+export function readCellVolume(r: ByteReader, n: number, budget: CellBudget, check?: (packed: number) => string | null): CellLayers; // check：调色板每项一次、逐格形式里值每变一次调一次，返回非 null 即失败
 export function volumeCost(n: number, hasHoles: boolean, hasPart2: boolean): number;
 // src/net/protocol.ts
 export type Cell = number;            // 整格内容
@@ -1245,7 +1246,7 @@ NETCODE 的改动：第 6 节“格子值的格式”里“M2.1 的副本还是 
 - **子版本号的规则**：载荷变了的块，自己的版本号加 1；没变的不动。`STRUCTURES_FORMAT` 从 3 升到 4（`structures/serialize.ts:50`），实体块的 `SAVE_VERSION` 从 2 升到 3（`entities/manager.ts:115`）。外层的 `SAVE_VERSION` 已经把旧世界整个拒掉了，这两个号实际上不会被旧数据碰到；照规则加，是为了让每个块的读取代码只认识一种布局。
 - **区块**（`save/codec.ts`，`BLKC`）：外壳（magic、版本、CRC）不变，载荷改成 `varint cx, varint cz, CellVolume(32768)`。`decodeChunk` 返回 `{ cx, cz, layers: CellLayers }`。
   - 解码的预算：`readCellVolume(r, 32768, { cells: volumeCost(32768, true, true) })`，即一个区块三层全有的份额；格数是常数，不存在读出一个巨大尺寸的问题。
-  - 语义检查：调色板的每一项（逐格形式时每个格子）过 `cellProblem`，失败抛 `SaveFormatError`。
+  - 语义检查：`decodeChunk` 把 `cellProblem` 作为 `readCellVolume` 的第四个参数 `check` 传进去。`check` 对调色板的每一项调一次（没有游程用到的项也查），逐格形式里值每变一次调一次；返回非 `null` 就失败（`SaveFormatError`），不再有第二遍扫描。
   - 大小：逐格形式不再是固定的 2 字节一格（13.1“最坏的大小”）。只有整格方块的区块走调色板时，调色板项从固定 2 字节变成 1～3 字节的 `Cell`，其余相同，和现在差几十个字节以内。
 - **暂存的区块**（`sim/chunks.ts`）用同一个编码；`ChunkManager.stashedCells(cx, cz): CellLayers | null`。
 - **结构体**（`structures/serialize.ts`）：格子部分**保持现在的稀疏游程**，只把每格从 u16 换成 `Cell`：紧凑包围盒，然后 `varuint 游程数`，每个游程 `varuint gap, varuint 长度, 长度 × Cell`（现在是 `gap` 加一个带长度的 u16 数组）。不换成稠密的 `CellVolume`：现在的写法和读法都只和格子数成正比，而且读的时候先把所有游程解出来、核对包围盒确实紧凑，然后才分配（`serialize.ts:309-345`）；换成稠密的，一条 2²¹ 格盒子里的稀疏结构体每次自动存档都要扫 200 万格，读的时候还得先分配后检查。一个游程至少 3 字节（`r.count(3)`）。每个格子过 `cellProblem`（取代现在的 `checkCell`），包围盒必须紧凑的检查保留。写的一侧用 `forEachCell`（整格内容）。转子的帆数按 13.2。
@@ -1300,7 +1301,7 @@ export function partLabels(grid: VoxelGrid, box: CellBounds): string[];   // "x,
   1. `cellProblem(cell) === null`；`gridId` 是世界或一个现存的结构体。
   2. 这一格现在的内容和要写的内容都不是功能方块（舵轮、轴承、螺旋桨，`func !== 'none'`）：挖舵轮要先让舵手松手（`interact.ts:1276-1282`），轴承带着转子，这些流程命令里没有。
   3. 世界：`0 <= y < 128`，并且这一列已加载（`getCell` 不是未加载的哨兵）。
-  4. 结构体：它没在转（`editable`）；把空格子写成非空时，过和放置相同的两条上限（`interact.ts:906-921 structureFull`）：格数没到上限，`boxCellsWith(紧凑包围盒, x, y, z) <= sim.structureMaxBoxCells`。否则 `StructureGrid.setCell` 会为了够到任意远的坐标去扩存储（`sgrid.ts:103-112`），盒子超过 `STRUCTURE_MAX_BOX_CELLS` 之后这个结构体就再也发不出去、存不下来了（客户端用 `checkDeltaBox` 防的是同一件事）。
+  4. 结构体：它没在转（`editable`）；非空内容的每个部件都能加入结构体（`canJoinStructure`：液体和不可破坏的方块不行，和手放时一样）；把空格子写成非空时，过和放置相同的两条上限（`interact.ts:906-921 structureFull`）：格数没到上限，`boxCellsWith(紧凑包围盒, x, y, z) <= sim.structureMaxBoxCells`。否则 `StructureGrid.setCell` 会为了够到任意远的坐标去扩存储（`sgrid.ts:103-112`），盒子超过 `STRUCTURE_MAX_BOX_CELLS` 之后这个结构体就再也发不出去、存不下来了（客户端用 `checkDeltaBox` 防的是同一件事）。
   
   通过之后是一次普通的 `setCell`，钩子照常运行（把结构体的最后一格写成空气，和挖掉它走同一条路）。页面上 `window.__blocklands.game.debug` 加：`setCell(x, y, z, packed, gridId = 0)`、`slab(x, y, z, blockId, dir, gridId = 0)`（把这种方块在 `dir` 一侧的半砖并进这一格）、`parts(x, y, z, gridId = 0)`（返回两个部件的 id、状态、占用）。现有脚本用的 `debug.cell(...) & 1023` 仍然是第一部件的 id。
 
@@ -1749,4 +1750,34 @@ P2 合并之后，世界里可以存在部分格子，但工具要到 M2.4 才�
 | 60 | `planPlacement` 被拒绝时返回原因 | 两个部件的上限要有自己的提示 | 14.2 |
 | 61 | 分层测试：引用方向按表；模块级状态只拦顶层的 `let` / `var` 和空容器；禁用的全局 | `src/net` 那条更严的规则会命中模拟层里两百多张常量表 | 16.2 |
 | 62 | 性能对照：同一台机器上新旧代码交替运行，比中位数 | 同一份代码两次运行就差 1.1～1.7 倍，不能和表里的数比 | 15 |
+
+## 19. 实现过程中定下的规则
+
+规格没写到、实现时定下来的规则记在这里，按工作包分。和前面各节冲突时，以这一节为准（前面的正文已经跟着改过的不再重复）。
+
+### 19.1 P1（编码与几何表）
+
+- 出错的方式：`makePart`、`withHoles` 只做掩码（和 `makeCell` 一样），不检查；`canonCell`、`mergeCells`、`rotatePart`、`rotIndex`、`withoutOctant`、`withoutPartAt`、`withOctant` 对不合法的输入抛 `RangeError`（不是部件值、八分格编号不在 0～7、`ay` 和 `ax` 同轴、不能切的方块被切）。`partAt`、`otherPart` 是热路径，不检查八分格编号。
+- `otherPart(c, o)`：八分格 `o` 是空的，或者这一格只有一个部件时，返回 0。`withoutOctant`、`withoutPartAt` 遇到空的八分格原样返回。
+- `rotIndex` 不检查 `az` 是否等于 `ax × ay`；`az` 只用来转朝向类和轴向类方块的状态。
+- `cellProblem` 的检查顺序：范围；第 24 位和第二部件是否对应；I1；每个部件的 id（非 0、已注册、不是 `B.UNLOADED`）、I2、I3；双部件格子的 I5（都有缺口、不重叠）、I6（顺序）。不检查状态位。
+- `shapes.ts` 引用 `./defs`，方块表在第一次查表之前一定已经注册。
+- 分层测试（`tests/core/layering.test.ts`）：目录按 `src/` 下第一级的名字算，子目录跟父目录；`src/` 下直接放 `.ts` 文件不通过；第三方包只有 `render` 能引用 `three`。
+
+### 19.2 P2（存储与管线）
+
+- `World.setCell` / `StructureGrid.setCell` 的检查是 `checkCanonical`：布局、第 24 位和第二部件对应、I1～I6。它不查 id 是否注册，那是 `cellProblem` 在不可信数据的入口做的事。
+- 射线命中时只读一次 `getCell`，第 24 位置位才再读 `getPart2`。
+- `isDryHalf(h, hx, hy, hz)` 收半格的整数坐标。P9 之前它回答的是“这个点所在的整格干不干”。
+- 网络编解码里三种宽度的格子：下落方块实体和平地生成器的层只能是整格方块（`writeFullCell` / `readFullCell`，< 2¹⁶）；方块事件带的是部件值（`writePartCell` / `readPartCell`，< 2²⁴）；其余是整格内容。语义检查（`cellProblem`）在 `apply.ts`。
+- 空结构体的记录是 `{ base: new Uint16Array(0), holes: null, part2: null }`。
+- 网格输入：`snapshotSection` 只在遇到非零项时才分配另外两层；`checkInput` 检查层的长度。
+- `debug.setCell` 在本地只拒绝编不出来的值（`layoutProblem`，返回 `false`）；布局合法、语义不合法的值照样发给服务器，由 `SetCell` 的检查拒绝并回提示。`debug.slab` 把半砖并进副本里这一格现在的内容，放不下返回 `false`。
+- `StructureGrid.adoptStorage(other)` 只给驾驶测试的夹具用。
+- `encodeChunk` 的写缓冲从 4096 字节起。编码器只在需要比较时才累加 `rawBytes`（调色板形式小于格数时它一定赢），输出和每次都累加完全相同。
+
+### 19.3 过渡期的标记（P10 清掉）
+
+- `docs/NETCODE.md` 第 14 节里，`Target.sub`、`Use.flags` 第 1～3 位的检查标着“P8b 实现”，转子帆数按 `round(sails × 8)` 发送标着“P7 实现”。两个包合并后去掉这些标记。
+- `src/liquid/fluids.ts` 里“只读基础层”的注释（第 4.5 节）由 P6 加。
 

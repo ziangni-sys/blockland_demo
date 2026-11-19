@@ -143,6 +143,7 @@ describe('non-finite and out-of-range parameters', () => {
       parent: null,
       isWorld: true,
       getCell: () => 0,
+      getPart2: () => 0,
       setCell: () => false,
       toWorld: (p, out = vec3()) => Object.assign(out, p),
       toLocal: (p, out = vec3()) => Object.assign(out, p),
