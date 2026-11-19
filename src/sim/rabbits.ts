@@ -6,7 +6,7 @@
  * same rabbits. The rng is consumed per player, so the rabbits depend on the join order when
  * several players are in the world.
  */
-import { AIR, ID_MASK } from '../blocks/cell';
+import { AIR, ID_MASK, makeCell } from '../blocks/cell';
 import { B } from '../blocks/defs';
 import { LIQUID, SOLID } from '../blocks/registry';
 import { WORLD_HEIGHT } from '../core/constants';
@@ -24,6 +24,8 @@ export const RABBIT_SPAWN_MAX = 40;
 export const RABBIT_DESPAWN_DISTANCE = 96;
 /** Columns tried per attempt. */
 const TRIES = 4;
+/** The only cell a rabbit spawns on: a whole turf block, alone in its cell. */
+const TURF = makeCell(B.TURF);
 
 export class RabbitSpawner {
   /** Set false to keep the world free of ambient rabbits (tests, tools). */
@@ -103,16 +105,22 @@ export class RabbitSpawner {
     return false;
   }
 
-  /** y of a turf cell with two free cells above it, the top of its column; -1 when there is none. */
+  /**
+   * y of a turf cell with two free cells above it, the top of its column; -1 when there is none.
+   * The top must be a whole turf block on its own (docs/SHAPES.md section 9.6): a turf slab, a
+   * carved turf block or a turf part sharing its cell is no spawning ground. The two cells above
+   * are not hard and not liquid; a cell with any part is hard (invariant I7), so it blocks.
+   */
   private turfTop(x: number, z: number): number {
     const world = this.sim.world;
     // The whole neighbourhood must be loaded: a rabbit must not hop into the unknown.
     if (!world.isAreaLoaded(x - 1, z - 1, x + 1, z + 1)) return -1;
     for (let y = WORLD_HEIGHT - 2; y > 0; y--) {
-      const id = world.getCell(x, y, z) & ID_MASK;
+      const c = world.getCell(x, y, z);
+      const id = c & ID_MASK;
       // Air and soft cover (grass tufts, flowers, snow) are looked through.
       if (id === AIR || (SOLID[id] === 0 && LIQUID[id] === 0)) continue;
-      if (id !== B.TURF) return -1;
+      if (c !== TURF) return -1;
       const a1 = world.getCell(x, y + 1, z) & ID_MASK;
       const a2 = world.getCell(x, y + 2, z) & ID_MASK;
       if (SOLID[a1] === 1 || LIQUID[a1] !== 0 || SOLID[a2] === 1 || LIQUID[a2] !== 0) return -1;

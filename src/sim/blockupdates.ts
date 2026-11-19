@@ -7,7 +7,13 @@
  *    falling-block entity (which lands as a block, or as an item on a structure — LESSONS
  *    沙子落到船上悬浮).
  *  - Blocks with a support rule (BlockDef.support: torch, plants, snow cover, cactus) whose
- *    support is gone pop off as their drop. Chains (a cactus column) pop one after another.
+ *    support is gone pop off as their drop (sim/support.ts: a torch needs the top face of the
+ *    cell below fully covered by hard material). Chains (a cactus column) pop one after another.
+ *    Blocks with a support rule are whole-cell models that cannot be cut, so popping one turns
+ *    the whole cell into air and drops one item.
+ *  - Partial cells (docs/SHAPES.md section 9.3): a cell with any part has a hard first part
+ *    (invariant I7), so "the cell below is hard" (gravity) is true over a lower slab, an upper
+ *    slab or a single octant alike: sand rests on any hard part.
  *  - A soft non-liquid block overwritten by a liquid is washed away and drops its item.
  *  - Structure grids follow the same support rule in their own local frame (a torch on a deck
  *    pops when the plank under it is mined or blown up). Gravity does not apply inside
@@ -29,7 +35,6 @@
  * the world's dropsEnabled is on, whoever caused the change.
  */
 import { AIR, ID_MASK } from '../blocks/cell';
-import { B } from '../blocks/defs';
 import { BLOCKS, GRAVITY_BLOCK, LIQUID, SOLID } from '../blocks/registry';
 import { WORLD_HEIGHT } from '../core/constants';
 import { DIR_X, DIR_Y, DIR_Z } from '../core/dirs';
@@ -37,6 +42,7 @@ import { vec3 } from '../core/math';
 import { SET_NO_NEIGHBOR_UPDATE, type VoxelGrid } from '../voxel/grid';
 import { spawnBlockDrop } from './drops';
 import type { Simulation } from './simulation';
+import { supportOkAt } from './support';
 
 /** Ticks between a gravity block losing its support and it starting to fall. */
 export const FALL_DELAY = 2;
@@ -45,17 +51,6 @@ export const FALL_DELAY = 2;
  * a pathological cascade stalling one tick; whatever is left stays queued for the next flush.
  */
 const MAX_FLUSH_STEPS = 1 << 16;
-
-const SAND = B.SAND;
-const CACTUS = B.CACTUS;
-
-/** Is the support rule of `def` met by the cell `below`? */
-function supportedBy(support: 'none' | 'solid' | 'sandOrSelf', below: number): boolean {
-  if (support === 'none') return true;
-  const id = below & ID_MASK;
-  if (support === 'solid') return SOLID[id] === 1;
-  return id === SAND || id === CACTUS;
-}
 
 /** A soft, non-liquid, non-air block replaced by a liquid. */
 function washedAway(oldCell: number, newCell: number): boolean {
@@ -99,10 +94,11 @@ export class BlockUpdates {
   /**
    * Change hook of a structure grid, bulk moves included (see WHEN). Support rules look straight
    * down (local -Y), so only the cell above can be affected — and the changed cell itself when
-   * something was put there. A state-only change (a rotated facing) changes no support.
+   * something was put there. Any change of the content counts, not only a change of id: carving
+   * the plank under a torch keeps the plank's id and can uncover the torch's support.
    */
   onStructureChange(grid: VoxelGrid, x: number, y: number, z: number, oldCell: number, newCell: number, _flags: number): void {
-    if ((oldCell & ID_MASK) === (newCell & ID_MASK)) return;
+    if (oldCell === newCell) return;
     this.gridQueue.push(grid, grid);
     this.gridCoords.push(x, y + 1, z, x, y, z);
   }
@@ -113,7 +109,7 @@ export class BlockUpdates {
     const world = this.sim.world;
     const cell = world.getCell(x, y, z);
     if ((cell & ID_MASK) !== blockId) return;
-    if (SOLID[world.getCell(x, y - 1, z) & ID_MASK] === 1) return; // supported again meanwhile
+    if (SOLID[world.getCell(x, y - 1, z) & ID_MASK] === 1) return; // supported again meanwhile (any part counts, I7)
     if (!world.setCell(x, y, z, AIR)) return;
     this.sim.entities.spawnFalling(x, y, z, cell);
   }
@@ -170,12 +166,12 @@ export class BlockUpdates {
     if (def === undefined) return;
     // Below an unloaded chunk border or the world floor, getCell answers a HARD sentinel, so
     // nothing ever falls or pops into the unknown.
-    const below = world.getCell(x, y - 1, z);
     if (def.gravity) {
-      if (SOLID[below & ID_MASK] !== 1) world.scheduleTick(x, y, z, id, FALL_DELAY);
+      // Any part makes the cell below hard (I7): sand rests on slabs and single octants.
+      if (SOLID[world.getCell(x, y - 1, z) & ID_MASK] !== 1) world.scheduleTick(x, y, z, id, FALL_DELAY);
       return;
     }
-    if (supportedBy(def.support, below)) return;
+    if (supportOkAt(def, world, x, y, z)) return;
     if (!world.setCell(x, y, z, AIR)) return;
     if (this.sim.rules.dropsEnabled) spawnBlockDrop(this.sim, world, x, y, z, cell, this.tmp);
   }
@@ -188,7 +184,7 @@ export class BlockUpdates {
     if (id === AIR) return;
     const def = BLOCKS[id];
     if (def === undefined || def.support === 'none') return;
-    if (supportedBy(def.support, grid.getCell(x, y - 1, z))) return;
+    if (supportOkAt(def, grid, x, y, z)) return;
     if (!grid.setCell(x, y, z, AIR)) return;
     if (this.sim.rules.dropsEnabled) spawnBlockDrop(this.sim, grid, x, y, z, cell, this.tmp);
   }

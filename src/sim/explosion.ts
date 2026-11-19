@@ -5,28 +5,37 @@
  * One blast, in this order:
  *  1. SHOCK WAVE (read only). RAY_COUNT rays leave the centre toward the surface of a cube, each
  *     with a random strength power * [0.7, 1.3) drawn from sim.rng (the irregular edge, fully
- *     deterministic). A ray walks in STEP increments; at every step it pays for the cells it
- *     is in — the world cell and the cell of every structure in reach at that point, in the
+ *     deterministic). A ray walks in STEP increments; at every step it pays for what its sample
+ *     point is in — in the world and in every structure in reach at that point, in the
  *     structure's own local space — (blastResistance + 0.3) * 0.3, plus ATTENUATION for the
- *     distance. Every cell a ray still has strength in is marked for destruction. Resistant
- *     blocks shadow what lies behind them; liquids (infinite resistance) stop rays dead, except
- *     world liquid displaced by a hull (inside a ship's hard cell or its dry hold), which the
+ *     distance. What the point is in is the PART filling the octant of the cell the point lies
+ *     in (docs/SHAPES.md section 9.4): an empty octant of a partial cell costs nothing, like air;
+ *     a full block fills every octant, so it costs what it always did. Every octant a ray still
+ *     has strength in, and whose part a blast can remove, is marked. Resistant blocks shadow what
+ *     lies behind them; liquids (infinite resistance) stop rays dead, except world liquid
+ *     displaced by a hull (the point is in a hard octant of a ship or in its dry hold), which the
  *     hull keeps out.
- *  2. DESTRUCTION, inside structures.beginBatch(): every marked world cell, then every marked
- *     structure cell, is set to AIR with SET_EXPLOSION. Explosive blocks become primed blast
+ *  2. DESTRUCTION, inside structures.beginBatch(): the marked world cells, then the marked cells
+ *     of each structure, in the order each cell was first marked. In a cell, every part whose
+ *     octants meet the marked octants is removed (first part, then second), and the rest is
+ *     written back with one setCell flagged SET_EXPLOSION. Explosive blocks become primed blast
  *     crates with a short random fuse (chain reactions); when the world's drops are on
- *     (WorldRules.dropsEnabled) a 1/power share of the other blocks drop their item.
+ *     (WorldRules.dropsEnabled) each other removed part drops its item with chance 1/power, one
+ *     draw from sim.rng per part. In a world of full blocks every cell has one part, so the
+ *     marks, their order and the random sequence are exactly those of the whole-cell blast.
  *  3. structures.endBatch(): rotors whose bearing was destroyed blockify now — after the wave
  *     has gone through every structure, so surviving blades land where they should — and
  *     emptied ships are removed (one that still carries rotor remains survives).
- *  4. PUSH: surviving ships get an impulse summed over their cells (rotors are never pushed);
+ *  4. PUSH: surviving ships get an impulse summed over their cells, a partial cell in proportion
+ *     to its volume (rotors are never pushed);
  *     entities within 2 * power take damage scaled by distance and line-of-sight exposure —
  *     players by their own mode (EntityManager.damage), rabbits only in a survival world
  *     (WorldRules.defaultMode) — and are knocked back (item drops are only pushed).
  *  5. The 'explosion' event; queued block updates (sand over the crater, torches) run.
  */
-import { AIR, ID_MASK } from '../blocks/cell';
+import { AIR, CELL_MULTI_BIT, FULL_LIMIT, HOLES_SHIFT, ID_MASK, PART_MASK, partHoles } from '../blocks/cell';
 import { BLOCKS, LIQUID, SOLID } from '../blocks/registry';
+import { canonCell, volume8 } from '../blocks/shapes';
 import { vec3, type Vec3 } from '../core/math';
 import { Player, type Entity } from '../entities/entity';
 import { CellSet } from '../structures/collect';
@@ -34,7 +43,6 @@ import { isDryHalf, type HullInfo } from '../structures/hull';
 import { Ship, type Structure } from '../structures/structure';
 import { SET_EXPLOSION, type VoxelGrid } from '../voxel/grid';
 import { raycastGrids, type CellPredicate } from '../voxel/raycast';
-import { posKey } from '../voxel/world';
 import { spawnBlockDrop } from './drops';
 import type { Simulation } from './simulation';
 
@@ -76,36 +84,86 @@ export const RAY_COUNT = RAY_DIRS.length / 3;
 /** Line-of-sight blockers for exposure: every HARD cell (the 'unloaded' sentinel included). */
 const blocksSight: CellPredicate = (cell) => SOLID[cell & ID_MASK] === 1;
 
-/** Strength a ray pays for standing in a cell (Infinity stops it). */
-function cellCost(cell: number): number {
-  const id = cell & ID_MASK;
+/** Strength a ray pays for standing in a part (AIR: an empty octant; Infinity stops it). */
+function partCost(part: number): number {
+  const id = part & ID_MASK;
   if (id === AIR) return 0;
   const def = BLOCKS[id];
   return def === undefined ? Infinity : def.blastResistance;
 }
 
-/** Can a blast remove this cell? (finite resistance, not air, not liquid, breakable) */
-function destructible(cell: number): boolean {
-  const id = cell & ID_MASK;
+/** Can a blast remove this part? (finite resistance, not air, not liquid, breakable) */
+function destructible(part: number): boolean {
+  const id = part & ID_MASK;
   if (id === AIR || LIQUID[id] !== 0) return false;
   const def = BLOCKS[id];
   return def !== undefined && !def.unbreakable && def.blastResistance < Infinity;
 }
 
-/** A structure the shock wave can reach, with the cells marked in it. */
+/**
+ * The part of grid cell (x, y, z) that fills `octant`, or AIR when the octant is empty. Reads the
+ * cell value and, for a two-part cell, the second part; it never forms the packed value of a
+ * two-part cell (docs/SHAPES.md section 4.4: this runs at every step of 1352 rays). Air and full
+ * blocks (values below FULL_LIMIT: no holes, no second part) fill every octant.
+ */
+function partIn(grid: VoxelGrid, x: number, y: number, z: number, octant: number): number {
+  const c = grid.getCell(x, y, z);
+  if (c < FULL_LIMIT) return c;
+  if (((c >>> (HOLES_SHIFT + octant)) & 1) === 0) return c & PART_MASK;
+  if (c >= CELL_MULTI_BIT) {
+    const p2 = grid.getPart2(x, y, z);
+    if (((p2 >>> (HOLES_SHIFT + octant)) & 1) === 0) return p2;
+  }
+  return AIR;
+}
+
+/**
+ * The octant of the cell containing the point whose coordinates are (px, py, pz), the cell being
+ * (cx, cy, cz) = their floors. p - floor(p) is exact in floating point, so this is the octant of
+ * the half-cell grid point floor(2p) (docs/SHAPES.md section 1.1).
+ */
+function octantOf(px: number, py: number, pz: number, cx: number, cy: number, cz: number): number {
+  return (px - cx >= 0.5 ? 1 : 0) | (py - cy >= 0.5 ? 2 : 0) | (pz - cz >= 0.5 ? 4 : 0);
+}
+
+/**
+ * The marks of one grid: the cells in the order they were first marked, and which octants of
+ * each were marked (one set per octant, so no per-cell index is needed).
+ */
+class Marks {
+  private readonly cells = new CellSet(64);
+  private readonly octants: Array<CellSet | null> = [null, null, null, null, null, null, null, null];
+  /** Marked cells in first-mark order, x,y,z triples. */
+  readonly list: number[] = [];
+
+  mark(x: number, y: number, z: number, octant: number): void {
+    if (this.cells.add(x, y, z)) this.list.push(x, y, z);
+    let set = this.octants[octant]!;
+    if (set === null) this.octants[octant] = set = new CellSet(64);
+    set.add(x, y, z);
+  }
+
+  /** The octants marked in cell (x, y, z), as a fill mask. */
+  mask(x: number, y: number, z: number): number {
+    let m = 0;
+    for (let o = 0; o < 8; o++) if (this.octants[o]?.has(x, y, z) === true) m |= 1 << o;
+    return m;
+  }
+}
+
+/** A structure the shock wave can reach, with the octants marked in it. */
 interface Target {
   readonly s: Structure;
   readonly grid: VoxelGrid;
   /** Hull analysis of a ship when current (dry hold keeps world water out of the hull). */
   readonly hull: HullInfo | null;
-  readonly marked: CellSet;
-  /** Marked cells in discovery order, x,y,z triples. */
-  readonly list: number[];
-  /** Cell hit by the current ray step (or AIR), and its local coordinates. */
-  cell: number;
+  readonly marks: Marks;
+  /** Part the current ray step's point is in (AIR for an empty octant), its cell and octant. */
+  part: number;
   lx: number;
   ly: number;
   lz: number;
+  octant: number;
 }
 
 /**
@@ -154,17 +212,16 @@ function reachableStructures(sim: Simulation, x: number, y: number, z: number, p
     if (dx * dx + dy * dy + dz * dz > (radius + reach) * (radius + reach)) continue;
     let hull: HullInfo | null = null;
     if (s instanceof Ship && s.hull !== null && s.hull.version === s.grid.version) hull = s.hull;
-    out.push({ s, grid: s.grid, hull, marked: new CellSet(64), list: [], cell: AIR, lx: 0, ly: 0, lz: 0 });
+    out.push({ s, grid: s.grid, hull, marks: new Marks(), part: AIR, lx: 0, ly: 0, lz: 0, octant: 0 });
   }
   return out;
 }
 
-/** Phase 1: walk every ray, mark cells. Returns the marked world cells (x,y,z triples, discovery order). */
-function markCells(sim: Simulation, x: number, y: number, z: number, power: number, targets: Target[]): number[] {
+/** Phase 1: walk every ray, mark octants. Returns the marks of the world. */
+function markCells(sim: Simulation, x: number, y: number, z: number, power: number, targets: Target[]): Marks {
   const world = sim.world;
   const rng = sim.rng;
-  const marked = new Set<number>();
-  const list: number[] = [];
+  const marks = new Marks();
   const p = vec3();
   const l = vec3();
   const nt = targets.length;
@@ -188,33 +245,36 @@ function markCells(sim: Simulation, x: number, y: number, z: number, power: numb
         const lx = Math.floor(l.x);
         const ly = Math.floor(l.y);
         const lz = Math.floor(l.z);
-        const c = tg.grid.getCell(lx, ly, lz);
-        tg.cell = c;
-        if (c !== AIR) {
+        const o = octantOf(l.x, l.y, l.z, lx, ly, lz);
+        const part = partIn(tg.grid, lx, ly, lz, o);
+        tg.part = part;
+        if (part !== AIR) {
           tg.lx = lx;
           tg.ly = ly;
           tg.lz = lz;
-          cost += cellCost(c);
-          if (SOLID[c & ID_MASK] === 1) displaced = true;
-        } else if (tg.hull !== null && isDryHalf(tg.hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2))) {
-          displaced = true;
+          tg.octant = o;
+          cost += partCost(part);
+        }
+        // World liquid where the point is in a hard octant of a ship, or in its dry hold, is kept
+        // out by the hull (the same condition as sim/rays.ts displacedByHull). The part filling
+        // the point's octant is hard exactly when solidAtHalf(grid, floor(2 * local)) is true, so
+        // that read is not repeated; the dry hold is asked at the same half-cell coordinates.
+        if (!displaced) {
+          displaced =
+            SOLID[part & ID_MASK] === 1 ||
+            (tg.hull !== null && isDryHalf(tg.hull, Math.floor(l.x * 2), Math.floor(l.y * 2), Math.floor(l.z * 2)));
         }
       }
-      const wc = world.getCell(wx, wy, wz);
+      const wo = octantOf(p.x, p.y, p.z, wx, wy, wz);
+      const wp = partIn(world, wx, wy, wz, wo);
       // World liquid where a hull is (or in its dry hold) is kept out by the hull: not in the way.
-      if (!(displaced && LIQUID[wc & ID_MASK] !== 0)) cost += cellCost(wc);
+      if (!(displaced && LIQUID[wp & ID_MASK] !== 0)) cost += partCost(wp);
       f -= (cost + 0.3) * 0.3;
       if (f > 0) {
-        if (destructible(wc)) {
-          const k = posKey(wx, wy, wz);
-          if (!marked.has(k)) {
-            marked.add(k);
-            list.push(wx, wy, wz);
-          }
-        }
+        if (destructible(wp)) marks.mark(wx, wy, wz, wo);
         for (let t = 0; t < nt; t++) {
           const tg = targets[t]!;
-          if (tg.cell !== AIR && destructible(tg.cell) && tg.marked.add(tg.lx, tg.ly, tg.lz)) tg.list.push(tg.lx, tg.ly, tg.lz);
+          if (tg.part !== AIR && destructible(tg.part)) tg.marks.mark(tg.lx, tg.ly, tg.lz, tg.octant);
         }
       }
       p.x += dx * STEP;
@@ -223,33 +283,59 @@ function markCells(sim: Simulation, x: number, y: number, z: number, power: numb
       f -= ATTENUATION;
     }
   }
-  return list;
+  return marks;
 }
 
-/** Phase 2: remove every marked cell (world first, then structures in creation order). */
-function destroy(sim: Simulation, worldList: number[], targets: Target[], power: number): void {
-  const world = sim.world;
+/** Phase 2: remove the marked parts (world first, then structures in creation order). */
+function destroy(sim: Simulation, worldMarks: Marks, targets: Target[], power: number): void {
   const dropChance = Math.min(1, 1 / power);
   const tmp = vec3();
-  for (let i = 0; i < worldList.length; i += 3) {
-    const x = worldList[i]!;
-    const y = worldList[i + 1]!;
-    const z = worldList[i + 2]!;
-    removeCell(sim, world, x, y, z, dropChance, tmp);
-  }
+  removeMarked(sim, sim.world, worldMarks, dropChance, tmp);
   for (const tg of targets) {
     if (tg.s.removed) continue;
-    const l = tg.list;
-    for (let i = 0; i < l.length; i += 3) removeCell(sim, tg.grid, l[i]!, l[i + 1]!, l[i + 2]!, dropChance, tmp);
+    removeMarked(sim, tg.grid, tg.marks, dropChance, tmp);
   }
 }
 
-function removeCell(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: number, dropChance: number, tmp: Vec3): void {
+/** Remove the marked parts of one grid, cell by cell in first-mark order. */
+function removeMarked(sim: Simulation, grid: VoxelGrid, marks: Marks, dropChance: number, tmp: Vec3): void {
+  const l = marks.list;
+  for (let i = 0; i < l.length; i += 3) {
+    const x = l[i]!;
+    const y = l[i + 1]!;
+    const z = l[i + 2]!;
+    removeParts(sim, grid, x, y, z, marks.mask(x, y, z), dropChance, tmp);
+  }
+}
+
+/** Is `part` (0 = none) one the blast removes: it fills a marked octant and a blast can destroy it? */
+function blasted(part: number, mask: number): boolean {
+  return part !== AIR && (~partHoles(part) & mask) !== 0 && destructible(part);
+}
+
+/**
+ * Remove every part of cell (x, y, z) that fills one of the marked octants `mask` (and that a
+ * blast can destroy), in one setCell; then, first part before second, prime it (a blast crate)
+ * or let it drop. The cell is read again here: it may have changed since it was marked (by a
+ * hook, or an earlier removal).
+ */
+function removeParts(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: number, mask: number, dropChance: number, tmp: Vec3): void {
   const cell = grid.getCell(x, y, z);
-  if (!destructible(cell)) return; // changed since it was marked (e.g. by a hook)
-  if (!grid.setCell(x, y, z, AIR, SET_EXPLOSION)) return;
-  const def = BLOCKS[cell & ID_MASK]!;
+  const p1 = cell & PART_MASK;
+  const p2 = cell < CELL_MULTI_BIT ? AIR : grid.getPart2(x, y, z);
+  const r1 = blasted(p1, mask);
+  const r2 = blasted(p2, mask);
+  if (!r1 && !r2) return;
+  if (!grid.setCell(x, y, z, canonCell(r1 ? AIR : p1, r2 ? AIR : p2), SET_EXPLOSION)) return;
+  if (r1) blastedPart(sim, grid, x, y, z, p1, dropChance, tmp);
+  if (r2) blastedPart(sim, grid, x, y, z, p2, dropChance, tmp);
+}
+
+/** What becomes of a part the blast removed: a blast crate is primed, anything else may drop. */
+function blastedPart(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: number, part: number, dropChance: number, tmp: Vec3): void {
+  const def = BLOCKS[part & ID_MASK]!;
   if (def.explosive) {
+    // A blast crate cannot be cut (docs/SHAPES.md section 1.4): it is always the whole cell.
     tmp.x = x + 0.5;
     tmp.y = y + 0.5;
     tmp.z = z + 0.5;
@@ -259,10 +345,15 @@ function removeCell(sim: Simulation, grid: VoxelGrid, x: number, y: number, z: n
     tnt.setPosition(tmp.x, tmp.y - tnt.height * 0.5, tmp.z);
     return;
   }
-  if (sim.rules.dropsEnabled && sim.rng.next() < dropChance) spawnBlockDrop(sim, grid, x, y, z, cell, tmp);
+  if (sim.rules.dropsEnabled && sim.rng.next() < dropChance) spawnBlockDrop(sim, grid, x, y, z, part, tmp);
 }
 
-/** Phase 4a: every live ship in reach gets the impulses of its cells, applied at their impact-weighted centre. */
+/**
+ * Phase 4a: every live ship in reach gets the impulses of its cells, applied at their
+ * impact-weighted centre. A cell with holes or a second part counts with its volume, volume8 / 8
+ * (docs/SHAPES.md section 9.4); a full block counts 1, models included (whose volume8 is 0), so a
+ * ship of full blocks is pushed exactly as before.
+ */
 function pushShips(sim: Simulation, centre: Vec3, power: number): void {
   const radius = power * ENTITY_RADIUS_FACTOR;
   const dyn = sim.dynamics;
@@ -286,7 +377,8 @@ function pushShips(sim: Simulation, centre: Vec3, power: number): void {
     imp.x = imp.y = imp.z = 0;
     at.x = at.y = at.z = 0;
     let weight = 0;
-    g.forEachCell((x, y, z) => {
+    g.forEachCell((x, y, z, packed) => {
+      const share = packed < FULL_LIMIT ? 1 : volume8(packed) / 8;
       c.x = x + 0.5;
       c.y = y + 0.5;
       c.z = z + 0.5;
@@ -296,7 +388,7 @@ function pushShips(sim: Simulation, centre: Vec3, power: number): void {
       const dz = c.z - centre.z;
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (d >= radius) return;
-      const impact = 1 - d / radius;
+      const impact = (1 - d / radius) * share;
       const s = (impact * SHIP_CELL_IMPULSE) / Math.max(d, 1e-6);
       if (d > 1e-6) {
         imp.x += dx * s;
