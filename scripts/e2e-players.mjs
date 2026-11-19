@@ -511,6 +511,19 @@ async function session(renderer) {
     };
     await takeHelm();
     log(`ship #${ship.id} assembled, Bram at the wheel`);
+    /**
+     * The server lets go of a helmsman whose client sent no movement report for 2 s (NETCODE section
+     * 3, by design: a page that stalls must not keep a ship going). Bram's client runs on this page's
+     * main thread, which a software renderer on a loaded machine can block for longer than that; the
+     * longest gap between Bram's turns says whether that is what happened. He takes the wheel again.
+     */
+    const keepHelm = async () => {
+      const bs = await botState('船长 Bram');
+      if (bs.steeringShipId === ship.id) return;
+      log(`Bram was let go of the wheel (longest gap between his client's turns in the last 10 s: ${Math.round(bs.longestGapMs)} ms); taking it again`);
+      await takeHelm();
+      await bots((b) => b.keys('船长 Bram', { forward: 1, strafe: 0.5 }), null);
+    };
     // The player stands on the deck just ahead of the wheel, looking back at the helmsman.
     // Two cells ahead of the wheel, off the centre line (the windmill's blades sweep over it).
     const bowSpot = along(3.2, 1);
@@ -531,14 +544,10 @@ async function session(renderer) {
     }, ship.id);
     const h0 = await heading();
     await until(async () => {
-      const bs = await botState('船长 Bram');
-      if (bs.steeringShipId !== ship.id) {
-        log('Bram was let go of the wheel (a stalled page: no report for 2 s); taking it again');
-        await takeHelm();
-        await bots((b) => b.keys('船长 Bram', { forward: 1, strafe: 0.5 }), null);
-      }
+      await keepHelm();
       return Math.abs(Math.atan2(Math.sin((await heading()) - h0), Math.cos((await heading()) - h0))) > 0.25;
     }, 'the boat to sail and turn', 180_000, 400);
+    log(`the boat sails and turns; longest gap between Bram's client turns in the last 10 s: ${Math.round((await botState('船长 Bram')).longestGapMs)} ms`);
     const lookAtHelm = async () => {
       const hp = await G(([id, c]) => {
         const g = window.__blocklands.game.session.replica.state.structures.get(id).structure.grid;
@@ -546,11 +555,17 @@ async function session(renderer) {
       }, [ship.id, boat.helm]);
       await lookAtPoint(hp.x, hp.y, hp.z);
     };
-    await lookAtHelm();
-    list = await drawn();
-    const bram = list.find((e) => e.label === '船长 Bram');
+    // Drawn at the helm: the page shows what its replica says, which follows the server's word by a
+    // round trip (and after a stall Bram first takes the wheel again).
+    let bram = null;
+    await until(async () => {
+      await keepHelm();
+      await lookAtHelm();
+      list = await drawn();
+      bram = list.find((e) => e.label === '船长 Bram');
+      return bram !== undefined && bram.posture === 'helm';
+    }, 'Bram drawn at the helm', 60_000, 400);
     log(`at the helm: ${JSON.stringify(bram)}`);
-    check(bram && bram.posture === 'helm', 'Bram is not drawn at the helm');
     await shot('helm-from-deck', 'from the deck of the sailing, turning boat, two cells ahead of the wheel: Bram at the wheel, both hands on it, facing it, his tag above; the deck and he stay put relative to each other');
     await page.waitForTimeout(1500);
     await lookAtHelm();
@@ -573,12 +588,8 @@ async function session(renderer) {
       await lookAtPoint(sp.x, sp.y + 1, sp.z);
       await page.waitForTimeout(600);
     }
-    if ((await botState('船长 Bram')).steeringShipId !== ship.id) {
-      log('Bram was let go of the wheel (a stalled page); taking it again');
-      await takeHelm();
-      await bots((b) => b.keys('船长 Bram', { forward: 1, strafe: 0.5 }), null);
-    }
     await until(async () => {
+      await keepHelm();
       list = await drawn();
       return list.some((e) => e.label === '船长 Bram' && e.posture === 'helm');
     }, 'Bram drawn at the helm from the shore', 60_000);

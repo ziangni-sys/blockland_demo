@@ -15,7 +15,7 @@
  *   icons=art (real procedural icons from src/art; icons=placeholder: no provider)
  *   playing together (package 11): online=0 (a build that cannot go online)  role=host|guest|none
  *     room=closed|opening|open|lost|error|manual|manual-making|manual-invite|manual-answered
- *     players=<1..4>  modes=1 (the host set guest modes)  join=service|host|answer|world|reconnecting|failed|ended|build
+ *     players=<1..4>  traffic=1 (the server's numbers next to each guest)  join=service|host|answer|world|reconnecting|failed|ended|build
  *     diag=1 (diagnostics shown)  plist=1 (Tab held: the player list over the HUD)  name=<text>
  *
  * window.harness: { state(), set(patch), show(screen), toast(text, kind), log, clearLog(), perf(n) }
@@ -78,7 +78,8 @@ function onlineFromParams(lang: 'zh' | 'en'): OnlineView {
       name: PLAYER_NAMES[i]!,
       host: i === 0,
       you: role === 'guest' ? i === 1 : i === 0,
-      mode: role === 'host' && i > 0 && flag('modes') ? (i % 2 === 0 ? 'survival' : 'creative') : null,
+      mode: i % 2 === 0 ? 'creative' : 'survival',
+      traffic: role === 'host' && i > 0 && flag('traffic') ? { bytesPerSec: 4200 + i * 310, backlogBytes: i === 2 ? 2600 : 0, rttMs: 38 + i * 21 } : null,
     });
   }
   const r = params.get('room') ?? 'closed';

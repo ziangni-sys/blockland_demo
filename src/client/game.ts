@@ -57,7 +57,7 @@ import { hashString } from '../core/rng';
 import { paintAllTiles } from '../art/tiles';
 import { renderItemIcon } from '../art/icons';
 import type { MeshResponse } from '../mesh/types';
-import type { HostToPage } from '../net/host/control';
+import type { HostToPage, ServerProbe } from '../net/host/control';
 import type { NetStatus } from '../net/client/netclient';
 import { cleanName } from '../net/names';
 import type { HostCommand } from '../net/protocol';
@@ -70,6 +70,7 @@ import type { SaveStorage } from '../save/storage';
 import { formatMessage } from '../sim/messages';
 import { Rotor, Ship } from '../structures/structure';
 import { chunkKey } from '../voxel/chunk';
+import { columnHash, gridHash } from '../voxel/fingerprint';
 import { createUi } from '../ui/index';
 import {
   DEFAULT_SETTINGS,
@@ -231,6 +232,7 @@ export class Game implements InputHost {
   private envTime = 0;
   private lastRender = -Infinity;
   private renderDirty = true;
+  private probeSeq = 0;
   private lockLostAt = -Infinity;
   private hintMsg: unknown = null;
   private hintLang = '';
@@ -548,6 +550,8 @@ export class Game implements InputHost {
         break;
       case 'status':
         this.serverTps = m.tps;
+        this.lobby.guestTraffic(m.guests);
+        this.renderDirty = true;
         break;
       case 'tickTime':
         this.stats.serverTickMs = m.meanMs;
@@ -1585,8 +1589,9 @@ export class Game implements InputHost {
         sectionsMeshed: s?.mesher?.meshedCount ?? 0,
         sectionsDrawn: this.backend.stats().sections,
         meshQueue: s?.mesher?.stats.queued ?? 0,
+        // Only once the prediction placed the player (the first client tick after loading adopts the join's correction).
         player:
-          own && s
+          own && s && own.placed
             ? {
                 x: own.player.pos.x,
                 y: own.player.pos.y,
@@ -1658,8 +1663,9 @@ export class Game implements InputHost {
     /** The connection diagnostics text, as "Copy diagnostics" makes it (about a second). */
     diagnostics: (): Promise<string> => this.copyDiagnostics(),
     /**
-     * FNV-1a hashes of the replica's columns within `radius` columns of the player, and the cell
-     * count of every structure: two pages in one room compare theirs (scripts/e2e-room.mjs).
+     * Hashes of the replica's columns within `radius` columns of the player and of every
+     * structure's cells (voxel/fingerprint.ts): two pages in one room compare theirs, and each with
+     * the server's probe (scripts/e2e-room.mjs).
      */
     digest: (radius = 2): { tick: number; columns: Record<string, number>; structures: Record<string, number> } | null => {
       const s = this.session;
@@ -1671,15 +1677,22 @@ export class Game implements InputHost {
       for (let dz = -radius; dz <= radius; dz++) {
         for (let dx = -radius; dx <= radius; dx++) {
           const chunk = r.world.chunks.get(chunkKey(cx0 + dx, cz0 + dz));
-          if (chunk === undefined) continue;
-          let h = 0x811c9dc5;
-          for (let i = 0; i < chunk.cells.length; i++) h = Math.imul(h ^ chunk.cells[i]!, 0x01000193) >>> 0;
-          columns[`${cx0 + dx},${cz0 + dz}`] = h;
+          if (chunk !== undefined) columns[`${cx0 + dx},${cz0 + dz}`] = columnHash(chunk.cells);
         }
       }
       const structures: Record<string, number> = {};
-      for (const st of r.structures()) structures[String(st.id)] = st.grid.count;
+      for (const st of r.structures()) structures[String(st.id)] = gridHash(st.grid);
       return { tick: r.state.tick, columns, structures };
+    },
+    /** What the page's own server holds now (host control probe; null for a guest or without a world). */
+    serverProbe: async (radius = 2): Promise<ServerProbe | null> => {
+      const server = this.server;
+      if (server === null) return null;
+      const id = ++this.probeSeq;
+      const answer = server.waitFor((m) => m.type === 'probe' && m.id === id, 10_000);
+      server.post({ type: 'probe', id, radius });
+      const m = await answer;
+      return m !== null && m.type === 'probe' ? m.probe : null;
     },
     /** Join a room (from the menu): `code` is the room code, or a manual invitation code. */
     joinRoom: (signal: SignalKind, code: string, opts: { iceServers?: RTCIceServer[] } = {}): Promise<boolean> => this.joinRoom(signal, code, opts),

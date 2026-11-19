@@ -540,7 +540,7 @@ export class Replicator {
     const out: PlayerEntry[] = [];
     for (const c of this.clients.values()) {
       const ctrl = this.sim.players.get(c.key);
-      if (ctrl !== undefined) out.push({ entityId: ctrl.entityId, name: c.name, host: c.host });
+      if (ctrl !== undefined) out.push({ entityId: ctrl.entityId, name: c.name, host: c.host, mode: ctrl.player.mode });
     }
     return out.sort((a, b) => a.entityId - b.entityId);
   }
@@ -1467,7 +1467,13 @@ export class Replicator {
     for (const p of table) {
       now.add(p.entityId);
       const was = c.players.get(p.entityId);
-      if (was !== undefined && was.name === p.name && was.host === p.host) continue;
+      if (was !== undefined && was.name === p.name && was.host === p.host) {
+        if (was.mode !== p.mode) {
+          ops.push({ op: 'mode', entityId: p.entityId, mode: p.mode });
+          c.players.set(p.entityId, p);
+        }
+        continue;
+      }
       if (was !== undefined) ops.push({ op: 'leave', entityId: p.entityId });
       ops.push({ op: 'join', ...p });
       c.players.set(p.entityId, p);

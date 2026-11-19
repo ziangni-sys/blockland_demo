@@ -1753,8 +1753,14 @@ function writeGlobals(w: ByteWriter, g: Globals): void {
   if (g.players !== undefined) {
     w.varuint(g.players.length);
     for (const c of g.players) {
-      if (c.op === 'join') w.u8(0).varuint(c.entityId).string(c.name).bool(c.host);
-      else w.u8(1).varuint(c.entityId);
+      if (c.op === 'join') {
+        w.u8(0).varuint(c.entityId).string(c.name).bool(c.host);
+        writeMode(w, c.mode);
+      } else if (c.op === 'leave') w.u8(1).varuint(c.entityId);
+      else {
+        w.u8(2).varuint(c.entityId);
+        writeMode(w, c.mode);
+      }
     }
   }
   if (g.tps !== undefined) {
@@ -1777,8 +1783,10 @@ function readGlobals(r: ByteReader): Globals {
       const entityId = r.varuint();
       if (op === 0) {
         const name = r.string();
-        players.push({ op: 'join', entityId, name, host: r.bool() });
+        const host = r.bool();
+        players.push({ op: 'join', entityId, name, host, mode: readMode(r) });
       } else if (op === 1) players.push({ op: 'leave', entityId });
+      else if (op === 2) players.push({ op: 'mode', entityId, mode: readMode(r) });
       else r.fail(`unknown player list change ${op}`);
     }
     g.players = players;
@@ -1803,7 +1811,7 @@ const MIN_BYTES = Object.freeze({
   entityRecord: 17,
   entityUpdate: 2,
   worldEvent: 6,
-  player: 3,
+  player: 4,
   shipSample: 21,
   entitySample: 17,
 });
@@ -2005,11 +2013,13 @@ function writeSamplesBody(w: ByteWriter, tick: number, seq: number, ships: reado
 
 function writePlayerEntry(w: ByteWriter, p: PlayerEntry): void {
   w.varuint(p.entityId).string(p.name).bool(p.host);
+  writeMode(w, p.mode);
 }
 function readPlayerEntry(r: ByteReader): PlayerEntry {
   const entityId = r.varuint();
   const name = r.string();
-  return { entityId, name, host: r.bool() };
+  const host = r.bool();
+  return { entityId, name, host, mode: readMode(r) };
 }
 
 function writeServerPayload(w: ByteWriter, m: ServerMessage): void {

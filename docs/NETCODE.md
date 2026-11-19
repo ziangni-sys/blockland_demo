@@ -75,7 +75,7 @@ export interface Transport {
 
 **加入顺序**（握手通过后，服务器在下一个 tick 开头处理；对模拟的所有写都在 tick 的流程里）：
 
-1. tick T 开始前：`sim.join(key)`，恢复记录或新建玩家，并立刻把它设成客户端驱动（工作包 2 的 `setDrive`，它提出 cause 为 `drive`、epoch 1 的校正）；新身份由 `ServerHost` 发开局物品（第 17 节第 5 条）；玩家的模拟半径设成 `min(viewRadius, SIM_RADIUS_CAP)`；发 `Welcome`：自己的实体 id、`GeneratorSpec`、`world.time`、`dayOffset`、世界规则、在线玩家表（实体 id、名字、是否房主）、`isHost`、`roomOpen`。
+1. tick T 开始前：`sim.join(key)`，恢复记录或新建玩家，并立刻把它设成客户端驱动（工作包 2 的 `setDrive`，它提出 cause 为 `drive`、epoch 1 的校正）；新身份由 `ServerHost` 发开局物品（第 17 节第 5 条）；玩家的模拟半径设成 `min(viewRadius, SIM_RADIUS_CAP)`；发 `Welcome`：自己的实体 id、`GeneratorSpec`、`world.time`、`dayOffset`、世界规则、在线玩家表（实体 id、名字、是否房主、模式）、`isHost`、`roomOpen`。
 2. tick T 的包：私有区有那条校正（完整的移动状态，含座位）、完整背包、生命等、交互视图。区块快照、兴趣内的结构体和实体都按第 13 节的优先级在预算内发。
 3. **就绪区** = 以玩家所在区块为中心的 7×7 列（`READY_CHUNK_RADIUS = 3`）里落在订阅圆内的列（订阅半径很小时圆比 7×7 小，比如验收测试的半径 2、3）。就绪区的快照、就绪区里的实体、加入时兴趣内的全部结构体都发出之后，那个包的全局区带 `ready`。
 4. `NetClient` 就绪 = 收到 `Welcome`、收到 `ready`、就绪区的列都已插进副本（标成原样的已经自己生成完）。浏览器的加载界面（`client/session.ts`）另外等中间 5×5 列（同样只算订阅圆内的）的 section 网格化完、每个结构体至少网格化过一次（沿用 `WorldSession.loadingProgress`）；无头客户端没有网格，只看 `NetClient`。然后才开始预测、接受输入、发移动上报。在这之前服务器让这个玩家停在原地（工作包 2 对没有上报的客户端驱动玩家的处理）。
@@ -546,7 +546,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 | id | 消息 | 通道 | 布局 |
 |---|---|---|---|
-| 0x81 | `Welcome` | 可靠 | `vu entityId, GeneratorSpec, vu worldTime, vu dayOffset, u8 defaultMode, bool drops, bool isHost, bool roomOpen, vu n, n × (vu entityId, str name, bool host)` |
+| 0x81 | `Welcome` | 可靠 | `vu entityId, GeneratorSpec, vu worldTime, vu dayOffset, u8 defaultMode, bool drops, bool isHost, bool roomOpen, vu n, n × (vu entityId, str name, bool host, u8 mode)` |
 | 0x82 | `Refuse` | 可靠 | `u8 reason, str detail`（布局和 reason 1 永不改）。reason：1 build、2 bad_hello、3 full、4 closed、5 shutting_down、6 same_key |
 | 0x83 | `Kick` | 可靠 | `u8 reason, str detail`。reason：1 replaced、2 too_slow、3 protocol_error、4 shutdown、5 kicked、6 timeout |
 | 0x84 | `Pong` | 不可靠 | `u32 clientMs, vu tick` |
@@ -569,7 +569,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | 9 entityUpdates | `vu n, n × EntityUpdate` |
 | 10 private | `PrivateState` |
 | 11 events | `vu n, n × WorldEvent` |
-| 12 globals | `u8 mask`：0 `vu dayOffset`；1 `u8 mode, bool drops`；2 `vu n, n × (u8 op`（0 加入 1 离开）`, vu entityId, [str name, bool host])`；3 `vu tps×10`；4 ready（无载荷）；5 `bool roomOpen` |
+| 12 globals | `u8 mask`：0 `vu dayOffset`；1 `u8 mode, bool drops`；2 `vu n, n × (u8 op`（0 加入 1 离开 2 模式）`, vu entityId`，加入再加 `str name, bool host, u8 mode`，模式再加 `u8 mode)`；3 `vu tps×10`；4 ready（无载荷）；5 `bool roomOpen` |
 
 **记录**
 
@@ -589,7 +589,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
   - 6 `vu moveAck`。
 - `WorldEvent`：`u8 type`；0 blockBroken、1 blockPlaced：`vu gridId, vi x, vi y, vi z, Cell`；2 explosion：`f32×3, f32 power`；3 sound：`str name, f32×3`。
 
-**大小估计**（实测）：空包 4～6 字节（tick < 2^21，约 29 小时）；平常的包 6～60 字节；原样快照 6 字节 + 每个胶面 3 字节；改过的快照中位约 2.0 KB（p90 约 2.85 KB，最大可到 4.8 KB；玩家轻度改动的列中位 2.6～2.7 KB；调色板游程和存档相同，比存档编码小 17～29 字节）；区块增量每列约 6 字节 + 每格 2～4 字节；结构体生成约 130 字节 + 格子（木板船实测每格约 0.3～0.4 字节，3700 格整条约 1.2～1.35 KB；按存档的量法每格 2.4 字节是上限）+ 每个胶面 3～7 字节；结构体增量约 3 字节 + 每格约 5 字节；采样消息约 5 字节 + 每条船 22 字节 + 每个实体 18～21 字节；校正约 75 字节（坐着时约 100）；预览位图最多 256 KiB（盒子上限 2^21 格）。
+**大小估计**（实测）：空包 4～6 字节（tick < 2^21，约 29 小时）；平常的包 6～60 字节；原样快照 6 字节 + 每个胶面 3 字节；改过的快照中位约 2.0 KB（p90 约 2.85 KB，最大可到 4.8 KB；玩家轻度改动的列中位 2.6～2.7 KB；调色板游程和存档相同，比存档编码小 17～29 字节）；区块增量每列约 6 字节 + 每格 2～4 字节；结构体生成约 130 字节 + 格子（木板船实测每格约 0.3～0.4 字节，3700 格整条约 1.2～1.35 KB；按存档的量法每格 2.4 字节是上限）+ 每个胶面 3～7 字节；结构体增量约 3 字节 + 每格约 5 字节；采样消息约 5 字节 + 每条船 22 字节 + 每个实体 18～21 字节；校正约 75 字节（坐着时约 100）；玩家表每项（`Welcome` 里，或者全局区的加入）约 4 字节 + 名字的 UTF-8 字节，模式变化 3 字节；预览位图最多 256 KiB（盒子上限 2^21 格）。
 
 **版本**：没有单独的协议版本号，`BUILD_ID` 相同才能连（第 3 节）。不做兼容：版本不同就拒绝连接。
 
@@ -659,7 +659,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 **服务器一个 tick**（`ServerHost.tickOnce()`）：`netServer.beforeTick()`（超时；离开和顶替；握手通过的加入；然后按玩家实体 id、到达顺序把排队的上报全部交给 `moves.receive`，再把排队的意图全部交给 `intents.receive`，然后 `moves.beforeTick()`、`intents.beforeTick()`）→ `sim.tick()` → `replicator.endTick()` → `netServer.afterTick()`（踢掉太慢的客户端）。上报和意图在到达时只排队，过滤是 `moves.ts`、`intents.ts` 的事。两次 tick 之间：处理到达的消息（只排队，`Ping` 立刻回）、按时间预算生成区块（`sim.chunks.wanted()` + `loadColumn`，和现在 `ChunkStreamer` 喂 `provide()` 一样在 tick 之外做，`syncChunks` 只留给测试）。
 
-**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players, guests }`（TPS 或玩家数变了时发，有客人在时每秒发一次，每秒最多一次；`guests` 是每个客人的实体 id、名字、每秒发给它的字节、积压、往返，第 18 节“工作包 13”）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。Worker 自己打不开 IndexedDB 时存到页面的存储里（`host/pagestorage.ts`，第 18 节工作包 9）：Worker → 页面 `storage { id, call }`（`call` 是 `open`，或者宿主用到的存储调用 `getMeta`、`listChunkKeys`、`getChunks`、`getBlob`、`putAll`），页面 → Worker `storageResult { id, ok, value }` 或 `storageResult { id, ok: false, code, message }`（`code` 是 `SaveStorageError` 的 code，别的错误为 null）。回答不是命令，不排在等它的命令（比如正在读档的 `load`）后面。
+**宿主控制消息**（`host/control.ts`，页面 → Worker）：`create { meta, options: { generator?, exampleShip? } }`、`load { worldId }`、`connect { port, local }`（每个连接一个 MessagePort，本机客户端 `local = true`，它就是房主连接）、`pause { paused }`（只在房间没开放时接受，不接受时报 `error { what: 'pause' }`）、`save`、`openRoom` / `closeRoom`（工作包 11；`openRoom` 让暂停的服务器继续，`closeRoom` 现在只改标志、不踢客人）、`shutdown { save }`、`probe { id, radius }`（只给浏览器测试，回 `probe { id, probe }`，第 18 节“工作包 14”）。Worker → 页面：`ready { meta, persistent, reason }`（`reason` 在能持久时为 null，否则同 `openBestStorage` 的 code）、`saved { ok, code }`、`status { tps, players, guests }`（TPS 或玩家数变了时发，有客人在时每秒发一次，每秒最多一次；`guests` 是每个客人的实体 id、名字、每秒发给它的字节、积压、往返，第 18 节“工作包 13”）、`tickTime { meanMs, maxMs }`（时钟在走时约每秒一次：上次报告以来一个 tick 的平均和最长耗时，给页面的调试面板）、`error { what, message }`（tick 里抛出的异常报 `what: 'tick'` 并停住时钟）、`closed`。Worker 自己打不开 IndexedDB 时存到页面的存储里（`host/pagestorage.ts`，第 18 节工作包 9）：Worker → 页面 `storage { id, call }`（`call` 是 `open`，或者宿主用到的存储调用 `getMeta`、`listChunkKeys`、`getChunks`、`getBlob`、`putAll`），页面 → Worker `storageResult { id, ok, value }` 或 `storageResult { id, ok: false, code, message }`（`code` 是 `SaveStorageError` 的 code，别的错误为 null）。回答不是命令，不排在等它的命令（比如正在读档的 `load`）后面。
 
 **无头联机测试的组装**（`tests/net/harness.ts`，一个进程里）
 
@@ -895,7 +895,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **`Ping`**：每个连接每 `PONG_INTERVAL_MS`（50 ms）至多回一个 `Pong`，多的不回（客户端每秒只发一个）；按服务器的时钟算，不按 tick，模拟暂停时 `Pong` 照回（第 4 节“`Pong` 还在到”）。不这样的话字节预算之内每秒 700 个 `Ping`（审查时试过）换来 700 个 `Pong`，都排进这个客人自己的通道，下行慢的客户端会让房主页面替它攒着。`rttMs` 截到 `MAX_REPORTED_RTT_MS`（60 秒，客户端本来就截到这么多），房主页面不会显示 2⁴⁰ 毫秒。
 - **游戏规则没有限住的意图**：`DropCursor` 按“按下”算（这个 tick 的应用到它为止）：创造模式里“取一组 + 扔掉”原来每 tick 能扔 8 组，每组一个要发生成记录和采样的实体。连续的几条 `Aim` 只校验最后一条（前面的被覆盖，从来没人用）：一阵 `Aim` 只花一次校验。`SetViewRadius` 每 `VIEW_RADIUS_INTERVAL_TICKS`（20）个 tick 至多生效一次，最新的值等着（确认号照走）：每次改都要重订阅、服务器加载或丢掉模拟半径里的列，每 tick 来回切会让服务器一直在生成、它自己那份上行一直满。其余意图已经由每 tick 至多 16 条（`INTENTS_PER_TICK`）和按下每 tick 一个限住，消息大小由第 13 节的上限限住。
 - **加入的次数**：一个身份一分钟内至多加入 `JOINS_PER_KEY_PER_MINUTE`（6）次；超出的连接握手照样通过（顶替照样发生），但留在“已接受”里，等到这一分钟允许再加入（仍占 `full` 的名额）。循环重连的客户端每次都让服务器做一次离开、加入和整套重新同步。房主自己的连接不限。不设所有客人合计的次数（审查后去掉了原来的每分钟 20 次）：身份是客户端自己选的，一个客户端换着 20 个身份进出就用光这一分钟，别的客人断线重连时被挡在世界外面最多一分钟（实测 19 秒）；它也挡不住存档里的玩家记录越积越多（20 次一分钟一天还是约 2.9 万条）。换身份要新开一个连接，新连接的多少由房主页面管（工作包 10）。“一个传输的 Hello 次数”本来就是一次（第二个 `Hello` 是协议错误），不说话的连接由房主页面限住（工作包 10）。
-- **房主页面看得到的**（第 15 节）：宿主控制的 `status` 多一个 `guests`（`control.ts GuestTraffic`）：每个客人的实体 id、名字、上次状态以来每秒发给它的字节（包 + 采样的载荷）、两条通道的积压（服务器按转发方报告的估计）、往返（客户端量的，`Ping` 带上来：`Ping` 改成 `u32 clientMs, vu rttMs`）。有客人在时每秒发一次，没客人时照旧只在 TPS 或玩家数变了时发。界面由工作包 11 做。
+- **房主页面看得到的**（第 15 节）：宿主控制的 `status` 多一个 `guests`（`control.ts GuestTraffic`）：每个客人的实体 id、名字、上次状态以来每秒发给它的字节（包 + 采样的载荷）、两条通道的积压（服务器按转发方报告的估计）、往返（客户端量的，`Ping` 带上来：`Ping` 改成 `u32 clientMs, vu rttMs`）。有客人在时每秒发一次，没客人时照旧只在 TPS 或玩家数变了时发。界面见第 18 节“工作包 14”。
 - **没改的常量**：`SNAPSHOT_BUDGET`（16 KB/tick）在 5 Mbit/s 三人加入时也不是瓶颈（每人分到约 200 KB/s，预算是 320 KB/s）；`SAMPLE_MESSAGES_PER_TICK`（4）只在 5 Mbit/s 以上才碰得到；`CHUNK_RESEND_CELLS`、`STRUCTURE_RESEND_CELLS`（1024）：3700 格的船组装时清掉的格子分在几列里，每列都在线下，走增量，一个包 7.7 KB，和第 13 节的估计相同；插值延迟 D 的公式不变：采样变稀是按东西轮流发，不是丢包，不该把 D 顶上去，远处的东西一顿一顿地走是低带宽时有意的取舍。
 - **没做的**：`too_slow` 还是按 8 MiB 积压持续 10 秒，上行低于约 110 kbit/s 时客人们的积压涨得很慢，要很久才到；按“排多久”踢人会在共享的上行上把三个客人同时踢掉，所以没改。要省带宽，最大的一块是头（平常玩时四分之三）：每 tick 一个包、一条采样消息是协议的约定，改成没内容时隔一个 tick 发一次要改客户端的时钟，留到需要时。
 
@@ -904,7 +904,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **模块**：`client/lobby.ts`（`Lobby`：房主的房间、客人的加入、玩家列表、名字、加入和离开的 toast、连接诊断；无头，页面经 `LobbyDeps` 把浏览器的对象传进来，`tests/client/lobby.test.ts` 用工作包 10 的假连接和 harness 的服务器驱动它）、`client/names.ts`（名字规则、建议的名字、存储）、`client/diagnostics.ts`（诊断文字，纯函数）。界面：`ui/views/room.ts`（暂停菜单的“一起玩”）、`join.ts`（主菜单的“加入房间”）、`name.ts`（名字）、`players.ts`（按住 Tab 的玩家列表），`loading.ts` 显示加入的阶段和失败，`pause.ts`、`mainMenu.ts`、`settings.ts` 加了各自的入口。`UiState.online`（`OnlineView`）是这一切的状态，`Lobby.view()` 在没有变化时给同一个对象。
 - **`Kick` 房主命令**（第 10 节）：`net/server/intents.ts` 把房主的 `Kick { entityId }` 记下来，`IntentSink.kicks()` 在 `beforeTick` 之后交给 `NetServer`，它给那个客人的连接发 `Kick(kicked)` 并结束连接，玩家在下一个 tick 开头离开（记录留下）。房主自己的玩家、不在线的 id、`entityId` 0 都忽略；客人发来的照第 10 节回 `toast.host.only`。被移出的客人不自动重连（第 3 节），房间开着时可以用同一个链接再加入：不记黑名单，房主要挡住某人就关闭房间（再开放是新的房间码）。
 - **名字**（第 3 节）：客户端和服务器用同一个规则 `net/names.ts` 的 `cleanName`：去掉控制字符、格式字符（双向覆盖、嵌入和隔离，零宽空格和连接符，BOM，软连字符……）、其他默认可忽略的码点（画不出东西的填充字符）、行和段分隔符、孤立的代理项；两个象形符号之间的零宽连接符和象形符号后面的表情变体选择符保留（表情序列不散开）；再去掉首尾空白；剩下 1～24 个码点，而且至少有一个画得出来的字符（不全是空白或组合符号），否则拒绝（服务器回 `Refuse(bad_hello)`）。这样名字不会把列表、toast 和头顶标签里前后的文字反过来或藏起来；界面上名字另外用 `dir=auto`（列表）或 FSI…PDI（句子里，`ui/format.ts` 的 `isolate`）隔开。输入框不设 `maxlength`（它数 UTF-16 单元），按码点检查，违反时说出规则。只问一次：能联机的版本第一次打开时、在主菜单之前问（经邀请链接打开时问完就加入）；输入框里是建议的名字，由玩家身份算出的两个词（同一个身份总是同一个名字，跟当前语言），永远不是“Player”。存 localStorage 的 `playerName`（`?slot=` 时 `playerName:<名字>`）。设置里可以改，从下一次进入世界起生效：已经发出的 `Hello` 不变，协议里没有改名的消息。单文件版不问。
-- **别人的模式不复制**：玩家表没有模式。房主的列表里每个客人的模式按钮只显示这个页面在这次开着世界期间给他设过的模式，设过之前两个都不亮。要显示真实的模式，玩家表要带上模式（`Replicator` 的玩家表和一个新的变化项），留到工作包 13 合并之后。
+- **每个人的模式**：玩家表带模式（第 18 节“工作包 14”）。房主的列表里每个客人的模式按钮亮的是服务器上他现在的模式，按下后等服务器的玩家表变了才换过来；其他行（房主自己、客人看到的每一行）是一个模式标记。
 - **开房间**：“向朋友开放”用页面的信令服务（公共服务；页面地址带 `?signal=broadcast` 时用同浏览器的频道，给测试用），新的随机房间码；监听成功才算开放。“改用邀请码”用 `ManualSignaller` 开同一个房间：一次给一位朋友生成邀请码，粘贴他的应答码后才能给下一位生成。一个房间只有一种信令；关闭房间后再开放就是新房间（新码）；关闭时还有客人在的旧房间留到世界关闭（它的转发方还在送这些客人的字节）。邀请链接 = 页面地址（不带查询和片段）+ `?join=<房间码>`，信令不是公共服务时再加 `&signal=<种类>`。房间码显示成 `XXXX-XXXX`，输入时连字符和空格忽略。加入框接受邀请链接、房间码、邀请码（`BL1I.` 开头）三种，别的在加入界面就拒绝。
 - **暂停**（DESIGN“联机的世界不暂停”）：只有单机（房间没开放、也没有客人在）时暂停菜单暂停世界；否则暂停菜单的标题是“游戏菜单”，下面一行说游戏仍在进行。客人的暂停菜单没有模式切换，“保存并退出”换成“离开房间”。单机时暂停菜单的模式切换连世界规则一起切；联机时（房间开着或有客人在）它只切房主自己的模式，世界规则（新玩家的模式、被撞掉等的方块是否掉落）在“一起玩”里单独设置（DESIGN“联机时由房主另外设置”），显示的是副本里的世界规则；单机时那里没有这一栏（模式切换带着规则，世界还可能暂停着）。
 - **客人看到的阶段和结局**（第 18 节工作包 10）：加载界面列出三步：连接信令服务（手动加入时是“读取邀请码”，同一刻就过去）、连接房主（手动加入时是“等房主粘贴你的应答码”，应答码和复制按钮显示在这里）、载入世界。每一步都有“回到主菜单”（Esc 也行），放弃这次加入；没有哪一步只能等。一张邀请码只能应答一次（第二个应答码在房主粘贴后 ICE 失败，浏览器里试过）：页面记下自己应答过的邀请码，不再用它加入，提示“请房主重新生成一个”；应答过之后放弃或失败时也这样提示，失败时不给“重试”。重连时 Esc 不放弃（只有按钮）。加入一开始就把 `?join=` 从页面地址里去掉（`history.replaceState`，`?signal=`、`?slot=` 留着），所以加入结束后刷新回到主菜单，而不是再加入一次或报告房间已经没了。连接断了显示“连接中断，正在重连”和“放弃”。加入失败、`Refuse`、`Kick`、协议错误、重连放弃时，会话结束，加载界面留着标题（没进去过是“无法加入”，进去过是“已离开房间”）、原因、“回到主菜单”，以及“重试”：`Kick`（任何原因）和 `Refuse(build)` 之后不给“重试”，其余都给。
@@ -913,6 +913,16 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **连接诊断**：“一起玩”里的“复制诊断信息”取每条 WebRTC 连接的统计两次，间隔 1 秒（`WebRtcTransport.stats()`，即 `RTCPeerConnection.getStats()`），给出：构建号、角色（房主带房间是否开放和客人连接数）、信令种类、每条连接正在用的候选对的两端类型（host、srflx、prflx、relay）和协议、它的往返时间、两个方向的字节速率，以及游戏连接的往返时间、采样丢失率、插值延迟 D、两个方向的字节速率、服务器 TPS、连接状态、这个世界或这次加入里最近一次连接错误（只有字符串键和失败代码，不带说明文字：信令的说明文字里有房间码；开始托管或开始加入时清空）。文字是英文（贴进问题报告用）。不含名字、身份、房间码、邀请码、IP 地址和端口：候选类型只接受短的小写单词。文字显示在可选中的框里并复制到剪贴板。
 - **名字标签的上限**（第 18 节工作包 12）：标签在屏幕上最多 `LABEL_MAX_PX = 32` 个 CSS 像素高（最少仍是 15），离得一两格的人头上不再是一块大牌子。
 - **单文件版**：不问名字，设置里没有名字一栏，按住 Tab 没有玩家列表，主菜单的“加入房间”换成一行“这个版本不能联机”，暂停菜单没有“一起玩”，`?join=` 只提示不能联机。
+
+### 工作包 14（集成与双页面冒烟测试）
+
+- **玩家表带模式**（第 3、14 节）：`PlayerEntry` 加 `mode`（`Welcome` 的每一项和全局区的“加入”都带 `u8 mode`），全局区的玩家表变化多一种 op 2“模式”（`vu entityId, u8 mode`，3 字节）。`Replicator` 每个 tick 按客户端比较玩家表：名字或房主标记变了照旧发离开 + 加入，只有模式变了发 op 2（不触发加入、离开的 toast）。不管模式是怎么变的（房主命令、存档恢复）都发。客户端收到玩家表里没有的实体的模式变化按协议错误（`ReplicaError`）。房主的模式按钮亮的是这个值，按下后等服务器的玩家表变了才换过来；其他行和 Tab 列表是模式标记，客人也看得到。
+- **房主看得到的客人连接**（第 15 节 `status`）：页面把 `status.guests` 交给 `Lobby.guestTraffic`。“一起玩”的玩家列表里每个客人那一行有一行小字：服务器每秒发给他的字节、积压、他量到的往返；文字就地更新（不重建这一行，按钮的焦点不丢），Tab 列表里同样。“复制诊断信息”里每个客人一行 `guest 1`、`guest 2`（按玩家表的顺序，没有名字）：他的 WebRTC 连接的候选对和速率，加上服务器的这三个数。连接和客人怎么对上：转发方（`client/forward.ts`）读服务器在这个连接上发的第一条可靠消息，接受的连接上它总是 `Welcome`，开头就是这个客人的实体 id（`PortForwarder.entityId`）。还没收到 `Welcome` 的连接排在最后，没有服务器的数字；没有 WebRTC 连接的客人（开发用的机器人）写 `no webrtc link`。
+- **握手的最后一步不再依赖信令**（第 18 节工作包 10）：一边的数据通道打开后它关掉自己的信令路径，对端收到 `bye`。原来对端只在自己的 `setRemoteDescription` 返回之后才算“交换完了”，页面忙时 `bye` 会先到，握手以 `left` 失败（e2e-room 的 echo 加入偶尔 1.5 秒后报 `left` 就是它）。现在自己的描述已发出、对方的已收到，信令路径的结束就不算失败；对方真的不在了由 ICE 的超时发现。
+- **预测放置玩家之前**（第 18 节工作包 6）：`OwnPlayer` 在加载结束时创建，加入的校正要到它的第一个客户端 tick 才采用（`OwnPlayer.placed`）。在这之前页面按校正显示玩家（和加载时一样），调试状态里没有 `player`。原来这段时间显示和调试状态都是原点：页面一秒一帧时脚本读到 (0, 0, 0)（e2e-play 的“could not place a block”之一），刚好在暂停时加载完的页面相机在原点。
+- **服务器探针**（第 15 节，只给浏览器测试用）：宿主控制 `probe { id, radius }`，Worker 回 `probe { id, probe }`：最后一个 tick、每个在线玩家的世界位置和载体局部位置、每个结构体的格子指纹、每个玩家周围 `radius` 列内已加载的列的指纹（`net/server/probe.ts`，指纹的算法在 `voxel/fingerprint.ts`，页面的 `debug.digest` 用同一个）。`window.__blocklands.game.debug.serverProbe()` 用它，双页面测试拿两个页面和服务器比。
+- **卡住的页面和舵**：页面主线程卡住 2 秒以上就没有移动上报，服务器按第 3 节松舵（房间开放后对房主也一样），这是设计。软件渲染、负载 8～11 的测试机上一帧可以超过 2 秒，浏览器脚本因此要在舵被松开时重新掌舵，并等到画面上真的是掌舵的样子再检查（e2e-players、e2e-room 的 ship 步骤）；开发用机器人的状态里有它的计时器两次运行之间最长的间隔（`longestGapMs`），脚本把它写进日志。
+- **双页面冒烟测试**（`scripts/e2e-room.mjs` 的 `ship` 和 `ship-cloud` 步骤）：见脚本开头的说明。`ship-cloud` 走真的公共信令服务，连不上时说明并跳过，不算失败。
 
 ## 附：有意不做的，以及什么时候需要
 

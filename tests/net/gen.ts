@@ -33,6 +33,7 @@ import {
   type NetMoveReport,
   type PlayerFlags,
   type PlayerHeld,
+  type PlayerListChange,
   type Pose,
   type PrivateEvent,
   type PrivateState,
@@ -472,7 +473,12 @@ export class Gen {
     const g: Globals = {};
     if (this.bool()) g.dayOffset = this.int(0, 23999);
     if (this.bool()) g.rules = { defaultMode: this.mode(), dropsEnabled: this.bool() };
-    if (this.bool()) g.players = this.list(() => (this.bool() ? { op: 'join' as const, entityId: this.id(), name: this.str(24), host: this.bool() } : { op: 'leave' as const, entityId: this.id() }), 3);
+    if (this.bool()) g.players = this.list((): PlayerListChange => {
+      const op = this.int(0, 2);
+      if (op === 0) return { op: 'join', entityId: this.id(), name: this.str(24), host: this.bool(), mode: this.mode() };
+      if (op === 1) return { op: 'leave', entityId: this.id() };
+      return { op: 'mode', entityId: this.id(), mode: this.mode() };
+    }, 3);
     if (this.bool()) g.tps = this.int(0, 300) / 10;
     if (this.bool()) g.ready = true;
     if (this.bool()) g.roomOpen = this.bool();
@@ -512,7 +518,7 @@ export class Gen {
         rules: { defaultMode: this.mode(), dropsEnabled: this.bool() },
         isHost: this.bool(),
         roomOpen: this.bool(),
-        players: this.list(() => ({ entityId: this.id(), name: this.str(24), host: this.bool() }), 4),
+        players: this.list(() => ({ entityId: this.id(), name: this.str(24), host: this.bool(), mode: this.mode() }), 4),
       },
       { type: 'refuse', reason: this.pick(REFUSE_REASONS), detail: this.str(40) },
       { type: 'kick', reason: this.pick(KICK_REASONS), detail: this.str(40) },

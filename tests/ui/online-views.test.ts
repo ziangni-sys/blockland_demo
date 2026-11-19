@@ -44,8 +44,8 @@ function setup(lang: Language): { doc: FakeDocument; ctx: UiContext; calls: Call
 
 const NAMES = ['Hester', 'Ann', 'Bob', 'Cy'];
 
-function players(n: number, you = 0, modes: Array<PlayerRow['mode']> = []): PlayerRow[] {
-  return NAMES.slice(0, n).map((name, i) => ({ entityId: i + 1, name, host: i === 0, you: i === you, mode: modes[i] ?? null }));
+function players(n: number, you = 0, modes: Array<PlayerRow['mode']> = [], traffic: Array<PlayerRow['traffic']> = []): PlayerRow[] {
+  return NAMES.slice(0, n).map((name, i) => ({ entityId: i + 1, name, host: i === 0, you: i === you, mode: modes[i] ?? 'creative', traffic: traffic[i] ?? null }));
 }
 
 function room(over: Partial<RoomView> = {}): RoomView {
@@ -221,18 +221,21 @@ describe.each(LANGS)('the room screen (%s)', (lang) => {
     expect(calls).toEqual([['makeInvitation'], ['acceptAnswer', 'BL1A.answer']]);
   });
 
-  it("the host's controls per guest: the mode it set (none before), Remove asks first in the row; never for the host itself", () => {
+  it("the host's controls per guest: the guest's mode lit, Remove asks first in the row; never for the host itself", () => {
     const { ctx, calls } = setup(lang);
     const v = new RoomScreenView(ctx);
     const root = el(v.el);
-    v.update(state(lang, online({ players: players(3, 0, [null, 'survival', null]) })));
+    v.update(state(lang, online({ players: players(3, 0, ['survival', 'survival', 'creative']) })));
     const rows = root.querySelectorAll('.bl-player');
     expect(rows[0]!.querySelector('[data-act="kick"]')).toBeNull();
     expect(visibleText(rows[0]!)).toContain(tr('room.host'));
     expect(visibleText(rows[0]!)).toContain(tr('room.you'));
+    // The host's own mode is a badge (it switches it in the pause menu).
+    expect(rows[0]!.querySelector('[data-act="mode"]')).toBeNull();
+    expect(visibleText(rows[0]!)).toContain(tr('mode.survival'));
     const annModes = rows[1]!.querySelectorAll('[data-act="mode"]');
     expect(annModes.map((b) => b.getAttribute('aria-checked'))).toEqual(['false', 'true']);
-    expect(rows[2]!.querySelectorAll('[data-act="mode"]').map((b) => b.getAttribute('aria-checked'))).toEqual(['false', 'false']);
+    expect(rows[2]!.querySelectorAll('[data-act="mode"]').map((b) => b.getAttribute('aria-checked'))).toEqual(['true', 'false']);
     annModes[0]!.click();
     act(rows[2]!, 'kick').click();
     expect(visibleText(root)).toContain(tr('room.kickConfirm', { name: '\u2068Bob\u2069' }));
@@ -246,6 +249,26 @@ describe.each(LANGS)('the room screen (%s)', (lang) => {
     ]);
   });
 
+  it("the host sees each guest's connection in small print, updated in place (the row is not rebuilt)", () => {
+    const { ctx } = setup(lang);
+    const v = new RoomScreenView(ctx);
+    const root = el(v.el);
+    v.update(state(lang, online({ players: players(2) })));
+    const link = root.querySelectorAll('.bl-player')[1]!.querySelector('.bl-player-link')!;
+    expect(shown(link, root)).toBe(false);
+    v.update(state(lang, online({ players: players(2, 0, [], [null, { bytesPerSec: 4400, backlogBytes: 2600, rttMs: 61 }]) })));
+    const row = root.querySelectorAll('.bl-player')[1]!;
+    expect(row.querySelector('.bl-player-link')).toBe(link);
+    expect(shown(link, root)).toBe(true);
+    expect(link.textContent).toBe(tr('room.traffic', { rate: '4.3 KB', backlog: '2.5 KB', rtt: '61' }));
+    expect(link.getAttribute('title')).toBe(tr('room.trafficHint'));
+    v.update(state(lang, online({ players: players(2, 0, [], [null, { bytesPerSec: 900, backlogBytes: 0, rttMs: 0 }]) })));
+    expect(root.querySelectorAll('.bl-player')[1]).toBe(row);
+    expect(link.textContent).toBe(tr('room.traffic', { rate: '900 B', backlog: '0 B', rtt: '–' }));
+    // Never on the host's own row.
+    expect(root.querySelectorAll('.bl-player')[0]!.querySelector('.bl-player-link')).toBeNull();
+  });
+
   it("a guest's view: no invite section, no controls; the diagnostics button, then the text shown and copied", async () => {
     const { ctx, calls, doc } = setup(lang);
     const v = new RoomScreenView(ctx);
@@ -255,6 +278,7 @@ describe.each(LANGS)('the room screen (%s)', (lang) => {
     expect(text).not.toContain(tr('room.invite'));
     expect(root.querySelector('[data-act="kick"]')).toBeNull();
     expect(root.querySelector('[data-act="mode"]')).toBeNull();
+    expect(root.querySelector('.bl-player-link')).toBeNull();
     expect(text).toContain(tr('room.copyDiagnostics'));
     act(root, 'diagnostics').click();
     v.update(state(lang, online({ role: 'guest', pauses: false, room: null, players: players(2, 1), diagnosticsBusy: true })));
@@ -561,8 +585,18 @@ describe.each(LANGS)('the pause menu, the main menu, the settings and the HUD li
     expect(text).toContain(tr('room.host'));
     expect(text).toContain(tr('room.you'));
     expect(text).toContain(tr('players.roomOpen'));
-    v.update(true, online({ role: 'guest', room: null, players: players(2, 1) }));
+    v.update(true, online({ role: 'guest', room: null, players: players(2, 1, ['creative', 'survival']) }));
     expect(visibleText(root)).not.toContain(tr('players.roomOpen'));
+    // Everyone's mode, for guests too.
+    const modes = root.querySelectorAll('.bl-plist-row').map((r) => visibleText(r));
+    expect(modes[0]).toContain(tr('mode.creative'));
+    expect(modes[1]).toContain(tr('mode.survival'));
+    expect(root.querySelector('.bl-plist-link')).toBeNull();
+    // The host sees each guest's connection in small print.
+    v.update(true, online({ players: players(2, 0, [], [null, { bytesPerSec: 4400, backlogBytes: 0, rttMs: 61 }]), room: room({ status: 'open' }) }));
+    const rows = root.querySelectorAll('.bl-plist-row');
+    expect(rows[0]!.querySelector('.bl-plist-link')).toBeNull();
+    expect(visibleText(rows[1]!)).toContain(t(lang, 'room.traffic', { rate: '4.3 KB', backlog: '0 B', rtt: '61' }));
     expect(root.querySelectorAll('.bl-player-name').every((n) => n.getAttribute('dir') === 'auto')).toBe(true);
     // No world: nothing to show.
     v.update(true, online({ role: null, room: null, players: [] }));

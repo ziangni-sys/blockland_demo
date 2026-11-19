@@ -17,10 +17,11 @@
  * pause (blocksPause).
  *
  * THE PLAYER LIST: the replica's player table, the host first, with who is the host and who is
- * this page. The host sets a guest's mode (SetPlayerMode) and removes a guest (Kick); the view
- * shows the mode this host set for a guest since the world opened (other players' modes are not
- * replicated). A removed guest may come back while the room is open (the host closes the room to
- * keep someone out; reopening makes a new code).
+ * this page, and each player's mode (the table carries it). The host sets a guest's mode
+ * (SetPlayerMode) and removes a guest (Kick); next to each guest the host sees what the server
+ * reports of that guest's connection (bytes a second, backlog, round trip: the host control
+ * `status`, guestTraffic()). A removed guest may come back while the room is open (the host closes
+ * the room to keep someone out; reopening makes a new code).
  *
  * JOINING. beginJoin(kind, code) makes the GuestJoin whose openTransport the page's session uses
  * (client/room.ts has the policy: every failure before the first Welcome is final, a lost link is
@@ -36,6 +37,7 @@
  */
 import { BUILD_ID, MAX_PLAYERS, type HostCommand, type PlayerEntry, type TickBatchMsg, type WelcomeMsg } from '../net/protocol';
 import type { NetStatus } from '../net/client/netclient';
+import type { GuestTraffic } from '../net/host/control';
 import { cleanName } from '../net/names';
 import type { ConnectDeps } from '../net/webrtc/connect';
 import { worldRulesFor, type WorldRules } from '../sim/rules';
@@ -44,7 +46,7 @@ import { DialError, newRoomCode, parseRoomCode, type Signaller } from '../net/we
 import type { WebRtcTransport } from '../net/webrtc/transport';
 import { isolate } from '../ui/format';
 import type { GameMode, JoinView, Language, OnlineView, PlayerRow, RoomView } from '../ui/model';
-import { diagnosticsText, linkReport, pairFromStats, type PairInfo } from './diagnostics';
+import { diagnosticsText, linkReport, pairFromStats, type GuestReport, type LinkReport, type PairInfo } from './diagnostics';
 import type { IntervalTimers } from './forward';
 import { storedName, storeName, suggestedName } from './names';
 import { dialFailureKey, GuestJoin, kickKey, refuseKey, RoomHost, type JoinStage, type RoomServer, type RoomState, type SignalKind } from './room';
@@ -177,7 +179,8 @@ export class Lobby {
   private invitation: string | null = null;
   private inviting = false;
   private answered = false;
-  private readonly modes = new Map<number, GameMode>();
+  /** The server's latest report of each guest's connection, by entity id (host control `status`). */
+  private traffic = new Map<number, GuestTraffic>();
   // ---- joining
   private joinState: JoinState | null = null;
   /**
@@ -258,7 +261,7 @@ export class Lobby {
     this.invitation = null;
     this.inviting = false;
     this.answered = false;
-    this.modes.clear();
+    this.traffic = new Map();
     this.joinState?.join.end();
     if (!keepJoin || this.joinState?.stage !== 'failed') this.joinState = null;
     this.session = null;
@@ -413,14 +416,17 @@ export class Lobby {
     return true;
   }
 
+  /** Host: the server's report of every guest's connection (host control `status`, about once a second while guests are in). */
+  guestTraffic(guests: readonly GuestTraffic[]): void {
+    this.traffic = new Map(guests.map((g) => [g.entityId, g]));
+    this.changed();
+  }
+
   /** Host: set guest `entityId`'s mode. */
   setPlayerMode(entityId: number, mode: GameMode): boolean {
     const s = this.session;
     if (s === null || s.welcome?.isHost !== true || entityId === s.welcome.entityId) return false;
-    if (!s.hostCommand({ kind: 'setPlayerMode', entityId, mode })) return false;
-    this.modes.set(entityId, mode);
-    this.changed();
-    return true;
+    return s.hostCommand({ kind: 'setPlayerMode', entityId, mode });
   }
 
   /** Host: the world's rules (a new player's mode, whether loosened blocks drop), set apart from the host's own mode online. */
@@ -567,7 +573,7 @@ export class Lobby {
 
   // ------------------------------------------------------------------ batches
 
-  /** A batch was applied: toasts for players joining and leaving. */
+  /** A batch was applied: toasts for players joining and leaving (a mode change only redraws the list). */
   onBatch(batch: TickBatchMsg): void {
     // The world's rules show on the host's room screen.
     if (batch.globals?.rules !== undefined) this.changed();
@@ -579,10 +585,9 @@ export class Lobby {
       if (c.op === 'join') {
         this.known.set(c.entityId, c.name);
         if (c.entityId !== self) this.d.toast(clientText(lang, 'players.joined', { name: isolate(c.name) }), 'info');
-      } else {
+      } else if (c.op === 'leave') {
         const name = this.known.get(c.entityId);
         this.known.delete(c.entityId);
-        this.modes.delete(c.entityId);
         if (c.entityId !== self && name !== undefined) this.d.toast(clientText(lang, 'players.left', { name: isolate(name) }), 'info');
       }
     }
@@ -591,18 +596,20 @@ export class Lobby {
 
   // ------------------------------------------------------------------ diagnostics
 
-  /** The guest's link, or each guest's link of the host's rooms. */
-  private links(): WebRtcTransport[] {
+  /** The guest's link to the host, or each guest's link of the host's rooms with the guest's entity id once welcomed. */
+  private links(): Array<{ link: WebRtcTransport; entityId: number | null }> {
     if (this.joinState !== null) {
       const t = this.joinState.join.transport;
-      return t !== null && t.open ? [t] : [];
+      return t !== null && t.open ? [{ link: t, entityId: null }] : [];
     }
     return [this.room, ...this.retired].flatMap((r) => (r === null ? [] : r.links()));
   }
 
   /**
    * Measure and format the connection diagnostics (client/diagnostics.ts): each link's candidate
-   * pair twice DIAGNOSTICS_SAMPLE_MS apart, and the page's numbers. The text goes in the view.
+   * pair twice DIAGNOSTICS_SAMPLE_MS apart, and the page's numbers; on the host, one entry per
+   * guest of the player table with its link and the server's latest report of it. The text goes
+   * in the view.
    */
   async diagnostics(numbers: () => DiagnosticsNumbers): Promise<string> {
     this.diagBusy = true;
@@ -610,9 +617,9 @@ export class Lobby {
     const links = this.links();
     const sample = async (): Promise<Array<PairInfo | null>> =>
       Promise.all(
-        links.map(async (t) => {
+        links.map(async ({ link }) => {
           try {
-            const r = await t.stats();
+            const r = await link.stats();
             return r === null ? null : pairFromStats(r);
           } catch {
             return null;
@@ -627,6 +634,7 @@ export class Lobby {
     const n1 = numbers();
     const ms = Math.max(1, this.d.now() - t0);
     const rate = (a: number | undefined, b: number | undefined): number | null => (a === undefined || b === undefined ? null : Math.max(0, ((b - a) * 1000) / ms));
+    const reports = links.map((l, i) => ({ entityId: l.entityId, report: linkReport(before[i] ?? null, after[i] ?? null, ms) }));
     const role = this.role;
     const room = this.room;
     const text = diagnosticsText({
@@ -634,7 +642,8 @@ export class Lobby {
       role,
       signal: role === 'guest' ? (this.joinState?.target.kind ?? null) : (room?.signaller.kind ?? null),
       roomOpen: role === 'host' ? room !== null && room.state !== 'closed' : null,
-      links: links.map((_, i) => linkReport(before[i] ?? null, after[i] ?? null, ms)),
+      link: role === 'guest' ? (reports[0]?.report ?? null) : null,
+      guests: role === 'host' ? this.guestReports(reports) : [],
       rttMs: n1.rttMs,
       loss: n1.loss,
       delayTicks: n1.delayTicks,
@@ -648,6 +657,26 @@ export class Lobby {
     this.diagBusy = false;
     this.changed();
     return text;
+  }
+
+  /**
+   * The host's guests for the diagnostics: the other players of the table in its order, each with
+   * its link (matched by entity id) and the server's numbers; then links not welcomed yet.
+   */
+  private guestReports(links: ReadonlyArray<{ entityId: number | null; report: LinkReport }>): GuestReport[] {
+    const out: GuestReport[] = [];
+    const used = new Set<number>();
+    for (const row of this.playerRows()) {
+      if (row.you) continue;
+      const i = links.findIndex((l) => l.entityId === row.entityId);
+      if (i >= 0) used.add(i);
+      const t = this.traffic.get(row.entityId);
+      out.push({ link: i >= 0 ? links[i]!.report : null, server: t === undefined ? null : { bytesPerSec: t.bytesPerSec, backlogBytes: t.backlogBytes, rttMs: t.rttMs } });
+    }
+    links.forEach((l, i) => {
+      if (!used.has(i)) out.push({ link: l.report, server: null });
+    });
+    return out;
   }
 
   // ------------------------------------------------------------------ the view
@@ -705,7 +734,11 @@ export class Lobby {
     const self = s.welcome?.entityId ?? -1;
     const hostView = s.welcome?.isHost === true;
     const rows: PlayerRow[] = [];
-    for (const p of table.values()) rows.push({ entityId: p.entityId, name: p.name, host: p.host, you: p.entityId === self, mode: hostView ? (this.modes.get(p.entityId) ?? null) : null });
+    for (const p of table.values()) {
+      const t = hostView && p.entityId !== self ? this.traffic.get(p.entityId) : undefined;
+      const traffic = t === undefined ? null : { bytesPerSec: t.bytesPerSec, backlogBytes: t.backlogBytes, rttMs: t.rttMs };
+      rows.push({ entityId: p.entityId, name: p.name, host: p.host, you: p.entityId === self, mode: p.mode, traffic });
+    }
     rows.sort((a, b) => (a.host !== b.host ? (a.host ? -1 : 1) : a.entityId - b.entityId));
     return rows;
   }

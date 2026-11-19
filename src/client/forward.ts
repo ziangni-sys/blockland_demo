@@ -19,11 +19,17 @@
  *    server's PortTransport.bufferedBytes = bufferedAmount + (bytes it posted - seen), so the
  *    Replicator's back-pressure works for guests as for any link.
  *
+ *  - the guest's player: the server's first reliable message on an accepted connection is Welcome,
+ *    which starts with the guest's entity id (section 14); the forwarder reads it (`entityId`) so the
+ *    host page can put a link's statistics next to the server's numbers of the same guest.
+ *
  * Frames from the port are checked (channel, an ArrayBuffer); anything else is ignored, like
  * PortTransport does.
  */
 import type { PortBacklog, PortClose, PortData, PortFrame, PortLike } from '../net/host/port';
+import { MSG } from '../net/protocol';
 import { RELIABLE, UNRELIABLE, type Channel, type Transport } from '../net/transport';
+import { ByteReader } from '../save/bytes';
 
 /** The backlog goes to the server at least this often, ms (section 2). */
 export const BACKLOG_REPORT_MS = 100;
@@ -46,6 +52,7 @@ export class PortForwarder {
   private readonly seen: [number, number] = [0, 0];
   private fromGuestCount = 0;
   private ended = false;
+  private entityIdValue: number | null = null;
   private readonly timer: unknown;
 
   constructor(
@@ -72,6 +79,11 @@ export class PortForwarder {
   /** Whether the guest sent a whole message yet (its Hello comes first, as soon as its link opens). */
   get heard(): boolean {
     return this.fromGuestCount > 0;
+  }
+
+  /** The guest's entity id from its Welcome; null before it (or when the server refused it). */
+  get entityId(): number | null {
+    return this.entityIdValue;
   }
 
   /** Bytes of `channel` forwarded from the server so far. */
@@ -101,9 +113,11 @@ export class PortForwarder {
     const f = raw as Partial<PortFrame> & Record<string, unknown>;
     if (f.kind === 'msg') {
       if ((f.channel !== RELIABLE && f.channel !== UNRELIABLE) || !(f.data instanceof ArrayBuffer)) return;
+      const bytes = new Uint8Array(f.data);
+      if (f.channel === RELIABLE && this.seen[RELIABLE] === 0) this.entityIdValue = welcomedId(bytes);
       this.seen[f.channel] += f.data.byteLength;
       try {
-        this.link.send(f.channel, new Uint8Array(f.data));
+        this.link.send(f.channel, bytes);
       } catch {
         // A message the link cannot carry (a server bug): the guest's connection is over.
         this.close('forward_error');
@@ -148,5 +162,15 @@ export class PortForwarder {
       // closed
     }
     this.onEnd?.(reason);
+  }
+}
+
+/** The entity id a Welcome starts with (`u8 id, vu entityId`), or null for any other message. */
+function welcomedId(bytes: Uint8Array): number | null {
+  if (bytes[0] !== MSG.welcome) return null;
+  try {
+    return new ByteReader(bytes.subarray(1), 'welcome').varuint();
+  } catch {
+    return null;
   }
 }

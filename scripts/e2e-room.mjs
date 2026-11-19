@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Two browser pages connected over real WebRTC (Playwright + Chromium; package 10 of NETCODE):
 //
-//   node scripts/e2e-room.mjs [--out DIR] [--no-build] [--only rtc|screens|game|offline|cloud]
+//   node scripts/e2e-room.mjs [--out DIR] [--no-build] [--only rtc|screens|game|ship|ship-cloud|offline|cloud]
 //
 // rtc: two pages of dev/rtc (a Vite dev server this script starts) with the real
 //   RTCPeerConnection, data channels and BroadcastChannel under src/net/webrtc:
@@ -27,6 +27,15 @@
 //   messages with "Try again"; manual invitation codes copied between the pages; the host closing
 //   the world; the host's page dying (reconnecting with "Give up", then the end). Each screen is
 //   shot in English and Chinese (game-<step>-<lang>.png).
+// ship (package 14, the two-page smoke test): two pages of the built game. The host builds a raft
+//   (15 planks on the water by a beach) and a helm with clicks and keys, opens the room through the
+//   room screen; the guest opens the invitation link, flies over to the beach, lands and walks onto
+//   the raft; the host assembles it and sails. While it sails, each page must see it move and draw
+//   the other player, with the right name, where the server has them in the raft's frame (the
+//   server's own view comes from the host page's Worker: debug.serverProbe); the host docks; both
+//   replicas must then equal the server. Over the same-browser channel (?signal=broadcast).
+// ship-cloud: the same through the real public signalling service (0.peerjs.com); when the room
+//   cannot open there (no network), the step says so plainly and passes.
 // offline: the single-file build says it cannot go online.
 // cloud (only with --only cloud: it needs the network): two dev/rtc pages join through the real
 //   public PeerJS server (CloudSignaller), messages go there and back, an unknown room is told.
@@ -68,7 +77,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-build') build = false;
   else if (a === '--only') only = argv[++i].split(',');
   else {
-    console.error('usage: node scripts/e2e-room.mjs [--out DIR] [--no-build] [--only rtc|screens|game|offline|cloud]');
+    console.error('usage: node scripts/e2e-room.mjs [--out DIR] [--no-build] [--only rtc|screens|game|ship|ship-cloud|offline|cloud]');
     process.exit(2);
   }
 }
@@ -508,6 +517,19 @@ async function runGame(browser) {
     await toRoomScreen(host);
     const gusRow = `${ROOM} .bl-player:not(:first-child)`;
     await host.waitForSelector(gusRow, { timeout: 10_000 });
+    // The guest's real mode is lit before the host set anything (the player table carries it), and
+    // next to the guest the server's numbers for its connection (about once a second).
+    await host.waitForSelector(`${gusRow} [data-act="mode"][data-mode="creative"][aria-checked="true"]`, { timeout: 10_000 });
+    await host.waitForSelector(`${gusRow} .bl-player-link:not([hidden])`, { timeout: 20_000 });
+    const linkText = (await host.textContent(`${gusRow} .bl-player-link`)).trim();
+    log(`the host's row of the guest: ${linkText}`);
+    check(/^\d+(\.\d)? (B|KB|MB)\/s · backlog \d+(\.\d)? (B|KB|MB) · rtt (\d+|–) ms$/.test(linkText), `not the guest's connection: ${linkText}`);
+    await host.click(`${ROOM} [data-act="diagnostics"]`);
+    await host.waitForFunction(() => (document.querySelector('.bl-copy--diag textarea')?.value ?? '').includes('last error'), undefined, { timeout: 20_000 });
+    const hostDiag = await host.inputValue('.bl-copy--diag textarea');
+    log(`host diagnostics:\n      ${hostDiag.split('\n').join('\n      ')}`);
+    check(/role: host \(room open, 1 guest\)/.test(hostDiag) && /guest 1: (host|srflx|prflx|relay|\?) -> (host|srflx|prflx|relay|\?) \((udp|tcp|\?)\), rtt [^;]*; out [^;]*, in [^;]*; server sends [^,]+, backlog [^,]+, rtt/.test(hostDiag), "the host's diagnostics lack the guest's line");
+    check(!hostDiag.includes('Gus') && !hostDiag.includes('Hester') && !/\b\d{1,3}(\.\d{1,3}){3}\b/.test(hostDiag), "the host's diagnostics carry a name or an address");
     await shot(host, '10-room-two-players');
     await backToPlay(host);
 
@@ -781,6 +803,550 @@ async function runGame(browser) {
   return problems;
 }
 
+// ====================================================================== ship: two pages on one raft (package 14)
+
+const SHIP_SEED = 'play-session';
+const SHIP_RENDER_DISTANCE = 2;
+const ITEM = { planks: 10, helm: 50 };
+/** Face (Dir) index of a horizontal unit step. */
+const faceOf = (dx, dz) => (dx === 1 ? 0 : dx === -1 ? 1 : dz === 1 ? 4 : 5);
+/** The sea level's top water cell (SEA_LEVEL 48: water up to y 47). */
+const SEA_Y = 47;
+/** A player's position on the deck as two pages and the server see it may differ this much (blocks; scenario 31 asks 0.05 at renderTick). */
+const DECK_TOLERANCE = 0.1;
+
+/** A page of the game with the helpers the ship step drives it with (clicks and keys as a player; debug helpers only point the view, teleport and read). */
+function shipPage(p, name, log) {
+  const G = (fn, arg) => p.evaluate(fn, arg);
+  const state = () => G(() => window.__blocklands.game.debug.state());
+  const frames = (n = 3) =>
+    G((k) => new Promise((res) => {
+      let i = 0;
+      const f = () => (++i >= k ? res() : requestAnimationFrame(f));
+      requestAnimationFrame(f);
+    }), n);
+  const until = async (cond, what, timeout = 60_000, pollMs = 250) => {
+    const end = Date.now() + timeout;
+    while (!(await cond())) {
+      if (Date.now() >= end) throw new StepError(`${name}: timed out waiting for ${what}`);
+      await p.waitForTimeout(pollMs);
+    }
+  };
+  const center = () => ({ x: p.viewportSize().width / 2, y: p.viewportSize().height / 2 });
+  /** The game takes the mouse (pointer lock, or drag-to-look) with a click when it does not have it yet: a click then is not a game click. */
+  const engage = async () => {
+    if (await G(() => window.__blocklands.game.pointerLocked)) return;
+    await p.bringToFront();
+    await p.mouse.click(center().x, center().y);
+    await p.waitForTimeout(400);
+  };
+  const lookAtPoint = async (x, y, z) => {
+    await G(([x, y, z]) => {
+      const d = window.__blocklands.game.debug;
+      const pl = d.state().player;
+      const dx = x - pl.shownX;
+      const dy = y - (pl.shownY + pl.eyeHeight);
+      const dz = z - pl.shownZ;
+      d.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)));
+    }, [x, y, z]);
+    await frames(3);
+  };
+  /** Point the view at a cell of a grid (0 = the world), at a face's centre when given; the target that results. */
+  const aim = async (c, face = -1, gridId = 0) => {
+    await G(([c, face, gridId]) => {
+      const g = window.__blocklands.game;
+      const r = g.session.replica;
+      const grid = gridId === 0 ? r.world : r.state.structures.get(gridId).structure.grid;
+      const D = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+      const off = face >= 0 ? D[face] : [0, 0, 0];
+      const w = grid.toWorld({ x: c.x + 0.5 + off[0] * 0.45, y: c.y + 0.5 + off[1] * 0.45, z: c.z + 0.5 + off[2] * 0.45 }, { x: 0, y: 0, z: 0 });
+      const pl = g.debug.state().player;
+      const dx = w.x - pl.shownX;
+      const dy = w.y - (pl.shownY + pl.eyeHeight);
+      const dz = w.z - pl.shownZ;
+      g.debug.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)));
+    }, [c, face, gridId]);
+    await frames(3);
+    return (await state()).target;
+  };
+  const onTarget = (t, c, face = -1, gridId = 0) => t && t.gridId === gridId && t.x === c.x && t.y === c.y && t.z === c.z && (face < 0 || t.face === face);
+  const cell = (c) => G((c) => window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023, c);
+  const rightClick = async () => {
+    await engage();
+    await p.mouse.click(center().x, center().y, { button: 'right' });
+    await frames(2);
+  };
+  const select = async (item) => {
+    const st = await state();
+    const idx = st.inventory.hotbar.findIndex((s) => s !== null && s.item === item);
+    check(idx >= 0, `${name}: no item ${item} in the hotbar`);
+    await p.bringToFront();
+    await p.keyboard.press(`Digit${idx + 1}`);
+    await until(async () => {
+      const inv = (await state()).inventory;
+      return inv.hotbar[inv.selected]?.item === item;
+    }, `item ${item} in hand`, 20_000);
+  };
+  /**
+   * A double tap of Space (creative): flight on or off, until it is `on`. The two taps go to the
+   * page in one turn of its event loop: the game wants them within FLY_TOGGLE_TICKS (300 ms), and
+   * two Playwright key presses to a page drawing a frame or two a second can be 0.5 s apart.
+   */
+  const flight = async (on) => {
+    for (let i = 0; i < 6; i++) {
+      if ((await state()).player.flying === on) return;
+      await p.bringToFront();
+      await engage();
+      await G(() => {
+        for (const type of ['keydown', 'keyup', 'keydown', 'keyup']) window.dispatchEvent(new KeyboardEvent(type, { code: 'Space', key: ' ', bubbles: true }));
+      });
+      try {
+        await until(async () => (await state()).player.flying === on, `flight ${on ? 'on' : 'off'}`, 6000, 150);
+        return;
+      } catch {
+        // again
+      }
+    }
+    const s = await state();
+    const focus = await G(() => document.hasFocus());
+    throw new StepError(`${name}: flight did not turn ${on ? 'on' : 'off'} (mode ${s.player.mode}, screen ${s.screen}, pointer locked ${s.pointerLocked}, focus ${focus})`);
+  };
+  /** The host's teleport (a host command; the server answers with a correction). */
+  const teleport = async (x, y, z) => {
+    await G(([x, y, z]) => window.__blocklands.game.debug.teleport(x, y, z), [x, y, z]);
+    await until(async () => {
+      const s = await state();
+      return s.player !== null && Math.hypot(s.player.x - x, s.player.z - z) < 0.3 && Math.abs(s.player.y - y) < 0.6 && s.sessionState === 'ready';
+    }, `the player at ${x.toFixed(1)} ${y.toFixed(1)} ${z.toFixed(1)}`);
+    await frames(2);
+  };
+  /** Hold `keys` until `cond()` holds (polled here), then let go. */
+  const holdUntil = async (keys, cond, what, timeout = 60_000, pollMs = 120) => {
+    await p.bringToFront();
+    for (const k of keys) await p.keyboard.down(k);
+    try {
+      await until(cond, what, timeout, pollMs);
+    } finally {
+      for (const k of keys) await p.keyboard.up(k);
+    }
+  };
+  /** The players this page draws: entity id, name tag, posture, feet (world) and, on a ship, in the ship's frame at its display pose. */
+  const drawn = () =>
+    G(() => {
+      const s = window.__blocklands.game.session;
+      const r = s.replica;
+      return (s.view.entityList ?? [])
+        .filter((e) => e.kind === 'player')
+        .map((e) => {
+          const ship = [...r.state.structures.values()].find((x) => x.structure.kind === 'ship');
+          const l = ship ? ship.structure.grid.toLocal({ x: e.x, y: e.y, z: e.z }, { x: 0, y: 0, z: 0 }) : null;
+          return { id: e.id, label: e.label, posture: e.posture, x: e.x, y: e.y, z: e.z, shipId: ship ? ship.structure.id : 0, local: l };
+        });
+    });
+  /**
+   * This page's own player as predicted; `local`: the feet in its carrier's frame as its last
+   * movement report gave them (the prediction's own conversion, at the poses of its client tick).
+   */
+  const own = () =>
+    G(() => {
+      const s = window.__blocklands.game.session;
+      const p = s.own.player;
+      const rep = s.own.rep;
+      const l = rep.carrierId === p.carrierId ? { x: rep.pos.x, y: rep.pos.y, z: rep.pos.z } : null;
+      return { id: s.replica.ownEntityId, carrierId: p.carrierId, steeringShipId: p.steeringShipId, onGround: p.onGround, flying: p.flying, x: p.pos.x, y: p.pos.y, z: p.pos.z, local: l };
+    });
+  return { p, name, G, state, frames, until, engage, lookAtPoint, aim, onTarget, cell, rightClick, select, flight, teleport, holdUntil, drawn, own, log };
+}
+
+/** Find a place for a raft near `spawn`: a beach cell at sea level with open water before it (the raft's 3 x 5 cells and a lane to sail). */
+function findRaftSite(spawn) {
+  const d = window.__blocklands.game.debug;
+  const Y = 47;
+  const id = (x, y, z) => d.cell(x, y, z) & 1023;
+  const water = (x, y, z) => id(x, y, z) === 30;
+  const air = (x, y, z) => id(x, y, z) === 0;
+  const ground = (n) => n === 1 || n === 3 || n === 4 || n === 5 || n === 6 || n === 7;
+  const sites = [];
+  for (let x = Math.floor(spawn.x) - 40; x <= spawn.x + 40; x++) {
+    for (let z = Math.floor(spawn.z) - 40; z <= spawn.z + 40; z++) {
+      if (!ground(id(x, Y, z)) || !air(x, Y + 1, z) || !air(x, Y + 2, z)) continue;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ux = -dz;
+        const uz = dx;
+        let ok = true;
+        for (let i = 1; i <= 16 && ok; i++) {
+          for (let k = -2; k <= 2 && ok; k++) {
+            const cx = x + dx * i + ux * k;
+            const cz = z + dz * i + uz * k;
+            if (!water(cx, Y, cz) || !air(cx, Y + 1, cz) || !air(cx, Y + 2, cz)) ok = false;
+            else if (i <= 5 && Math.abs(k) <= 1 && !water(cx, Y - 1, cz)) ok = false;
+          }
+        }
+        if (ok) sites.push({ x, z, dx, dz, ux, uz, dist: Math.hypot(x - spawn.x, z - spawn.z) });
+      }
+    }
+  }
+  sites.sort((a, b) => a.dist - b.dist);
+  return sites[0] ?? null;
+}
+
+/**
+ * Package 14, the two-page smoke test: the host builds a raft and a helm by clicks and keys, opens
+ * the room through the room screen; the guest joins through the invitation link, flies over to the
+ * beach and walks onto the raft; the host assembles it and sails; both pages see the ship move,
+ * each other on its deck where the server has them, and each other's name; the host docks; both
+ * replicas equal the server. `signal`: the same-browser channel, or the real public service (when
+ * it cannot be reached, the step says so and passes).
+ */
+async function runShip(browser, signal) {
+  const log = logger(`ship-${signal}`);
+  const problems = [];
+  const site = await distSite();
+  const context = await browser.newContext({ viewport: VIEWPORT });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: site.url.replace(/\/$/, '') });
+  // Each page was asked its name before (the game step covers the name screen).
+  await context.addInitScript(() => {
+    localStorage.setItem('playerName', 'Hester');
+    localStorage.setItem('playerName:guest', 'Gus');
+  });
+  const pages = [];
+  const tag = signal === 'cloud' ? 'ship-cloud' : 'ship';
+  const shot = async (g, what) => {
+    const size = g.p.viewportSize();
+    await g.p.setViewportSize(SHOT_VIEWPORT);
+    await g.frames(3);
+    const file = join(outDir, `${tag}-${what}.png`);
+    await g.p.screenshot({ path: file });
+    await g.p.setViewportSize(size);
+    await g.frames(2);
+    log(`screenshot ${file}`);
+  };
+  const open = async (who, search) => {
+    const p = await context.newPage();
+    watch(p, who, problems);
+    pages.push(p);
+    await p.goto(site.url + search, { timeout: 60_000 });
+    await p.waitForFunction(() => !!window.__blocklands, undefined, { timeout: 60_000 });
+    await p.evaluate((rd) => window.__blocklands.game.changeSettings({ renderDistance: rd, showDebug: false, language: 'en' }), SHIP_RENDER_DISTANCE);
+    return shipPage(p, who, log);
+  };
+  const playing = (g, timeout = 240_000) =>
+    g.until(async () => {
+      const s = await g.state();
+      return s.sessionState === 'ready' && s.screen === 'none' && s.player !== null;
+    }, 'play', timeout, 300);
+  const ROOM = '.bl-screen[data-screen="room"]';
+  const screenIs = (g, sc) => g.until(async () => (await g.G(() => window.__blocklands.game.screen)) === sc, `the ${sc} screen`, 30_000, 150);
+  try {
+    // ---- the host: a world from the menu
+    const host = await open('host', signal === 'broadcast' ? '?signal=broadcast' : '');
+    await screenIs(host, 'mainMenu');
+    await host.p.fill('.bl-newworld input[type="text"] >> nth=0', 'Raft');
+    await host.p.fill('.bl-newworld .bl-num-input', SHIP_SEED);
+    await host.p.click('.bl-newworld .bl-form-submit');
+    await playing(host);
+    const spawn = (await host.state()).player;
+    const raft = await host.G(findRaftSite, { x: spawn.x, z: spawn.z });
+    check(raft !== null, 'no beach with open water near the spawn');
+    log(`raft site: beach ${raft.x} ${SEA_Y} ${raft.z}, out along ${raft.dx} ${raft.dz} (${raft.dist.toFixed(1)} blocks from the spawn)`);
+    // Cell i rows out from the beach, k across (row 0 is the beach cell itself).
+    const at = (i, k, y = SEA_Y) => ({ x: raft.x + raft.dx * i + raft.ux * k, y, z: raft.z + raft.dz * i + raft.uz * k });
+    const out = { x: raft.dx, z: raft.dz };
+    const across = { x: raft.ux, z: raft.uz };
+
+    // ---- the host builds the raft: 3 x 5 planks on the water, each placed against a neighbour's face from just beyond it
+    await host.engage();
+    await host.flight(true);
+    await host.select(ITEM.planks);
+    const place = async (c, from, step) => {
+      const face = faceOf(step.x, step.z);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await host.teleport(c.x + 0.5 + step.x * 1.6, SEA_Y + 1.6, c.z + 0.5 + step.z * 1.6);
+        const t = await host.aim(from, face);
+        if (!host.onTarget(t, from, face)) {
+          log(`placing at ${c.x} ${c.y} ${c.z}: the target is ${JSON.stringify(t)}, again`);
+          continue;
+        }
+        await host.rightClick();
+        try {
+          await host.until(async () => (await host.cell(c)) === ITEM.planks, `planks at ${c.x} ${c.y} ${c.z}`, 20_000, 150);
+          return;
+        } catch {
+          // again
+        }
+      }
+      throw new StepError(`could not place planks at ${c.x} ${c.y} ${c.z}`);
+    };
+    const tb = Date.now();
+    for (let i = 1; i <= 5; i++) {
+      await place(at(i, 0), at(i - 1, 0), out);
+      await place(at(i, 1), at(i, 0), across);
+      await place(at(i, -1), at(i, 0), { x: -across.x, z: -across.z });
+    }
+    // The helm on row 2, facing out to sea (where the host looks while placing it), from the beach.
+    await host.select(ITEM.helm);
+    const helm = at(2, 0, SEA_Y + 1);
+    await host.teleport(raft.x + 0.5, SEA_Y + 1.1, raft.z + 0.5);
+    let helmed = false;
+    for (let attempt = 0; attempt < 3 && !helmed; attempt++) {
+      const t = await host.aim(at(2, 0), 2);
+      if (!host.onTarget(t, at(2, 0), 2)) continue;
+      await host.rightClick();
+      helmed = await host.until(async () => (await host.cell(helm)) === ITEM.helm, 'the helm', 20_000, 150).then(() => true, () => false);
+    }
+    check(helmed, 'could not place the helm');
+    await host.flight(false);
+    await host.until(async () => (await host.own()).onGround, 'the host on the beach', 20_000);
+    log(`the host built the raft (15 planks) and the helm in ${((Date.now() - tb) / 1000).toFixed(0)} s`);
+    await host.lookAtPoint(at(3, 0).x + 0.5, SEA_Y + 1.2, at(3, 0).z + 0.5);
+    await shot(host, '01-raft-built');
+
+    // ---- the room, through the room screen
+    await host.p.bringToFront();
+    await host.p.keyboard.press('Escape');
+    await screenIs(host, 'pause');
+    await host.p.click('.bl-screen[data-screen="pause"] [data-act="together"]');
+    await screenIs(host, 'room');
+    const to = Date.now();
+    await host.p.click(`${ROOM} [data-act="open"]`);
+    const opened = await host.p
+      .waitForSelector(`${ROOM} .bl-room-status[data-status="open"]`, { timeout: signal === 'cloud' ? 30_000 : 20_000 })
+      .then(() => true, () => false);
+    if (!opened) {
+      const why = (await host.p.textContent(`${ROOM} .bl-room-error`).catch(() => null))?.trim() ?? '';
+      if (signal === 'cloud') {
+        log(`THE PUBLIC SIGNALLING SERVICE COULD NOT BE REACHED (${why || 'the room did not open in 30 s'}): the run through it is skipped`);
+        return problems;
+      }
+      throw new StepError(`the room did not open: ${why}`);
+    }
+    const link = await host.p.inputValue(`${ROOM} .bl-room-invite .bl-copy input >> nth=0`);
+    log(`room open after ${Date.now() - to} ms (${signal}): ${link}`);
+    check(signal === 'cloud' ? /\?join=[A-Z2-9]{8}$/.test(link) : /\?join=[A-Z2-9]{8}&signal=broadcast$/.test(link), `not an invitation link: ${link}`);
+    await host.p.click(`${ROOM} .bl-room-panel > .bl-actions .bl-btn--primary`);
+    await screenIs(host, 'pause');
+    await host.p.click('.bl-screen[data-screen="pause"] .bl-btn--primary');
+    await screenIs(host, 'none');
+
+    // ---- the guest opens the invitation link
+    const tj = Date.now();
+    const guest = await open('guest', `${link.slice(link.indexOf('?'))}&slot=guest`);
+    await playing(guest);
+    const joinS = (Date.now() - tj) / 1000;
+    log(`the guest is in ${joinS.toFixed(1)} s after opening the link`);
+    const hostId = (await host.own()).id;
+    const guestId = (await guest.own()).id;
+    await host.until(async () => (await host.state()).online.players.length === 2, "the guest in the host's list", 20_000);
+    // The guest flies over to the beach and lands there, then walks onto the raft.
+    await guest.flight(true);
+    const beach = { x: raft.x + 0.5, z: raft.z + 0.5 };
+    const g0 = await guest.own();
+    const cruise = Math.max(g0.y, SEA_Y + 1) + 14;
+    await guest.holdUntil(['Space'], async () => (await guest.own()).y >= cruise, 'the guest rising', 60_000);
+    /**
+     * Go to x, z holding W, in short presses timed from the distance left (`speed` blocks a second):
+     * reading the page's state takes a few hundred ms on a page drawing a frame or two a second, so
+     * polling would overshoot; each press is followed by a pause for the motion to settle.
+     */
+    const goTo = async (x, z, speed, tol, what, keys = ['KeyW'], legs = 25) => {
+      for (let leg = 0; leg < legs; leg++) {
+        const g = await guest.own();
+        const d = Math.hypot(g.x - x, g.z - z);
+        if (d < tol) return;
+        await guest.lookAtPoint(x, g.y + 1.62, z);
+        await guest.p.bringToFront();
+        for (const k of keys) await guest.p.keyboard.down(k);
+        await guest.p.waitForTimeout(Math.max(60, Math.min(2000, ((d - tol / 2) / speed) * 1000 * 0.8)));
+        for (const k of [...keys].reverse()) await guest.p.keyboard.up(k);
+        await guest.p.waitForTimeout(700);
+      }
+      const g = await guest.own();
+      throw new StepError(`${what}: the guest stopped at ${g.x.toFixed(2)} ${g.z.toFixed(2)}, ${Math.hypot(g.x - x, g.z - z).toFixed(2)} from it`);
+    };
+    const flyTo = (x, z, what) => goTo(x, z, 10, 0.5, what);
+    await flyTo(beach.x, beach.z, 'the guest flying to the beach');
+    await guest.flight(false);
+    await guest.until(async () => {
+      const g = await guest.own();
+      return g.onGround && Math.abs(g.y - (SEA_Y + 1)) < 0.05;
+    }, 'the guest landing on the beach', 60_000);
+    // On the raft as a careful player does: sneaking (slow, and the sneak guard keeps a body from
+    // walking off an edge; it also never sprints, which two presses of W close together would start).
+    const walkTo = (c, what, tol = 0.45) => goTo(c.x, c.z, 1.3, tol, what, ['ShiftLeft', 'KeyW']);
+    const stand = { x: at(4, 1).x + 0.5, z: at(4, 1).z + 0.5 };
+    await walkTo({ x: at(1, 1).x + 0.5, z: at(1, 1).z + 0.5 }, 'the guest stepping onto the raft', 0.6);
+    await walkTo(stand, 'the guest walking across the deck');
+    await guest.until(async () => {
+      const g = await guest.own();
+      return g.onGround && Math.abs(g.y - (SEA_Y + 1)) < 0.05;
+    }, 'the guest standing on the deck', 30_000);
+    const gs = await guest.own();
+    log(`the guest stands on the raft at ${gs.x.toFixed(2)} ${gs.y.toFixed(2)} ${gs.z.toFixed(2)}`);
+
+    // ---- the host assembles at the helm and sails
+    const shipNow = async (g) => (await g.state()).structures.find((s) => s.kind === 'ship') ?? null;
+    let ship = null;
+    for (let attempt = 0; attempt < 4 && ship === null; attempt++) {
+      await host.select(ITEM.planks);
+      const t = await host.aim(helm);
+      if (!host.onTarget(t, helm)) continue;
+      // First click: the preview; second: assemble (and take the wheel).
+      await host.rightClick();
+      await host.p.waitForTimeout(600);
+      await host.rightClick();
+      await host.until(async () => (await shipNow(host)) !== null && (await host.own()).steeringShipId !== 0, 'the raft assembled and steered', 20_000).catch(() => undefined);
+      ship = await shipNow(host);
+    }
+    check(ship !== null, 'the raft did not assemble');
+    log(`assembled ship #${ship.id} (${ship.cells} cells); the host steers it`);
+    await guest.until(async () => (await guest.own()).carrierId === ship.id, 'the guest carried by the raft', 30_000);
+    const start = { x: ship.x, z: ship.z };
+    /** The host holds the wheel; a page stalled 2 s loses it (by design): take it again. */
+    const keepHelm = async () => {
+      if ((await host.own()).steeringShipId === ship.id) return;
+      log('the host was let go of the wheel (no movement report for 2 s: a stalled page); taking it again');
+      for (let i = 0; i < 4; i++) {
+        const t = await host.aim(helm, -1, ship.id);
+        if (host.onTarget(t, helm, -1, ship.id)) await host.rightClick();
+        const ok = await host.until(async () => (await host.own()).steeringShipId === ship.id, 'the wheel again', 10_000).then(() => true, () => false);
+        if (ok) return;
+      }
+      throw new StepError('the host cannot take the wheel again');
+    };
+    // Full ahead: the throttle follows W while it is held (the raft has no sails: it paddles slowly).
+    await host.p.bringToFront();
+    await host.p.keyboard.down('KeyW');
+    const serverShip = async () => (await host.G(() => window.__blocklands.game.debug.serverProbe(2))).structures.find((x) => x.id === ship.id) ?? null;
+    const sailed = async () => {
+      const s = await serverShip();
+      return s ? Math.hypot(s.x - start.x, s.z - start.z) : 0;
+    };
+    await host.until(async () => {
+      await keepHelm();
+      return (await sailed()) > 2;
+    }, 'the raft under way', 120_000, 500);
+    log(`under way: throttle ${((await host.state()).helm?.throttle ?? 0).toFixed(2)}`);
+
+    // ---- while it sails: both pages see it move, each other on its deck where the server has them, and the names
+    const seen = { host: { max: 0, n: 0 }, guest: { max: 0, n: 0 }, ownHost: 0, ownGuest: 0, moved: { host: 0, guest: 0 } };
+    const shipPos = async (g) => g.G((id) => {
+      const st = window.__blocklands.game.session.replica.state.structures.get(id);
+      return st ? { x: st.structure.grid.position.x, z: st.structure.grid.position.z } : null;
+    }, ship.id);
+    const p0 = { host: await shipPos(host), guest: await shipPos(guest) };
+    const dist = (a, b) => Math.hypot(a.x - b.lx, a.y - b.ly, a.z - b.lz);
+    let ahead = true;
+    for (let i = 0; i < 8; i++) {
+      await keepHelm();
+      // Under power until the pictures are taken, or before the end of the lane checked for open
+      // water (16 cells): then it coasts on.
+      if (ahead && (i >= 3 || (await sailed()) > 12)) {
+        await host.p.keyboard.up('KeyW');
+        ahead = false;
+      }
+      // Each page looks at the other (the views drawn are compared).
+      const sg = (await guest.own());
+      const sh = (await host.own());
+      await host.lookAtPoint(sg.x, sg.y + 1.2, sg.z);
+      await guest.lookAtPoint(sh.x, sh.y + 1.2, sh.z);
+      const probe = await host.G(() => window.__blocklands.game.debug.serverProbe(2));
+      const srv = Object.fromEntries(probe.players.map((x) => [x.entityId, x]));
+      check(srv[guestId]?.carrierId === ship.id, `the server does not have the guest on the raft: ${JSON.stringify(srv[guestId])}`);
+      for (const [g, other, key] of [[host, guestId, 'host'], [guest, hostId, 'guest']]) {
+        const d = (await g.drawn()).find((e) => e.id === other);
+        check(d !== undefined, `${g.name} does not draw the other player`);
+        check(d.label === (other === guestId ? 'Gus' : 'Hester'), `${g.name} shows the name ${JSON.stringify(d.label)}`);
+        check(d.local !== null && d.shipId === ship.id, `${g.name} has no ship to measure the other player on`);
+        const e = dist(d.local, srv[other]);
+        seen[key].max = Math.max(seen[key].max, e);
+        seen[key].n++;
+        if (i === 0) log(`${g.name} draws ${d.label} (${d.posture}) at ${d.local.x.toFixed(3)} ${d.local.y.toFixed(3)} ${d.local.z.toFixed(3)} on the raft; the server has ${srv[other].lx.toFixed(3)} ${srv[other].ly.toFixed(3)} ${srv[other].lz.toFixed(3)}`);
+        const mine = await g.own();
+        check(mine.local !== null, `${g.name}'s last report is not on the raft`);
+        const eo = dist(mine.local, srv[mine.id]);
+        if (key === 'host') seen.ownHost = Math.max(seen.ownHost, eo);
+        else seen.ownGuest = Math.max(seen.ownGuest, eo);
+      }
+      if (i === 2) {
+        await shot(host, '02-host-sees-guest-on-deck');
+        await shot(guest, '03-guest-sees-host-at-helm');
+      }
+      await host.p.waitForTimeout(800);
+    }
+    const p1 = { host: await shipPos(host), guest: await shipPos(guest) };
+    seen.moved.host = Math.hypot(p1.host.x - p0.host.x, p1.host.z - p0.host.z);
+    seen.moved.guest = Math.hypot(p1.guest.x - p0.guest.x, p1.guest.z - p0.guest.z);
+    log(`while sailing (${seen.host.n} samples): the raft moved ${seen.moved.host.toFixed(2)} blocks on the host's page, ${seen.moved.guest.toFixed(2)} on the guest's`);
+    log(`on the deck, page vs server (blocks, in the raft's frame): the host draws the guest within ${seen.host.max.toFixed(4)}, the guest draws the host within ${seen.guest.max.toFixed(4)}; own prediction vs server: host ${seen.ownHost.toFixed(4)}, guest ${seen.ownGuest.toFixed(4)}`);
+    check(seen.moved.host > 0.5 && seen.moved.guest > 0.5, 'a page does not see the raft move');
+    check(seen.host.max < DECK_TOLERANCE && seen.guest.max < DECK_TOLERANCE, `a page draws the other player off its place on the deck (host ${seen.host.max.toFixed(3)}, guest ${seen.guest.max.toFixed(3)})`);
+    check(seen.ownHost < DECK_TOLERANCE && seen.ownGuest < DECK_TOLERANCE, 'a page predicts its own player off the place the server has');
+
+    // ---- the host lets go of W, the raft coasts to a stop, the host docks: sneak + right-click the helm while steering
+    await host.p.keyboard.up('KeyW');
+    let last = await serverShip();
+    await host.until(async () => {
+      const now = await serverShip();
+      const moved = Math.hypot(now.x - last.x, now.z - last.z);
+      last = now;
+      return moved < 0.02;
+    }, 'the raft to coast to a stop', 90_000, 1000);
+    let docked = false;
+    for (let i = 0; i < 4 && !docked; i++) {
+      await keepHelm();
+      const t = await host.aim(helm, -1, ship.id);
+      if (!host.onTarget(t, helm, -1, ship.id)) continue;
+      await host.p.keyboard.down('ShiftLeft');
+      try {
+        await host.p.waitForTimeout(300);
+        await host.rightClick();
+        docked = await host.until(async () => (await shipNow(host)) === null, 'the raft docked', 20_000).then(() => true, () => false);
+      } finally {
+        await host.p.keyboard.up('ShiftLeft');
+      }
+    }
+    check(docked, 'the raft did not dock');
+    await guest.until(async () => (await shipNow(guest)) === null, "the dock on the guest's page", 20_000);
+    log('docked');
+    await host.until(async () => (await host.own()).onGround && (await guest.own()).onGround, 'both players standing on the docked raft', 30_000);
+
+    // ---- at the end both replicas equal the server (columns about each player, structures), and each player is where the server has it
+    let diff = null;
+    for (let i = 0; i < 20; i++) {
+      const probe = await host.G(() => window.__blocklands.game.debug.serverProbe(2));
+      diff = [];
+      for (const g of [host, guest]) {
+        const dg = await g.G(() => window.__blocklands.game.debug.digest(2));
+        const shared = Object.keys(dg.columns).filter((k) => k in probe.columns);
+        for (const k of shared) if (dg.columns[k] !== probe.columns[k]) diff.push(`${g.name} column ${k}`);
+        if (shared.length < 9) diff.push(`${g.name} shares only ${shared.length} columns with the probe`);
+        const srvS = Object.fromEntries(probe.structures.map((s) => [String(s.id), s.hash]));
+        if (JSON.stringify(Object.keys(dg.structures).sort()) !== JSON.stringify(Object.keys(srvS).sort())) diff.push(`${g.name} structures ${Object.keys(dg.structures)} vs ${Object.keys(srvS)}`);
+        else for (const k of Object.keys(srvS)) if (dg.structures[k] !== srvS[k]) diff.push(`${g.name} structure ${k}`);
+        const mine = await g.own();
+        const s = probe.players.find((x) => x.entityId === mine.id);
+        const e = Math.hypot(mine.x - s.x, mine.y - s.y, mine.z - s.z);
+        if (e > 0.05) diff.push(`${g.name} own player ${e.toFixed(3)} from the server's`);
+      }
+      if (diff.length === 0) {
+        log(`the two replicas equal the server: ${Object.keys(probe.columns).length} columns probed, ${probe.structures.length} structures, both players where the server has them`);
+        break;
+      }
+      await host.p.waitForTimeout(500);
+    }
+    check(diff.length === 0, `at the end: ${diff.join('; ')}`);
+    await host.lookAtPoint((await guest.own()).x, SEA_Y + 2.2, (await guest.own()).z);
+    await shot(host, '04-docked');
+  } catch (e) {
+    problems.push(e instanceof StepError ? e.message : `error: ${e.stack ?? e}`);
+    for (const [i, p] of pages.entries()) await p.screenshot({ path: join(outDir, `${tag}-failure-${i}.png`) }).catch(() => undefined);
+  } finally {
+    await context.close();
+    await site.close();
+  }
+  return problems;
+}
+
 // ====================================================================== screens: every new screen and panel in zh and en (dev/ui harness)
 
 /** UI states of package 11 for the harness (dev/ui/main.ts URL parameters), each shot in both languages. */
@@ -797,9 +1363,9 @@ const SCREENS = [
   ['room-closed', 'screen=room&room=closed&players=1'],
   ['room-opening', 'screen=room&room=opening&players=1'],
   ['room-open-1', 'screen=room&room=open&players=1'],
-  ['room-open-2', 'screen=room&room=open&players=2&modes=1'],
-  ['room-open-3', 'screen=room&room=open&players=3&modes=1'],
-  ['room-open-4', 'screen=room&room=open&players=4&modes=1'],
+  ['room-open-2', 'screen=room&room=open&players=2&traffic=1'],
+  ['room-open-3', 'screen=room&room=open&players=3&traffic=1'],
+  ['room-open-4', 'screen=room&room=open&players=4&traffic=1'],
   ['room-lost', 'screen=room&room=lost&players=2'],
   ['room-error', 'screen=room&room=error&players=1'],
   ['room-manual', 'screen=room&room=manual&players=1'],
@@ -815,7 +1381,7 @@ const SCREENS = [
   ['loading-failed', 'screen=loading&join=failed'],
   ['loading-removed', 'screen=loading&join=ended'],
   ['loading-other-build', 'screen=loading&join=build'],
-  ['hud-tab-list', 'screen=none&locked=1&plist=1&room=open&players=4'],
+  ['hud-tab-list', 'screen=none&locked=1&plist=1&room=open&players=4&traffic=1'],
 ];
 
 async function runScreens(browser) {
@@ -841,7 +1407,7 @@ async function runScreens(browser) {
     // Phone width: the room screen and the join failure.
     await page.setViewportSize({ width: 390, height: 780 });
     for (const [name, query] of [
-      ['room-open-3-narrow', 'screen=room&room=open&players=3&modes=1'],
+      ['room-open-3-narrow', 'screen=room&room=open&players=3&traffic=1'],
       ['loading-failed-narrow', 'screen=loading&join=failed'],
     ]) {
       await page.goto(`${url}?${query}&lang=en`);
@@ -892,7 +1458,7 @@ async function runOffline(browser) {
 // ====================================================================== main
 
 if (build) {
-  for (const script of [...(want('game') ? ['build'] : []), ...(want('offline') ? ['build:artifact'] : [])]) {
+  for (const script of [...(want('game') || want('ship') || want('ship-cloud') ? ['build'] : []), ...(want('offline') ? ['build:artifact'] : [])]) {
     console.log(`npm run ${script}`);
     const r = spawnSync('npm', ['run', script], { cwd: ROOT, stdio: 'inherit' });
     if (r.status !== 0) process.exit(1);
@@ -904,6 +1470,8 @@ for (const [name, run] of [
   ['rtc', runRtc],
   ['screens', runScreens],
   ['game', runGame],
+  ['ship', (b) => runShip(b, 'broadcast')],
+  ['ship-cloud', (b) => runShip(b, 'cloud')],
   ['offline', runOffline],
   ['cloud', runCloud],
 ]) {

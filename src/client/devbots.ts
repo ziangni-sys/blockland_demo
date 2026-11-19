@@ -54,6 +54,8 @@ export interface BotState {
   onGround: boolean;
   selected: number;
   heldItem: number;
+  /** The longest time between two of this bot's turns (its timer) in the last STALL_WINDOW_MS, ms: a stalled page. */
+  longestGapMs: number;
 }
 
 type Task =
@@ -62,6 +64,8 @@ type Task =
   | { kind: 'walk'; path: Vec3[]; next: number; loop: boolean; speed: number };
 
 const FRAME_MS = 16;
+/** BotState.longestGapMs looks back this far, ms. */
+const STALL_WINDOW_MS = 10_000;
 const HEARTBEAT_MS = 1000;
 /** A bot's subscription radius (its columns are generated on the main thread). */
 const BOT_VIEW_RADIUS = 2;
@@ -79,6 +83,9 @@ class Bot {
   private use: { cell: Vec3; gridId: number; face: number; frames: number; done: (ok: boolean) => void } | null = null;
   private readonly timer: number;
   private lastBeat = 0;
+  private lastFrameAt: number | null = null;
+  /** Gaps between turns longer than 4 frames: [when it ended, how long], the last STALL_WINDOW_MS. */
+  private gaps: Array<[number, number]> = [];
   private readonly ray: ViewRay = { eye: vec3(), origin: vec3(), dir: vec3() };
 
   constructor(
@@ -115,6 +122,9 @@ class Bot {
 
   private frame(): void {
     const now = this.t.now();
+    if (this.lastFrameAt !== null && now - this.lastFrameAt > 4 * FRAME_MS) this.gaps.push([now, now - this.lastFrameAt]);
+    this.lastFrameAt = now;
+    if (this.gaps.length > 0 && this.gaps[0]![0] < now - STALL_WINDOW_MS) this.gaps = this.gaps.filter(([at]) => at >= now - STALL_WINDOW_MS);
     if (now - this.lastBeat >= HEARTBEAT_MS) {
       this.lastBeat = now;
       this.net.heartbeat(now);
@@ -353,6 +363,7 @@ class Bot {
       onGround: p?.onGround ?? false,
       selected: this.intents?.selected ?? 0,
       heldItem: this.intents?.heldItem ?? 0,
+      longestGapMs: this.gaps.reduce((m, [at, gap]) => (at >= this.t.now() - STALL_WINDOW_MS ? Math.max(m, gap) : m), 0),
     };
   }
 

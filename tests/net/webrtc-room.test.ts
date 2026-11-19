@@ -182,6 +182,26 @@ describe('BroadcastSignaller', () => {
     expect(o.at - t0).toBeLessThan(2 * GATHER_QUIET_MS + 500);
   });
 
+  it("the host's path closes once its channels opened, before the guest's page got its own setRemoteDescription back: the guest connects", async () => {
+    const w = world();
+    const h = await host(w, broadcast(w, 1), 'RXAMCDEF');
+    // The guest's page is busy: its setRemoteDescription and its channels' open come late, and the
+    // host's 'bye' (sent once the host's channels opened) gets there first.
+    const busy: ConnectDeps = {
+      ...w.deps,
+      createPeer: () => {
+        const p = w.rtc.createPeer();
+        p.busyMs = 200;
+        return p;
+      },
+    };
+    const o = await settle(w.loop, joinRoom(broadcast(w, 2), 'RXAMCDEF', busy));
+    expect(failure(o)).toBe('ok');
+    await advance(w.loop, 300);
+    expect(h.guests).toHaveLength(1);
+    expect(talks(w, (o as { value: WebRtcTransport }).value, h.guests[0]!)).toBe(true);
+  });
+
   it('the host leaves in the middle of the handshake: left', async () => {
     const w = world();
     await settle(w.loop, broadcast(w, 1).listen('RXAMCDEF', (path) => path.close()));

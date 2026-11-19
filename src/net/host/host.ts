@@ -52,6 +52,7 @@ import { readGeneratorSpec, writeGeneratorSpec } from '../codec';
 import { AUTOSAVE_TICKS, MAX_CATCHUP_TICKS } from '../protocol';
 import { IntentQueue } from '../server/intents';
 import { MoveQueue } from '../server/moves';
+import { probeServer } from '../server/probe';
 import { Replicator } from '../server/replicator';
 import { RELIABLE, UNRELIABLE, type Transport } from '../transport';
 import type { CreateOptions, GuestTraffic, HostToPage, PageToHost } from './control';
@@ -256,6 +257,9 @@ export class ServerHost {
           return this.setRoomOpen(false);
         case 'shutdown':
           await this.shutdown(msg.save);
+          return;
+        case 'probe':
+          this.o.report({ type: 'probe', id: msg.id, probe: this.world === null ? null : probeServer(this.world.sim, msg.radius) });
           return;
       }
     } catch (e) {
