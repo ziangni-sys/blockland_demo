@@ -39,10 +39,11 @@ export function dropCountOf(part: number): number {
 }
 
 /**
- * Spawn what `part` drops in local cell (x,y,z) of `grid`, in world space. The item's feet are at
- * the cell's minimum corner plus DROP_POINT of the part's fill (blocks/shapes.ts): the centre of a
- * full block, else the centre of the part's lowest-numbered octant, which the removed part leaves
- * empty, so the item never starts inside the other part of the cell.
+ * Spawn what `part` drops in local cell (x,y,z) of `grid`, in world space. The item's centre is at
+ * the cell's minimum corner plus DROP_POINT of the part's fill (blocks/shapes.ts); its feet are
+ * 0.125 lower (EntityManager.spawnItem centres the item vertically on the point it is given). The
+ * point is the centre of a full block, else the centre of the part's lowest-numbered octant,
+ * which the removed part leaves empty, so the item never starts inside the other part of the cell.
  *
  * Unconditional: the caller decides whether this drop happens at all (sim/rules.ts — the mining
  * player's mode, or the world's dropsEnabled). `tmp` is caller-owned scratch. Returns true when

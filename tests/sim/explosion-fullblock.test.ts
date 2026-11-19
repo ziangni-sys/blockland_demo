@@ -2,8 +2,12 @@
  * Explosions in a world of full blocks are exactly those of the code before Milestone 2.3
  * (docs/SHAPES.md section 9.4): per-octant costs and marks, per-part removal and the volume share
  * of the push must not change a single cell, item, structure pose or random number when every
- * cell holds one full block. The numbers below were produced by the same fingerprint function
- * (explosion-fullblock-fingerprint.ts) on the M1 baseline, commit c20ea8e.
+ * cell holds one full block. One exception, by rule 19.8: a soft whole-cell block (a torch, a
+ * flower) standing in a ship's dry hold no longer stops the rays in the world water refilled
+ * there, so it can be blown away; the old code asked about the dry hold only in empty ship cells
+ * (explosion-hold.test.ts pins the new behaviour). The scenes below have no such block. The
+ * numbers were produced by the same fingerprint function (explosion-fullblock-fingerprint.ts) on
+ * the M1 baseline, commit c20ea8e.
  */
 import { describe, expect, it } from 'vitest';
 import { fullBlockExplosions } from './explosion-fullblock-fingerprint';
