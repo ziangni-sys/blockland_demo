@@ -4,8 +4,7 @@
  * item of its material; mining progress belongs to grid + cell + part value (the crosshair moving
  * over the part keeps it, the part changing resets it, the other part changing does not); pick
  * block takes the aimed part; blockBroken carries the removed part; a claimed target whose part
- * changed is no target. These replace the transition behaviour of 16.3 (the whole cell went, one
- * drop of the first part), which tests/sim/parts-transition.test.ts used to pin.
+ * changed is no target.
  */
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';

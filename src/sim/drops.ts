@@ -8,8 +8,7 @@
  *
  * The three functions read only the bits they need and never throw on what they are given: a
  * cell value with CELL_MULTI_BIT, or the packed content of a two-part cell, reads as its first
- * part (bitwise operations see the low 32 bits). The callers in other packages can therefore pass
- * what they have, before and after their own package changes (section 16.3, rule 3).
+ * part (bitwise operations see the low 32 bits). Every caller passes the one part that went.
  *
  * BlockDef.drop: undefined = the block drops itself (block ids double as item ids),
  * null = nothing. Block state (axis, facing, layers) is never part of the item: a sideways

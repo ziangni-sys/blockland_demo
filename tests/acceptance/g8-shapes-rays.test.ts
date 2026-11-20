@@ -1,15 +1,15 @@
 /**
- * Rays hit octants (docs/SHAPES.md 6.1, package P8a), headless, whole simulation, in both modes:
- * the player's rays pass through the empty octants of a partial cell (DESIGN "材质 + 形状": the
- * ray reaches what lies behind the gap above a slab) and stop at the top of a lower slab, an inner
- * face. No numbered scenario of docs/ACCEPTANCE.md belongs to P8a (16.4); this file checks that the
- * server's rays (direct mode) and the client's rays on its replica (network mode) agree on the
- * octant-level targets, through the whole protocol.
+ * Rays hit octants (docs/SHAPES.md 6.1), headless, whole simulation, in both modes: the player's
+ * rays pass through the empty octants of a partial cell (DESIGN "材质 + 形状": the ray reaches what
+ * lies behind the gap above a slab) and stop at the top of a lower slab, an inner face. No numbered
+ * scenario of docs/ACCEPTANCE.md covers this; the file checks that the server's rays (direct mode)
+ * and the client's rays on its replica (network mode) agree on the octant-level targets, through
+ * the whole protocol.
  *
  * The scene is written on the server (w.sim): the tools that make partial blocks come in M2.4. The
- * player's actions are the looks and the mining (creative: one click breaks). Only P8a's results
- * are asserted (16.4): which cell and face is targeted, and that the targeted cell is the one that
- * breaks; how much of a partial cell mining removes belongs to P8b.
+ * player's actions are the looks and the mining (creative: one click breaks). What is asserted is
+ * which cell and face is targeted, and that the targeted cell is the one that breaks; how much of
+ * a partial cell mining removes (one part) is scenario 39, tests/acceptance/g8-shapes-parts.test.ts.
  */
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';

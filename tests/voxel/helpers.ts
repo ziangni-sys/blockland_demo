@@ -171,56 +171,7 @@ function solve4(M: number[]): [number, number, number, number] | null {
   return [M[4]! / M[0]!, M[9]! / M[6]!, M[14]! / M[12]!, M[19]! / M[18]!];
 }
 
-// ------------------------------------------------------------------ reference: ray vs cells
-
-export interface RefHit {
-  x: number;
-  y: number;
-  z: number;
-  t: number;
-}
-
-/**
- * Brute-force ray cast: intersect the local ray with every listed cell's unit cube (slab
- * method) and keep the earliest entry. Independent of raycast.ts's DDA, but with the same
- * documented convention: a cell is on the ray only if the ray runs a POSITIVE length through
- * it (touching an edge or a corner is not a hit), cells are half-open along axes the ray does
- * not move on, and a cell entered at exactly maxDist counts.
- */
-export function referenceRay(
-  grid: VoxelGrid,
-  cells: ReadonlyArray<readonly [number, number, number]>,
-  origin: Vec3,
-  dir: Vec3,
-  maxDist: number,
-): RefHit | null {
-  const o = grid.toLocal(origin);
-  const d = grid.dirToLocal(dir);
-  let best: RefHit | null = null;
-  for (const [x, y, z] of cells) {
-    let t0 = 0;
-    let t1 = Infinity;
-    let ok = true;
-    const lo = [x, y, z];
-    const oo = [o.x, o.y, o.z];
-    const dd = [d.x, d.y, d.z];
-    for (let a = 0; a < 3 && ok; a++) {
-      if (Math.abs(dd[a]!) < 1e-14) {
-        if (oo[a]! < lo[a]! || oo[a]! >= lo[a]! + 1) ok = false;
-        continue;
-      }
-      let tn = (lo[a]! - oo[a]!) / dd[a]!;
-      let tf = (lo[a]! + 1 - oo[a]!) / dd[a]!;
-      if (tn > tf) [tn, tf] = [tf, tn];
-      if (tn > t0) t0 = tn;
-      if (tf < t1) t1 = tf;
-    }
-    if (ok && t0 < t1 && t0 <= maxDist && (best === null || t0 < best.t)) best = { x, y, z, t: t0 };
-  }
-  return best;
-}
-
-/** All solid cells of a structure as a list (for the reference ray). */
+/** All solid cells of a structure as a list (for the reference ray of ./ray-helpers.ts). */
 export function solidCells(g: StructureGrid): Array<[number, number, number]> {
   const out: Array<[number, number, number]> = [];
   g.forEachCell((x, y, z, c) => {

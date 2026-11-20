@@ -560,6 +560,30 @@ describe('GlueStore: moveTo', () => {
     expect(t.size).toBe(0);
   });
 
+  it('stays sees the end left behind and its face towards the moved end: a face stays only where that end says so for that face', () => {
+    // The moved cell (0,0,0) is glued on all six faces; the six neighbours stay behind. Each
+    // neighbour's face towards (0,0,0) is the opposite of the direction it lies in.
+    const s = new GlueStore();
+    for (const d of ALL_DIRS) s.add(0, 0, 0, d);
+    const asked: string[] = [];
+    const t = new GlueStore();
+    const n = s.moveTo(
+      t,
+      (x, y, z) => x === 0 && y === 0 && z === 0,
+      (x, y, z) => ({ x, y, z }),
+      (x, y, z, dir) => {
+        asked.push(`${x},${y},${z}:${dir}`);
+        return dir === NX || dir === PY; // the cell east keeps its west face, the cell below its top face
+      },
+    );
+    expect(asked.sort()).toEqual(ALL_DIRS.map((d) => `${DIR_X[d]},${DIR_Y[d]},${DIR_Z[d]}:${opposite(d)}`).sort());
+    expect(n).toBe(4);
+    expect(s.size).toBe(2);
+    expect(s.has(0, 0, 0, PX) && s.has(0, 0, 0, NY)).toBe(true);
+    expect([PX, NY].some((d) => t.has(0, 0, 0, d))).toBe(false);
+    expect([NX, PY, PZ, NZ].every((d) => t.has(0, 0, 0, d))).toBe(true);
+  });
+
   it('an empty set moves nothing and deletes nothing', () => {
     const { s } = cluster();
     const n0 = s.size;

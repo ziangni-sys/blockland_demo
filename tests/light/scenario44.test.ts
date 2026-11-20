@@ -1,8 +1,9 @@
 /**
  * Scenario 44 (docs/ACCEPTANCE.md, docs/SHAPES.md 7.1 and 16.2 P5): under a roof of half slabs it
  * is dark. Light is computed on the client only (the server's acceptance world has none), so the
- * scenario runs here on a World with a LightEngine, as the client's replica does; the networked
- * version that reads the replica's light belongs to P10.
+ * scenario runs here on a World with a LightEngine, as the client's replica does. The versions that
+ * read the client's replica (the player mines a gap; a guest on a lossy link) are
+ * tests/acceptance/g8-shapes-light.test.ts and tests/net/e2e-shapes-join.test.ts.
  *
  * A stone room straddles the chunk border x = 16: walls from the floor (y = 11) up to the roof
  * layer, interior x 13..19, z 5..11. Every roof is built three ways: incrementally with setCell

@@ -374,9 +374,11 @@ export class GlueStore {
    * keyed again from the two MAPPED end cells: `map` may translate and rotate by multiples of
    * 90 degrees, so the face axis can change and the canonical end can swap (LESSONS: 移动或旋转时，
    * 要按映射后的两个端点重新计算键). A face with exactly ONE end in the set stays here when
-   * `stays(other end)` is true (the end left behind is a glueable block that remains in this
-   * grid: the glue keeps holding on to it and is not duplicated), and otherwise moves like the
-   * others (glue lives on while one side holds it; the source grid's hook then applies
+   * `stays(x, y, z, dir)` is true for the end left behind, `dir` being that end's face towards the
+   * moved end (the end left behind is a glueable block that remains in this grid and has material
+   * on that face, glueSideAt: the glue keeps holding on to it and is not duplicated), and
+   * otherwise moves like the others: it is the moved cell's exposed face, as if the cell across
+   * were air (glue lives on while one side holds it; the source grid's hook then applies
    * glueFaceKept, SHAPES 11.2). Faces with no end in the
    * set are untouched. A moved face landing on a face `target` already holds merges with it.
    *
@@ -395,7 +397,7 @@ export class GlueStore {
     target: GlueStore,
     inSet: (x: number, y: number, z: number) => boolean,
     map: (x: number, y: number, z: number) => { x: number; y: number; z: number },
-    stays: (x: number, y: number, z: number) => boolean,
+    stays: (x: number, y: number, z: number, dir: Dir) => boolean,
   ): number {
     const drop: number[] = []; // canonical faces leaving this store: x, y, z, axis
     const put: number[] = []; // canonical mapped faces for the target
@@ -406,8 +408,9 @@ export class GlueStore {
       const inA = inSet(x, y, z);
       const inB = inSet(x1, y1, z1);
       if (!inA && !inB) return;
-      if (!inA && stays(x, y, z)) return;
-      if (!inB && stays(x1, y1, z1)) return;
+      // The end left behind and its face towards the moved end: + (axis * 2) from end A, - from B.
+      if (!inA && stays(x, y, z, (axis << 1) as Dir)) return;
+      if (!inB && stays(x1, y1, z1, ((axis << 1) | 1) as Dir)) return;
       drop.push(x, y, z, axis);
       const pa = map(x, y, z);
       const ax = pa.x; // copy before the second call: map may reuse its result object

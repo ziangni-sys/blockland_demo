@@ -39,10 +39,10 @@ import type { StructureGrid } from '../voxel/sgrid';
 import type { World } from '../voxel/world';
 import { boxCellsWith, CellSet, inBounds } from './collect';
 import type { GlueStore } from './glue';
-import { isDryHalf, type HullInfo } from './hull';
+import { hasDryOctant, type HullInfo } from './hull';
 import { nearestRot, rotCell, rotCellPos, rotToQuat, rotVec, type GridRot } from './orient';
 import { applyRotorPose } from './rotor';
-import { glueFaceKept, glueSideAt, holdsGlue, pruneGlueAt } from './stick';
+import { glueFaceKept, glueSideAt, pruneGlueAt } from './stick';
 import type { Rotor, Ship, StructureHost } from './structure';
 
 /** Flags of every bulk write made while assembling, blockifying or docking. */
@@ -191,44 +191,10 @@ export function transferCells(
   }
   if (srcGlue.size > 0) {
     const inSet = CellSet.fromCells(cells, count);
-    takeOffFaceGlue(src, srcGlue, dstGlue, inSet);
-    // Every face left with one end outside the set has a glueable end there that is on the face
-    // (or an end that holds no glue at all, which moveTo moves with the cell).
-    srcGlue.moveTo(dstGlue, (x, y, z) => inSet.has(x, y, z), identityMap(), (x, y, z) => holdsGlue(src.getCell(x, y, z)));
+    srcGlue.moveTo(dstGlue, (x, y, z) => inSet.has(x, y, z), identityMap(), (x, y, z, d) => glueSideAt(getPacked(src, x, y, z), d));
   }
   for (let i = 0; i < count; i++) src.setCell(cells[i * 3]!, cells[i * 3 + 1]!, cells[i * 3 + 2]!, AIR, MOVE_FLAGS);
   pruneGlueAround(dst, dstGlue, cells, count);
-}
-
-/**
- * Part of transferCells' glue move (same coordinates in both stores): every glued face of `srcGlue`
- * with exactly one end in `inSet` whose other end holds glue but is not on the face (glueSideAt is
- * false: its material lies away from the face) moves to `dstGlue` now. GlueStore.moveTo's `stays`
- * sees only the end cell, not the face, so it cannot tell such a face from one the cell left behind
- * is on; left in `srcGlue`, the face would lose its last side when the moved cell is cleared, and
- * the source's hook would delete it although the moved cell still carries it.
- */
-function takeOffFaceGlue(src: VoxelGrid, srcGlue: GlueStore, dstGlue: GlueStore, inSet: CellSet): void {
-  const faces: number[] = []; // moved end x, y, z, direction towards the end left behind
-  srcGlue.forEach((x, y, z, axis) => {
-    const x1 = axis === 0 ? x + 1 : x;
-    const y1 = axis === 1 ? y + 1 : y;
-    const z1 = axis === 2 ? z + 1 : z;
-    const inA = inSet.has(x, y, z);
-    if (inA === inSet.has(x1, y1, z1)) return;
-    // d: from the moved end towards the end left behind (Dir = axis * 2 is the positive direction).
-    const d = (inA ? axis << 1 : (axis << 1) | 1) as Dir;
-    const q = inA ? getPacked(src, x1, y1, z1) : getPacked(src, x, y, z);
-    if (holdsGlue(q) && !glueSideAt(q, (d ^ 1) as Dir)) {
-      if (inA) faces.push(x, y, z, d);
-      else faces.push(x1, y1, z1, d);
-    }
-  });
-  for (let i = 0; i < faces.length; i += 4) {
-    const d = faces[i + 3]! as Dir;
-    srcGlue.remove(faces[i]!, faces[i + 1]!, faces[i + 2]!, d);
-    dstGlue.add(faces[i]!, faces[i + 1]!, faces[i + 2]!, d);
-  }
 }
 
 /** `{x,y,z} -> same {x,y,z}` mapping for GlueStore.moveTo (returns one reused object). */
@@ -651,24 +617,6 @@ export interface DockOutcome {
   report: BlockifyReport;
   /** World cells written (ship cells) and cleared (liquid in dry hull cells), x,y,z triples. */
   touched: Int32Array;
-}
-
-/**
- * Does the ship cell (x,y,z) have at least one dry octant (sealed, or bilge while the hull floats)?
- * For a cell that is air in the ship this is the dry counterpart of hullCavityCells (no hard
- * octant, at least one cavity octant), so every cell that took water when the ship was assembled
- * is cleared again when it docks (docs/SHAPES.md 11.3, 19.5). An air cell is dry only in part when
- * the spill line runs through its middle (lower half bilge, upper half open): its water level is
- * half a layer, which only a path through octants of cells with parts can give (docs/SHAPES.md
- * 12.3). Liquids never enter cells with parts, so once docked the sea cannot reach such a cell
- * from the side, and clearing it removes no water the sea could refill. isDryCell (all eight
- * octants dry) would leave that water inside the docked hull, to drain into the hold.
- */
-function hasDryOctant(h: HullInfo, x: number, y: number, z: number): boolean {
-  for (let o = 0; o < 8; o++) {
-    if (isDryHalf(h, 2 * x + (o & 1), 2 * y + ((o >> 1) & 1), 2 * z + (o >> 2))) return true;
-  }
-  return false;
 }
 
 /**

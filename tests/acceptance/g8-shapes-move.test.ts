@@ -2,10 +2,10 @@
  * Acceptance scenario 38 (docs/ACCEPTANCE.md "形状与凿子"; docs/SHAPES.md 5.7 and 16.4), headless,
  * whole simulation, in both modes: a half slab fills four of its cell's eight octants; the player
  * walks straight up onto half slabs (a whole block still needs a jump), stands on them without
- * sinking (also after a jump, and on a half slab on the deck of a raft it assembled), and walking
- * along a row of half slabs (pressed against a wall of vertical half slabs whose face is the
- * cells' mid-line, or on top of a row of lower half slabs) is never caught on the seams between
- * the cells.
+ * sinking (also after a jump, on a half slab on the deck of a raft it assembled, and on a floating
+ * raft whose hull is built of half slabs), and walking along a row of half slabs (pressed against a
+ * wall of vertical half slabs whose face is the cells' mid-line, or on top of a row of lower half
+ * slabs, on land and on that raft) is never caught on the seams between the cells.
  *
  * The scenes are written on the server (w.sim): the tools that make partial blocks come in M2.4.
  * The player acts through held keys (walk, jump), clicks (the helm) and the host's teleport; the
@@ -173,5 +173,67 @@ describe('38. 半砖占 4 个八分格。玩家能直接走上半砖，站在半
       expect(Math.abs(at().y - onSlab), `tick ${t}`).toBeLessThan(1e-6); // and it does not sink
       expect(me.player.carrierId).toBe(ship.id);
     }
+  });
+
+  it('on a floating raft built of half slabs (its deck is the hull itself: lower slabs between full bow and stern rows): the player walks down onto the slabs, along them across the seams without catching, and up onto the bow row without jumping; carried all along, never sinking', () => {
+    // The raft of g8-shapes-ship.test.ts (package P9: it floats at the draught of its real shapes).
+    const deckY = SEA_TOP - 1;
+    const w = seaWorld('creative', vec3(2.5, SEA_TOP, 5.5), 385);
+    const { sim, me } = w;
+    for (let z = 0; z <= 5; z++) {
+      for (let x = 0; x <= 4; x++) {
+        let c = slab(B.PLANKS_OAK, LOWER);
+        if (z === 0 || z === 5 || (x === 2 && z === 4)) c = makeCell(B.PLANKS_OAK);
+        sim.world.setCell(x, deckY, z, c);
+      }
+    }
+    sim.world.setCell(2, SEA_TOP, 4, makeCell(B.HELM, NZ));
+    w.tick(10);
+    me.emptyHand();
+    const ship = assembleAtHelm(w, vec3(2, SEA_TOP, 4));
+    releaseWheelByClick(w);
+    w.tick(40); // the raft settles on the water
+    const at = (): Vec3 => ship.grid.toLocal(vec3(me.player.pos.x, me.player.pos.y, me.player.pos.z));
+    // Onto the stern row west of the helm's seat, facing the bow.
+    const start = ship.grid.toWorld(vec3(1.5, deckY + 1.05, 5.5));
+    me.teleport(start.x, start.y, start.z);
+    w.tick(10);
+    expect(me.player.carrierId).toBe(ship.id);
+    const plank = at().y;
+    expect(Math.abs(plank - (deckY + 1))).toBeLessThan(0.03); // on the full planks (a slight heel)
+    // Walk north (toward the bow) in the frame of the deck.
+    const north = (): number => 0 + yawOf(ship.grid);
+    let z = at().z;
+    let lowest = Infinity;
+    hold(w, { yaw: north() }, 6);
+    me.input.yaw = north();
+    me.input.forward = 1;
+    for (let t = 0; t < 40 && at().z > 1.6; t++) {
+      me.input.yaw = north();
+      w.tick();
+      const p = at();
+      lowest = Math.min(lowest, p.y);
+      expect(me.player.carrierId, `tick ${t}`).toBe(ship.id);
+      if (p.z < 4.5 && p.z > 1.6) expect(z - p.z, `tick ${t}: dz on the slabs`).toBeGreaterThan(MIN_STEP);
+      z = p.z;
+    }
+    me.input.forward = 0;
+    expect(at().z).toBeLessThanOrEqual(1.6);
+    w.tick(10);
+    // Standing on the slabs: half a block below the planks, and it does not sink.
+    const onSlab = at().y;
+    expect(onSlab - plank).toBeCloseTo(-0.5, 1);
+    expect(lowest).toBeGreaterThan(onSlab - 0.03);
+    for (let t = 0; t < 30; t++) {
+      w.tick();
+      expect(Math.abs(at().y - onSlab), `tick ${t}`).toBeLessThan(1e-6);
+    }
+    // Up onto the bow row: half a block, without a jump.
+    hold(w, { yaw: north() }, 4);
+    w.tick(10);
+    expect(at().z).toBeLessThan(1);
+    expect(at().z).toBeGreaterThan(0.3); // still on the bow row
+    expect(at().y - onSlab).toBeCloseTo(0.5, 1);
+    expect(me.player.carrierId).toBe(ship.id);
   });
 });
