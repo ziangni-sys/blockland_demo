@@ -45,6 +45,7 @@ import {
 import { AIR, CELL_MULTI_BIT, FULL_LIMIT, HOLES_MASK, HOLES_SHIFT, PACK_SCALE, type CellLayers } from '../blocks/cell';
 import { SET_DEFAULT, type CellBounds, type VoxelGrid } from './grid';
 import { checkCanonical } from './parts';
+import type { LocalObb } from './shape';
 
 /** Called after a structure cell changed; oldCell and newCell are packed cells (blocks/cell.ts). */
 export type StructureCellListener = (
@@ -113,6 +114,17 @@ export class StructureGrid implements VoxelGrid {
   private boundsCache: CellBounds | null = null;
   private boundsVersion = -1;
 
+  /**
+   * The local box of this grid's shape queries (voxel/shape.ts: a world box seen in this grid's
+   * local space, about 0.85 KB, 1.4 KB with the SAT axes of a tilted grid), made by the first query and
+   * reused by every later one instead of one per query; only voxel/shape.ts (takeObb, releaseObb)
+   * touches it and `queryBoxBusy`. Busy while a query uses it: a query of this grid made meanwhile
+   * (from a callback of forEachSolidCellOverlapping or nearestFreeOffset) builds a box of its own,
+   * so a nested query never changes the box the outer one is still reading.
+   */
+  queryBox: LocalObb | null = null;
+  queryBoxBusy = false;
+
   constructor(gridId: number, parent: VoxelGrid) {
     if (gridId <= 0) throw new Error('structure gridId must be positive');
     this.gridId = gridId;
@@ -128,9 +140,16 @@ export class StructureGrid implements VoxelGrid {
     const lz = z - this.oz;
     if (lx < 0 || ly < 0 || lz < 0 || lx >= this.sx || ly >= this.sy || lz >= this.sz) return AIR;
     const i = lx + lz * this.sx + ly * this.sx * this.sz;
+    return this.holes === null && this.part2 === null ? this.cells[i]! : this.layeredCell(i);
+  }
+
+  /**
+   * getCell at storage index `i` of a grid that has a holes or a second-part layer: kept out of
+   * getCell so that it stays as small as M1's (see voxel/world.ts layeredCell; no test holds it).
+   */
+  private layeredCell(i: number): number {
     const h = this.holes;
     const q = this.part2;
-    if (h === null && q === null) return this.cells[i]!;
     return this.cells[i]! | (h !== null ? h[i]! << HOLES_SHIFT : 0) | (q !== null && q[i] !== 0 ? CELL_MULTI_BIT : 0);
   }
 
@@ -361,29 +380,44 @@ export class StructureGrid implements VoxelGrid {
     this.version = other.version;
   }
 
+  /**
+   * Tight bounds of the non-air cells, null for an empty grid; recomputed after a change only.
+   * Every structure query asks it, so the cached answer costs nothing: the scan lives in its own
+   * method without closures (a function whose locals a closure captures allocates their context on
+   * every call, the early return included).
+   */
   cellBounds(): CellBounds | null {
-    if (this.boundsVersion === this.version) return this.boundsCache;
-    this.boundsVersion = this.version;
-    if (this.count === 0) {
-      this.boundsCache = null;
-      return null;
+    if (this.boundsVersion !== this.version) {
+      this.boundsVersion = this.version;
+      this.boundsCache = this.count === 0 ? null : this.tightBounds();
     }
+    return this.boundsCache;
+  }
+
+  /** cellBounds() of a grid with at least one non-air cell: a scan of the base layer. */
+  private tightBounds(): CellBounds {
+    const { sx, sy, sz, ox, oy, oz, cells } = this;
     let minX = Infinity;
     let minY = Infinity;
     let minZ = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
     let maxZ = -Infinity;
-    this.forEachCell((x, y, z) => {
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-      if (z > maxZ) maxZ = z;
-    });
-    this.boundsCache = { minX, minY, minZ, maxX: maxX + 1, maxY: maxY + 1, maxZ: maxZ + 1 };
-    return this.boundsCache;
+    let i = 0;
+    for (let y = 0; y < sy; y++) {
+      for (let z = 0; z < sz; z++) {
+        for (let x = 0; x < sx; x++, i++) {
+          if (cells[i] === AIR) continue;
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (z < minZ) minZ = z;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+          if (z > maxZ) maxZ = z;
+        }
+      }
+    }
+    return { minX: minX + ox, minY: minY + oy, minZ: minZ + oz, maxX: maxX + ox + 1, maxY: maxY + oy + 1, maxZ: maxZ + oz + 1 };
   }
 
   /**

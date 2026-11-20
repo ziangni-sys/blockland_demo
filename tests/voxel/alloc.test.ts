@@ -6,6 +6,12 @@
  * with default inlining and with inlining nearly off (docs/SHAPES.md 4.4: an allocation-free
  * query must not depend on being inlined).
  *
+ * The same per-tick queries against a StructureGrid allocate nothing either (tests/voxel/
+ * struct-alloc-probe.ts): the grid keeps the local box its queries see the world box through
+ * (StructureGrid.queryBox, about 0.85 KB, 1.4 KB with the SAT axes of a tilted grid) and every query
+ * reuses it; before, each query built one, which was most of what a body on a deck allocated per
+ * tick.
+ *
  * Why a child process: inside vitest the module transform (imports become getter calls on
  * namespace objects) changes how V8 optimises shape.ts, and the original regression (~30 B
  * per FREE-box query from World.getCell inlined into a y-innermost loop) did not reproduce
@@ -26,6 +32,19 @@ describe('World fast paths do not allocate (bundled, optimised code, both inlini
       expect(Object.keys(cases).length, report).toBe(19);
       // The profiler's own plumbing costs a few KB per round (~0.02 B/call at 200k calls); one
       // boxed double costs >= 12 bytes, so even boxing on 1 call in 12 fails this bound.
+      for (const v of Object.values(cases)) expect(v, report).toBeLessThan(1);
+    }
+  }, 240_000);
+});
+
+describe('structure queries do not allocate either (bundled, optimised code, both inlining conditions)', () => {
+  it('boxOverlapsSolid / hasSupportBelow / columnHasSolidBelow / deepestPenetration(out, with and without a lean) on a deck of planks and one of half slabs, axis-aligned and heeled', async () => {
+    const result = await runHeapProbe(fileURLToPath(new URL('./struct-alloc-probe.ts', import.meta.url)));
+    const report = heapReport(result);
+    expect(Object.keys(result).length).toBe(INLINING_CONDITIONS.length);
+    for (const cases of Object.values(result)) {
+      expect(Object.keys(cases).length, report).toBe(24);
+      // As above: < 1 byte per call (a local box per query was 920 to 1510 bytes).
       for (const v of Object.values(cases)) expect(v, report).toBeLessThan(1);
     }
   }, 240_000);

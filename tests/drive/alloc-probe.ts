@@ -8,9 +8,8 @@
  *    walking in a small circle and jumping, inside one chunk;
  *  - 'walk on slabs and stairs': the same walk over a field of lower half slabs and octant stairs
  *    (docs/SHAPES.md 15: < 256 B per tick, the world path with partial cells);
- *  - 'stand on a moving deck': a deck structure moving and turning under a standing player. The
- *    voxel queries against a structure allocate their local box (voxel/shape.ts structureObb), so
- *    this case measures that, not the mover;
+ *  - 'stand on a moving deck' / 'walk on a moving deck': a deck structure moving and turning under
+ *    a standing player / a player walking in small circles;
  *  - 'sneak on a slab deck' / 'sneak on a planks deck': a player sneaking along the edges of a deck
  *    at rest made of lower half slabs (a layered structure grid: the sneak guard's solidAtHalf
  *    probes) / of whole planks (the same deck as M1 had it);
@@ -18,11 +17,14 @@
  *    bounds of a ship (a plate of lower half slabs / planks with a mast, its hull analysed), so the
  *    fluid samples ask isDryHalf every tick.
  *  - 'judge a jump in the world', 'judge standing on a heeled deck', 'judge standing on a heeled
- *    deck beside a wall': the server judging one move report of a client-driven player
- *    (entities/drive.ts ReportJudge.check) on a fixed state, in the world and on a deck at rest
- *    heeling 9 degrees, in the open and 0.02 short of its deck house on the side its walls lean toward.
- * The structure cases all pay for the local box per structure query (M1); the slab / planks pairs
- * isolate what partial cells add.
+ *    deck beside a wall', 'judge a landing nobody saw beside a leaning mast': the server judging
+ *    one move report of a client-driven player (entities/drive.ts ReportJudge.check) on a fixed
+ *    state, in the world; on a deck at rest heeling 9 degrees, in the open and 0.02 short of its
+ *    deck house on the side its walls lean toward; and on a raft at rest heeling 7.5 degrees, a
+ *    report that counts a landing no report showed, beside its mast on the side the mast leans away
+ *    from (the deeper ground search, slab by slab).
+ * The structure queries allocate nothing (the grid keeps its local box, StructureGrid.queryBox);
+ * the slab / planks pairs isolate what partial cells add.
  */
 import { Session } from 'node:inspector/promises';
 import { makeCell } from '../../src/blocks/cell';
@@ -206,8 +208,18 @@ const swimPlanks = swimCase(22, makeCell(B.PLANKS_OAK));
  * Judging one move report (entities/drive.ts ReportJudge.check) on a fixed state: the reference
  * at `from`, the report at `to` (in `carrier`'s frame, else the world), standing or in the air.
  * check() changes nothing but the judge's scratch, so the same report is judged again and again.
+ * `fall`: the reference was in the air, falling at `vy` (blocks/s) `rise` above where something
+ * last held it up, and the report counts a landing no report showed, `ticks` ticks after it
+ * (check()'s `unseen`: the search for the ground it came down on).
  */
-function judgeCase(mover: BodyMover, carrier: { id: number; grid: StructureGrid } | null, from: Vec3, to: Vec3, onGround: boolean): { tick: () => void; verdict: () => string | null } {
+function judgeCase(
+  mover: BodyMover,
+  carrier: { id: number; grid: StructureGrid } | null,
+  from: Vec3,
+  to: Vec3,
+  onGround: boolean,
+  fall?: { vy: number; rise: number; ticks: number },
+): { tick: () => void; verdict: () => string | null; landedUnseen: () => boolean } {
   const judge = new ReportJudge(mover, world);
   const p = new Player(50 + (carrier?.id ?? 0), 'survival');
   const d = new ClientDrive();
@@ -220,8 +232,14 @@ function judgeCase(mover: BodyMover, carrier: { id: number; grid: StructureGrid 
   d.pos.x = from.x;
   d.pos.y = from.y;
   d.pos.z = from.z;
-  d.onGround = true;
-  d.reportedOnGround = true;
+  d.onGround = fall === undefined;
+  d.reportedOnGround = fall === undefined;
+  if (fall !== undefined) {
+    d.envRise = fall.rise;
+    d.envTop = d.envTopLate = d.envPeak = fall.rise;
+    d.envVy = d.envVyLate = fall.vy;
+    d.envHeld = false;
+  }
   d.fresh = false;
   d.viewTick = 98;
   const rep = emptyReport();
@@ -233,7 +251,13 @@ function judgeCase(mover: BodyMover, carrier: { id: number; grid: StructureGrid 
   rep.vel.y = onGround ? 0 : 6;
   rep.onGround = onGround;
   rep.viewTick = 98;
-  return { tick: () => void judge.check(p, d, rep, 1, 100, false), verdict: () => judge.check(p, d, rep, 1, 100, false) };
+  const ticks = fall?.ticks ?? 1;
+  const unseen = fall !== undefined;
+  return {
+    tick: () => void judge.check(p, d, rep, ticks, 100, unseen),
+    verdict: () => judge.check(p, d, rep, ticks, 100, unseen),
+    landedUnseen: () => judge.check(p, d, rep, ticks, 100, unseen) === null && judge.landedUnseen,
+  };
 }
 // In the world: a jump off the stone floor (y 11).
 const judgeAir = judgeCase(landMover, null, vec3(8.5, 11, 8.5), vec3(8.78, 11.39, 8.5), false);
@@ -253,6 +277,60 @@ const heeledDeck = { id: 31, grid: heeled };
 // drive.ts clearOfLeaningWalls asks about the side's strip and its corners.
 const judgeDeckOpen = judgeCase(heeledMover, heeledDeck, vec3(6.5, 61, 9.5), vec3(6.6, 61, 9.5), true);
 const judgeDeckWall = judgeCase(heeledMover, heeledDeck, vec3(11, 61, 5.66), vec3(11.1, 61, 5.68), true);
+/**
+ * A raft at rest heeling 7.5 degrees about x (planks x -4..7, z -4..7 at y 70) with a mast at x 2,
+ * z 2 up 20 cells: its up, and the mast, lean toward +z (tests/drive/wall-cheats.test.ts "a landing
+ * nobody saw beside a leaning mast"). A body on the mast's -z side, 0.01 short of it, fell half a
+ * block in three ticks no report showed and stands on the deck at the mast's foot: the report counts
+ * that landing, and the search for its ground (drive.ts groundUnder, supportDepth) probes deeper than
+ * the standing probe, slab by slab past the mast leaning away from the body (underLeaningWalls).
+ */
+const masted = new StructureGrid(32, world);
+for (let x = -4; x < 8; x++) for (let z = -4; z < 8; z++) masted.setCell(x, 70, z, makeCell(B.PLANKS_OAK));
+for (let y = 71; y < 91; y++) masted.setCell(2, y, 2, makeCell(B.PLANKS_OAK));
+masted.pivot.x = 2;
+masted.pivot.y = 70.5;
+masted.pivot.z = 2;
+masted.setPoseImmediate(vec3(2, 70.5, 2), qfromAxisAngle(vec3(1, 0, 0), (7.5 * Math.PI) / 180));
+const mastedList: readonly BodyStructure[] = [{ id: 32, grid: masted, parent: null, children: [], removed: false, hull: null }];
+const judgeMast = judgeCase(new BodyMover({ world, structures: () => mastedList }), { id: 32, grid: masted }, vec3(2.5, 71.5, 1.69), vec3(2.5, 71, 1.69), true, { vy: -3, rise: 0.5, ticks: 3 });
+
+// ---- walk on a moving deck: the deck of 'stand on a moving deck' (a grid of its own), a rider walking in small circles on it
+const walkGrid = new StructureGrid(6, world);
+for (let x = 4; x < 12; x++) for (let z = 4; z < 12; z++) walkGrid.setCell(x, 20, z, makeCell(B.PLANKS_OAK));
+walkGrid.pivot.x = 8;
+walkGrid.pivot.y = 20.5;
+walkGrid.pivot.z = 8;
+walkGrid.setPoseImmediate(vec3(8, 20.5, 8), quat());
+const walkList: readonly BodyStructure[] = [{ id: 6, grid: walkGrid, parent: null, children: [], removed: false, hull: null }];
+const walkMover = new BodyMover({ world, structures: () => walkList });
+const deckWalker = new Player(4, 'survival');
+deckWalker.setPosition(8.5, 21, 8.5);
+deckWalker.input.forward = 1;
+const wq: Quat = quat();
+let wt = 0;
+function deckWalkTick(): void {
+  wt++;
+  walkGrid.snapshotPose();
+  walkGrid.position.y = 20.5 + 0.1 * Math.sin(wt * 0.05);
+  qfromYaw(0.3 * Math.sin(wt * 0.02), wq);
+  walkGrid.rotation.x = wq.x;
+  walkGrid.rotation.y = wq.y;
+  walkGrid.rotation.z = wq.z;
+  walkGrid.rotation.w = wq.w;
+  if (wt % 300 === 0) {
+    // Back to the middle of the deck now and then (the turning deck bends the circle into a drift).
+    const m = walkGrid.toWorld(vec3(8.5, 21, 8.5));
+    deckWalker.setPosition(m.x, m.y + 0.01, m.z);
+  }
+  deckWalker.input.yaw = wt * 0.15;
+  walkMover.beginCarry();
+  if (deckWalker.carrierId !== 0) walkMover.carryRider(deckWalker);
+  walkMover.beginStep(deckWalker);
+  sanitizeInput(deckWalker);
+  walkMover.stepPlayer(deckWalker, takeJumpPresses(deckWalker), false);
+  walkMover.endTick();
+}
 
 const cases: Record<string, (n: number) => number> = {
   'walk on land': (n) => {
@@ -295,6 +373,14 @@ const cases: Record<string, (n: number) => number> = {
     for (let i = 0; i < n; i++) judgeDeckWall.tick();
     return n;
   },
+  'judge a landing nobody saw beside a leaning mast': (n) => {
+    for (let i = 0; i < n; i++) judgeMast.tick();
+    return n;
+  },
+  'walk on a moving deck': (n) => {
+    for (let i = 0; i < n; i++) deckWalkTick();
+    return deckWalker.pos.x;
+  },
 };
 
 interface ProfileNode {
@@ -307,6 +393,14 @@ function totalBytes(n: ProfileNode): number {
   return s;
 }
 
+/** The cases in the world only (no structure near the body): measured over CALLS ticks. */
+const WORLD_CASES = new Set(['walk on land', 'walk on slabs and stairs', 'judge a jump in the world']);
+/**
+ * The search for the ground of a landing nobody saw asks the deck a few hundred structure queries
+ * per report: fewer reports measure it as well, and keep the profile (one entry per sample) small
+ * enough to read back should the queries allocate again (a local box per query: 235 KB per report).
+ */
+const SEARCH_CALLS = 2_000;
 const SAMPLING = { samplingInterval: 64, includeObjectsCollectedByMinorGC: true, includeObjectsCollectedByMajorGC: true };
 const session = new Session();
 session.connect();
@@ -316,7 +410,7 @@ await session.post('HeapProfiler.stopSampling');
 const out: Record<string, number> = {};
 let sink = 0;
 for (const [name, run] of Object.entries(cases)) {
-  const calls = name.startsWith('walk on') || name === 'judge a jump in the world' ? CALLS : STRUCTURE_CALLS;
+  const calls = WORLD_CASES.has(name) ? CALLS : name === 'judge a landing nobody saw beside a leaning mast' ? SEARCH_CALLS : STRUCTURE_CALLS;
   let best = Infinity;
   for (let r = 0; r < ROUNDS && best > CLEAN; r++) {
     sink += run(calls * 2);
@@ -339,6 +433,11 @@ const scenes = {
   sneakY: [sneakSlab.rider.pos.y, sneakPlanks.rider.pos.y],
   swimWet: [swimSlab.dryChecks(), swimPlanks.dryChecks()],
   swimXZ: [swimSlab.swimmer.pos.x, swimSlab.swimmer.pos.z, swimPlanks.swimmer.pos.x, swimPlanks.swimmer.pos.z],
-  judgeVerdicts: [judgeAir.verdict(), judgeDeckOpen.verdict(), judgeDeckWall.verdict()],
+  judgeVerdicts: [judgeAir.verdict(), judgeDeckOpen.verdict(), judgeDeckWall.verdict(), judgeMast.verdict()],
+  mastLandedUnseen: judgeMast.landedUnseen(),
+  deckWalker: { carried: deckWalker.carrierId, local: (() => {
+    const l = walkGrid.toLocal(deckWalker.pos);
+    return [l.x, l.y, l.z];
+  })() },
 };
 process.stdout.write(JSON.stringify({ bytesPerCall: out, sink, ...scenes }) + '\n');

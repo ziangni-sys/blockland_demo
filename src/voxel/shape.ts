@@ -147,13 +147,26 @@ function plainStructure(grid: VoxelGrid): boolean {
  * A world AABB expressed in a structure grid's local space. Built once per query (and then
  * translated cheaply for iterative queries) so the rotation is only fetched once.
  *
- * Cost model: building is a handful of multiplies and one small allocation; the SAT axes are
- * only derived when a SOLID candidate cell actually needs the exact test, so queries that
- * miss the structure (the common case: every entity against every nearby structure) stay
- * cheap. Plain arrays rather than typed arrays: allocating an ArrayBuffer per query costs
- * more than the whole early-out.
+ * REUSE. With its number fields, its rotation array and its SAT axes a local box is about 0.85 KB,
+ * 1.4 KB once a tilted grid's SAT axes are built, and the per-tick code asks structures many queries (a body on a deck a handful per tick,
+ * the sneak guard and the server's judgement of a move report on a tilted deck dozens to hundreds).
+ * So each StructureGrid keeps one (StructureGrid.queryBox) that its queries take and give back
+ * (takeObb, releaseObb); only a query made while another query of the same grid holds it (from a
+ * callback of forEachSolidCellOverlapping or nearestFreeOffset) builds a box of its own. A reused
+ * box keeps its arrays and its number fields keep their storage, so a query allocates nothing.
+ * The world box comes in through `w` (written by the caller, read by build()) rather than as six
+ * arguments: a fresh fractional double passed to a function V8 does not inline is boxed.
+ *
+ * Cost model: building is a handful of multiplies; the SAT axes are only derived when a SOLID
+ * candidate cell actually needs the exact test, so queries that miss the structure (the common
+ * case: every entity against every nearby structure) stay cheap. Plain arrays rather than typed
+ * arrays: a box that is not the grid's own (nested queries, VoxelGrid implementations other than
+ * StructureGrid) is allocated per query, and an ArrayBuffer per query costs more than the whole
+ * early-out.
  */
 class LocalObb {
+  /** The world box to build from (build() reads it; callers write its six coordinates). */
+  readonly w: AABB = aabb();
   /**
    * Row-major local->world rotation. Row i is world axis i expressed in local coordinates
    * (the box's own axes, seen from the grid); column j is local axis j in world coordinates.
@@ -196,7 +209,9 @@ class LocalObb {
     this.bounds = bounds;
   }
 
-  build(grid: VoxelGrid, minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number): void {
+  /** Express the world box `w` in `grid`'s local space (at the grid's present pose); undoes setWorldOffset. */
+  build(grid: VoxelGrid): void {
+    const { minX, minY, minZ, maxX, maxY, maxZ } = this.w;
     const m = this.m;
     const q = grid.worldRotation(this.q);
     // Same formula as core/math qtoMat3, written into a plain array.
@@ -448,21 +463,55 @@ class LocalObb {
   }
 }
 
-/** Builds the local OBB of a world box for a structure grid; null when nothing can overlap. */
-function structureObb(
-  grid: VoxelGrid,
-  minX: number,
-  minY: number,
-  minZ: number,
-  maxX: number,
-  maxY: number,
-  maxZ: number,
-): LocalObb | null {
+/** The type only: StructureGrid keeps one for its queries (StructureGrid.queryBox); nothing outside this module builds or reads one. */
+export type { LocalObb };
+
+/**
+ * The local box for a query of structure grid `grid` (not built yet: write the world box into
+ * `w`, then build()), or null for an empty structure (nothing can overlap; only the world is
+ * unbounded). It is the grid's own box (StructureGrid.queryBox) when no other query of the grid
+ * holds that, else a new one: a query made from a callback of another query on the same grid
+ * never touches the outer query's box. Give it back with releaseObb when the query is done.
+ */
+function takeObb(grid: VoxelGrid): LocalObb | null {
   const bounds = grid.cellBounds();
-  if (bounds === null) return null; // empty structure (only the world is unbounded)
-  const obb = new LocalObb(bounds);
-  obb.build(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  if (bounds === null) return null;
+  if (grid instanceof StructureGrid && !grid.queryBoxBusy) {
+    grid.queryBoxBusy = true;
+    const own = grid.queryBox;
+    if (own === null) return (grid.queryBox = new LocalObb(bounds));
+    own.bounds = bounds;
+    return own;
+  }
+  return new LocalObb(bounds);
+}
+
+/** The query that took `obb` for `grid` (takeObb) is done with it: the grid's own box is free again. */
+function releaseObb(grid: VoxelGrid, obb: LocalObb): void {
+  if (grid instanceof StructureGrid && grid.queryBox === obb) grid.queryBoxBusy = false;
+}
+
+/** takeObb built for world box `b`; null for an empty structure. Give it back with releaseObb. */
+function structureObb(grid: VoxelGrid, b: AABB): LocalObb | null {
+  const obb = takeObb(grid);
+  if (obb === null) return null;
+  const w = obb.w;
+  w.minX = b.minX;
+  w.minY = b.minY;
+  w.minZ = b.minZ;
+  w.maxX = b.maxX;
+  w.maxY = b.maxY;
+  w.maxZ = b.maxZ;
+  obb.build(grid);
   return obb;
+}
+
+/** Does any solid octant of structure grid `grid` overlap the world box `obb.w`? Builds `obb` (from takeObb) and gives it back. */
+function obbHasSolid(grid: VoxelGrid, obb: LocalObb): boolean {
+  obb.build(grid);
+  const hit = obb.range() && obb.hasSolid(grid);
+  releaseObb(grid, obb);
+  return hit;
 }
 
 // ====================================================================== world fast path
@@ -576,20 +625,6 @@ function genericRangeHasSolid(grid: VoxelGrid, hx0: number, hx1: number, hy0: nu
   return false;
 }
 
-/** Structure-path overlap test on box coordinates (allocates the local OBB). */
-function structureHasSolid(
-  grid: VoxelGrid,
-  minX: number,
-  minY: number,
-  minZ: number,
-  maxX: number,
-  maxY: number,
-  maxZ: number,
-): boolean {
-  const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
-  return obb !== null && obb.range() && obb.hasSolid(grid);
-}
-
 // ====================================================================== overlap
 
 /**
@@ -630,25 +665,32 @@ export function forEachSolidCellOverlapping(
     }
     return;
   }
-  const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
-  if (obb === null || !obb.range()) return;
-  for (let y = obb.y0; y <= obb.y1; y++) {
-    for (let z = obb.z0; z <= obb.z1; z++) {
-      for (let x = obb.x0; x <= obb.x1; x++) {
-        const f = solidFillAt(grid, x, y, z);
-        if (f === 0) continue;
-        if (f === 0xff && !obb.overlapsCell(x, y, z)) continue;
-        const s = obb.overlappingOctants(x, y, z, f & obb.sub(x, y, z));
-        if (f !== 0xff && s === 0) continue;
-        if (fn(x, y, z, getPacked(grid, x, y, z), s) === true) return;
+  const obb = structureObb(grid, box);
+  if (obb === null) return;
+  // `fn` may query this grid again (it then gets a box of its own, takeObb); given back even when
+  // `fn` throws, or every later query of the grid would build its own.
+  try {
+    if (!obb.range()) return;
+    for (let y = obb.y0; y <= obb.y1; y++) {
+      for (let z = obb.z0; z <= obb.z1; z++) {
+        for (let x = obb.x0; x <= obb.x1; x++) {
+          const f = solidFillAt(grid, x, y, z);
+          if (f === 0) continue;
+          if (f === 0xff && !obb.overlapsCell(x, y, z)) continue;
+          const s = obb.overlappingOctants(x, y, z, f & obb.sub(x, y, z));
+          if (f !== 0xff && s === 0) continue;
+          if (fn(x, y, z, getPacked(grid, x, y, z), s) === true) return;
+        }
       }
     }
+  } finally {
+    releaseObb(grid, obb);
   }
 }
 
 /**
  * True when `box` truly overlaps any solid octant of `grid` (false for an invalid box).
- * Allocation-free for the world.
+ * Allocation-free for the world and for a StructureGrid (its own local box, takeObb).
  */
 export function boxOverlapsSolid(grid: VoxelGrid, box: AABB): boolean {
   const { minX, minY, minZ, maxX, maxY, maxZ } = box;
@@ -664,7 +706,16 @@ export function boxOverlapsSolid(grid: VoxelGrid, box: AABB): boolean {
       Math.ceil((maxZ - CONTACT_EPS) * 2) - 1,
     );
   }
-  return structureHasSolid(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  const obb = takeObb(grid);
+  if (obb === null) return false;
+  const w = obb.w;
+  w.minX = minX;
+  w.minY = minY;
+  w.minZ = minZ;
+  w.maxX = maxX;
+  w.maxY = maxY;
+  w.maxZ = maxZ;
+  return obbHasSolid(grid, obb);
 }
 
 // ====================================================================== penetration
@@ -692,18 +743,20 @@ export interface PushOptions {
 }
 
 /**
- * The lean's weight for `opts`, or 0 for none. A non-finite vector or weight is ignored, not
- * trusted: a NaN score would make every candidate face lose and report "no push" for an overlap.
- * (Read where used rather than copied into an object: findPenetration must not allocate.)
+ * The lean's direction for `opts`, or null for none; its weight is then
+ * `opts.preferWeight ?? DEFAULT_PREFER_WEIGHT`. A non-finite vector or weight, or a weight of 0, is
+ * no lean: a NaN score would make every candidate face lose and report "no push" for an overlap.
+ * (Returns the vector, not the weight, and the weight is read where used: a fractional double
+ * returned from a function V8 does not inline is boxed, and findPenetration must not allocate.)
  */
-function preferWeightOf(opts: PushOptions | undefined): number {
-  if (opts === undefined) return 0;
+function preferOf(opts: PushOptions | undefined): Vec3 | null {
+  if (opts === undefined) return null;
   const p = opts.prefer;
-  if (p === undefined) return 0;
+  if (p === undefined) return null;
   const w = opts.preferWeight ?? DEFAULT_PREFER_WEIGHT;
-  if (w === 0 || !Number.isFinite(w)) return 0;
-  if (!(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z))) return 0;
-  return w;
+  if (w === 0 || !Number.isFinite(w)) return null;
+  if (!(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z))) return null;
+  return p;
 }
 
 /**
@@ -747,8 +800,8 @@ function findPenetration(
   const h1y = Math.ceil((lmaxY - CONTACT_EPS) * 2) - 1;
   const h0z = Math.floor((lminZ + CONTACT_EPS) * 2);
   const h1z = Math.ceil((lmaxZ - CONTACT_EPS) * 2) - 1;
-  const pw = preferWeightOf(opts);
-  const pref = pw !== 0 ? opts!.prefer! : null;
+  const pref = preferOf(opts);
+  const pw = pref !== null ? (opts!.preferWeight ?? DEFAULT_PREFER_WEIGHT) : 0;
   const rotated = obb !== null && !obb.aligned;
   let found = false;
   let bestOverlap = 0;
@@ -905,8 +958,8 @@ function findPenetrationPlain(
   const lmaxX = obb !== null ? obb.cx + obb.ex : wb!.maxX;
   const lmaxY = obb !== null ? obb.cy + obb.ey : wb!.maxY;
   const lmaxZ = obb !== null ? obb.cz + obb.ez : wb!.maxZ;
-  const pw = preferWeightOf(opts);
-  const pref = pw !== 0 ? opts!.prefer! : null;
+  const pref = preferOf(opts);
+  const pw = pref !== null ? (opts!.preferWeight ?? DEFAULT_PREFER_WEIGHT) : 0;
   let found = false;
   let bestOverlap = 0;
   let bestDepth = 0;
@@ -1061,13 +1114,14 @@ function newPenetration(): Penetration {
  * "free" from "fully embedded").
  */
 export function deepestPenetration(grid: VoxelGrid, box: AABB, opts?: PushOptions, out?: Penetration): Penetration | null {
-  const { minX, minY, minZ, maxX, maxY, maxZ } = box;
   if (!validBox(box)) return null;
   const res = out ?? newPenetration();
   if (grid.isWorld) return worldPenetration(grid, box, opts, res) ? res : null;
-  const obb = structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  const obb = structureObb(grid, box);
   if (obb === null) return null;
-  return obbPenetration(grid, obb, opts, res) ? res : null;
+  const found = obbPenetration(grid, obb, opts, res);
+  releaseObb(grid, obb);
+  return found ? res : null;
 }
 
 export interface PenetrationResolution {
@@ -1114,7 +1168,7 @@ export function resolvePenetration(
   const isWorld = grid.isWorld;
   // World: a translated copy of the box. Structure: its local OBB, built once and translated.
   const cur: AABB | null = isWorld ? { minX, minY, minZ, maxX, maxY, maxZ } : null;
-  const obb = isWorld ? null : structureObb(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  const obb = isWorld ? null : structureObb(grid, box);
   if (cur === null && obb === null) return res; // empty structure: nothing to resolve
   const pen = newPenetration();
   let dx = 0;
@@ -1165,6 +1219,7 @@ export function resolvePenetration(
     res.nz = pen.nz;
     it++;
   }
+  if (obb !== null) releaseObb(grid, obb);
   res.dx = dx;
   res.dy = dy;
   res.dz = dz;
@@ -1736,7 +1791,16 @@ function probeOverlapsSolid(grid: VoxelGrid, box: AABB, depth: number, inset: nu
       Math.ceil((maxZ - CONTACT_EPS) * 2) - 1,
     );
   }
-  return structureHasSolid(grid, minX, minY, minZ, maxX, maxY, maxZ);
+  const obb = takeObb(grid);
+  if (obb === null) return false;
+  const w = obb.w;
+  w.minX = minX;
+  w.minY = minY;
+  w.minZ = minZ;
+  w.maxX = maxX;
+  w.maxY = maxY;
+  w.maxZ = maxZ;
+  return obbHasSolid(grid, obb);
 }
 
 /**
@@ -1786,26 +1850,52 @@ export function nearestFreeOffset(
   maxRadius: number,
   extraTest?: (candidate: AABB) => boolean,
 ): Vec3 | null {
-  const { minX, minY, minZ, maxX, maxY, maxZ } = box;
   if (!validBox(box)) return null;
   const n = grids.length;
   // Per structure: the local OBB is built once and only translated per candidate. Structures
-  // the box cannot reach within maxRadius are dropped up front.
+  // the box cannot reach within maxRadius are dropped up front. Every box taken is given back
+  // at the end, even when `extraTest` throws (it may query these grids: takeObb).
   const obbs: Array<LocalObb | null> = [];
   const list: VoxelGrid[] = [];
   const radius = maxRadius > 0 ? (maxRadius < MAX_FREE_RADIUS ? maxRadius : MAX_FREE_RADIUS) : 0;
-  for (let i = 0; i < n; i++) {
-    const g = grids[i]!;
-    if (g.isWorld) {
+  try {
+    for (let i = 0; i < n; i++) {
+      const g = grids[i]!;
+      if (g.isWorld) {
+        list.push(g);
+        obbs.push(null);
+        continue;
+      }
+      const obb = structureObb(g, box);
+      if (obb === null) continue;
+      if (!obb.range(radius)) {
+        releaseObb(g, obb);
+        continue;
+      }
       list.push(g);
-      obbs.push(null);
-      continue;
+      obbs.push(obb);
     }
-    const obb = structureObb(g, minX, minY, minZ, maxX, maxY, maxZ);
-    if (obb === null || !obb.range(radius)) continue;
-    list.push(g);
-    obbs.push(obb);
+    return freeOffsetSearch(list, obbs, box, radius, extraTest);
+  } finally {
+    for (let i = 0; i < list.length; i++) {
+      const obb = obbs[i]!;
+      if (obb !== null) releaseObb(list[i]!, obb);
+    }
   }
+}
+
+/**
+ * nearestFreeOffset's search over `list` (world grids with a null entry in `obbs`, structures with
+ * their local box built for `box`), the radius already clamped.
+ */
+function freeOffsetSearch(
+  list: readonly VoxelGrid[],
+  obbs: ReadonlyArray<LocalObb | null>,
+  box: AABB,
+  radius: number,
+  extraTest: ((candidate: AABB) => boolean) | undefined,
+): Vec3 | null {
+  const { minX, minY, minZ, maxX, maxY, maxZ } = box;
   const cand = aabb();
   const isFree = (ox: number, oy: number, oz: number): boolean => {
     const x0 = minX + ox;

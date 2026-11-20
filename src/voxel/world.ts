@@ -135,6 +135,22 @@ export class TickQueue {
   }
 }
 
+/**
+ * World.getCell in a chunk that has a holes or a second-part layer. Kept out of getCell so that
+ * getCell stays as small as M1's (a read of the base layer behind one test of the two layer
+ * fields): a bigger getCell is inlined into fewer hot callers under vitest's transform. Collection
+ * against M1 (alternating runs, medians of 7 to 35 runs per side, several series): under vitest
+ * 1.08-1.20 x with the layered expression inline, 1.07-1.13 x without (2 to 8 % gained); bundled
+ * 1.06-1.14 x and 1.05-1.10 x, the gain showing in some series and not in others. No test holds
+ * this (the results are the same and far inside the budgets): only an alternating timing of
+ * collection against M1 under vitest shows it.
+ */
+function layeredCell(c: Chunk, i: number): number {
+  const h = c.holes;
+  const q = c.part2;
+  return c.cells[i]! | (h !== null ? h[i]! << HOLES_SHIFT : 0) | (q !== null && q[i] !== 0 ? CELL_MULTI_BIT : 0);
+}
+
 export class World implements VoxelGrid {
   readonly gridId = 0;
   readonly parent = null;
@@ -242,10 +258,7 @@ export class World implements VoxelGrid {
     const c = this.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
     if (!c) return CELL_UNLOADED;
     const i = (x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4) | (y << 8);
-    const h = c.holes;
-    const q = c.part2;
-    if (h === null && q === null) return c.cells[i]!;
-    return c.cells[i]! | (h !== null ? h[i]! << HOLES_SHIFT : 0) | (q !== null && q[i] !== 0 ? CELL_MULTI_BIT : 0);
+    return c.holes === null && c.part2 === null ? c.cells[i]! : layeredCell(c, i);
   }
   /** Second part's value at integer world coordinates; 0 when there is none, outside the world or unloaded. */
   getPart2(x: number, y: number, z: number): number {
@@ -254,9 +267,25 @@ export class World implements VoxelGrid {
     if (!c || c.part2 === null) return 0;
     return c.part2[(x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4) | (y << 8)]!;
   }
+  /**
+   * Id and state of the first part at integer world coordinates: the base layer alone (16 bits),
+   * without what getCell adds from the holes and second-part layers, so `getCell(x, y, z) &
+   * 0xffff` always. Same rules where nothing is stored: y < 0 -> deeprock; y >= WORLD_HEIGHT ->
+   * AIR; unloaded chunk -> CELL_UNLOADED. For per-cell work that decides by the id and the state
+   * bits only, such as the liquid rules (a cell with parts has a hard first part, docs/SHAPES.md
+   * I7, so its id alone tells it from air and liquid): in a chunk with partial cells getCell reads
+   * two more arrays.
+   */
+  getIdState(x: number, y: number, z: number): number {
+    if (y < 0) return CELL_BELOW_WORLD;
+    if (y >= WORLD_HEIGHT) return AIR;
+    const c = this.getChunk(x >> CHUNK_SHIFT, z >> CHUNK_SHIFT);
+    if (!c) return CELL_UNLOADED;
+    return c.cells[(x & CHUNK_MASK) | ((z & CHUNK_MASK) << 4) | (y << 8)]!;
+  }
   /** Block id of the first part at integer world coordinates. */
   getId(x: number, y: number, z: number): number {
-    return this.getCell(x, y, z) & ID_MASK;
+    return this.getIdState(x, y, z) & ID_MASK;
   }
 
   /**

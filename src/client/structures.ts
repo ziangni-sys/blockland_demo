@@ -6,7 +6,8 @@
  * analysis the replica derives changes.
  *
  * Small structures are meshed synchronously (a freshly assembled raft then appears in the
- * same frame its blocks leave the world); big ones go to the mesh worker pool.
+ * same frame its blocks leave the world); big ones go to the mesh worker pool, and "big" starts
+ * smaller for a structure with partial cells, whose meshes are denser.
  */
 import { quat, vec3, type Quat, type Vec3 } from '../core/math';
 import { Mesher } from '../mesh/mesher';
@@ -20,8 +21,16 @@ import type { World } from '../voxel/world';
 import { approach } from './interp';
 import type { WorkerPool } from './workers';
 
-/** Padded snapshot volumes up to this are meshed on the main thread. */
+/** Padded snapshot volumes up to this are meshed on the main thread (whole blocks only: see the next). */
 const SYNC_MESH_MAX_CELLS = 24 * 24 * 24;
+/**
+ * The same limit for a snapshot that carries a holes or second-part layer (docs/SHAPES.md 8.5). The
+ * limit counts cells, and partial cells emit up to four quads per half face: a structure full of
+ * half slabs gives two to three times the quads of the densest whole-block structure of the same
+ * size (a 22^3 checkerboard of lower slabs: 85,000 quads, 22 ms on the main thread, against 32,000
+ * and 6.7 ms for planks), so such structures go to the mesh worker from 12^3 padded cells on.
+ */
+const SYNC_MESH_MAX_LAYERED_CELLS = 12 * 12 * 12;
 /** Light smoothing rate (1/s) so a ship sailing under a cliff dims instead of flickering. */
 const LIGHT_RATE = 6;
 
@@ -127,9 +136,9 @@ export class StructureRenderer {
       return;
     }
     const { input, ox, oy, oz } = snap;
-    const volume = input.cells.length;
+    const syncMax = input.holes !== null || input.part2 !== null ? SYNC_MESH_MAX_LAYERED_CELLS : SYNC_MESH_MAX_CELLS;
     const pool = this.pool && !this.pool.failed ? this.pool : null;
-    if (pool && volume > SYNC_MESH_MAX_CELLS) {
+    if (pool && input.cells.length > syncMax) {
       rec.jobVersion = version;
       const accepted = pool.submit(
         (id): MeshRequest => ({ type: 'mesh', id, input }),
