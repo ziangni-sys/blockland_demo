@@ -5,11 +5,13 @@
 import { describe, expect, it } from 'vitest';
 import { CHUNK_SIZE, SECTIONS_PER_CHUNK, WORLD_HEIGHT } from '../../src/core/constants';
 import { vec3, quat } from '../../src/core/math';
-import { AIR, makeCell } from '../../src/blocks/cell';
+import { AIR, ID_MASK, makeCell } from '../../src/blocks/cell';
+import { canonCell } from '../../src/blocks/shapes';
 import { B, CELL_BELOW_WORLD, CELL_UNLOADED } from '../../src/blocks/defs';
 import { cellIndex, Chunk, sectionKey, sectionKeyParts } from '../../src/voxel/chunk';
 import { SET_EXPLOSION, SET_NO_NEIGHBOR_UPDATE } from '../../src/voxel/grid';
 import { TickQueue, World, posKey } from '../../src/voxel/world';
+import { LOWER, UPPER, slab } from '../shapes';
 import { STONE, emptyWorld } from './helpers';
 
 function sections(keys: Iterable<number>): string[] {
@@ -56,6 +58,20 @@ describe('World cells', () => {
     expect(w.setCell(3, WORLD_HEIGHT, 3, STONE)).toBe(false);
     expect(w.setCell(100, 50, 3, STONE)).toBe(false);
     expect(w.setCell(3, 50, 3, AIR)).toBe(false); // unchanged
+  });
+
+  it('getIdState is the base layer: getCell & 0xffff everywhere (full blocks, partial and two-part cells, out of range, unloaded); getId its id', () => {
+    const w = emptyWorld(0, 1);
+    const cells = [STONE, makeCell(B.WATER, 3), slab(B.STONE, LOWER), slab(B.PLANKS_OAK, 0x7f), canonCell(slab(B.STONE, LOWER), slab(B.BRICKS, UPPER))];
+    cells.forEach((c, i) => w.setCell(2 + i, 7, 18, c));
+    const spots: Array<[number, number, number]> = [[3, -1, 3], [3, WORLD_HEIGHT, 3], [100, 50, 3], [-1, 50, 3], [1, 7, 18]];
+    for (let i = 0; i < cells.length; i++) spots.push([2 + i, 7, 18]);
+    for (const [x, y, z] of spots) {
+      expect(w.getIdState(x, y, z), `${x},${y},${z}`).toBe(w.getCell(x, y, z) & 0xffff);
+      expect(w.getId(x, y, z), `${x},${y},${z}`).toBe(w.getCell(x, y, z) & ID_MASK);
+    }
+    expect(w.getIdState(4, 7, 18)).toBe(slab(B.STONE, LOWER) & 0xffff);
+    expect(w.getCell(4, 7, 18)).not.toBe(w.getIdState(4, 7, 18));
   });
 
   it('chunk cache never serves a removed or replaced chunk', () => {

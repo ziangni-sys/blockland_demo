@@ -51,7 +51,11 @@
  * the infinite source's floor — sees a partial cell as a full wall or floor. Water beside a lower
  * slab stops at the slab's cell, water over it rests in the cell above (half a cell of air over
  * the slab's surface), and a new infinite source may form over it. Only the base layer is read
- * (the id and state of the first part); the holes and the second part never matter here.
+ * (the id and state of the first part): the chunk arrays directly, or World.getIdState, never
+ * World.getCell, whose layer reads make every read in a chunk with partial cells about a fifth
+ * dearer. The holes and the second part never matter here: every decision reads the id or the
+ * liquid state bits, and the one comparison of a whole value (the re-read in tick()) is with a
+ * liquid cell, which is never the base of a cell with parts.
  *
  * DEVIATIONS from the classic rules, on purpose:
  *  - spreading may also raise a same-liquid FLOWING cell that holds less than the incoming
@@ -378,12 +382,12 @@ export class Fluids {
     const L = liquidProps(blockId);
     if (!L) return;
     const world = this.world;
-    const cell = world.getCell(x, y, z);
+    const cell = world.getIdState(x, y, z);
     if ((cell & CELL_ID) !== L.id) return;
     if (this.deferred.size !== 0) this.deferred.delete(posKey(x, y, z));
     const nb = this.tickNb;
     let unknown = this.readNeighbours(x, y, z, nb);
-    let below = world.getCell(x, y - 1, z);
+    let below = world.getIdState(x, y - 1, z);
     let state = liquidStateOf(cell);
 
     // 1. Lava touching water hardens; the water stays.
@@ -401,7 +405,7 @@ export class Fluids {
 
     // 2. A flowing cell takes its state from its surroundings.
     if (state !== SOURCE) {
-      const next = this.nextState(L, nb, unknown, world.getCell(x, y + 1, z), below);
+      const next = this.nextState(L, nb, unknown, world.getIdState(x, y + 1, z), below);
       if (next === UNDECIDED) {
         this.defer(x, y, z);
         return;
@@ -414,10 +418,12 @@ export class Fluids {
         const nextCell = cellOf(L.id, next);
         world.setCell(x, y, z, nextCell);
         // Another change listener may have replaced the cell, or its surroundings, synchronously.
-        if (world.getCell(x, y, z) !== nextCell) return;
+        // (The base layer tells: a liquid value is never the base of a cell with parts, whose
+        // first part is hard.)
+        if (world.getIdState(x, y, z) !== nextCell) return;
         state = next;
         unknown = this.readNeighbours(x, y, z, nb);
-        below = world.getCell(x, y - 1, z);
+        below = world.getIdState(x, y - 1, z);
       }
     }
 
@@ -433,7 +439,7 @@ export class Fluids {
    * complete (BlockUpdates.updateAround / StructureHost.blockUpdate). Only schedules ticks.
    */
   wakeAround(x: number, y: number, z: number): void {
-    const c = this.world.getCell(x, y, z);
+    const c = this.world.getIdState(x, y, z);
     if (LIQUID_KIND[c & CELL_ID] !== 0) this.scheduleCell(x, y, z, c);
     this.wakeNeighbours(x, y, z);
     // The previous content is unknown here: assume both kinds of search saw a difference.
@@ -583,7 +589,7 @@ export class Fluids {
         for (let dx = -span; dx <= span; dx++) {
           const dist = adz + (dx < 0 ? -dx : dx);
           if (dist < nearest) continue;
-          const c = world.getCell(x + dx, ly, z + dz);
+          const c = world.getIdState(x + dx, ly, z + dz);
           const L = liquidProps(c & CELL_ID);
           if (!L || (kinds & L.bit) === 0 || dist > L.reach) continue;
           const qx = x + dx;
@@ -600,7 +606,7 @@ export class Fluids {
   }
 
   private scheduleIfLiquid(x: number, y: number, z: number): void {
-    const c = this.world.getCell(x, y, z);
+    const c = this.world.getIdState(x, y, z);
     if (LIQUID_KIND[c & CELL_ID] !== 0) this.scheduleCell(x, y, z, c);
   }
 
@@ -630,9 +636,9 @@ export class Fluids {
     if (L.hardens && this.waterContact(x, y, z) !== NO_CONTACT) return true;
     const nb = this.restNb;
     const unknown = this.readNeighbours(x, y, z, nb);
-    const below = world.getCell(x, y - 1, z);
+    const below = world.getIdState(x, y - 1, z);
     // UNDECIDED and DRY differ from every state, too.
-    if (state !== SOURCE && this.nextState(L, nb, unknown, world.getCell(x, y + 1, z), below) !== state) return true;
+    if (state !== SOURCE && this.nextState(L, nb, unknown, world.getIdState(x, y + 1, z), below) !== state) return true;
     if (canFlowInto(below, id, 8)) return true;
     if (state !== SOURCE && isHole(below)) return false;
     const side = amountOf(state) - L.dropOff;
@@ -738,7 +744,7 @@ export class Fluids {
       const nx = x + HDX[d]!;
       const nz = z + HDZ[d]!;
       // Re-read: an earlier write in this loop (or another listener) may have changed it.
-      if (!canFlowInto(world.getCell(nx, y, nz), id, side)) continue;
+      if (!canFlowInto(world.getIdState(nx, y, nz), id, side)) continue;
       const cell = L.hardens && this.waterContact(nx, y, nz) === CONTACT ? CELL_RUBBLE : flowing;
       world.setCell(nx, y, nz, cell);
     }
@@ -870,7 +876,7 @@ export class Fluids {
     const w = this.world;
     let unknown = 0;
     for (let d = 0; d < 4; d++) {
-      const c = w.getCell(x + HDX[d]!, y, z + HDZ[d]!);
+      const c = w.getIdState(x + HDX[d]!, y, z + HDZ[d]!);
       out[d] = c;
       if (isUnloaded(c)) unknown |= 1 << d;
     }
@@ -882,24 +888,24 @@ export class Fluids {
    * position lies inside it, else through the world (unloaded / below-world rules apply).
    * Deliberately ignores the holes and second-part layers: the base layer's id is hard for every
    * cell with parts (invariant I7, docs/SHAPES.md section 9.1), and the slope search reads only
-   * ids and liquid states. The world fallback returns a cell value whose id bits are the same.
+   * ids and liquid states. The world fallback reads the same base layer (World.getIdState).
    */
   private peek(cells: Uint16Array, hx: number, hz: number, qx: number, qy: number, qz: number): number {
     const lx = qx - hx;
     const lz = qz - hz;
     if (((lx | lz) & ~LOCAL_MASK) === 0 && qy >= 0) return cells[lx | (lz << LOCAL_SHIFT) | (qy << 8)]!;
-    return this.world.getCell(qx, qy, qz);
+    return this.world.getIdState(qx, qy, qz);
   }
 
   /** Is water among the 6 neighbours of (x,y,z)? CONTACT, NO_CONTACT or CONTACT_UNKNOWN. */
   private waterContact(x: number, y: number, z: number): number {
     const w = this.world;
-    if ((w.getCell(x, y + 1, z) & CELL_ID) === WATER_ID || (w.getCell(x, y - 1, z) & CELL_ID) === WATER_ID) {
+    if ((w.getIdState(x, y + 1, z) & CELL_ID) === WATER_ID || (w.getIdState(x, y - 1, z) & CELL_ID) === WATER_ID) {
       return CONTACT;
     }
     let unknown = false;
     for (let d = 0; d < 4; d++) {
-      const id = w.getCell(x + HDX[d]!, y, z + HDZ[d]!) & CELL_ID;
+      const id = w.getIdState(x + HDX[d]!, y, z + HDZ[d]!) & CELL_ID;
       if (id === WATER_ID) return CONTACT;
       if (id === UNLOADED_ID) unknown = true;
     }

@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { makeCell, makePart, PACK_SCALE, type CellLayers } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { canonCell } from '../../src/blocks/shapes';
+import { canonCell, cellProblem } from '../../src/blocks/shapes';
 import { CHUNK_VOLUME } from '../../src/core/constants';
 import { applyBatch, ReplicaError, ReplicaState } from '../../src/net/client/apply';
 import { ClientChunks, type ChunkSource } from '../../src/net/client/chunks';
@@ -169,6 +169,20 @@ describe('applyBatch refuses cells that are not valid (cellProblem) with a Repli
       expect(apply(st, batch(2, (b) => b.structureDeltas.push({ id: 3, cells: [[1, 40, 0, cell]] })))).toMatch(/^ReplicaError: delta of structure/);
     });
   }
+
+  it('a refused snapshot or structure record names the volume, the index of the first invalid cell and the reason', () => {
+    // The scan forms this text only when a cell fails (one string per run of equal cells cost more
+    // than the checks), so what it says is pinned here.
+    for (const [, cell] of INVALID) {
+      const i = at(3, 9, 3);
+      expect(apply(fresh(), batch(1, (b) => b.snapshots.push({ cx: 0, cz: 0, cells: layers(CHUNK_VOLUME, [[at(0, 1, 0), STONE], [i, cell]]), glue: [] })))).toBe(
+        `ReplicaError: snapshot of column 0,0, cell ${i}: ${cellProblem(cell)}`,
+      );
+      expect(apply(fresh(), batch(1, (b) => b.structureSpawns.push(shipRecord(3, layers(2, [[0, STONE], [1, cell]]), 2))))).toBe(
+        `ReplicaError: record of structure 3, cell 1: ${cellProblem(cell)}`,
+      );
+    }
+  });
 
   it('a falling block entity with an unregistered id, block events with an invalid part', () => {
     expect(apply(base(), batch(2, (b) => b.entitySpawns.push({ id: 9, kind: 'falling', carrierId: 0, pos: { x: 1, y: 2, z: 3 }, yaw: 0, cell: makeCell(999) })))).toMatch(/^ReplicaError: falling block entity 9/);

@@ -41,7 +41,7 @@ import { BLOCKS, LIQUID, SOLID } from '../blocks/registry';
 import { canonCell, volume8 } from '../blocks/shapes';
 import { vec3, type Vec3 } from '../core/math';
 import { Player, type Entity } from '../entities/entity';
-import { CellSet } from '../structures/collect';
+import { hashCell } from '../structures/collect';
 import { isDryHalf, type HullInfo } from '../structures/hull';
 import { Ship, type Structure } from '../structures/structure';
 import { SET_EXPLOSION, type VoxelGrid } from '../voxel/grid';
@@ -120,27 +120,53 @@ function partOf(grid: VoxelGrid, c: number, x: number, y: number, z: number, oct
 }
 
 /**
- * The marks of one grid: the cells in the order they were first marked, and which octants of
- * each were marked (one set per octant, so no per-cell index is needed).
+ * The marks of one grid: the cells in the order they were first marked, and the octants marked in
+ * each, as a fill mask beside the cell. One open-addressing table holds, per cell, its index in
+ * that list, so a mark costs one hash and one probe, and the removal reads each cell's mask by
+ * index without a lookup. Marking is most of a blast's own work in plain terrain (the rays
+ * overlap near the centre, so most marks hit a cell already marked): with a set of cells plus a
+ * set per octant, two hash insertions per mark, a terrain-only blast cost 1.1 to 1.4 times M1's
+ * (bundled, alternating runs); with one table it costs what M1's does.
  */
 class Marks {
-  private readonly cells = new CellSet(64);
-  private readonly octants: Array<CellSet | null> = [null, null, null, null, null, null, null, null];
-  /** Marked cells in first-mark order, x,y,z triples. */
+  /** Marked cells in first-mark order, x,y,z triples (int32 coordinates). */
   readonly list: number[] = [];
+  /** masks[i]: the octants marked in the cell at list[3i..3i+2] (bit o = octant o). */
+  readonly masks: number[] = [];
+  /** 0 = empty slot, else 1 + the cell's index in `masks`; at most half full (short probes). */
+  private slots = new Int32Array(64);
 
   mark(x: number, y: number, z: number, octant: number): void {
-    if (this.cells.add(x, y, z)) this.list.push(x, y, z);
-    let set = this.octants[octant]!;
-    if (set === null) this.octants[octant] = set = new CellSet(64);
-    set.add(x, y, z);
+    const slots = this.slots;
+    const list = this.list;
+    const m = slots.length - 1;
+    let i = hashCell(x, y, z) & m;
+    for (let s = slots[i]!; s !== 0; s = slots[i]!) {
+      const k = (s - 1) * 3;
+      if (list[k] === x && list[k + 1] === y && list[k + 2] === z) {
+        this.masks[s - 1]! |= 1 << octant;
+        return;
+      }
+      i = (i + 1) & m;
+    }
+    const n = this.masks.length;
+    slots[i] = n + 1;
+    list.push(x, y, z);
+    this.masks.push(1 << octant);
+    if ((n + 1) * 2 > slots.length) this.grow();
   }
 
-  /** The octants marked in cell (x, y, z), as a fill mask. */
-  mask(x: number, y: number, z: number): number {
-    let m = 0;
-    for (let o = 0; o < 8; o++) if (this.octants[o]?.has(x, y, z) === true) m |= 1 << o;
-    return m;
+  /** Double the table and put every marked cell back. */
+  private grow(): void {
+    const slots = new Int32Array(this.slots.length * 2);
+    const m = slots.length - 1;
+    const list = this.list;
+    for (let n = 0, k = 0; k < list.length; n++, k += 3) {
+      let i = hashCell(list[k]!, list[k + 1]!, list[k + 2]!) & m;
+      while (slots[i] !== 0) i = (i + 1) & m;
+      slots[i] = n + 1;
+    }
+    this.slots = slots;
   }
 }
 
@@ -318,7 +344,7 @@ function destroy(sim: Simulation, worldMarks: Marks, targets: Target[], power: n
  */
 function removeMarked(sim: Simulation, grid: VoxelGrid, marks: Marks, dropChance: number, tmp: Vec3): void {
   const l = marks.list;
-  for (let i = 0; i < l.length; i += 3) {
+  for (let n = 0, i = 0; i < l.length; n++, i += 3) {
     const x = l[i]!;
     const y = l[i + 1]!;
     const z = l[i + 2]!;
@@ -326,7 +352,7 @@ function removeMarked(sim: Simulation, grid: VoxelGrid, marks: Marks, dropChance
     if (cell < FULL_LIMIT) {
       if (destructible(cell) && grid.setCell(x, y, z, AIR, SET_EXPLOSION)) blastedPart(sim, grid, x, y, z, cell, dropChance, tmp);
     } else {
-      removeParts(sim, grid, x, y, z, cell, marks.mask(x, y, z), dropChance, tmp);
+      removeParts(sim, grid, x, y, z, cell, marks.masks[n]!, dropChance, tmp);
     }
   }
 }

@@ -24,8 +24,8 @@ import { canJoinStructure, cellFunc, connectedCells, isFunctionalCell, sailVolum
 
 // ------------------------------------------------------------ CellSet
 
-/** murmur3 fmix32 over a combination of the three coordinates. */
-function hashCell(x: number, y: number, z: number): number {
+/** murmur3 fmix32 over a combination of the three coordinates (int32 values). */
+export function hashCell(x: number, y: number, z: number): number {
   let h = Math.imul(x, 0x9e3779b1) ^ Math.imul(y, 0x85ebca77) ^ Math.imul(z, 0xc2b2ae3d);
   h ^= h >>> 16;
   h = Math.imul(h, 0x85ebca6b);

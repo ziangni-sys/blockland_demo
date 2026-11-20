@@ -428,7 +428,12 @@ function checkCell(c: number, what: string): void {
 /**
  * ReplicaError unless every cell of the volume is valid. The scan compares neighbours and calls
  * cellProblem only where the value changes, so a column of full blocks costs one load and one
- * compare per cell plus a table lookup per run.
+ * compare per cell plus a table lookup per run (about 65 us for a column of terrain). The error's
+ * text is formed only when a cell fails: a column of terrain has a few thousand runs, and forming
+ * "<what>, cell <i>" for each of them cost more than the checks themselves (about 90 us a column).
+ * No test holds that (tests/net/apply-parts.test.ts pins the text, not when it is formed; the
+ * difference is far inside the join budget of tests/net/hidden-cost.test.ts): a bundled timing
+ * of joining a few hundred modified columns shows it.
  */
 function checkVolume(l: CellLayers, what: string): void {
   const { base, holes, part2 } = l;
@@ -438,7 +443,8 @@ function checkVolume(l: CellLayers, what: string): void {
     const q = part2 !== null ? part2[i]! : 0;
     const v = holes === null && q === 0 ? base[i]! : (base[i]! | (holes !== null ? holes[i]! << HOLES_SHIFT : 0) | (q !== 0 ? CELL_MULTI_BIT : 0)) + q * PACK_SCALE;
     if (v === prev) continue;
-    checkCell(v, `${what}, cell ${i}`);
+    const p = cellProblem(v);
+    if (p !== null) throw new ReplicaError(`${what}, cell ${i}: ${p}`);
     prev = v;
   }
 }
