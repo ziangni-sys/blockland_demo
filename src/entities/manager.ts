@@ -85,6 +85,7 @@ import {
   REGEN_INTERVAL_TICKS,
   REPORT_CREDIT_TICKS,
   REPORT_DEBT_TICKS,
+  REPORT_HARD_TOLERANCE,
   REPORT_QUEUE_LIMIT,
   REPORT_SLACK_BURST,
   REPORT_SLACK_RATE,
@@ -748,6 +749,7 @@ export class EntityManager {
       const s = this.host.structure(p.carrierId);
       if (s !== undefined && !s.removed) this.body.beginCarry('now');
     }
+    this.pushOutOfStructures(p);
     this.judge.toReportFrame(p, c);
     if (c.carrierId === 0 && p.carrierId !== 0) {
       // The carrier has no record any more: the player stands in the world.
@@ -783,6 +785,29 @@ export class EntityManager {
       const held = this.judge.heldUp(p);
       d.resetEnvelope(held ? Math.max(up, JUMP_SPEED) : up, held);
     }
+  }
+
+  /**
+   * A correction is about to place a client-driven body where a structure overlaps it more deeply
+   * than a report may dip into one (REPORT_HARD_TOLERANCE): a teleport or respawn beside the
+   * overhang of a mast on a tilted deck, a refused report's place that a structure has moved into
+   * since. The client's first step from there pushes the body out of the structure (and may attach
+   * it to a deck: a carrier switch), farther than one tick of legs and the slack allow, and every
+   * such report would be refused back to the same place, without end. So the server pushes it out
+   * itself first, as its push of a copy of the body does for the squeeze judgement
+   * (ReportJudge.ghostStuck: the push every body gets at the server's present poses), unless that
+   * push cannot free it or would put it into world blocks (then the squeeze and unstuck rules have
+   * it). A seated or dead body stays where it is. The place is the server's own: a client gains
+   * nothing by it.
+   */
+  private pushOutOfStructures(p: Player): void {
+    if (p.steeringShipId !== 0 || p.dead || p.removed) return;
+    const b = p.box(this.box1);
+    const near = this.body.structuresNear(b, 0, this.overlapNear);
+    let deep = false;
+    for (let k = 0; k < near.length && !deep; k++) deep = hardDepth(near[k]!.grid, b) > REPORT_HARD_TOLERANCE;
+    if (!deep || this.judge.ghostStuck(p, null) || !this.judge.ghostEnd(this.t2)) return;
+    p.setPosition(this.t2.x, this.t2.y, this.t2.z);
   }
 
   /** End of the tick: corrections raised in it take the state the tick left the player in. */
@@ -940,9 +965,15 @@ export class EntityManager {
       const wasOnGround = d.onGround;
       const unseen = judge.landedUnseen;
       if (unseen) {
-        // The fall tracked so far ended in a landing no report showed: judged by what was tracked
-        // (fluids where the body last was); the next fall starts at this report.
-        const total = p.wet > 0 || p.inLava || p.flying ? 0 : p.fallDistance;
+        // The fall tracked so far ended in a landing no report showed (fluids where the body last
+        // was), on the ground the check found (judge.landedGround): what was tracked, plus the drop
+        // from the last place down to that ground, which the body came down in the gap. That ground
+        // is the highest under either place the body can have reached, so the drop is no more than
+        // the body fell before it touched down. Without it a report that counts a landing never
+        // paid for the descent of its own gap: in the air beside a tower, a jump's height above
+        // its foot, the body shed the fall from the top.
+        const drop = y0 - judge.landedGround;
+        const total = p.wet > 0 || p.inLava || p.flying ? 0 : p.fallDistance + (drop > 0 ? drop : 0);
         p.fallDistance = 0;
         if (total > landed) {
           landed = total;
@@ -970,7 +1001,14 @@ export class EntityManager {
       inp.sneak = rep.sneak === true;
       this.followReference(p, d);
       d.recordAccepted(rep.seq, d.carrierId, d.pos, d.vel);
-      if (unseen) y0 = p.pos.y;
+      // After that landing the next fall starts on its ground: a report that ends below it has
+      // fallen from there (it stood on that ground and left it), less what it may have walked down
+      // first (judge.landedWalk: down a staircase between the two places, any height; down the
+      // floor of a tilted deck that ground lies on, as far as that floor descends on the way).
+      // (Stepping off the tower's edge first, the last place in the air beside it, the ground is
+      // the foot and the drop above books the fall; standing on its top, the ground is the top and
+      // the fall goes on from there.)
+      if (unseen) y0 = Math.max(p.pos.y, judge.landedGround - judge.landedWalk);
       // Vitals where the report puts the body; the fall on the reported track (a fall that ends
       // on a moving deck counts from where it began: both ends at the server's present poses).
       body.sampleFluids(p);

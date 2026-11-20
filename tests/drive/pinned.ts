@@ -1,8 +1,8 @@
 /**
  * A structure held at ANY orientation, at rest (for the leaning-wall rules of the movement checks,
- * drive.ts leanOf / underLeaningWalls): a ship, a 5x5x5 planks cube with a mast eight cells long
- * standing on each of its six faces, assembled high above the sea, whose pose is set again after
- * every structure phase: rotation `q` about its centre of mass, no motion. The checks see a ship
+ * drive.ts leanOf / underLeaningWalls): a ship, a 5x5x5 planks cube with a mast eight cells long (or
+ * `mast`) standing on each of its six faces, assembled high above the sea, whose pose is set again
+ * after every structure phase: rotation `q` about its centre of mass, no motion. The checks see a ship
  * and a rotor through the same StructRec (pose and grid), and a rotor on a world bearing turns
  * about one horizontal axis only (drum.ts); this one turns about any axis, so each of the three
  * grid axes can be the one nearest the vertical. The player is server-driven and stands on a
@@ -14,7 +14,6 @@ import type { Ship } from '../../src/structures/structure';
 import { assemble, B, facingState, fill, makeCell, SEA_TOP, seaRun, type Run } from './scenes';
 
 const Y0 = SEA_TOP + 12;
-const MAST = 8;
 /** The cube's centre, local. */
 const C = vec3(4.5, Y0 + 2.5, 4.5);
 const AXES = [vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1)];
@@ -34,22 +33,22 @@ export interface Pinned {
   onFace(a: number, b: number, up?: number): Vec3;
 }
 
-export function pinned(q: Quat): Pinned {
+export function pinned(q: Quat, mast = 8): Pinned {
   const run = seaRun('survival', vec3(12.5, SEA_TOP, 12.5), null);
   const sim = run.sim;
   const w = sim.world;
   fill(w, 11, SEA_TOP - 1, 11, 13, SEA_TOP - 1, 13, B.STONE);
   fill(w, 2, Y0, 2, 6, Y0 + 4, 6, B.PLANKS_OAK);
-  fill(w, 4, Y0 + 5, 4, 4, Y0 + 4 + MAST, 4, B.PLANKS_OAK);
-  fill(w, 4, Y0 - MAST, 4, 4, Y0 - 1, 4, B.PLANKS_OAK);
-  fill(w, 7, Y0 + 2, 4, 6 + MAST, Y0 + 2, 4, B.PLANKS_OAK);
-  fill(w, 2 - MAST, Y0 + 2, 4, 1, Y0 + 2, 4, B.PLANKS_OAK);
-  fill(w, 4, Y0 + 2, 7, 4, Y0 + 2, 6 + MAST, B.PLANKS_OAK);
-  fill(w, 4, Y0 + 2, 2 - MAST, 4, Y0 + 2, 1, B.PLANKS_OAK);
+  fill(w, 4, Y0 + 5, 4, 4, Y0 + 4 + mast, 4, B.PLANKS_OAK);
+  fill(w, 4, Y0 - mast, 4, 4, Y0 - 1, 4, B.PLANKS_OAK);
+  fill(w, 7, Y0 + 2, 4, 6 + mast, Y0 + 2, 4, B.PLANKS_OAK);
+  fill(w, 2 - mast, Y0 + 2, 4, 1, Y0 + 2, 4, B.PLANKS_OAK);
+  fill(w, 4, Y0 + 2, 7, 4, Y0 + 2, 6 + mast, B.PLANKS_OAK);
+  fill(w, 4, Y0 + 2, 2 - mast, 4, Y0 + 2, 1, B.PLANKS_OAK);
   // (The helm on a corner of the +Y face, away from its mast.)
   w.setCell(6, Y0 + 5, 6, makeCell(B.HELM, facingState(NZ)));
   const ship = assemble(sim, vec3(6, Y0 + 5, 6));
-  if (ship.grid.count !== 125 + 6 * MAST + 1) throw new Error(`the pinned ship has ${ship.grid.count} cells`);
+  if (ship.grid.count !== 125 + 6 * mast + 1) throw new Error(`the pinned ship has ${ship.grid.count} cells`);
   const g = ship.grid;
   const pos = vec3(g.position.x, g.position.y, g.position.z);
   const rot: Quat = { x: q.x, y: q.y, z: q.z, w: q.w };
@@ -83,4 +82,46 @@ export function pinned(q: Quat): Pinned {
   const onFace = (a: number, b: number, up = 0): Vec3 =>
     g.toWorld(vec3(C.x + n.x * (2.5 + up) + t1.x * a + t2.x * b, C.y + n.y * (2.5 + up) + t1.y * a + t2.y * b, C.z + n.z * (2.5 + up) + t1.z * a + t2.z * b));
   return { run, ship, n, t1, t2, lean: (Math.acos(Math.min(1, best)) * 180) / Math.PI, mast: qrotate(rot, n), onFace };
+}
+
+export interface PinnedPlate {
+  readonly run: Run;
+  readonly ship: Ship;
+  /** World point `up` above the plate's top face at local (x, z) (the plate covers 0..15 in x and z). */
+  at(x: number, z: number, up?: number): Vec3;
+}
+
+/**
+ * A 15 x 15 planks plate (one cell thick), a ship held at rotation `q` about its centre of mass like
+ * pinned(): a deck tilted as much as one likes, and wide enough to walk across. The player is
+ * server-driven and stands on a stone pad at sea level until a test teleports it.
+ */
+export function pinnedPlate(q: Quat): PinnedPlate {
+  const run = seaRun('survival', vec3(12.5, SEA_TOP, 12.5), null);
+  const sim = run.sim;
+  const w = sim.world;
+  fill(w, 11, SEA_TOP - 1, 11, 13, SEA_TOP - 1, 13, B.STONE);
+  fill(w, 0, Y0, 0, 14, Y0, 14, B.PLANKS_OAK);
+  w.setCell(14, Y0 + 1, 14, makeCell(B.HELM, facingState(NZ)));
+  const ship = assemble(sim, vec3(14, Y0 + 1, 14));
+  const g = ship.grid;
+  const pos = vec3(g.position.x, g.position.y, g.position.z);
+  const rot: Quat = { x: q.x, y: q.y, z: q.z, w: q.w };
+  const force = () => {
+    qcopy(g.rotation, rot);
+    qcopy(g.prevRotation, rot);
+    g.position.x = g.prevPosition.x = pos.x;
+    g.position.y = g.prevPosition.y = pos.y;
+    g.position.z = g.prevPosition.z = pos.z;
+    g.linearVelocity.x = g.linearVelocity.y = g.linearVelocity.z = 0;
+    g.angularVelocity.x = g.angularVelocity.y = g.angularVelocity.z = 0;
+  };
+  const step = sim.structures.step.bind(sim.structures);
+  sim.structures.step = () => {
+    step();
+    force();
+  };
+  force();
+  for (let i = 0; i < 3; i++) sim.tick();
+  return { run, ship, at: (x, z, up = 0) => g.toWorld(vec3(x, Y0 + 1 + up, z)) };
 }

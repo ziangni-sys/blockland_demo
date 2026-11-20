@@ -9,8 +9,9 @@ import { TICK_DT } from '../../src/core/constants';
 import { FALL_SAFE_HEIGHT, GRAVITY, JUMP_SPEED, PLAYER_MAX_HEALTH, REPORT_CREDIT_TICKS, REPORT_DEBT_TICKS, REPORT_STALL_TICKS, SPRINT_SPEED } from '../../src/entities/constants';
 import { emptyReport, type Correction, type MoveReport } from '../../src/entities/drive';
 import { NZ } from '../../src/core/dirs';
-import { vec3 } from '../../src/core/math';
+import { qfromAxisAngle, vec3, type Vec3 } from '../../src/core/math';
 import { Liar } from './liar';
+import { pinnedPlate } from './pinned';
 import { assemble, B, facingState, LAND_TOP, fill, hurts, landRun, makeCell, SEA_TOP, seaRun, type Run } from './scenes';
 
 const T = LAND_TOP;
@@ -465,6 +466,103 @@ describe('landings: two falls never merge when the landing between them is lost;
     expect(top - T).toBeLessThan(1.25 + 1e-9);
     run.sim.advance(40);
     expect(c.player.pos.y).toBe(T);
+  });
+  /**
+   * A stone tower `H` high (top at T + H): the body stands on it, then one report with a seq gap of
+   * `gap` ticks (in store: the credit and the debt) puts it in the air beside the tower, 1.4 above
+   * its foot, and counts one landing more than it showed; it comes down the rest as gravity has it.
+   * With `stepOff` the body first walks off the edge (the last place before the long report is in
+   * the air beside the tower). The landing's ground is the tower's top (standing on it) or its foot
+   * (stepped off), both within reach: the landing is taken.
+   */
+  function towerDrop(H: number, gap: number, stepOff: boolean): { damage: number; rejected: number } {
+    const { run, c } = scripted(2.6, 1.5, (r) => fill(r.sim.world, 0, T, 0, 2, T + H - 1, 2, B.STONE), T + H);
+    run.sim.soloPlayer.teleport(2.6, T + H, 1.5);
+    c.tick();
+    for (let i = 0; i < 15; i++) c.send(2.6, T + H, 1.5);
+    let top = T + H;
+    let x = 2.6;
+    if (stepOff) {
+      for (const sx of [2.85, 3.1, 3.3]) c.send((x = sx), top, 1.5);
+      top -= 0.15;
+      c.send((x = 3.5), top, 1.5, { onGround: false, vy: -3 });
+    }
+    for (let i = 0; i < gap - 1; i++) c.tick();
+    c.landings = (c.landings + 1) & 255;
+    // Beside the tower (its face at x = 3), clear of it.
+    x = stepOff ? 3.5 : 3.35;
+    let y = T + 1.4;
+    c.send(x, y, 1.5, { onGround: false, vy: -20, seqStep: gap });
+    let v = -20;
+    while (y > T) {
+      const v1 = Math.max(-60, v - GRAVITY * TICK_DT);
+      y = Math.max(T, y + (v + v1) * 0.5 * TICK_DT);
+      v = v1;
+      c.send(x, y, 1.5, { onGround: y === T, vy: y === T ? 0 : v });
+    }
+    run.sim.advance(3);
+    return { damage: PLAYER_MAX_HEALTH - c.player.health, rejected: c.rejected };
+  }
+  it('one report that counts a landing and ends in the air beside a tower, a jump above its foot, still pays the whole fall (standing on the top or stepped off its edge first)', () => {
+    // The fall that ended on that landing is what was tracked plus the drop from the last place to
+    // the landing's ground, and the next one starts on that ground (or as low as a staircase or a
+    // deck's floor leads down from it): standing on the top, the landing's ground is the top, and
+    // the fall goes on from there; stepped off, it is the foot. Booking neither, the fall tracked
+    // so far (none) ended and the next one started 1.4 above the foot: towers 6 to 20 high cost
+    // nothing with a gap of 8, and 40 high with a gap of 18.
+    // (Stepped off, a gap longer than REPORT_STALL_TICKS leaves the body hanging in the air: the
+    // server lets it fall itself before the report comes.)
+    for (const [H, gap, stepOff] of [
+      [8, 8, false],
+      [12, 8, false],
+      [20, 8, false],
+      [16, 18, false],
+      [8, 8, true],
+      [20, 8, true],
+    ] as const) {
+      const r = towerDrop(H, gap, stepOff);
+      expect(r.rejected, `${H} high, gap ${gap}${stepOff ? ', stepped off' : ''}`).toBe(0);
+      expect(r.damage, `${H} high, gap ${gap}${stepOff ? ', stepped off' : ''}`).toBe(Math.ceil(H - FALL_SAFE_HEIGHT));
+    }
+  });
+  it('running down a deck tilted 40 degrees, every report of the run lost: no damage (the body walked down the floor of the deck the landing lies on, as a server-driven one does)', () => {
+    // The plate falls away toward +z. Standing uphill, then one report 18 ticks later, 6.5 blocks
+    // down the plate (about 5 across and 4.2 down), a hop above it, counting the landings of the run
+    // (an honest body running down a 40-degree floor leaves it and comes down on it again every few
+    // ticks); then down onto the plate. The landing's ground is the plate under the old place; the
+    // next fall starts no higher than the plate's floor descends between the two places allows.
+    // Started on that ground itself, the run down the floor was one fall of 4.2 blocks: 1 damage.
+    const P = pinnedPlate(qfromAxisAngle(vec3(1, 0, 0), (40 * Math.PI) / 180));
+    const sim = P.run.sim;
+    const ctl = sim.soloPlayer;
+    const w = P.at(7.5, 3, 0.02);
+    ctl.teleport(w.x, w.y + 0.1, w.z);
+    for (let i = 0; i < 15; i++) sim.tick();
+    const l = new Liar(P.run);
+    const frame = (q: Vec3): Vec3 => (l.carrierId !== 0 ? P.ship.grid.toLocal(q) : q);
+    const sp = l.player;
+    let f = frame(vec3(sp.pos.x, sp.pos.y, sp.pos.z));
+    for (let i = 0; i < 3; i++) l.send(f.x, f.y, f.z, true);
+    l.wait(17);
+    l.landings = (l.landings + 4) & 255;
+    const end = P.at(7.5, 9.5, 0.6);
+    f = frame(end);
+    expect(l.send(f.x, f.y, f.z, false, 18, 1)).toBe(true);
+    const ground = P.at(7.5, 9.5, 0).y;
+    let y = end.y;
+    let v = 0;
+    while (y > ground) {
+      const v1 = v - GRAVITY * TICK_DT;
+      y = Math.max(ground, y + (v + v1) * 0.5 * TICK_DT);
+      v = v1;
+      f = frame(vec3(end.x, y, end.z));
+      l.send(f.x, f.y, f.z, y === ground, 1, y === ground ? 0 : v);
+    }
+    for (let i = 0; i < 5; i++) l.send(f.x, f.y, f.z, true);
+    expect(l.causes).toEqual([]);
+    expect(end.y - ground, 'a hop above the plate').toBeLessThan(0.7);
+    expect(w.y - ground, 'the run descends more than the safe height').toBeGreaterThan(FALL_SAFE_HEIGHT + 0.5);
+    expect(l.damage).toBe(0);
   });
   it('a jump right after a landing whose report was lost is accepted (the envelope starts again there)', () => {
     const { c } = scripted(0.5, 0.5);
