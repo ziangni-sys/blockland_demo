@@ -191,6 +191,8 @@ describe('the prediction and the server agree exactly on a perfect link (package
     r.onTick(() => {
       if (r.ctrl.player.carrierId === ship.id) carried++;
     });
+    // The seed matters: with 304, 305 or 309 one report differs in onGround, and with 306 to 308
+    // the walk leaves the raft. Not diagnosed (ROADMAP, Milestone 2.3 leftovers).
     r.mark(randomScript(r, 303, false));
     r.runSteps(STEPS);
     stat(`agree\t${STEPS} client ticks: ${a.compared} reports compared, ${a.worst.length} differing, corrections ${JSON.stringify(r.causes())}`);
