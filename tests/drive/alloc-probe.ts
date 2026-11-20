@@ -17,15 +17,20 @@
  *  - 'swim over a slab hull' / 'swim over a planks hull': a player swimming in water inside the
  *    bounds of a ship (a plate of lower half slabs / planks with a mast, its hull analysed), so the
  *    fluid samples ask isDryHalf every tick.
+ *  - 'judge a jump in the world', 'judge standing on a heeled deck', 'judge standing on a heeled
+ *    deck beside a wall': the server judging one move report of a client-driven player
+ *    (entities/drive.ts ReportJudge.check) on a fixed state, in the world and on a deck at rest
+ *    heeling 9 degrees, in the open and 0.02 short of its deck house on the side its walls lean toward.
  * The structure cases all pay for the local box per structure query (M1); the slab / planks pairs
  * isolate what partial cells add.
  */
 import { Session } from 'node:inspector/promises';
 import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
-import { qfromYaw, quat, vec3, type Quat } from '../../src/core/math';
+import { qfromAxisAngle, qfromYaw, quat, vec3, type Quat, type Vec3 } from '../../src/core/math';
 import { PX } from '../../src/core/dirs';
 import { BodyMover, sanitizeInput, takeJumpPresses, type BodyStructure } from '../../src/entities/body';
+import { ClientDrive, emptyReport, ReportJudge } from '../../src/entities/drive';
 import { Player } from '../../src/entities/entity';
 import { analyzeHull } from '../../src/structures/hull';
 import { Chunk } from '../../src/voxel/chunk';
@@ -197,6 +202,58 @@ function swimCase(id: number, plate: number): { tick: () => void; swimmer: Playe
 const swimSlab = swimCase(21, slab(B.PLANKS_OAK, LOWER));
 const swimPlanks = swimCase(22, makeCell(B.PLANKS_OAK));
 
+/**
+ * Judging one move report (entities/drive.ts ReportJudge.check) on a fixed state: the reference
+ * at `from`, the report at `to` (in `carrier`'s frame, else the world), standing or in the air.
+ * check() changes nothing but the judge's scratch, so the same report is judged again and again.
+ */
+function judgeCase(mover: BodyMover, carrier: { id: number; grid: StructureGrid } | null, from: Vec3, to: Vec3, onGround: boolean): { tick: () => void; verdict: () => string | null } {
+  const judge = new ReportJudge(mover, world);
+  const p = new Player(50 + (carrier?.id ?? 0), 'survival');
+  const d = new ClientDrive();
+  p.remote = d;
+  mover.beginCarry();
+  const w = carrier !== null ? carrier.grid.toWorld(from) : from;
+  p.setPosition(w.x, w.y, w.z);
+  p.carrierId = carrier?.id ?? 0;
+  d.carrierId = p.carrierId;
+  d.pos.x = from.x;
+  d.pos.y = from.y;
+  d.pos.z = from.z;
+  d.onGround = true;
+  d.reportedOnGround = true;
+  d.fresh = false;
+  d.viewTick = 98;
+  const rep = emptyReport();
+  rep.seq = 1;
+  rep.carrierId = p.carrierId;
+  rep.pos.x = to.x;
+  rep.pos.y = to.y;
+  rep.pos.z = to.z;
+  rep.vel.y = onGround ? 0 : 6;
+  rep.onGround = onGround;
+  rep.viewTick = 98;
+  return { tick: () => void judge.check(p, d, rep, 1, 100, false), verdict: () => judge.check(p, d, rep, 1, 100, false) };
+}
+// In the world: a jump off the stone floor (y 11).
+const judgeAir = judgeCase(landMover, null, vec3(8.5, 11, 8.5), vec3(8.78, 11.39, 8.5), false);
+/** A deck at rest heeling 9 degrees about x (planks x 4..13, z 4..13 at y 60) with a deck house (x 10..12, y 61..62, z 6..8). */
+const heeled = new StructureGrid(31, world);
+for (let x = 4; x < 14; x++) for (let z = 4; z < 14; z++) heeled.setCell(x, 60, z, makeCell(B.PLANKS_OAK));
+for (let x = 10; x < 13; x++) for (let y = 61; y < 63; y++) for (let z = 6; z < 9; z++) heeled.setCell(x, y, z, makeCell(B.PLANKS_OAK));
+heeled.pivot.x = 9;
+heeled.pivot.y = 60.5;
+heeled.pivot.z = 9;
+heeled.setPoseImmediate(vec3(9, 60.5, 9), qfromAxisAngle(vec3(1, 0, 0), (9 * Math.PI) / 180));
+const heeledList: readonly BodyStructure[] = [{ id: 31, grid: heeled, parent: null, children: [], removed: false, hull: null }];
+const heeledMover = new BodyMover({ world, structures: () => heeledList });
+const heeledDeck = { id: 31, grid: heeled };
+// Standing in the open, and standing beside the deck house, 0.02 short of its face z = 6: the side
+// the deck's walls lean toward (its up leans toward +z), within the reach of that lean, where
+// drive.ts clearOfLeaningWalls asks about the side's strip and its corners.
+const judgeDeckOpen = judgeCase(heeledMover, heeledDeck, vec3(6.5, 61, 9.5), vec3(6.6, 61, 9.5), true);
+const judgeDeckWall = judgeCase(heeledMover, heeledDeck, vec3(11, 61, 5.66), vec3(11.1, 61, 5.68), true);
+
 const cases: Record<string, (n: number) => number> = {
   'walk on land': (n) => {
     for (let i = 0; i < n; i++) landTick();
@@ -226,6 +283,18 @@ const cases: Record<string, (n: number) => number> = {
     for (let i = 0; i < n; i++) swimPlanks.tick();
     return swimPlanks.swimmer.pos.x;
   },
+  'judge a jump in the world': (n) => {
+    for (let i = 0; i < n; i++) judgeAir.tick();
+    return n;
+  },
+  'judge standing on a heeled deck': (n) => {
+    for (let i = 0; i < n; i++) judgeDeckOpen.tick();
+    return n;
+  },
+  'judge standing on a heeled deck beside a wall': (n) => {
+    for (let i = 0; i < n; i++) judgeDeckWall.tick();
+    return n;
+  },
 };
 
 interface ProfileNode {
@@ -247,7 +316,7 @@ await session.post('HeapProfiler.stopSampling');
 const out: Record<string, number> = {};
 let sink = 0;
 for (const [name, run] of Object.entries(cases)) {
-  const calls = name.startsWith('walk on') ? CALLS : STRUCTURE_CALLS;
+  const calls = name.startsWith('walk on') || name === 'judge a jump in the world' ? CALLS : STRUCTURE_CALLS;
   let best = Infinity;
   for (let r = 0; r < ROUNDS && best > CLEAN; r++) {
     sink += run(calls * 2);
@@ -270,5 +339,6 @@ const scenes = {
   sneakY: [sneakSlab.rider.pos.y, sneakPlanks.rider.pos.y],
   swimWet: [swimSlab.dryChecks(), swimPlanks.dryChecks()],
   swimXZ: [swimSlab.swimmer.pos.x, swimSlab.swimmer.pos.z, swimPlanks.swimmer.pos.x, swimPlanks.swimmer.pos.z],
+  judgeVerdicts: [judgeAir.verdict(), judgeDeckOpen.verdict(), judgeDeckWall.verdict()],
 };
 process.stdout.write(JSON.stringify({ bytesPerCall: out, sink, ...scenes }) + '\n');

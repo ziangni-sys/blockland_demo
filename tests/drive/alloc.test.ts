@@ -13,6 +13,13 @@
  * only what partial cells add on top of the same scene in whole cells is bounded where that is the
  * point of the case.
  *
+ * The server's judgement of a client-driven player's move report (entities/drive.ts ReportJudge.check)
+ * is measured the same way, per report: a jump in the world (boxed numbers only, < 768 B), and
+ * standing on a deck heeling 9 degrees in the open and against its deck house on the side the
+ * deck's walls lean toward, where the support probe's insets and the leaning-wall rule
+ * (clearOfLeaningWalls) ask the deck more structure queries: what the wall adds is bounded
+ * (< 12 KB per report).
+ *
  * docs/SHAPES.md 15 (P3): walking on half slabs and stairs < 256 B per tick (the world path with
  * partial cells, asserted). Sneaking on a deck of half slabs (the sneak guard's solidAtHalf probes)
  * and swimming beside a hull (the fluid samples' isDryHalf) are bounded as what partial cells add
@@ -41,7 +48,7 @@ async function bundleProbe(): Promise<string> {
 }
 
 describe('the body mover creates no objects per tick (bundled, optimised code)', () => {
-  it('a player walking and jumping on land, and on half slabs and stairs: nothing but boxed numbers per tick', async () => {
+  it('a player walking and jumping on land, and on half slabs and stairs: nothing but boxed numbers per tick; judging a move report: the same in the world, the leaning-wall rule bounded on a heeled deck', async () => {
     const code = await bundleProbe();
     const run = spawnSync(process.execPath, ['--input-type=module', '-'], { input: code, encoding: 'utf8', timeout: 120_000 });
     expect(run.status, run.stderr).toBe(0);
@@ -52,6 +59,7 @@ describe('the body mover creates no objects per tick (bundled, optimised code)',
       sneakY: number[];
       slabWalkerXZ: number[];
       swimWet: boolean[];
+      judgeVerdicts: Array<string | null>;
     };
     const report = Object.entries(res.bytesPerCall)
       .map(([k, v]) => `${k}: ${v.toFixed(2)} B/tick`)
@@ -63,6 +71,7 @@ describe('the body mover creates no objects per tick (bundled, optimised code)',
     expect(res.sneakY[0]!, 'on the slab top').toBeCloseTo(40.5, 4);
     expect(res.sneakY[1]!, 'on the planks top').toBeCloseTo(41, 4);
     expect(res.swimWet, 'the swimmers were in the water over the plates').toEqual([true, true]);
+    expect(res.judgeVerdicts, 'the judged reports pass').toEqual([null, null, null]);
     const [wx, wz] = res.slabWalkerXZ as [number, number];
     expect(Math.abs(wx - 24.5) < 6 && Math.abs(wz - 8.5) < 6, 'the slab walker stayed on its field').toBe(true);
     const b = res.bytesPerCall;
@@ -70,5 +79,12 @@ describe('the body mover creates no objects per tick (bundled, optimised code)',
     expect(b['walk on slabs and stairs']!, report).toBeLessThan(256);
     expect(b['sneak on a slab deck']! - b['sneak on a planks deck']!, report).toBeLessThan(256);
     expect(b['swim over a slab hull']! - b['swim over a planks hull']!, report).toBeLessThan(256);
+    // Judging a report: in the world nothing but boxed numbers (measured 370 to 440 B); on a heeled
+    // deck, standing against a wall within the reach of its lean asks the deck about 16 structure
+    // queries more than standing in the open, most of them the support probe's insets (measured
+    // 11.3 KB more; without the leaning-wall rule's shortcut, support under the footprint without
+    // the strip, 12.8 KB; with a strip on every side and no shortcut, 17.9 KB).
+    expect(b['judge a jump in the world']!, report).toBeLessThan(768);
+    expect(b['judge standing on a heeled deck beside a wall']! - b['judge standing on a heeled deck']!, report).toBeLessThan(12_000);
   }, 120_000);
 });

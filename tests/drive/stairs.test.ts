@@ -15,7 +15,7 @@
 import { describe, expect, it } from 'vitest';
 import { NZ } from '../../src/core/dirs';
 import { vec3 } from '../../src/core/math';
-import { assemble, B, facingState, fill, makeCell, SEA_TOP, seaRun } from './scenes';
+import { assemble, B, facingState, fill, LAND_TOP, makeCell, SEA_TOP, seaRun } from './scenes';
 import { buildStairs, HEELED_RAFT, shipStairs, START, walk, worldStairs, type StairKind } from './stairs-scenes';
 
 const KINDS: readonly StairKind[] = ['slab', 'straight', 'diagonal', 'stairwell'];
@@ -172,6 +172,28 @@ describe('5.8 on a heeled raft (stairs-scenes.ts HEELED_RAFT), every phase of th
           for (let phase = 0; phase <= lose; phase++) {
             const b = run('diagonal', sprint, up, lose, phase, 360);
             if (b !== null) bad.push(b);
+          }
+    expect(bad).toEqual([]);
+  });
+});
+
+describe('5.8 item 3: up the edge of a staircase, a sliver of the footprint over its treads', () => {
+  it('walking and sprinting along the straight staircase with 0.02 to 0.19 of the footprint over it, seven and ten of every eight and eleven lost (each phase): nothing refused or corrected', () => {
+    // The body overhangs the staircase's side and climbs every riser (the mover steps up a riser its
+    // box overlaps by any amount). The staircase path's samples overlap the treads by less than the
+    // depth limit; lifted only beyond it, they stayed at the foot of the staircase, and the whole
+    // climb was left to the last leg (drive.ts stairClear, stepUp), which is bounded.
+    const bad: string[] = [];
+    // The straight staircase covers z 1.0 .. 4.0 from x = 5 on; yaw -PI/2 walks toward +X.
+    for (const overlap of [0.02, 0.1, 0.19])
+      for (const sprint of [false, true])
+        for (const lose of [7, 10])
+          for (let phase = 0; phase <= lose; phase++) {
+            const run = worldStairs('straight');
+            run.sim.soloPlayer.teleport(2.5, LAND_TOP, 0.7 + overlap);
+            for (let t = 0; t < 10; t++) run.sim.tick();
+            const r = walk(run, -Math.PI / 2, { sprint, lose, phase, ticks: 70 });
+            if (r.causes.length > 0 || r.rejected > 0 || r.climbed < 10) bad.push(`overlap ${overlap} ${sprint ? 'sprint' : 'walk'}, ${lose} of ${lose + 1} lost, phase ${phase}: ${JSON.stringify(r)}`);
           }
     expect(bad).toEqual([]);
   });
