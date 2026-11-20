@@ -127,6 +127,20 @@ describe('5.8 item 1: sqrt(2) h only where a staircase lies between the two plac
     });
   }
 
+  it('onto the rim of a wall two blocks high from 1.1 blocks short of it, three ticks after the last report: refused (a last leg of two blocks is more than the path may climb straight up)', () => {
+    // Three ticks give the plain bound (the arc so far, a step and the slack) less than two
+    // blocks, and the staircase allowance (sqrt(2) times the 1.0 to 1.15 blocks covered) more:
+    // only the last leg's bound (1.7) keeps it out. With 1.9 or 2.3 it got onto the wall. (Feet x
+    // 2.61: 0.09 short of the face; 2.75: 0.05 into it. Deeper in, three ticks are too short for
+    // the distance: check:speed.)
+    for (const endX of [2.61, 2.75]) {
+      const l = liar(1.6, 0.5, block(2));
+      l.wait(2);
+      l.send(endX, T + 2, 0.5, true, 3);
+      expect(l.causes, `feet x ${endX}`).toEqual(['check:rise']);
+    }
+  });
+
   it(`onto the rim of a wall two and a half blocks high (a lower slab on two blocks): refused, the last leg (2.5) being more than the path may climb straight up (1.7)`, () => {
     // Higher than the bound without the allowance (a jump, a step and the slack: 2.35), lower than
     // what a last leg of 2.3 risers and the depth limit would let through.
@@ -220,8 +234,8 @@ describe('5.8 item 1: a report that ends held up but says it is in the air is ju
   });
 
   it('rising past the rim of a step, 0.05 short of its face, saying it is in the air and rises no faster than a jump: the envelope starts again there', () => {
-    // A body hopping up steps with the jump key held touches a tread in a tick whose report is
-    // lost and jumps again at once (its client counts no landing): a delivered report finds it
+    // A body rising past a rim in reports whose take-off was lost (out of water by the water-exit
+    // lift beside a ledge; hopping up steps with the jump key held): a delivered report finds it
     // rising past the next step's rim, within the support probe's widening of it. The next report,
     // a jump's height above that one, must pass (judged from the old ground, it would not).
     const step = (run: Run) => fill(run.sim.world, 3, T, -3, 6, T, 3, B.STONE);
@@ -323,6 +337,31 @@ describe('5.8 item 1: a report that ends held up but says it is in the air is ju
     const l = fallTo((run) => fill(run.sim.world, 1, T, -3, 4, T, 3, B.STONE), 0.65, 0.5, 0, true, (r) => r.wait(3));
     expect(l.causes).toEqual(['teleport']);
     expect(l.damage).toBe(Math.ceil(12 - 3.5));
+  });
+
+  it('a 12-block fall beside a ledge whose last report ends a hair above the rim and 0.05 beside it, in the air but saying it rises no faster than a jump: the fall ends at the rim, as when that report says it stands there', () => {
+    // Held up by the probe's widening only, a report that says it rises (at most a jump) has
+    // landed (heldEnd): the fall tracked so far ends there, at once, with the same damage as a
+    // claim to stand at the same place (drive.ts heldEnd, manager.ts landingFall).
+    const damageAtRim = (stand: boolean): number => {
+      const l = liar(0.65, 0.5, (run) => fill(run.sim.world, 1, T, -3, 4, T, 3, B.STONE));
+      l.run.sim.soloPlayer.teleport(0.65, T + 12, 0.5);
+      l.tick();
+      let y = T + 12;
+      let v = 0;
+      while (y > T + 1.02) {
+        const v1 = v - GRAVITY * TICK_DT;
+        y = Math.max(T + 1.02, y + (v + v1) * 0.5 * TICK_DT);
+        v = v1;
+        const last = y === T + 1.02;
+        l.send(0.65, y, 0.5, last && stand, 1, last ? (stand ? 0 : 2) : v);
+      }
+      expect(l.causes, stand ? 'standing' : 'rising').toEqual(['teleport']);
+      return l.damage;
+    };
+    const standing = damageAtRim(true);
+    expect(standing).toBeGreaterThan(0);
+    expect(damageAtRim(false)).toBe(standing);
   });
 });
 

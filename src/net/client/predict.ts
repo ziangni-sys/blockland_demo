@@ -43,8 +43,8 @@
  *     player (Player.carriedYaw, section 9 item 6);
  *  5. the report: seq, epoch, viewTick = floor(this tick's renderTick), the carrier and the feet and
  *     velocity in its frame, the look relative to its heading, the flags, the stick axes and sneak
- *     key (steering, docking), the landings counted so far (a step that ends on the ground after
- *     one that did not).
+ *     key (steering, docking), the landings counted so far (the mover's touch-downs: a step that
+ *     ends on the ground after one that did not, StepFacts.touchedDown).
  * The body is frozen (no step, and no report: the client is not moving it, and the server holds it,
  * or lets it fall when nothing holds it up, as before the client was ready) while dead, while a
  * reload after a far correction is under way, while a correction waits for its carrier to reach
@@ -334,9 +334,8 @@ export class OwnPlayer implements BodyHost {
       body.beginStep(p);
       const presses = takeJumpPresses(p);
       if (p.mode !== 'creative') p.flying = false;
-      const wasOnGround = p.onGround;
       body.stepPlayer(p, presses, p.mode === 'creative');
-      if (p.onGround && !wasOnGround) this.landings = (this.landings + 1) & 255;
+      if (body.facts.touchedDown) this.landings = (this.landings + 1) & 255;
     }
     body.endTick();
     // The view follows a turning carrier (section 9 item 6).

@@ -216,9 +216,8 @@ export class LaggedClient implements BodyHost {
     sanitizeInput(p);
     const presses = takeJumpPresses(p);
     if (p.mode !== 'creative') p.flying = false;
-    const wasOnGround = p.onGround;
     body.stepPlayer(p, presses, p.mode === 'creative');
-    if (p.onGround && !wasOnGround) this.landings = (this.landings + 1) & 255;
+    if (body.facts.touchedDown) this.landings = (this.landings + 1) & 255;
     body.endTick();
     this.sendReport();
   }

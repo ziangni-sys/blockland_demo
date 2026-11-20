@@ -11,16 +11,19 @@
  * faster than a jump: an honest body a blast throws up past the top of a wall it stands beside, or
  * that falls past it, does not land on that top. On tilted structures (heeled decks, a rotor
  * stopped at any angle) walls lean along the grid axis nearest the vertical, toward one side, and a
- * wall's foot reaches under the feet from that side.
+ * wall's foot reaches under the feet from that side, the farther the deeper below them: a mast's
+ * face is no ground for a landing nobody saw either.
  */
 import { describe, expect, it } from 'vitest';
 import { NZ } from '../../src/core/dirs';
-import { vec3, type Vec3 } from '../../src/core/math';
+import { qfromAxisAngle, vec3, type Vec3 } from '../../src/core/math';
 import { GRAVITY } from '../../src/entities/constants';
 import { TICK_DT } from '../../src/core/constants';
-import { attachClient } from './client';
+import type { Ship } from '../../src/structures/structure';
+import { attachClient, type LaggedClient } from './client';
 import { drum } from './drum';
 import { Liar, liar } from './liar';
+import { pinned } from './pinned';
 import { assemble, B, corrections, facingState, fill, hurts, LAND_TOP, landRun, makeCell, SEA_TOP, seaRun, type Run } from './scenes';
 import { addOctant } from './stairs-scenes';
 
@@ -488,6 +491,250 @@ describe('on a structure turned steeply (drum.ts: a rotor stopped at an angle): 
             }
             if (best >= 1.8) bad.push(`${deg} degrees, ${side}, ${gap} from the mast, ${stand ? 'standing' : 'in the air'}: ${best.toFixed(1)} up`);
           }
+        }
+    expect(bad).toEqual([]);
+  });
+});
+
+describe('a landing nobody saw beside a leaning mast: its face is no ground (drive.ts underLeaningWalls)', () => {
+  /**
+   * A raft at sea (planks deck at SEA_TOP - 1, x -4..7, z -4..7) with a mast at x 2, z 2 up 20
+   * blocks and planks stacked along its +z edge (z 6..7, three high), which heel it about 7.5
+   * degrees toward that edge: the mast leans toward +z, away from a body on its -z side. A report
+   * that counts a landing no report showed may have come down a few tenths below the lower of its
+   * places (the reach of a fall over its seq gap); the probe for that ground reaches as deep, and
+   * the face of a mast leaning away from the body reaches the farther under its feet the deeper
+   * below them. Leaving out only what a leaning wall reaches within the standing probe's depth, the
+   * face was "ground" 0.28 below the feet, the envelope started again on it at every report, and a
+   * client counting one more landing per report climbed the mast to its top (20.8 blocks) from 10 of
+   * 40 spots, unharmed.
+   */
+  function raft(side: string, gap: number, lag: number | null): { run: Run; x: number; z: number; ship: Ship; client: LaggedClient | null } {
+    const at: Record<string, [number, number]> = { '-z': [2.5, 1.7 - gap], '-x-z': [1.7 - gap, 1.7 - gap], '+x-z': [3.3 + gap, 1.7 - gap], '-x': [1.7 - gap, 2.5] };
+    const [x, z] = at[side]!;
+    const run = seaRun('survival', vec3(0.5, SEA_TOP, 2.5), null);
+    const sim = run.sim;
+    fill(sim.world, -4, SEA_TOP - 1, -4, 7, SEA_TOP - 1, 7, B.PLANKS_OAK);
+    fill(sim.world, 2, SEA_TOP, 2, 2, SEA_TOP + 19, 2, B.PLANKS_OAK);
+    fill(sim.world, -4, SEA_TOP, 6, 7, SEA_TOP + 2, 7, B.PLANKS_OAK);
+    sim.world.setCell(6, SEA_TOP, -3, makeCell(B.HELM, facingState(NZ)));
+    const ship = assemble(sim, vec3(6, SEA_TOP, -3));
+    for (let t = 0; t < 220; t++) sim.tick();
+    const q = ship.grid.rotation;
+    expect((Math.acos(Math.min(1, 1 - 2 * (q.x * q.x + q.z * q.z))) * 180) / Math.PI, 'heel').toBeGreaterThan(7);
+    const w = ship.grid.toWorld(vec3(x, SEA_TOP, z));
+    sim.soloPlayer.teleport(w.x, w.y + 0.02, w.z);
+    for (let t = 0; t < 20; t++) sim.tick();
+    const client = lag === null ? null : attachClient(sim, lag);
+    return { run, x, z, ship, client };
+  }
+
+  it('climbing the mast in the air, each report counting one more landing (seq gaps of one, two and three ticks, a block or more a report), or alternating an air report with a claim to stand where nothing holds it: no higher than a jump', () => {
+    const bad: string[] = [];
+    for (const side of ['-z', '-x-z', '+x-z', '-x'])
+      for (const gap of [0, 0.05, 0.1, -0.05, -0.15])
+        for (const how of ['gap 1', 'gap 2', 'gap 3', 'edge'] as const) {
+          const { run, x, z } = raft(side, gap, null);
+          const l = new Liar(run);
+          l.send(x, SEA_TOP, z);
+          const y0 = l.player.pos.y;
+          let y = SEA_TOP;
+          let top = 0;
+          for (let t = 0; t < 30; t++) {
+            let ok: boolean;
+            if (how === 'edge') {
+              ok = l.send(x, y + 0.6, z, t % 2 === 1);
+              if (ok) y += 0.6;
+            } else {
+              const n = how === 'gap 1' ? 1 : how === 'gap 2' ? 2 : 3;
+              const up = n === 1 ? 0.6 : n === 2 ? 1 : 1.4;
+              l.wait(n - 1);
+              l.landings = (l.landings + 1) & 255;
+              ok = l.send(x, y + up, z, false, n);
+              if (ok) y += up;
+            }
+            if (!ok) y = SEA_TOP;
+            top = Math.max(top, l.player.pos.y - y0);
+          }
+          // No higher than a jump (1.25) and the slack (0.5) above the deck.
+          if (top >= 1.8) bad.push(`${side}, ${gap} from the mast, ${how}: ${top.toFixed(1)} up`);
+        }
+    expect(bad).toEqual([]);
+  });
+
+  it('a structure held 0.2 degrees off level (a raft at sea), about an axis and about a diagonal: the same climb along its mast, a block a report counting one more landing each, from every side and corner: no higher than a jump', () => {
+    // (Leaving out the standing probe's reach only, the strips are a thousandth wide at this heel,
+    // and a body touching the mast found its face under its feet: 6 and 14 of 40 spots climbed the
+    // whole mast.)
+    const bad: string[] = [];
+    for (const [axis, a] of [
+      ['an axis', vec3(1, 0, 0)],
+      ['a diagonal', vec3(Math.SQRT1_2, 0, Math.SQRT1_2)],
+    ] as const) {
+      const P = pinned(qfromAxisAngle(a, (0.2 * Math.PI) / 180));
+      const sim = P.run.sim;
+      const ctl = sim.soloPlayer;
+      for (const g of [0, 0.05, -0.1])
+        for (const [sa, sb] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+          [1, 1],
+          [1, -1],
+          [-1, 1],
+          [-1, -1],
+        ] as const) {
+          const o = 0.8 + g;
+          ctl.setDrive('server');
+          const w = P.onFace(sa * o, sb * o, 0.02);
+          ctl.teleport(w.x, w.y + 0.1, w.z);
+          for (let i = 0; i < 15; i++) sim.tick();
+          const sp = ctl.player;
+          const l = new Liar(P.run);
+          const frame = (q: Vec3): Vec3 => (l.carrierId !== 0 ? P.ship.grid.toLocal(q) : q);
+          const y0 = sp.pos.y;
+          const start = vec3(sp.pos.x, sp.pos.y, sp.pos.z);
+          const f0 = frame(start);
+          l.send(f0.x, f0.y, f0.z, true);
+          let k = 0;
+          let top = 0;
+          for (let t = 0; t < 20; t++) {
+            l.wait(1);
+            l.landings = (l.landings + 1) & 255;
+            const f = frame(vec3(start.x + P.mast.x * (k + 1), start.y + P.mast.y * (k + 1), start.z + P.mast.z * (k + 1)));
+            k = l.send(f.x, f.y, f.z, false, 2) ? k + 1 : 0;
+            top = Math.max(top, sp.pos.y - y0);
+          }
+          if (top >= 1.8) bad.push(`about ${axis}, spot ${sa},${sb}, ${g} from the mast: ${top.toFixed(1)} up`);
+        }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it('an honest body beside the mast, on the side it leans away from and at that corner, jumping again and again with the jump key held, standing or walking along the mast or into it, reports lost in every phase: nothing corrected (the deck at its foot is the ground of the landings nobody saw)', () => {
+    // Leaving out at every depth of the probe what a leaning wall reaches at its bottom, nothing
+    // was left under the feet of a body beside the mast a block above the deck (the reach of a
+    // fall over seven lost ticks is several blocks), and these landings, each a jump's height
+    // below the delivered report, were refused: 31 of these runs corrected.
+    const bad: string[] = [];
+    for (const side of ['-z', '-x-z'])
+      for (const how of ['still', 'along', 'into'] as const)
+        for (const lose of [3, 7, 10])
+          for (let phase = 0; phase <= lose; phase += lose >= 7 ? 3 : 1) {
+            const { run, x, z, ship, client } = raft(side, 0.01, 0);
+            const sim = run.sim;
+            const ctl = sim.soloPlayer;
+            const submit = ctl.submitReport.bind(ctl);
+            // (The first report of an epoch is always delivered: the server takes it as one client
+            // tick from the correction, whatever its seq gap.)
+            let n = phase;
+            let epoch = -1;
+            ctl.submitReport = (rep) => {
+              if (rep.epoch !== epoch) {
+                epoch = rep.epoch;
+                submit(rep);
+              } else if (++n % (lose + 1) === 0) submit(rep);
+            };
+            const into = side === '-z' ? vec3(0, 0, 1) : vec3(1, 0, 1);
+            const dir = how === 'along' ? vec3(-into.z, 0, into.x) : into;
+            for (let t = 0; t < 160; t++) {
+              const tw = ship.grid.toWorld(vec3(x + dir.x * 3, SEA_TOP + 1.6, z + dir.z * 3));
+              ctl.lookAt(tw.x, tw.y, tw.z);
+              ctl.player.input.forward = how === 'still' ? 0 : how === 'along' ? (t % 40 < 20 ? 0.6 : -0.6) : 1;
+              ctl.player.input.jump = true;
+              sim.tick();
+            }
+            const st = ctl.player.remote!;
+            const causes = client!.causes();
+            if (causes.length > 0 || st.rejected > 0) bad.push(`${side}, ${how}, ${lose} of ${lose + 1} lost, phase ${phase}: ${JSON.stringify(causes)}`);
+          }
+    expect(bad).toEqual([]);
+  });
+});
+
+describe('a structure turned about its Z axis (pinned.ts): its local X axis is the one nearest the vertical, and its walls lean along it', () => {
+  /**
+   * Turned 60 or 120 degrees about Z, the cube's +X face is on top, sloping 30 degrees, and the
+   * mast on it leans 30 degrees, one way at 60, the other at 120 (drive.ts leanOf, the branch of
+   * the local X axis; the drum and the heeled decks only ever turn about X or heel a little).
+   */
+  const SPOTS: ReadonlyArray<readonly [number, number]> = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [1, -1],
+    [-1, 1],
+    [-1, -1],
+  ];
+
+  it('climbing the mast at 0.6 per report claiming to stand or to be in the air, or a block per report counting one more landing, from each side and corner: no higher than a jump', () => {
+    const bad: string[] = [];
+    for (const deg of [60, 120]) {
+      const P = pinned(qfromAxisAngle(vec3(0, 0, 1), (deg * Math.PI) / 180));
+      expect(P.n.x, `${deg}: the +X face on top`).toBe(1);
+      const sim = P.run.sim;
+      const ctl = sim.soloPlayer;
+      for (const how of ['stand', 'air', 'landings'] as const)
+        for (const g of [0, 0.05, -0.1])
+          for (const [sa, sb] of SPOTS) {
+            const o = 0.8 + g;
+            ctl.setDrive('server');
+            const w = P.onFace(sa * o, sb * o, 0.02);
+            ctl.teleport(w.x, w.y + 0.1, w.z);
+            for (let i = 0; i < 15; i++) sim.tick();
+            const sp = ctl.player;
+            const l = new Liar(P.run);
+            const frame = (q: Vec3): Vec3 => (l.carrierId !== 0 ? P.ship.grid.toLocal(q) : q);
+            const y0 = sp.pos.y;
+            const start = vec3(sp.pos.x, sp.pos.y, sp.pos.z);
+            const f0 = frame(start);
+            l.send(f0.x, f0.y, f0.z, true);
+            const step = how === 'landings' ? 1 : 0.6;
+            let k = 0;
+            let top = 0;
+            for (let t = 0; t < 20; t++) {
+              const f = frame(vec3(start.x + P.mast.x * step * (k + 1), start.y + P.mast.y * step * (k + 1), start.z + P.mast.z * step * (k + 1)));
+              let ok: boolean;
+              if (how === 'landings') {
+                l.wait(1);
+                l.landings = (l.landings + 1) & 255;
+                ok = l.send(f.x, f.y, f.z, false, 2);
+              } else ok = l.send(f.x, f.y, f.z, how === 'stand');
+              k = ok ? k + 1 : 0;
+              top = Math.max(top, sp.pos.y - y0);
+            }
+            if (top >= 1.8) bad.push(`${deg} degrees, ${how}, spot ${sa},${sb}, ${g} from the mast: ${top.toFixed(1)} up`);
+          }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it('an honest body standing and walking on the face on top, beside the mast and in the open, every report delivered and three of every four lost: nothing refused or corrected', () => {
+    const bad: string[] = [];
+    for (const deg of [60, 120])
+      for (const [sa, sb] of [...SPOTS, [1.8, 0.4]] as const)
+        for (const lose of [0, 3]) {
+          const P = pinned(qfromAxisAngle(vec3(0, 0, 1), (deg * Math.PI) / 180));
+          const sim = P.run.sim;
+          const ctl = sim.soloPlayer;
+          const w = P.onFace(sa * 0.81, sb * 0.81, 0.02);
+          ctl.teleport(w.x, w.y + 0.1, w.z);
+          for (let i = 0; i < 25; i++) sim.tick();
+          const client = attachClient(sim, 0);
+          const submit = ctl.submitReport.bind(ctl);
+          let n = 0;
+          ctl.submitReport = (rep) => {
+            if (++n % (lose + 1) === 0) submit(rep);
+          };
+          for (let i = 0; i < 100; i++) {
+            // Standing 40 ticks, then a few steps one way and back.
+            ctl.player.input.forward = i >= 40 && i < 55 ? 0.5 : i >= 70 && i < 85 ? -0.5 : 0;
+            sim.tick();
+          }
+          if (client.causes().length > 0 || ctl.player.remote!.rejected > 0) bad.push(`${deg} degrees, spot ${sa},${sb}, ${lose} of ${lose + 1} lost: ${JSON.stringify(client.causes())}`);
         }
     expect(bad).toEqual([]);
   });

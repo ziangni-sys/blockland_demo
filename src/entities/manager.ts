@@ -1369,7 +1369,7 @@ export class EntityManager {
     if (facts.pushedOffSeat && p.steeringShipId !== 0) this.releaseHelm(p, 'pushed');
     if (facts.landedFall >= 0) {
       const total = facts.landedFall;
-      if (facts.landedFromAir && total >= LAND_EVENT_HEIGHT) this.host.emit({ type: 'land', entity: p, amount: total });
+      if (facts.touchedDown && total >= LAND_EVENT_HEIGHT) this.host.emit({ type: 'land', entity: p, amount: total });
       if (total > FALL_SAFE_HEIGHT) {
         // Fluids were sampled before this tick's move: a fast fall can enter shallow water and
         // hit its bottom in the same tick. Water at the landing spot always breaks the fall.
