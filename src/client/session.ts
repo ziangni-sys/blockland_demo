@@ -29,7 +29,7 @@
  */
 import { CHUNK_SHIFT, SECTIONS_PER_CHUNK } from '../core/constants';
 import { vec3, type Vec3 } from '../core/math';
-import { headingOf } from '../entities/structs';
+import { curToLocal, headingOf } from '../entities/structs';
 import type { Inventory } from '../entities/inventory';
 import type { MeshResponse } from '../mesh/types';
 import { ClientIntents, type ViewRay } from '../net/client/intents';
@@ -490,7 +490,7 @@ export class WorldSession {
     this.dropRenderState();
     try {
       this.deps.backend.setEntities([]);
-      this.deps.backend.setOverlays({ target: null, breakProgress: 0, preview: [], conflicts: [], glue: [] });
+      this.deps.backend.setOverlays({ target: null, breakProgress: 0, breakFill: 0, preview: [], conflicts: [], glue: [], targetOctant: -1, placement: null });
     } catch {
       // the backend may already be gone
     }
@@ -577,8 +577,15 @@ export class WorldSession {
       s.sneaking = p.sneaking;
       s.flying = p.flying;
       s.steeringShipId = p.steeringShipId;
+      // The body at its last client tick, for the camera's step offset (docs/SHAPES.md 5.7).
+      s.tick = own.tick;
+      s.onGround = p.onGround;
+      const rec = p.carrierId !== 0 ? own.body.record(p.carrierId) : undefined;
+      s.tickY = rec !== undefined ? curToLocal(rec, p.pos, this.tmp).y : p.pos.y;
       return;
     }
+    s.tick = Number.NEGATIVE_INFINITY;
+    s.onGround = false;
     // Loading (and until the prediction adopted its first correction): where the server's correction has the player, looking where it says.
     const corr = r.ownState.correction;
     const clock = this.net.clock;

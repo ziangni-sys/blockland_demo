@@ -46,8 +46,8 @@ describe('glue overlays', () => {
     rig.run(100);
     const glue = glueOf(rig, new ViewBuilder(), 0);
     expect([...glue].sort((a, b) => a.face - b.face)).toEqual([
-      { structureId: 0, x: 3, y: T, z: -3, face: PX, covered: false, sky: 15, block: 0 },
-      { structureId: 0, x: 3, y: T, z: -3, face: PY, covered: false, sky: 15, block: 0 },
+      { structureId: 0, x: 3, y: T, z: -3, face: PX, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 },
+      { structureId: 0, x: 3, y: T, z: -3, face: PY, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 },
     ]);
   });
 
@@ -66,7 +66,7 @@ describe('glue overlays', () => {
     expect(faceAt(rig, v, 0, 3, T, -3)).toEqual([]);
     rig.hold(I.GLUE);
     rig.frame();
-    expect(faceAt(rig, v, 1, 3, T, -3)).toEqual([{ structureId: 0, x: 3, y: T, z: -3, face: PY, covered: true, sky: 0, block: 0 }]);
+    expect(faceAt(rig, v, 1, 3, T, -3)).toEqual([{ structureId: 0, x: 3, y: T, z: -3, face: PY, covered: true, sky: 0, block: 0, fill: 0xff, quads: 15 }]);
     rig.session.swapHands(); // glue in the off-hand, nothing in the main hand
     rig.frame();
     expect(rig.session.inventory!.offhand?.item).toBe(I.GLUE);
@@ -207,7 +207,7 @@ describe('glue overlays', () => {
     const shipFaces = (): OverlayFace[] => glueOf(rig, v, (now += GLUE_REFRESH_MS)).filter((f) => f.structureId === shipId);
     // Local cells and the ship's own exposed / covered classification; lit by the ship's pose
     // (sky 15 / block 0 here, the renderer applies the pose light).
-    expect(shipFaces()).toEqual([{ structureId: shipId, x: 4, y: SEA_TOP - 1, z: 4, face: PY, covered: false, sky: 15, block: 0 }]);
+    expect(shipFaces()).toEqual([{ structureId: shipId, x: 4, y: SEA_TOP - 1, z: 4, face: PY, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 }]);
     // A change to the ship's glue store shows at once, without waiting for the refresh.
     const ship = rig.sim.structures.get(shipId)!;
     ship.glue.add(0, SEA_TOP - 1, 0, PY);
@@ -218,7 +218,7 @@ describe('glue overlays', () => {
     expect(glueOf(rig, v, now + 2).some((f) => f.structureId === shipId && f.x === 0 && f.z === 0)).toBe(false);
     rig.hold(I.GLUE);
     rig.frame();
-    const hub = { structureId: shipId, x: 2, y: by, z: 0, face: PZ, covered: true, sky: 0, block: 0 };
+    const hub = { structureId: shipId, x: 2, y: by, z: 0, face: PZ, covered: true, sky: 0, block: 0, fill: 0xff, quads: 15 };
     expect(shipFaces()).toContainEqual(hub);
     // Start the rotor (planks in hand: the bearing comes before placing): the hub leaves the
     // ship's grid, the glue stays on the bearing's face, now exposed, drawn whatever the player holds.
@@ -228,7 +228,7 @@ describe('glue overlays', () => {
     const rotor = rig.sim.structures.rotors()[0]!;
     expect(rotor.parent).toBe(ship);
     settle(rig);
-    const onBearing = { structureId: shipId, x: 2, y: by, z: 1, face: NZ, covered: false, sky: 15, block: 0 };
+    const onBearing = { structureId: shipId, x: 2, y: by, z: 1, face: NZ, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 };
     expect(shipFaces()).toContainEqual(onBearing);
     expect(glueOf(rig, v, (now += GLUE_REFRESH_MS)).some((f) => f.structureId === rotor.id)).toBe(false);
     // Stop it: back between the bearing and the hub, covered.

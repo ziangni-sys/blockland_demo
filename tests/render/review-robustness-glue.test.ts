@@ -17,6 +17,7 @@ import * as THREE from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { OverlayLayer } from '../../src/render/three/overlays';
 import { SharedUniforms } from '../../src/render/three/shading';
+import type { Dir } from '../../src/core/dirs';
 import type { OverlayState } from '../../src/render/backend';
 
 const DIRS: readonly [number, number, number][] = [
@@ -33,9 +34,9 @@ describe('review: glue faces between two blocks', () => {
     const placeholder = new THREE.DataArrayTexture(new Uint8Array(4 * 4 * 4).fill(255), 4, 4, 1);
     const layer = new OverlayLayer(new SharedUniforms(), uniform(new THREE.Vector4(1, 0, 0, 1)), placeholder, []);
     const root = new THREE.Group();
-    const cell = { structureId: 0, x: 2, y: 3, z: 3 };
+    const cell = { structureId: 0, x: 2, y: 3, z: 3, fill: 0xff };
     for (let face = 0; face < 6; face++) {
-      const o: OverlayState = { target: null, breakProgress: 0, preview: [], conflicts: [], glue: [{ ...cell, face, covered: true, sky: 15, block: 0 }] };
+      const o: OverlayState = { target: null, breakProgress: 0, breakFill: 0xff, preview: [], conflicts: [], glue: [{ ...cell, face: face as Dir, covered: true, sky: 15, block: 0, quads: 15 }], targetOctant: -1, placement: null };
       layer.update(o, () => root, face);
       const mesh = root.children.find((c) => c instanceof THREE.InstancedMesh && c.count > 0 && c.visible) as THREE.InstancedMesh;
       expect(mesh).toBeDefined();

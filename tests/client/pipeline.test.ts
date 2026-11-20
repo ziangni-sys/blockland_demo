@@ -284,10 +284,10 @@ describe('WorldSession (against a real server)', () => {
     view.conflicts = [{ x: 5, y: 6, z: 7 }];
     rig.frame();
     const o = rig.backend.overlays!;
-    expect(o.target).toEqual({ structureId: 0, x: 1, y: FLAT_TOP - 1, z: 1 });
+    expect(o.target).toEqual({ structureId: 0, x: 1, y: FLAT_TOP - 1, z: 1, fill: 0xff });
     expect(o.breakProgress).toBe(1);
     expect(o.preview.length).toBe(2);
-    expect(o.conflicts).toEqual([{ structureId: 0, x: 5, y: 6, z: 7 }]);
+    expect(o.conflicts).toEqual([{ structureId: 0, x: 5, y: 6, z: 7, fill: 0xff }]);
     const previewList = o.preview;
     rig.frame();
     expect(rig.backend.overlays!.preview).toBe(previewList);

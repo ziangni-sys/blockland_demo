@@ -6,6 +6,7 @@
  * All positions are WORLD space unless stated otherwise. Angles in radians.
  * Camera convention: yaw 0 looks toward -Z, yaw grows turning left; pitch > 0 looks up.
  */
+import type { Dir } from '../core/dirs';
 import type { MeshData } from '../mesh/types';
 
 export interface BackendInfo {
@@ -104,8 +105,8 @@ export interface EntityRenderState {
 }
 
 /**
- * A box of local cells of some grid, drawn as an overlay.
- * `structureId` 0 = world space; otherwise the box is in that structure's local space and
+ * A cell of some grid, drawn as an overlay over the octants `fill` of it (docs/SHAPES.md 8.6).
+ * `structureId` 0 = world space; otherwise the cell is in that structure's local space and
  * follows its pose.
  */
 export interface OverlayCell {
@@ -113,14 +114,21 @@ export interface OverlayCell {
   x: number;
   y: number;
   z: number;
+  /**
+   * The octants to draw (bit o = octant o = ox | oy << 1 | oz << 2, docs/SHAPES.md 1.1). Target
+   * outline: the occupancy of the aimed part; preview and conflicts: the union of the cell's
+   * hard parts; model blocks and whole blocks 0xff.
+   */
+  fill: number;
 }
 export interface OverlayFace extends OverlayCell {
-  /** Face direction (Dir 0..5) on the cell. */
-  face: number;
+  /** Face direction on the cell. */
+  face: Dir;
   /**
-   * Hard blocks on both sides of the face. A covered glued face is drawn as a bead along the
-   * joint plus an x-ray ghost. An EXPOSED one (covered false) is drawn as a depth-tested decal
-   * lying on the face: then the cell is the hard side and `face` points to the open side.
+   * Material on both sides of the face (on the quadrants `quads`). A covered glued face is drawn
+   * as a bead along the outline of those quadrants plus an x-ray ghost of them. An EXPOSED one
+   * (covered false) is drawn as a depth-tested decal lying on the face: then the cell is the side
+   * with material on those quadrants and `face` points to the open side.
    */
   covered: boolean;
   /**
@@ -132,22 +140,35 @@ export interface OverlayFace extends OverlayCell {
    */
   sky: number;
   block: number;
+  /** The quadrants of the face the glue lies on, 4 bits (q = hu | hv << 1 on the face's axes u < v, docs/SHAPES.md 2.3); never 0. */
+  quads: number;
 }
 
 export interface OverlayState {
-  /** Outline around the targeted cell, or null. */
+  /** Outline around the aimed part of a cell (its `fill`), or null. */
   target: OverlayCell | null;
   /** Mining progress 0..1 drawn on the target cell (0 = none). */
   breakProgress: number;
-  /** Cells that will be assembled (preview), tinted. */
+  /**
+   * The octants of the target cell the mining cracks wrap (docs/SHAPES.md 6.3): the mined part's
+   * occupancy, or a single octant (1 << octant) when the progress is for one octant only. Read
+   * only while breakProgress > 0.
+   */
+  breakFill: number;
+  /** Cells that will be assembled (preview), tinted, each over its `fill`. */
   preview: OverlayCell[];
-  /** Cells blocking a docking / blockify attempt, tinted red. */
+  /** Cells blocking a docking / blockify attempt, tinted red, each over its `fill`. */
   conflicts: OverlayCell[];
   /**
    * Glued faces to draw near the player: exposed ones always, covered ones while glue is in
-   * one of the player's hands (see OverlayFace.covered).
+   * one of the player's hands (see OverlayFace.covered). The renderer reads an array once: a
+   * changed list (a face, its quadrants or its light) is sent as a new array, never changed in place.
    */
   glue: OverlayFace[];
+  /** The octant of the target cell highlighted while a chisel is in the main hand (M2.4); -1 = none. */
+  targetOctant: number;
+  /** A translucent preview of what a placement would put down (M2.4), drawn as the item's block over the octants `fill`; null = none. */
+  placement: { structureId: number; x: number; y: number; z: number; fill: number; item: number } | null;
 }
 
 /**

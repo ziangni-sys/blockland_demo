@@ -53,7 +53,7 @@ describe('25. 手持强力胶右键方块露出的面，面上出现胶；贴着
     // Shown as glue lying on the plank's open east face, whatever the player holds.
     // Lit like the face under it: by the light of the open cell east of the plank, under the open
     // sky (network mode: the client's replica computed that light; direct mode has no client).
-    expect(drawnFace(w, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: false, sky: 15, block: 0 });
+    expect(drawnFace(w, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 });
     me.hold(B.STONE);
     expect(drawnFace(w, ex, ey, ez, PX)?.covered).toBe(false);
   });
@@ -68,7 +68,7 @@ describe('25. 手持强力胶右键方块露出的面，面上出现胶；贴着
     expect(idAt(sim.world, sx, sy, sz)).toBe(B.STONE);
     // Now covered: drawn only while glue is in a hand.
     me.hold(I.GLUE);
-    expect(drawnFace(w, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: true, sky: 0, block: 0 });
+    expect(drawnFace(w, ex, ey, ez, PX)).toEqual({ structureId: 0, x: ex, y: ey, z: ez, face: PX, covered: true, sky: 0, block: 0, fill: 0xff, quads: 15 });
     me.hold(B.STONE);
     expect(drawnFace(w, ex, ey, ez, PX)).toBeUndefined();
     const cells = assembleRaft(w);
@@ -415,7 +415,7 @@ describe('25、28、29 在转过一个角度的船上：涂胶、去胶和副手
     expect(ship.glue.has(4, D, 2, PX)).toBe(true);
     expect(ship.glue.size).toBe(1);
     expect(sim.worldGlue.size).toBe(0);
-    expect(drawnGlue(w)).toContainEqual({ structureId: ship.id, x: 4, y: D, z: 2, face: PX, covered: false, sky: 15, block: 0 });
+    expect(drawnGlue(w)).toContainEqual({ structureId: ship.id, x: 4, y: D, z: 2, face: PX, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 });
     me.input.sneak = true;
     glueClick(w, 4, D, 2, PX, ship.id);
     me.input.sneak = false;

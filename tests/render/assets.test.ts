@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { prepareTilePixels, mipLevelCount } from '../../src/render/three/tiles';
 import { makeCloudNoise } from '../../src/render/three/noise';
-import { buildBox, buildQuad, boxEdges } from '../../src/render/three/boxgeom';
+import { buildBox, buildQuad, outlineSegments } from '../../src/render/three/boxgeom';
 import { blastCrateVisual, crackLayer, crackStage, cubeTilesForCell, itemVisual, tileLayer } from '../../src/render/three/blocktiles';
 import { B } from '../../src/blocks/defs';
 import { I } from '../../src/blocks/items';
@@ -234,7 +234,7 @@ describe('box geometry', () => {
     expect(windingZ(d, 0)).toBeGreaterThan(0);
     expect(windingZ(d, 1)).toBeLessThan(0);
     expect(d.normals[4 * 3 + 2]).toBe(-127);
-    const e = boxEdges(0, 0, 0, 1, 1, 1);
+    const e = outlineSegments(0xff, 0); // the 12 edges of the unit cube
     expect(e.length).toBe(72);
   });
 });

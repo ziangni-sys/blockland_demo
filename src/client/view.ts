@@ -19,10 +19,19 @@
  * (as the display pose places it), over the display time: the replica's renderTick for the others,
  * the rotorTick the own prediction runs on for the own player. So someone standing on a sailing,
  * turning ship stands still and someone walking its deck walks at their speed on it.
+ *
+ * SHAPES (docs/SHAPES.md 8.6). A cell holds up to two parts; the overlays follow them: the target
+ * outline wraps the aimed part (the part holding the target's octant), the cracks the mined part
+ * (or one octant, 6.3), the preview and conflict tints the cell's hard parts, and a glued face is
+ * split into the quadrants both sides cover and those only one side covers. Per-frame code reads
+ * getCell / getPart2 and the shape tables; it never forms the packed value of a two-part cell
+ * (docs/SHAPES.md 4.4).
  */
 import { DAY_TICKS, TPS } from '../core/constants';
 import { quat, vec3, type Vec3 } from '../core/math';
-import { ID_MASK, liquidAmount, STATE_MASK, STATE_SHIFT } from '../blocks/cell';
+import { CELL_MULTI_BIT, FULL_LIMIT, ID_MASK, liquidAmount, PART_MASK, partHoles, STATE_MASK, STATE_SHIFT } from '../blocks/cell';
+import { faceCover, opaqueFill, solidFill } from '../blocks/shapes';
+import type { Dir } from '../core/dirs';
 import { I } from '../blocks/items';
 import { B } from '../blocks/defs';
 import { LIQUID, LIQUID_LAVA, LIQUID_WATER, OPAQUE, SOLID } from '../blocks/registry';
@@ -46,6 +55,7 @@ import { isDryHalf } from '../structures/hull';
 import type { GlueStore } from '../structures/glue';
 import { Ship } from '../structures/structure';
 import type { VoxelGrid } from '../voxel/grid';
+import { solidFillAt } from '../voxel/parts';
 import { raycastGrids, type CellPredicate } from '../voxel/raycast';
 import type { World } from '../voxel/world';
 import {
@@ -56,8 +66,10 @@ import {
   resetCameraRig,
   SELF_HIDE_CLEARANCE,
   selfModelGap,
+  stepLagState,
   sweepGrids,
   sweepScratch,
+  updateStepLag,
   type CameraGridFrame,
   type CameraQueries,
   type ViewMode,
@@ -115,6 +127,16 @@ export interface ShownPlayer {
   flying: boolean;
   /** The ship whose wheel it holds (0 = none). */
   steeringShipId: number;
+  /**
+   * The predicted body at the last client tick run (docs/SHAPES.md 5.7, the camera's step offset):
+   * that tick (OwnPlayer.tick; not finite while there is no prediction), whether the body stood on
+   * the ground after it, and its feet height in its carrier's frame (carrierId; the world's when 0)
+   * at that tick. A body that rises 0.05 to STEP_HEIGHT + 0.01 within a tick, on the ground before
+   * and after, stepped up; the camera then follows smoothly instead of jumping (camera.ts StepLag).
+   */
+  tick: number;
+  onGround: boolean;
+  tickY: number;
 }
 
 /** What the camera reads of the replica: the world and the structures at their display pose. */
@@ -127,18 +149,52 @@ export type CameraScene = Pick<ClientReplica, 'world' | 'structures'>;
 export type EntityScene = Pick<ClientReplica, 'world' | 'entities' | 'state' | 'structures'>;
 
 export function shownPlayer(): ShownPlayer {
-  return { id: 0, feet: vec3(), eyeHeight: 1.62, yaw: 0, pitch: 0, sprinting: false, moving: false, dead: false, hurt: false, inventory: null, carrierId: 0, sneaking: false, flying: false, steeringShipId: 0 };
+  return {
+    id: 0,
+    feet: vec3(),
+    eyeHeight: 1.62,
+    yaw: 0,
+    pitch: 0,
+    sprinting: false,
+    moving: false,
+    dead: false,
+    hurt: false,
+    inventory: null,
+    carrierId: 0,
+    sneaking: false,
+    flying: false,
+    steeringShipId: 0,
+    tick: Number.NEGATIVE_INFINITY,
+    onGround: false,
+    tickY: 0,
+  };
 }
 
-/** Light (sky, block) of the open cell at or just above a point, 0..15 each. */
+/**
+ * Light (sky, block) of the open cell at or just above a point, 0..15 each. Only a cell opaque in
+ * all eight octants has no light of its own (docs/SHAPES.md 8.6): the cell above lights the body
+ * then. A partial cell is lit through its open octants (a body standing on a lower half slab has
+ * its sample point in the slab's cell, whose light is valid).
+ */
 export function sampleLight(world: World, x: number, y: number, z: number, out: { sky: number; block: number }): void {
   const fx = Math.floor(x);
   let fy = Math.floor(y);
   const fz = Math.floor(z);
-  // Inside an opaque block every light is 0; the cell above is what lights the body.
-  if (OPAQUE[world.getCell(fx, fy, fz) & ID_MASK] === 1) fy++;
+  const c = world.getCell(fx, fy, fz);
+  // A whole cell: M1's test. The partial case is its own function so the common path stays small.
+  if (c < FULL_LIMIT ? OPAQUE[c & ID_MASK] === 1 : partialOpaque(world, c, fx, fy, fz)) fy++;
   out.sky = world.getSkyLight(fx, fy, fz);
   out.block = world.getBlockLight(fx, fy, fz);
+}
+
+/**
+ * True when the partial cell (x, y, z) (getCell value c >= FULL_LIMIT) is opaque in all eight
+ * octants. Reads the parts only (< 2^24): the packed value of a two-part cell is never formed
+ * (docs/SHAPES.md 4.4).
+ */
+function partialOpaque(world: World, c: number, x: number, y: number, z: number): boolean {
+  const opaque = opaqueFill(c & PART_MASK) | ((c & CELL_MULTI_BIT) !== 0 ? opaqueFill(world.getPart2(x, y, z)) : 0);
+  return opaque === 0xff;
 }
 
 /**
@@ -161,11 +217,13 @@ export function mediumAt(world: World, x: number, y: number, z: number): 'none' 
 }
 
 /**
- * Cells the third-person camera may not enter: every hard or opaque block (liquids, plants,
- * torches and the invisible unloaded sentinel do not stop it).
+ * Parts the third-person camera may not enter: every hard or opaque material (liquids, plants,
+ * torches and the invisible unloaded sentinel do not stop it). Applied to each part of a cell: the
+ * ray of 'front' walks the octants (voxel/raycast.ts), and the sweep of 'back' tests the boxes of
+ * the octants of the parts it holds true for (camera.ts).
  */
-export const blocksCamera: CellPredicate = (cell) => {
-  const id = cell & ID_MASK;
+export const blocksCamera: CellPredicate = (part) => {
+  const id = part & ID_MASK;
   if (id === B.UNLOADED || LIQUID[id] !== 0) return false;
   return SOLID[id] === 1 || OPAQUE[id] === 1;
 };
@@ -217,7 +275,7 @@ function glueInHand(inv: Inventory | null): boolean {
 export class ViewBuilder {
   readonly camera: CameraState = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, fov: 75 };
   readonly env: EnvironmentState = { dayTime: 0, submerged: 'none', viewDistance: 128, time: 0 };
-  readonly overlay: OverlayState = { target: null, breakProgress: 0, preview: [], conflicts: [], glue: [] };
+  readonly overlay: OverlayState = { target: null, breakProgress: 0, breakFill: 0, preview: [], conflicts: [], glue: [], targetOctant: -1, placement: null };
 
   private readonly entityPool: EntityRenderState[] = [];
   private readonly entityList: EntityRenderState[] = [];
@@ -233,7 +291,9 @@ export class ViewBuilder {
   /** Third person with the camera clear of the player's model: the local player is drawn. */
   private showSelf = false;
   private readonly pose = cameraPose();
+  /** The eyes as drawn: the shown eyes plus the step offset (camera.ts StepLag). */
   private readonly eye: Vec3 = vec3();
+  private readonly stepLag = stepLagState();
   /** Easing state and scratch of the 'back' placement; reset when the view mode changes. */
   private readonly rig = cameraRig();
   private lastMode: ViewMode | null = null;
@@ -255,7 +315,7 @@ export class ViewBuilder {
   };
 
   // overlay caches (rebuilt only when the replica holds a new object)
-  private readonly targetCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0 };
+  private readonly targetCell: OverlayCell = { structureId: 0, x: 0, y: 0, z: 0, fill: 0xff };
   /** What the cached preview list was built from (the replica replaces the preview object when it changes). */
   private lastPreview: ReplicaView['preview'] | undefined = undefined;
   private lastConflicts: ReplicaView['conflicts'] | undefined = undefined;
@@ -277,12 +337,16 @@ export class ViewBuilder {
    * The camera for the view mode: first person at the player's eyes, or third person over the
    * shoulder ('back', kept CAMERA_CLEARANCE from every block of every grid as drawn this frame,
    * moving out again eased over `dt` seconds) or in front of the face ('front', pulled in by a
-   * ray); see src/client/camera.ts. The look is the shown player's.
+   * ray); see src/client/camera.ts. The look is the shown player's. The eyes (first person) and the
+   * anchor of the third-person camera are lowered by the step offset while the player steps up
+   * (docs/SHAPES.md 5.7; camera.ts StepLag).
    */
   updateCamera(replica: CameraScene, me: ShownPlayer, fov: number, dt: number, mode: ViewMode = 'first'): CameraState {
+    updateStepLag(this.stepLag, me, this.carrierGrid(replica, me.carrierId), dt);
+    const lag = this.stepLag.value;
     const eye = this.eye;
     eye.x = me.feet.x;
-    eye.y = me.feet.y + me.eyeHeight;
+    eye.y = me.feet.y + me.eyeHeight + lag;
     eye.z = me.feet.z;
     if (mode !== this.lastMode) {
       resetCameraRig(this.rig);
@@ -293,7 +357,10 @@ export class ViewBuilder {
     const pose = placeCamera(mode, eye, me.yaw, me.pitch, this.cameraQueries, this.rig, dt, this.pose);
     this.rayGrids = null;
     this.sweepCount = 0;
+    // The model stands at the shown feet: measured from the eyes without the step offset.
+    eye.y -= lag;
     this.showSelf = mode !== 'first' && !me.dead && selfModelGap(pose.x, pose.y, pose.z, eye, me.yaw, me.eyeHeight) >= SELF_HIDE_CLEARANCE;
+    eye.y += lag;
     const cam = this.camera;
     cam.x = pose.x;
     cam.y = pose.y;
@@ -305,9 +372,20 @@ export class ViewBuilder {
     return cam;
   }
 
-  /** The eyes of the last updateCamera (world). */
+  /** The eyes of the last updateCamera (world), with the step offset. */
   get eyePos(): Readonly<Vec3> {
     return this.eye;
+  }
+
+  /** The grid of structure `id` at its display pose (null for 0 or a structure the replica does not hold). */
+  private carrierGrid(replica: CameraScene, id: number): VoxelGrid | null {
+    if (id === 0) return null;
+    const structures = replica.structures();
+    for (let i = 0; i < structures.length; i++) {
+      const s = structures[i]!;
+      if (s.id === id) return s.grid;
+    }
+    return null;
   }
 
   /**
@@ -538,39 +616,67 @@ export class ViewBuilder {
   }
 
   /**
-   * Overlays: the outline of `target` (the client's own use target, section 10: drawn at once),
-   * the mining cracks the server reports (only on the target itself), the assembly preview and
-   * the docking conflicts of the private view, and the glued faces around the player.
+   * Overlays: the outline of the part `target` aims at (the client's own use target, section 10:
+   * drawn at once), the mining cracks the server reports (only on the target itself, docs/SHAPES.md
+   * 6.3), the assembly preview and the docking conflicts of the private view, and the glued faces
+   * around the player. The M2.4 markers (targetOctant, placement) stay off: no tool sets them yet.
    */
   updateOverlays(replica: ClientReplica, me: ShownPlayer, target: Target | null, nowMs: number): OverlayState {
     const o = this.overlay;
+    const v = replica.ownState.view;
+    const m = v.mining;
+    o.breakProgress = 0;
     if (target !== null) {
       const t = this.targetCell;
       t.structureId = target.gridId;
       t.x = target.x;
       t.y = target.y;
       t.z = target.z;
+      const grid = gridOf(replica, target.gridId);
+      const c = grid === null ? 0 : grid.getCell(target.x, target.y, target.z);
+      const p2 = grid !== null && (c & CELL_MULTI_BIT) !== 0 ? grid.getPart2(target.x, target.y, target.z) : 0;
+      // The aimed part: the one holding the target's octant (docs/SHAPES.md 6.2, 8.6).
+      const part = partOf(c, p2, target.sub & 7);
+      t.fill = ~partHoles(part) & 0xff;
       o.target = t;
+      if (m !== null && m.gridId === target.gridId && m.x === target.x && m.y === target.y && m.z === target.z) {
+        // docs/SHAPES.md 6.3: bit 3 of mining.sub clear = the progress is for the whole part holding
+        // octant (sub & 7), shown while the target is on that part; set = for that one octant,
+        // shown while the target is on that octant.
+        const mo = m.sub & 7;
+        if ((m.sub & 8) === 0) {
+          if (partOf(c, p2, mo) === part) {
+            o.breakProgress = Math.max(0, Math.min(1, m.progress));
+            o.breakFill = t.fill;
+          }
+        } else if (mo === (target.sub & 7)) {
+          o.breakProgress = Math.max(0, Math.min(1, m.progress));
+          o.breakFill = 1 << mo;
+        }
+      }
     } else {
       o.target = null;
     }
-    const v = replica.ownState.view;
-    const m = v.mining;
-    o.breakProgress =
-      target !== null && m !== null && m.gridId === target.gridId && m.x === target.x && m.y === target.y && m.z === target.z ? Math.max(0, Math.min(1, m.progress)) : 0;
     if (v.preview !== this.lastPreview) {
       const pv = v.preview;
       this.lastPreview = pv;
       const cells: OverlayCell[] = [];
       if (pv) {
+        const grid = gridOf(replica, pv.gridId);
         const a = pv.cells;
-        for (let i = 0; i + 2 < a.length; i += 3) cells.push({ structureId: pv.gridId, x: a[i]!, y: a[i + 1]!, z: a[i + 2]! });
+        for (let i = 0; i + 2 < a.length; i += 3) {
+          const x = a[i]!;
+          const y = a[i + 1]!;
+          const z = a[i + 2]!;
+          cells.push({ structureId: pv.gridId, x, y, z, fill: grid === null ? 0xff : tintFill(grid, x, y, z) });
+        }
       }
       o.preview = cells;
     }
     if (v.conflicts !== this.lastConflicts) {
       this.lastConflicts = v.conflicts;
-      o.conflicts = v.conflicts.map((c) => ({ structureId: 0, x: c.x, y: c.y, z: c.z }));
+      const world = replica.world;
+      o.conflicts = v.conflicts.map((c) => ({ structureId: 0, x: c.x, y: c.y, z: c.z, fill: tintFill(world, c.x, c.y, c.z) }));
     }
     this.updateGlue(replica, me, nowMs);
     return o;
@@ -638,6 +744,37 @@ export class ViewBuilder {
   }
 }
 
+/** The grid of `gridId` in the replica (0 = the world), or null when the replica has no such structure. */
+function gridOf(replica: ClientReplica, gridId: number): VoxelGrid | null {
+  if (gridId === 0) return replica.world;
+  return replica.state.structures.get(gridId)?.structure.grid ?? null;
+}
+
+/**
+ * The part of a cell (getCell value c, getPart2 value p2) holding octant o: partAt of
+ * docs/SHAPES.md 3.1 on the two part values, so the packed value of a two-part cell is never formed
+ * (4.4). 0 when the octant is empty.
+ */
+export function partOf(c: number, p2: number, o: number): number {
+  const first = c & PART_MASK;
+  if (first !== 0 && ((partHoles(first) >> o) & 1) === 0) return first;
+  if (p2 !== 0 && ((partHoles(p2) >> o) & 1) === 0) return p2;
+  return 0;
+}
+
+/**
+ * The octants a preview or conflict tint covers on cell (x, y, z) of `grid` (docs/SHAPES.md 8.6):
+ * the union of its hard parts. Every other value (a whole block, a model block such as a torch or a
+ * helm, and air) gives 0xff: a listed cell is always drawn, as before shapes existed. Air matters:
+ * planDock lists the cells at or above the build height as conflicts, and the world reads them as
+ * air; so does a preview cell the replica has not caught up with yet.
+ */
+export function tintFill(grid: VoxelGrid, x: number, y: number, z: number): number {
+  const c = grid.getCell(x, y, z);
+  if (c < FULL_LIMIT) return 0xff;
+  return solidFill(c & PART_MASK) | ((c & CELL_MULTI_BIT) !== 0 ? solidFill(grid.getPart2(x, y, z)) : 0);
+}
+
 /** The world and every structure grid of the replica (display poses). */
 export function replicaGrids(replica: CameraScene): VoxelGrid[] {
   const out: VoxelGrid[] = [replica.world];
@@ -647,11 +784,19 @@ export function replicaGrids(replica: CameraScene): VoxelGrid[] {
 
 /**
  * Append the glued faces of one grid around `at` (a point in that grid's local space) to `out`:
- * exposed ones within GLUE_EXPOSED_RADIUS, covered ones within GLUE_VIEW_RADIUS when `covered`
- * glue is to be shown. An exposed face is given as its hard cell plus the direction of the open
- * side (the decal lies on that side) and the light of the open cell, read from `light` (the
- * world, for world glue) or full sky light when null (a structure: its pose light is applied by
- * the renderer); a covered one as its canonical cell plus the positive face.
+ * exposed parts within GLUE_EXPOSED_RADIUS, covered parts within GLUE_VIEW_RADIUS when `covered`
+ * glue is to be shown (docs/SHAPES.md 8.6). A glued face between A (negative side) and B
+ * (positive side, direction d from A) is split by the hard material on it: a = the quadrants of
+ * the face A covers (solidCover(A, d)), b = those B covers (solidCover(B, d ^ 1)). It gives up to
+ * three entries, none with quads 0, in this order:
+ *  - covered (material on both sides): { A, face d, covered, quads a & b };
+ *  - exposed on A's side: { A, face d, quads a & ~b }, the decal on A's face, lit by B's cell;
+ *  - exposed on B's side: { B, face d ^ 1, quads b & ~a }, lit by A's cell;
+ *  - no material on either side (a = b = 0): { A, face d, quads 15 }, lit by B's cell.
+ * Two whole blocks give one covered entry, a whole block and air one exposed entry, as always.
+ * The light is read from `light` (the world, for world glue), or full sky light when null (a
+ * structure: its pose light is applied by the renderer). Reads getCell / getPart2 only
+ * (voxel/parts.ts solidFillAt), never the packed value of a two-part cell.
  */
 export function collectGlueFaces(
   grid: VoxelGrid,
@@ -672,19 +817,24 @@ export function collectGlueFaces(
     const bx = axis === 0 ? x + 1 : x;
     const by = axis === 1 ? y + 1 : y;
     const bz = axis === 2 ? z + 1 : z;
-    const hardA = SOLID[grid.getCell(x, y, z) & ID_MASK] === 1;
-    const hardB = SOLID[grid.getCell(bx, by, bz) & ID_MASK] === 1;
-    if (hardA && hardB) {
-      if (!showCovered || Math.max(Math.abs(x - cx), Math.abs(y - cy), Math.abs(z - cz)) > r) return;
-      out.push({ structureId, x, y, z, face: axis * 2, covered: true, sky: 0, block: 0 });
-    } else if (hardB) {
-      // The decal lies on B's negative face, in the open cell A.
-      const l = light === null ? FULL_SKY : light.getLightRaw(x, y, z);
-      out.push({ structureId, x: bx, y: by, z: bz, face: axis * 2 + 1, covered: false, sky: l >> 4, block: l & 15 });
-    } else {
-      // The decal lies on A's positive face, in the open cell B.
+    const d = (axis * 2) as Dir;
+    const a = faceCover(solidFillAt(grid, x, y, z), d);
+    const b = faceCover(solidFillAt(grid, bx, by, bz), (d ^ 1) as Dir);
+    const both = a & b;
+    if (both !== 0 && showCovered && Math.max(Math.abs(x - cx), Math.abs(y - cy), Math.abs(z - cz)) <= r) {
+      out.push({ structureId, x, y, z, fill: 0xff, face: d, covered: true, sky: 0, block: 0, quads: both });
+    }
+    const onA = a === 0 && b === 0 ? 15 : a & ~b;
+    if (onA !== 0) {
+      // The decal lies on A's positive face, in cell B.
       const l = light === null ? FULL_SKY : light.getLightRaw(bx, by, bz);
-      out.push({ structureId, x, y, z, face: axis * 2, covered: false, sky: l >> 4, block: l & 15 });
+      out.push({ structureId, x, y, z, fill: 0xff, face: d, covered: false, sky: l >> 4, block: l & 15, quads: onA });
+    }
+    const onB = b & ~a;
+    if (onB !== 0) {
+      // The decal lies on B's negative face, in cell A.
+      const l = light === null ? FULL_SKY : light.getLightRaw(x, y, z);
+      out.push({ structureId, x: bx, y: by, z: bz, fill: 0xff, face: (d ^ 1) as Dir, covered: false, sky: l >> 4, block: l & 15, quads: onB });
     }
   });
 }
@@ -695,6 +845,7 @@ function sameFaces(a: readonly OverlayFace[], b: readonly OverlayFace[]): boolea
     const p = a[i]!;
     const q = b[i]!;
     if (p.structureId !== q.structureId || p.x !== q.x || p.y !== q.y || p.z !== q.z || p.face !== q.face || p.covered !== q.covered) return false;
+    if (p.quads !== q.quads || p.fill !== q.fill) return false;
     if (p.sky !== q.sky || p.block !== q.block) return false;
   }
   return true;

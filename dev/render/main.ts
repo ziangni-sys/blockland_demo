@@ -17,6 +17,11 @@
  *   stress=4         replicate the world's sections on a 4 x 4 grid (performance testing)
  *   origin=1048576   shift the whole scene by (origin, 0, origin) blocks (float precision far
  *                    from the world origin; must be a multiple of 16)
+ *   shapes=1         overlays over partial cells (docs/SHAPES.md 8.6): the target outline of a lower
+ *                    half slab with cracks on one octant, the chisel's octant highlight and a
+ *                    translucent half-slab placement preview (the M2.4 fields), preview and
+ *                    conflict tints over stairs and slabs, glue on half faces; view=shapes looks
+ *                    at them
  * window.harness exposes the same controls plus stats() for scripted runs.
  */
 import { createThreeBackend } from '../../src/render/three/index';
@@ -172,6 +177,7 @@ const PRESETS: Record<string, () => { cam: CameraState; sub: 'none' | 'water' | 
     return { cam: lookAt(raftToWorld(-4, 5, -5, t), raftToWorld(3.5, 1, 2.5, t)), sub: 'none' };
   },
   ice: () => ({ cam: lookAt({ x: 31, y: 50.2, z: 68 }, { x: 36, y: 47.9, z: 60 }), sub: 'none' }),
+  shapes: () => ({ cam: lookAt({ x: 23.5, y: targetCell.y + 3.2, z: 47.5 }, { x: 20.5, y: targetCell.y + 0.4, z: 42.5 }), sub: 'none' }),
 };
 
 function applyView(): void {
@@ -249,32 +255,59 @@ function updateEntities(t: number): void {
   }
 }
 
-const targetCell = { structureId: 0, x: 20, y: 0, z: 42 };
+const targetCell = { structureId: 0, x: 20, y: 0, z: 42, fill: 0xff };
 targetCell.y = groundY(20.5, 42.5) - 1;
 const overlays: OverlayState = {
   target: targetCell,
   breakProgress: 0.45,
+  breakFill: 0xff,
   preview: [
-    { structureId: 0, x: 30, y: anchor.y - 1, z: 30 },
-    { structureId: 0, x: 31, y: anchor.y - 1, z: 30 },
-    { structureId: 0, x: 30, y: anchor.y - 1, z: 31 },
-    { structureId: 0, x: 31, y: anchor.y - 1, z: 31 },
+    { structureId: 0, x: 30, y: anchor.y - 1, z: 30, fill: 0xff },
+    { structureId: 0, x: 31, y: anchor.y - 1, z: 30, fill: 0xff },
+    { structureId: 0, x: 30, y: anchor.y - 1, z: 31, fill: 0xff },
+    { structureId: 0, x: 31, y: anchor.y - 1, z: 31, fill: 0xff },
   ],
   conflicts: [
-    { structureId: SHIP, x: 12, y: 1, z: 3 },
-    { structureId: SHIP, x: 12, y: 2, z: 3 },
+    { structureId: SHIP, x: 12, y: 1, z: 3, fill: 0xff },
+    { structureId: SHIP, x: 12, y: 2, z: 3, fill: 0xff },
   ],
   // Real glue, as the client sends it. Covered faces: the smaller cell of two adjacent BLOCKS
   // plus the positive face along the glue axis. Exposed faces: the block plus the open side.
   glue: [
-    { structureId: SHIP, x: 2, y: 3, z: 3, face: 0, covered: true, sky: 15, block: 0 }, // deck plank | deck plank (x)
-    { structureId: SHIP, x: 3, y: 3, z: 2, face: 4, covered: true, sky: 15, block: 0 }, // deck plank | deck plank (z)
-    { structureId: SHIP, x: 4, y: 0, z: 0, face: 2, covered: true, sky: 15, block: 0 }, // floor | wall (y)
-    { structureId: SHIP, x: 6, y: 1, z: 0, face: 2, covered: true, sky: 15, block: 0 }, // wall | wall (y)
-    { structureId: SHIP, x: 7, y: 2, z: 0, face: 0, covered: true, sky: 15, block: 0 }, // wall | wall (x)
-    { structureId: SHIP, x: 2, y: 3, z: 3, face: 2, covered: false, sky: 15, block: 0 }, // deck plank top, open
+    { structureId: SHIP, x: 2, y: 3, z: 3, face: 0, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 }, // deck plank | deck plank (x)
+    { structureId: SHIP, x: 3, y: 3, z: 2, face: 4, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 }, // deck plank | deck plank (z)
+    { structureId: SHIP, x: 4, y: 0, z: 0, face: 2, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 }, // floor | wall (y)
+    { structureId: SHIP, x: 6, y: 1, z: 0, face: 2, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 }, // wall | wall (y)
+    { structureId: SHIP, x: 7, y: 2, z: 0, face: 0, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 }, // wall | wall (x)
+    { structureId: SHIP, x: 2, y: 3, z: 3, face: 2, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 }, // deck plank top, open
   ],
+  targetOctant: -1,
+  placement: null,
 };
+if (params.get('shapes') === '1') {
+  // Partial cells (docs/SHAPES.md 8.6). The world here is made of whole blocks, so these overlays
+  // float where the shapes would be: they show the geometry, not a real scene.
+  const ty = targetCell.y + 1; // the open cell above the ground the target sits on
+  overlays.target = { structureId: 0, x: 20, y: ty, z: 42, fill: 0x33 }; // a lower half slab
+  overlays.breakFill = 1 << 1; // the chisel's timed progress on one octant (M2.4)
+  overlays.targetOctant = 3; // the chisel's octant highlight (M2.4)
+  overlays.placement = { structureId: 0, x: 21, y: ty, z: 42, fill: 0xcc, item: B.PLANKS_OAK }; // an upper half slab (M2.4)
+  overlays.preview = [
+    { structureId: 0, x: 18, y: ty, z: 44, fill: 0x3f }, // stairs
+    { structureId: 0, x: 19, y: ty, z: 44, fill: 0x0f }, // a north half
+    { structureId: 0, x: 20, y: ty, z: 44, fill: 0x69 }, // a checkerboard: four boxes
+  ];
+  overlays.conflicts = [{ structureId: 0, x: 22, y: ty, z: 44, fill: 0x55 }];
+  overlays.glue = [
+    // A whole block's glued top face half under a slab that fills the south half of the cell
+    // above: a bead along the covered south half, a decal on the open north half.
+    { structureId: 0, x: 18, y: ty - 1, z: 42, face: 2, covered: true, sky: 15, block: 0, fill: 0xff, quads: 0b1100 },
+    { structureId: 0, x: 18, y: ty - 1, z: 42, face: 2, covered: false, sky: 15, block: 0, fill: 0xff, quads: 0b0011 },
+    // One quadrant, and an L of three, on the ground's top faces.
+    { structureId: 0, x: 22, y: ty - 1, z: 42, face: 2, covered: false, sky: 15, block: 0, fill: 0xff, quads: 0b0001 },
+    { structureId: 0, x: 23, y: ty - 1, z: 42, face: 2, covered: true, sky: 15, block: 0, fill: 0xff, quads: 0b0111 },
+  ];
+}
 
 // ---------------------------------------------------------------- frame loop
 function environment(): EnvironmentState {
@@ -316,6 +349,7 @@ function shiftCell<T extends OverlayCell>(c: T): T {
 const shiftedOverlays: OverlayState = {
   ...overlays,
   target: overlays.target && shiftCell(overlays.target),
+  placement: overlays.placement && shiftCell(overlays.placement),
   preview: overlays.preview.map(shiftCell),
   conflicts: overlays.conflicts.map(shiftCell),
   glue: overlays.glue.map(shiftCell),

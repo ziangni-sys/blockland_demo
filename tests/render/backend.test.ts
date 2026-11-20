@@ -107,7 +107,7 @@ describe('lifecycle', () => {
     be.setStructurePose(9, pose(0, 0, 0));
     be.setStructureDryVolume(9, { ox: 0, oy: 0, oz: 0, sx: 1, sy: 1, sz: 1, scale: 1, mask: new Uint8Array([1]) });
     be.setEntities([{ id: 1, kind: 'rabbit', x: 0, y: 0, z: 0, yaw: 0, vx: 0, vy: 0, vz: 0, payload: 0, flash: 0, sky: 15, block: 0, headYaw: 0, headPitch: 0, held: 0, posture: 'stand', label: null }]);
-    be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0 }, breakProgress: 0.5, preview: [], conflicts: [], glue: [] });
+    be.setOverlays({ target: { structureId: 0, x: 0, y: 0, z: 0, fill: 0xff }, breakProgress: 0.5, breakFill: 0xff, preview: [], conflicts: [], glue: [], targetOctant: -1, placement: null });
     be.render();
     be.dispose(); // twice is fine
     expect(be.stats()).toEqual({ drawCalls: 0, triangles: 0, sections: 0, structures: 0 });
@@ -196,7 +196,7 @@ describe('floating render origin (review: float32 precision far from the world o
     expect(g.matrix.elements[12]).toBeCloseTo(10.25 - 768, 9);
     expect(i.entities.group.matrix.elements[12]).toBe(-(far + 768));
     // World overlays: root at (anchor - origin), anchor near the camera.
-    be.setOverlays({ target: { structureId: 0, x: far + 1001, y: 59, z: far + 1 }, breakProgress: 0, preview: [], conflicts: [], glue: [] });
+    be.setOverlays({ target: { structureId: 0, x: far + 1001, y: 59, z: far + 1, fill: 0xff }, breakProgress: 0, breakFill: 0xff, preview: [], conflicts: [], glue: [], targetOctant: -1, placement: null });
     const outline = i.overlayRoot.children.find((c) => c instanceof THREE.LineSegments)!;
     i.overlayRoot.updateMatrixWorld(true);
     const p = new THREE.Vector3().setFromMatrixPosition(outline.matrixWorld);
@@ -269,12 +269,15 @@ describe('glue on block surfaces (review: decals glowed at night and lay on top 
     be.setOverlays({
       target: null,
       breakProgress: 0,
-      preview: [{ structureId: 0, x: 5, y: 0, z: 0 }],
+      breakFill: 0xff,
+      preview: [{ structureId: 0, x: 5, y: 0, z: 0, fill: 0xff }],
       conflicts: [],
       glue: [
-        { structureId: 0, x: 0, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0 },
-        { structureId: 0, x: 2, y: 0, z: 0, face: 2, covered: true, sky: 0, block: 0 },
+        { structureId: 0, x: 0, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 },
+        { structureId: 0, x: 2, y: 0, z: 0, face: 2, covered: true, sky: 0, block: 0, fill: 0xff, quads: 15 },
       ],
+      targetOctant: -1,
+      placement: null,
     });
     const orders = new Map<string, number>();
     i.overlayRoot.traverse((o) => {
@@ -293,8 +296,8 @@ describe('glue on block surfaces (review: decals glowed at night and lay on top 
     const i = internals(be);
     be.setStructureMesh(4, 0, 0, 0, mesh());
     be.setStructurePose(4, { ...pose(10, 50, 10), sky: 6, block: 3 });
-    const face = { x: 1, y: 0, z: 1, face: 2, covered: false, sky: 15, block: 0 };
-    be.setOverlays({ target: null, breakProgress: 0, preview: [], conflicts: [], glue: [{ structureId: 4, ...face }, { structureId: 0, ...face }] });
+    const face = { x: 1, y: 0, z: 1, face: 2 as const, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 };
+    be.setOverlays({ target: null, breakProgress: 0, breakFill: 0xff, preview: [], conflicts: [], glue: [{ structureId: 4, ...face }, { structureId: 0, ...face }], targetOctant: -1, placement: null });
     const ship = decalOf(i.structures.get(4)!.group)!;
     const bl = ship.userData.bl as THREE.Vector4;
     expect([bl.x, bl.y]).toEqual([6 / 15, 3 / 15]);
