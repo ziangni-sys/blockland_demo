@@ -202,9 +202,9 @@ export interface Transport {
 
 **格子值的格式**
 
-- 网络上一个格子是 `Cell`：一个 varuint `v`。低 16 位是第一个部件的 id（10 位）+ 状态（6 位）；16～23 位是它的“缺口”（哪几个八分格空着）；第 24 位 `CELL_MULTI_BIT` 表示这一格还有第二个部件，为 1 时紧跟一个 varuint，就是第二个部件（同样的 id + 状态 + 缺口）。所有 `v` 都小于 2²⁵。内存里的 `Cell` 是“整格内容”`v + 第二部件 × 2²⁵`（[SHAPES.md](SHAPES.md) 第 1.2 节）。
-- 整格方块的值和 M2.2 完全相同：空气 1 字节，id < 128 且无状态的方块 1 字节，其余 2～3 字节。
-- 两端检查布局、绝不截断，副本按 `cellProblem` 检查语义；`Cell` 和 `CellVolume` 的编解码只有一份实现（`save/cells.ts`），存档的区块和协议共用。规则、上限和解码时的内存计价见 [SHAPES.md](SHAPES.md) 第 13.1、13.2 节。
+- 网络上一个格子是 `Cell`：一个 varuint `v`，就是格子值（位的布局见 [ARCHITECTURE.md](ARCHITECTURE.md)“方块”，所有 `v` 都小于 2²⁵）；`v` 的第 24 位 `CELL_MULTI_BIT` 为 1 时紧跟第二个 varuint，就是第二个部件的值。内存里的 `Cell` 是整格内容 `v + 第二部件 × 2²⁵`（[SHAPES.md](SHAPES.md) 第 1.2 节）。
+- 大小：空气 1 字节，id < 128 且无状态的整格方块 1 字节，其余整格方块 2～3 字节；带缺口的部件 3～4 字节（下半砖 4 字节）；两个部件的格子 7～8 字节。
+- 两端检查布局、绝不截断，副本按 `cellProblem` 检查语义（第 13 节“服务器对每个客户端的限制”）；`Cell` 和 `CellVolume` 的编解码只有一份实现（`save/cells.ts`），存档的区块和协议共用。规则、上限和解码时的内存计价见 [SHAPES.md](SHAPES.md) 第 13.1、13.2 节。
 
 ## 7. 结构体
 
@@ -292,7 +292,7 @@ export interface Transport {
 - `inventory`：变了就发整个背包（快捷栏 9 格、背包 27 格、副手、光标、选中格，约 100 字节）。只发变化的格子省不了多少，背包预测反正要整份。
 - `vitals`：`health`、`maxHealth`（f32）、`air`、`maxAir`、`dead`、`mode`。
 - `view`：交互视图里只有服务器算得出的部分：
-  - `mining`：正在挖的格子（网格 id + 坐标 + `sub`）和进度（u8）。客户端只在自己的准星目标就是这一格时画裂纹。
+  - `mining`：正在挖的部件（网格 id + 格子坐标 + `sub`）和进度（u8）。挖掘的身份是“网格 + 格子 + 部件值”：准星在同一个部件上移动不重新开始，这个部件的值变了才重新开始。`sub` 的位 0～2 是最先命中的八分格，重新开始挖之前不变；位 3 是“这次的进度只针对这一个八分格”的标志，留给生存模式的凿子（M2.4），现在服务器从不置位。客户端只在自己的准星目标在这一格时画裂纹；裂纹按部件包住哪些八分格见 [SHAPES.md](SHAPES.md) 第 6.3 节。
   - `gluing`：限时涂胶的面和进度，同上。
   - `preview`：组装预览：网格 id、种类、格子集合用包围盒 + 位图编码（4000 格的预览约 1～2 KB）。服务器上的预览对象换了才发（`preview.cells` 的身份只在 `setPreview` 里变）。
   - `conflicts`：停靠冲突格（世界坐标），内容变了才发（空列表每个 tick 都是新数组，要按内容比）。
@@ -302,7 +302,7 @@ export interface Transport {
 - `ack`：服务器到这个 tick 为止处理完的最大意图序号（背包预测，第 10 节）。
 - `moveAck`：这个 tick 里工作包 2 最后接受的移动上报的序号（第 4 节“转子时间”）。
 
-为此 `InteractionView` 改两个字段（工作包 7）：`breakProgress` 换成 `mining: { gridId, x, y, z, sub, progress } | null`，`glueProgress` 换成 `gluing: { gridId, x, y, z, face, sub, progress } | null`。`sub` 是部件或八分格（M2.3、M2.4 用，M2.1 是 0）。客户端的叠加层从它们和本地目标组合出原来的显示。
+为此 `InteractionView` 改两个字段（工作包 7）：`breakProgress` 换成 `mining: { gridId, x, y, z, sub, progress } | null`，`glueProgress` 换成 `gluing: { gridId, x, y, z, face, sub, progress } | null`。`mining.sub` 见上；`gluing.sub` 恒为 0（胶属于格面，和部件无关）。客户端的叠加层从它们和本地目标组合出原来的显示。
 
 **移动上报和校正**（结构是工作包 2 的，这里定网络上的走法和两个新字段）
 
@@ -337,7 +337,7 @@ export interface Transport {
 
 **服务器的校验**（`src/net/server/intents.ts`，对每个带目标的意图）
 
-1. 网格存在（`gridById`）；`sub` 那个八分格所在的部件在，并且 id 等于 `partAt(cell, sub)` 的 id（[SHAPES.md](SHAPES.md) 第 6.3 节；别人凿了这一格的另一个部件或这个部件的别的八分格不算变；客户端看见的就是服务器上的这一块：A 右键舵轮的路上 B 把它挖了换成圆石，A 的右键不会作用到圆石上，创造模式的左键也不会挖掉 A 没见过的方块）；这个部件满足当前手持物品那条射线的谓词：普通射线 `targetable`；胶射线可瞄准且是硬方块；桶射线可瞄准或液体源，并且世界液体源不能在船体排开的地方（`displacedByHull`，DESIGN“结构体里没有液体”）。
+1. 网格存在（`gridById`）；`sub` 那个八分格所在的部件在，并且 id 等于 `partAt(cell, sub)` 的 id（[SHAPES.md](SHAPES.md) 第 6.3 节；别人凿了这一格的另一个部件或这个部件的别的八分格不算变；客户端看见的就是服务器上的这一块：A 右键舵轮的路上 B 把它挖了换成碎岩，A 的右键不会作用到碎岩上，创造模式的左键也不会挖掉 A 没见过的方块）；这个部件满足当前手持物品那条射线的谓词：普通射线 `targetable`；胶射线可瞄准且是硬方块；桶射线可瞄准或液体源，并且世界液体源不能整格都被船体排开（`cellDisplaced`，第 18 节工作包 7“桶的校验”；DESIGN“结构体里没有液体”）。
 2. 够得着：眼睛取 `moveSeq` 那条上报，要工作包 2 在当前 epoch 里接受了它（第 8 节）；不在（还没校验——通常和意图一起到、被拒绝、被丢掉、丢了、太旧、在校正之前）就取这个玩家当前 epoch 里最新被接受的一条，一条也没有（刚被校正）就取服务器上这个玩家现在的位置。把眼睛从那条上报的载体坐标系用服务器当前的位姿换到目标网格的局部空间，到目标格子最近点的距离 ≤ `REACH + REACH_SLACK + min(5, (|v_rel|·viewLag + |v_own|·m)/TPS)`，`REACH_SLACK = 0.5`。
    - `viewLag` 是这个玩家当前的画面延迟（第 4 节，最近一条被应用的上报的），不是意图的年龄。
    - `v_rel` 是眼睛所在的载体（或世界）和目标网格在眼睛处的相对速度（`velocityAt`）。同一个网格、或者目标就在自己脚下的船上时为 0；人在 10 格/秒的船上、目标在码头、画面延迟 300 ms 时余量 3 格。
@@ -356,7 +356,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | 意图 | 字段 | 服务器做什么 | 客户端立刻预测吗 |
 |---|---|---|---|
 | `Aim` | use 目标、挖掘目标、`moveSeq` | 存为声称的瞄准 | 目标框：是 |
-| `Use` | `slot`、`sneak`、use 目标或无、`moveSeq` | `slot` 写进选中格，`sneak` 写进 input（这个 tick 里优先于移动上报里的 sneak：`beforeTick` 先交上报、后交意图）；校验目标；`usePresses++`、`input.use = true`；第 1 阶段按原来的右键优先级执行 | 否 |
+| `Use` | `slot`、`sneak`、`slabMode`、use 目标或无、`moveSeq` | `slot` 写进选中格，`sneak` 写进 input（这个 tick 里优先于移动上报里的 sneak：`beforeTick` 先交上报、后交意图），`slabMode`（半砖方向，M2.4 的副手凿子用；现在的客户端发 0）写进 `input.slabMode`；校验目标；`usePresses++`、`input.use = true`；第 1 阶段按原来的右键优先级执行 | 否 |
 | `UseRelease` | — | `input.use = false` | — |
 | `Attack` | `slot`、挖掘目标或无、`moveSeq` | 同上，`attackPresses++`、`input.attack = true` | 否 |
 | `AttackRelease` | — | `input.attack = false` | — |
@@ -372,7 +372,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 | `SetViewRadius` | `r` 0～17 | 订阅半径；模拟半径 `min(r, SIM_RADIUS_CAP)` | — |
 | `HostCommand` | 见下 | 只接受房主的连接 | 否 |
 
-`HostCommand` 的种类：`SetRules { rules: WorldRules }`（`defaultMode`、`dropsEnabled`）；`SetPlayerMode { entityId（0 = 自己）, mode }`；`SetDayTime { t }`；`Teleport { x, y, z }`（自己，调试）；`Give { item, count }`（自己，调试）；`Kick { entityId }`（工作包 11）。客人发来的回一个 toast `toast.host.only`（新的消息键）。单机暂停菜单里切模式 = `SetPlayerMode(自己)` + `SetRules(worldRulesFor(mode))`，和现在一样连世界规则一起切。暂停、存档、关服不在这里，它们是宿主控制消息：只有房主页面需要，客人发不了，Node 服务器有自己的控制台。`window.__blocklands` 的 `setDayTime`、`teleport`、`give` 改发这些命令。
+`HostCommand` 的种类：`SetRules { rules: WorldRules }`（`defaultMode`、`dropsEnabled`）；`SetPlayerMode { entityId（0 = 自己）, mode }`；`SetDayTime { t }`；`Teleport { x, y, z }`（自己，调试）；`Give { item, count }`（自己，调试）；`Kick { entityId }`（工作包 11）；`SetCell { gridId, x, y, z, cell }`（调试，第 14 节，[SHAPES.md](SHAPES.md) 第 14.1 节）。客人发来的回一个 toast `toast.host.only`（新的消息键）。单机暂停菜单里切模式 = `SetPlayerMode(自己)` + `SetRules(worldRulesFor(mode))`，和现在一样连世界规则一起切。暂停、存档、关服不在这里，它们是宿主控制消息：只有房主页面需要，客人发不了，Node 服务器有自己的控制台。`window.__blocklands` 的 `setDayTime`、`teleport`、`give`、`setCell`、`slab` 发这些命令。
 
 **应用顺序**：服务器把每个连接收到的意图按 `seq` 排队，在下一个 tick 开头、`sim.tick()` 之前按 `seq` 应用。一个玩家一个 tick 最多应用到第一个“按下”类意图（`Use`、`Attack`、`SwapHands`）为止，或者 `INTENTS_PER_TICK = 16` 条（`Aim` 不算），后面的留到下一个 tick。这样每次按下都作用在它自己带的目标和当时的手持物品上，不会被同一个 tick 里更晚的 `Aim` 或背包操作改掉；每秒 20 次按下足够（创造模式连点约 10 次/秒）。
 
@@ -393,7 +393,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 
 ## 11. 世界事件
 
-- `blockBroken`、`blockPlaced`（网格 id + 局部坐标 + `Cell`）、`explosion`（位置、威力）、`sound`（名字 + 位置）。
+- `blockBroken`、`blockPlaced`（网格 id + 局部坐标 + 被挖掉或放下的那一个部件的值：一次挖掉或放下一个部件，一个事件）、`explosion`（位置、威力）、`sound`（名字 + 位置）。
 - 走可靠包的 `events` 区，和同一个 tick 的方块变化一起生效（粒子和方块对得上）。不走不可靠通道：量很小，丢了就和方块对不上。
 - 兴趣：世界事件所在的列的快照已经发给这个客户端（和区块增量同一条规则）；结构体上的事件要求结构体在兴趣内（客户端用自己副本的位姿换到世界）。
 - `structureAdded`、`structureRemoved` 不再作为事件发，由结构体的生成和移除代替。
@@ -414,6 +414,8 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 - 客人永远收不到：任何人的 PlayerKey；别人的记录（背包、生命、出生点）；存档本身；随机数状态；待处理的方块 tick；兴趣外改过的区块；别人手上在做的事（挖掘进度、预览、涂胶进度）。客人在自己的浏览器里只存 PlayerKey 和名字（localStorage），不存世界。
 
 ## 13. 带宽
+
+下面的估算和实测都是只有整格方块的世界，第 5、14 节里按格算的大小也是。部分格子贵 2～4 倍：区块增量里一个部分格子约 4～9 字节（第 6 节的格子大小加 1 字节下标差），整格方块约 2～4 字节。
 
 估算假设：20 TPS；每条 WebRTC 消息约 80 字节开销（IP 20 + UDP 8 + DTLS 约 29 + SCTP 公共头 12 + DATA 块头 16）；4 人房间。
 
@@ -482,7 +484,10 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
 - 加入：一个身份一分钟内至多加入 `JOINS_PER_KEY_PER_MINUTE = 6` 次；超出的连接握手照样通过，但不加入，等到这一分钟允许（房主自己的不限）。不按所有客人合计：那样一个换着身份进出的客户端就能把别人的重连挡在外面。
 - `viewRadius` ≤ 17；名字 ≤ `MAX_NAME_LENGTH = 24` 个字符；身份 ≤ `MAX_PLAYER_KEY_LENGTH = 128`。
 - 可靠积压 > 8 MiB 持续 10 秒：`Kick(too_slow)`。
-- 握手之后解不开的消息、未知的消息 id、第二个 `Hello`、消息到达的通道和它规定的通道不同：`Kick(protocol_error)`（握手之前的错误回 `Refuse(bad_hello)`）。客户端收到 M2.1 存不下的格子值（≥ 2¹⁶）同样按协议错误断开。
+- 握手之后解不开的消息、未知的消息 id、第二个 `Hello`、消息到达的通道和它规定的通道不同：`Kick(protocol_error)`（握手之前的错误回 `Refuse(bad_hello)`）。
+- 格子分两道检查（[SHAPES.md](SHAPES.md) 第 13 节）：
+  - **布局**（`save/cells.ts`）：编解码的两端都查第 14 节 `Cell` 那一行的条件，编码端 `writeCell` 按 `layoutProblem` 抛 `RangeError`，解码端 `readCell` 失败即协议错误。下落方块、平地生成器的层和方块事件里的格子另有宽度限制，见第 14 节各自那一行。
+  - **语义**（`blocks/shapes.ts cellProblem`：id 已注册且不是未加载的哨兵、缺口只在可切的材质上、两个部件不重叠、顺序规范）：客户端应用包时对包里每一处格子检查（快照、区块增量、结构体记录和增量、下落方块实体、方块事件的部件），不合法就是 `ReplicaError`，连接按协议错误结束；平地生成器的层由 `generatorSpecProblem` 检查（客户端收到 `Welcome` 时，房主读档时）。服务器从不存客人发来的格子：`Target.cell` 只用来比较；房主的 `SetCell` 命令先过 `cellProblem` 和第 14 节列出的那几条，不满足就不写。
 
 `Replicator` 从一开始就按客户端、按区段统计发出的字节数（调试面板显示），工作包 13 用它调预算。
 
@@ -581,7 +586,7 @@ Hands 的改动（工作包 7）：客户端驱动的玩家（工作包 2 的标
   - 0 `Correction`：`vu epoch, str cause, vu carrierId, f64×3 pos, f32×3 vel, f32 yaw, f32 pitch, u8 flags`（0 飞行 1 着地）`, vu seatShipId, [f64×3 seat]`（只在 `seatShipId ≠ 0` 时有；f64 的理由同第 9 节的位置）。约 75 字节，坐着时约 100 字节。
   - 1 背包：`u8 selected, HOTBAR_SLOTS × Stack, MAIN_SLOTS × Stack, Stack offhand, Stack cursor`（9 格和 27 格）。80～120 字节。
   - 2 `f32 health, f32 maxHealth, vu air, vu maxAir, bool dead, u8 mode`。约 14 字节。
-  - 3 视图：`u8 mask`；0 `u8 有无, [vu gridId, vi x, vi y, vi z, u8 sub, u8 progress]`；1 `u8 有无, [vu gridId, vi x, vi y, vi z, u8 face, u8 sub, u8 progress]`；2 `u8 有无, [vu gridId, u8 kind, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, ceil(sx·sy·sz/8) 字节位图]`（位序同 `CellVolume` 的格子顺序，第 i 格是第 i>>3 字节的第 i&7 位）；3 `vu n, n × (vi dx, vi dy, vi dz)`；4 `u8 有无, [Message]`。
+  - 3 视图：`u8 mask`；0 `u8 有无, [vu gridId, vi x, vi y, vi z, u8 sub, u8 progress]`（`sub` 只用位 0～3，第 9 节）；1 `u8 有无, [vu gridId, vi x, vi y, vi z, u8 face, u8 sub, u8 progress]`（`sub` 必须是 0）；2 `u8 有无, [vu gridId, u8 kind, vi minX, vi minY, vi minZ, vu sx, vu sy, vu sz, ceil(sx·sy·sz/8) 字节位图]`（位序同 `CellVolume` 的格子顺序，第 i 格是第 i>>3 字节的第 i&7 位）；3 `vu n, n × (vi dx, vi dy, vi dz)`；4 `u8 有无, [Message]`。
     - 预览的格子数 ≤ `MAX_PREVIEW_CELLS`（= max(`SHIP_MAX_CELLS`, `ROTOR_MAX_CELLS`) = 4000），盒子体积 ≤ `MAX_STRUCTURE_BOX_CELLS`（位图最多 256 KiB，放得进一条消息），远角 ≤ `MAX_COORD`；超出时编码端抛错、解码端按协议错误，在分配之前检查。编码端总是发紧凑包围盒，盒子外的位必须为 0。服务器只为游戏会组装的结构体（或缺帆的转子）做预览，它们都在这两个上限之内（第 7 节）。
   - 4 事件：`vu n`，每个 `u8 type`：0 toast `Message, u8 kind`（0 info 1 warn 2 error）；1 受伤 `f32 amount, str cause`；2 死亡 `str cause`；3 拾取 `vu item, vu count`；4 松舵 `str cause`。
   - 5 `vu ack`。
@@ -641,15 +646,15 @@ tests/net/e2e-*.test.ts  经整套真的代码的端到端测试；e2e-scenes.ts
 **依赖方向**
 
 ```
-core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, entities} ─▶ sim ─▶ net/server ─▶ net/host
-                                     │                                               ▲
-                                     └────────────▶ net/client ◀── net/{protocol, codec, transport, loopback}
-                                                        │
-                                                        ▼
-                                                     client ─▶ ui
+core ─▶ blocks ─▶ voxel ─▶ {worldgen, liquid, structures, entities} ─▶ sim ─▶ net/server ─▶ net/host
+                     │               ▼                                        ▲
+                     └──▶ light ─▶ net/client ◀── net/{protocol, codec, transport, loopback}
+                                       │
+                                       ▼
+                                    client ─▶ ui
 ```
 
-- `net/protocol`、`codec`、`transport`、`loopback`：只引用 `core`、`blocks`、`save/bytes`，以及 `sim/view.ts`、工作包 2 的上报和校正、`worldgen/generator.ts` 的 `GeneratorSpec` 的**类型**。不引用任何模拟的运行时代码，不碰 DOM。
+- `net/protocol`、`codec`、`transport`、`loopback`：只引用 `core`、`blocks`、`save/bytes`、`save/cells`（格子的编解码，和存档共用），以及 `sim/view.ts`、工作包 2 的上报和校正、`worldgen/generator.ts` 的 `GeneratorSpec` 的**类型**。不引用任何模拟的运行时代码，不碰 DOM。
 - `net/server`：可以引用 `sim`、`structures`、`entities`、`voxel` 和上面四个基础模块。
 - `net/host`：可以引用 `net/server`、`sim`、`save`、`worldgen`。只有 `host/worker.ts`、`host/port.ts` 碰 Worker 和 MessagePort 的 API。
 - `net/client`：可以引用 `voxel`、`blocks`、`light`、`structures`（`Ship`/`Rotor`/`StructureGrid`/`GlueStore` 数据类、`hull`、`rotor`）、`entities`（工作包 2 的身体移动、`Inventory`、实体数据类）、`worldgen`（生成器）、`sim/view.ts`、`sim/messages.ts`、`sim/rays.ts` 和基础模块。**不能**引用 `sim/simulation`、`interact`、`players`、`chunks`、`persist`，不能引用 `net/server`、`net/host`，不碰 DOM（这样整个客户端逻辑能在 Node 里无头跑）。
@@ -676,7 +681,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 
 各工作包自己的单元测试：
 
-- 3：每种消息的往返（随机内容，编码再解码深度相等）；截断、乱改字节只抛 `ProtocolError`，不崩、不分配巨大内存；盒子正好 `STRUCTURE_MAX_BOX_CELLS` 的结构体记录和预览往返，多一格两端都拒绝；`Cell` 在 M2.1 拒绝 ≥ 2¹⁶；`CellVolume` 对真实地形区块的大小不超过存档编码 + 4 字节；回环的顺序、丢包率、SCTP 重传模型的队头阻塞和带宽限制。
+- 3：每种消息的往返（随机内容，编码再解码深度相等）；截断、乱改字节只抛 `ProtocolError`，不崩、不分配巨大内存；盒子正好 `STRUCTURE_MAX_BOX_CELLS` 的结构体记录和预览往返，多一格两端都拒绝；`Cell` 布局不合法的值（`v ≥ 2^25`、缺口是 `0xff`、第 24 位和第二部件对不上）两端都拒绝；`CellVolume` 对真实地形区块的大小不超过存档编码 + 4 字节；回环的顺序、丢包率、SCTP 重传模型的队头阻塞和带宽限制。
 - 4：`Replicator` 挂在一个 `Simulation` 上，传输换成记录器，包解码后 `applyBatch` 到 `ReplicaState`，在组装、停靠（船上带风车）、转子启停、爆炸、溃坝、区块进出兴趣的脚本场景里逐 tick 比较摘要。
 - 5：录下的包序列回放到 `ClientReplica`；时钟在抖动、丢包、补跑突发下不倒退、D 收敛；可靠通道卡住时 `renderTick` 不越过已应用的包；原样区块生成期间的增量排队、退订再订阅时作废在途的生成；载体被删时别人的位置连续。
 - 6：校正之后队列里旧 epoch 的上报不被应用、乱序的上报不让位置倒退；两次落地之间的上报全丢不产生摔伤；从行驶的船跳进水里、从码头登上行驶的船，往返 150 ms 和 400 ms 都不被校正；随机的单 tick 起跳在 150 ms、5% 丢包的链路上跑 2000 个 tick 不被校正，在转圈行驶、倾斜的示例船上反复起跳（0 ms 和 150 ms）不被校正；空中每段空缺多报一次落地爬不上去；`rotorLead` 收敛到服务器实际应用上报的 tick。
@@ -788,11 +793,21 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
   - 起跳的时刻：上一条被接受的上报站在地上（或在液体里、在飞）时，身体可能在下一条被接受的上报之前的任一个 tick 起跳，中间站着的那几个 tick 和起跳那个 tick 的上报都可能丢了。包络取这些抛物线里最高的：两头都还在上升时取最早起跳的，都在下降时取最晚起跳的，中间取抛物线的顶点。只按“紧接着就起跳”算，丢了一条起跳的上报，下落时身体就比包络高出一个 tick 的落差。
   - 超出只扣一次 slack：超出包络的部分记下来（已付的），之后的上报只为超出的增加部分扣 slack。同一段超出每条都扣，0.5 格的 slack 几个 tick 就扣光了，身体沿着抛物线走也会被拒绝；只扣增加部分，悬停和持续爬升照样很快扣光（包络一直在下降）。船倾斜时身体贴着桅杆、船舷跳，被斜面往上托一点（移动代码沿法线去掉撞向斜面的速度，法线有向上的分量），每跳一次超出约 0.1～0.15 格，就靠这一条。
 - **穿过方块的路径**（工作包 2）：两条上报之间的路径除了直线、先竖直和后竖直的折线，先沿坐标系的 x 轴或 z 轴走的折线畅通也算通过（载体上用载体的轴）。中间的上报丢了时，身体可能先贴着墙滑，再绕过墙角，直线会切过墙角；150 ms、5% 丢包的链路上在船上贴着桅杆走动会因此偶尔被拒绝。
+- **楼梯的余量**（竖直包络，[SHAPES.md](SHAPES.md) 第 5.8 节第 1 条，常量也在那里）：在楼梯上连丢几条上报，身体在一条上报的间隔里已经上了好几级。所以上报的终点被托住（`heldEnd`：服务器的站立探测在终点找到支撑，不管上报声称着地还是在空中），并且两处之间的阶梯路径（下一条）走得通时，竖直上限再加 √2 × 这条上报的水平位移。墙前、露天的台地前阶梯路径走不通，不加，上限和整格方块的世界相同；终点在空中（高出站立探测够得着的范围）的上报也不加。终点被托住时竖直包络从那里重新开始，但只有声称着地才结束一次下落、结算摔伤：倾斜的甲板上停在踏面上方一点点、自己的着地标志为假的老实身体不被拒绝，说谎的人也得不到东西（在同一处声称着地，结果相同）。
+- **阶梯路径**（穿过方块的路径，第 5.8 节第 3 条）：除了直线和折线，从两个端点里较低的一个出发、沿水平直线走向较高的那个也算通过。样本不通时把高度抬到最低的能通过的高度，每次至多一个台阶，只升不降；抬一级还不通的样本可以绕拐角去够（一次只走一个水平轴，先 x 后 z 或先 z 后 x，每段至多一级，拐角处本身要通），沿对角八分格楼梯的对角线走时同一个样本同时跨过两个轴上的立面，没有这一条就过不去；走到较高一端的水平位置之后，最后竖直的那一段不超过 `STAIR_LAST_RISERS` 加路径的深度上限，否则跳上墙沿的上报也拿得到楼梯的余量。它只放行一路向上、每次不超过一级的路径：楼梯间的天花板挡住“先竖直后水平”的折线时它照样走得通，墙和笼子过不去。
+- **落在踏面的边上**（第 5.8 节第 4 条）：上报声称它自己的一次落地（上一条被接受的上报在空中，并且这条不是纪元的第一条），服务器在终点却找不到支撑时，按没看到的落地处理（`landings`）：身体先竖直后水平移动，落在一级的边上，同一个 tick 里又走了出去。这次落地的地面也可以是旧位置下面、这条上报自己下落距离以内的那级边沿。没看到的落地找地面时，阶梯路径走得通的话，地面的上限同样加 √2 × 水平位移。
+- **边上的起跳**：紧接着一条真正站着的上报、或者上面那样一次落地之后，声称着地而脚下没有东西的上报，把最晚起跳的时刻再保留一条上报：客户端的身体在这个 tick 开头还站在边上，下一个 tick 可以起跳。只保留一次，再下一条这样的上报没有。
+- **站在什么上面**（第 5.8 节第 5 条）：声称着地时，服务器只认脚下的硬格子。支撑探测比脚印宽，上报又可以陷进硬格子一点，所以贴着、靠近或陷进墙时墙也会落进探测：身体本身碰到脚以上的硬格子时，脚印四周一起逐步内缩（每次 0.05 格，至多 `REPORT_HARD_TOLERANCE` = 0.2 格），直到身体不再碰到；陷得比这更深就什么也托不住它。倾斜的结构体上，墙沿着网格自己的“上”伸到脚印下面：脚印某一侧之外、按倾斜角算出的够得着的距离以内、脚以上有硬格子时，这一侧的一条不算支撑；只在某个角之外有时，那个角上的一块不算；其余脚印下面的硬格子都是踏面，再窄也算支撑。否则贴墙每 tick 能升一格、贴墙下落不受伤，倾斜的船上能声称站着贴着桅杆往上爬。
 - **校正之后的停顿**（工作包 2）：校正之后、这个 epoch 的第一条上报被接受之前，悬空的身体要多等 lag（上一条被接受的上报的，至少 `REPORT_MAX_LAG`）才由服务器接管：新 epoch 的上报最早一个往返后才到。否则 400 ms 的链路上每次传送到半空都会变成每 tick 一条 `fall` 校正。
 - **`moves.ts`**（第 8 节）：队列超过 2 条时交两条，否则交一条；`moveAck` 只在这个 tick 里工作包 2 接受了上报时给出；`viewLag(key)` 和被接受的上报（`accepted(key, seq)`、`newest(key)`）给工作包 7 用。
 - **被放下的人跟着取整走**（第 9 节第 7 条）：只搬位置，不转朝向和速度。停靠时站在船上转子上的人也随船的取整变换走（转子按同一个变换改挂世界，相对船不动）。舵手在同一个 tick 里先 `unseat:released` 再 `release`，只发一条校正，cause 是 `release`。
 - **玩家记录**（下面的“场景 36 和玩家记录”）：“站得下”是身体盒子四面各内缩 0.1 格后不和世界、任何结构体的硬格子重叠。载体从写记录起没动过（载体换算的世界坐标和记录里的差 < 1e-9，读档后在第一个 tick 前加入就是这样）时，按记录原样恢复，速度照旧；否则放回载体上时速度清零。
 - **上报的类型**（第 9、14 节）：工作包 2 的 `MoveReport` 带上 `viewTick` 和 `landings` 之后就是网络上的上报，`protocol.ts` 的 `NetMoveReport` 是它的别名。
+- **已知的限制**（后果最多是一次拉回，或者摔伤少算一点；不为它们改上报的格式）：
+  - 在楼梯上连丢 3 条以上的上报、其间上了两级以上、并且正好在下一条到达的上报之前起跳：那条上报的终点在空中，拿不到楼梯的余量，被 `check:rise` 纠正一次（[SHAPES.md](SHAPES.md) 第 5.8 节第 2 条）。要补上得在上报里数“迈了几级”，那又是一处要防作弊的新规则。
+  - L 形的楼梯上每 11 条上报丢 10 条，仍会被纠正一次（`check:speed`）。
+  - 每隔一条上报声称着地的长距离下落，会早一条上报落地（30 格的下落扣 24 点而不是 27 点）。
+  - 在行驶的整格方块木筏的甲板上，客户端和服务器偶尔对一条上报的 `onGround` 判断不同，不校正、不拒绝。`tests/net/e2e-own-agree.test.ts` 的木筏场景要求两边每条上报都一致，只在它用的种子下成立。
 
 ### 工作包 7（意图）
 
@@ -800,11 +815,10 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
   - 只用工作包 2 接受了的上报，按它接受的样子记（`ClientDrive.recordAccepted`，在接受的那一刻；坐在舵后面的记座位，不管上报里的脚在哪）。收到的上报要到这个 tick 的实体那一步才校验，意图却在这个 tick 开头就应用：只是收到就当眼睛的话，改过的客户端发一条站在远处目标旁边的上报（随便哪个 epoch），再发一个指向它的点击，就能远程挖、放、点爆破箱、抢舵，服务器只回一条 `check:speed` 校正。
   - 所以 `moveSeq` 那条通常还没被接受（它和意图一起到），这时取当前 epoch 里最新被接受的一条，`m = viewLag`：客户端在这两条之间走过的 tick 数不超过 `viewLag`。意图因为丢包晚到、那条已经被接受了时才用它本身（`m = 1`）。
   - 校正之前的上报（`moveSeq` 那条、最新的一条都一样）不用，没有当前 epoch 的就取服务器上的玩家：校正之后、新 epoch 的上报被接受之前，服务器把玩家停在校正的状态，客户端正是从那里出发的。否则传送、复活之后它是校正之前的位置：刚传送完的第一个 `Aim`、客户端刚采纳校正还没发新上报时的点击（`moveSeq` 还是校正之前的那条）会被判够不着。
-- **声称的瞄准**（第 10 节）：服务器存客户端发来的原样目标。每个 tick 开头先用最新被接受的上报（规则同上，`m = viewLag`）把它重新校验，再应用这个 tick 的意图（新的 `Aim` 用它自己的 `moveSeq` 校验）。重新校验不过只是这个 tick 没有目标，下一个 tick 照样再校验（刚传送完的旧目标在新位置的上报到了以后可能又成立）。按下类意图（`Use`、`Attack`）带的目标从它那个 tick 起就是这条射线声称的目标：点击时客户端正瞄着它。模拟层的 Hands 每次用声称的目标时再看一次那一格的 id 是否还是客户端看到的（同一个 tick 里编号小的玩家可能刚改了它），不是就当作没有目标，格子的状态位不比。
-- **`sub`**：M2.1 没有部件，服务器不看 `Target.sub`。
+- **声称的瞄准**（第 10 节）：服务器存客户端发来的原样目标。每个 tick 开头先用最新被接受的上报（规则同上，`m = viewLag`）把它重新校验，再应用这个 tick 的意图（新的 `Aim` 用它自己的 `moveSeq` 校验）。重新校验不过只是这个 tick 没有目标，下一个 tick 照样再校验（刚传送完的旧目标在新位置的上报到了以后可能又成立）。按下类意图（`Use`、`Attack`）带的目标从它那个 tick 起就是这条射线声称的目标：点击时客户端正瞄着它。模拟层的 Hands 每次用声称的目标时再看一次 `sub` 那个八分格所在部件的 id 是否还是客户端看到的（同一个 tick 里编号小的玩家可能刚改了它），不是就当作没有目标，状态位不比。
 - **位置被占**（第 10 节；DESIGN“多玩家规则”）：第二块被拒绝时给出单机的 toast `toast.place.occupied`。单机里点到的面外侧总是空的（射线从那里来），这条路原来只会静默返回。
 - **视角和点击**：意图不带视角，放置用到视角的只有舵轮的朝向（玩家的水平朝向），用的是服务器当时的视角，即最近一条被应用的上报里的。客户端刚转过视角就点击，舵轮可能按转之前的朝向放；真人是先转再点，差不了一两个 tick。无头测试的客户端在 `useOn` 里点击之前等转过来之后的上报被确认（`moveAck`）。
-- **桶的校验**（第 10 节第 1 条）：世界液体源只在整格都被船体排开时拒绝（格心和 8 个内缩 0.1 格的角都在船的硬格子或干区里，`sim/rays.ts` 的 `cellDisplaced`）：桶的射线会停在只被船体遮住一部分的格子上。
+- **桶的校验**（第 10 节第 1 条）：世界液体源只在整格都被船体排开时拒绝（格心和 8 个内缩 0.1 格的角都在船的硬八分格或干的八分格里，`sim/rays.ts` 的 `cellDisplaced`）：桶的射线会停在只被船体遮住一部分的格子上。船体和世界对齐时这是精确的；偏移或转过的船体上，九个取样点可能漏掉一条没被排开的窄带（整格船体时比 0.1 格还薄，挨着部分格子时最多约四分之一格），服务器就拒绝客户端射线够到的水。接受：拒绝什么也不改变。
 - **死了的玩家**：被消耗掉的按下类意图照样结束这个玩家这个 tick 的应用，节奏和活着时一样。
 - **队列和确认号**：意图按 `seq` 排队，早到的插到它的位置，重复的和不大于确认号的丢掉。`intentAck` 在 `endTick` 时读，是到这个 tick 为止应用过的最大 `seq`（按 `seq` 依次应用，就是最后应用的那条），所以同一个包里的背包是确认号以内全部意图的结果。
 - **房主命令**：`Teleport` 的三个坐标必须有限且绝对值不超过 4 194 303（`Pos32` 的范围），否则忽略；`Give` 的物品必须存在、数量至少 1，一次最多 64 × (9 + 27 + 1) 个，放不下的不给；`SetDayTime` 的非有限值忽略；`Kick` 在工作包 11 之前什么也不做。客人的房主命令回 toast `toast.host.only`（warn），调试统计计数。
@@ -812,7 +826,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **`Aim` 的节奏**：“每个客户端 tick 最多一条”按 `OwnPlayer.tick` 计（冻结时也走）；同一个客户端 tick 里目标又变了，下一个客户端 tick 发最新的。按下（`Use`、`Attack`、`PickBlock`）之前，客户端用上一次的视线和当时手持的物品重新选一次目标（刚换的栏位换了射线）。按下的目标就是服务器声称的目标，客户端不再为它另发 `Aim`。
 - **第三人称**（第 10 节）：相机射线的长度是相机到眼睛的距离加 `REACH`；最近的命中点离眼睛超过 `REACH` 就是没有目标，不往后找下一格。客户端模块的接口（工作包 9 用）：每帧 `ClientIntents.update({eye, origin, dir}, OwnPlayer.tick, OwnPlayer.lastSeq)`，第一人称 `origin` 就是眼睛。
 - **交互视图**（第 9 节）：`mining` 在生存模式挖掘有了进度之后才有（和原来的 `breakProgress > 0` 一样），不管准星现在指着哪里，网格没了就没有；`gluing` 在限时涂胶进行时就有（刚开始进度可能是 0）。
-- **背包预测**：`CreativePick` 只在客户端看到的模式（私有区的 vitals，没有时用世界规则的默认模式）是创造时预测；中键选取的物品按目标的 `cell` 算（`entities/inventory.ts` 的 `pickBlockItem`），服务器按它那一格算，两者 id 相同才执行。
+- **背包预测**：`CreativePick` 只在客户端看到的模式（私有区的 vitals，没有时用世界规则的默认模式）是创造时预测；中键选取的物品按目标里 `sub` 那个八分格所在的部件算（`entities/inventory.ts` 的 `pickBlockItem(partAt(cell, sub))`），服务器按它那一格的这个部件算，两者 id 相同才执行。
 - **脚本控制的客户端驱动玩家**：`PlayerControl.lookAt`、`lookAtCell`、`aimAt` 对客户端驱动的玩家同时声称它的客户端会声称的目标（从眼睛投两条射线，`Hands.claimLook`），所以模拟层的测试和 `tests/drive/client.ts` 的滞后客户端照样能点。有真客户端连着时不能这样用：客户端的 `Aim` 和每个 tick 的重新校验会覆盖它（`tests/net/e2e-scenes.ts` 的 `useOn` 只给服务器驱动的机器人用）。
 - **死亡和复活时松开按键**（第 10 节）：在模拟层做（`Interaction.onEntityEvent` 的死亡、`PlayerControl.respawn`），服务器驱动的玩家也一样：死前一直按着的键复活后不再起作用，要重新按（DESIGN“多玩家规则”）。
 
@@ -828,7 +842,7 @@ core ─▶ blocks ─▶ voxel ─▶ {worldgen, light, liquid, structures, ent
 - **每个测试结束时**（联机模式）：客户端仍然连着、就绪；副本和服务器在 `Replicator` 给它的全部内容上 `compareReplica` 为空（含位姿；测试最后改过场景就先走一步）；没有 cause 以 `check:` 开头的校正（零延迟下客户端看到的就是服务器判断用的）。`beforeAll` 里建的世界被一个文件里的测试共用，在文件结束时检查。
 - **只在直接模式里跑的**：场景 23 的两个测试要求读档后的游戏和没存过的游戏逐 tick 完全相同（甲板上的人、掌舵开着的船）。两种模式下都先对齐：读档的世界就绪的两个 tick 里，没存过的游戏松开按键跑同样的两个 tick，然后两边按同样的键。联机时读档后的游戏是一条新连接，第一个 tick 里服务器让玩家停着（还没有上报），没存过的游戏里客户端照常走这个玩家：甲板上的人没有把这个 tick 甲板的转动算进视角（yaw 差约 2.5e-5 弧度，脚差约 5e-8 格）；掌舵时客户端的按键晚一个 tick 才到舵（第 8 节“掌舵”），没存过的船比读档的多按松开前的键开一个 tick，40 个 tick 后船和舵手差约 0.1 格。没有容差的比较过不去。两边风车的角度和转速不受影响，在两种模式下逐 tick 比较（单独的测试）；存档保存了什么，由前后的测试在两种模式下检查；重新加入由场景 36 的端到端测试检查。
 - **光照**：直接模式没有客户端，也就没有光照（工作包 9 的另一半把光照从服务器拿掉）。场景 25 里画出的胶面亮度只在联机模式下检查（客户端副本算的光）；直接模式下画胶面用同一个 `collectGlueFaces`，读服务器的格子和胶，露天的格子按满天光。
-- **嵌进方块的身体**（第 9 节，`EntityManager.judgeWorldStuck`）：没有载体的客户端驱动玩家只要和世界方块重叠（`boxOverlapsSolid`，同服务器驱动的身体移动），服务器就把它挪到最近的空位并发 cause 为 `unstick` 的校正。世界不会动，延迟解释不了没有载体的身体和世界的重叠，那只能是有方块放进了身体。原来按“深度 > `REPORT_HARD_TOLERANCE`”判：浅的重叠留着不管，客户端又不自己挪位，身体继续往方块里沉，每条上报都被 `check:world` 拒回原处，永远如此。有载体的身体照旧按容差加载体速度乘延迟判。
+- **嵌进方块的身体**（第 9 节，`EntityManager.judgeWorldStuck`）：没有载体的客户端驱动玩家只要和世界方块重叠（`boxOverlapsSolid`，同服务器驱动的身体移动），服务器就把它挪到最近的空位并发 cause 为 `unstick` 的校正。挪位不结束下落（服务器驱动的身体也一样）：否则正在下落的客户端每条上报都往旁边的墙里陷一点，就能落地不受伤。世界不会动，延迟解释不了没有载体的身体和世界的重叠，那只能是有方块放进了身体。原来按“深度 > `REPORT_HARD_TOLERANCE`”判：浅的重叠留着不管，客户端又不自己挪位，身体继续往方块里沉，每条上报都被 `check:world` 拒回原处，永远如此。有载体的身体照旧按容差加载体速度乘延迟判。
 - **第一次在两个 tick 之间看到的结构体**（`entities/structs.ts`）：在 tick 之间提出校正时（读档后第一个 tick 之前加入），实体的结构体缓存第一次看到的结构体以它现在的位姿为速度基准（`rebuild(.., 'now')`），不用 `renderPose(0)`：那是已经结束的那个 tick 开头的位姿，下一个 tick 会把两个 tick 的运动当成一个，停在甲板上的人拿到两倍的船速。
 - **`ServerHost.serve`**：create 和 load 最后都调它；测试自己建好 Simulation 时直接调它（不放示例船、不报 `ready`、不先存一次）。存档的打包和读回抽成 `host.ts` 的 `saveBundle`（`exportSave` + `generator` 块）和 `readSave`（`ServerHost.load` 读存储的那部分），验收测试的存档往返在两种模式下都用它们。
 - **场景 30 不覆盖的**：锁步、零延迟下客户端永远不会瞄准过时的格子（SYNC 先让它收到变化），所以“目标格换了，意图按无目标执行”（第 18 节工作包 7）只由 `tests/net` 的单元和端到端测试覆盖，验收测试的联机模式发现不了服务器漏掉这项检查。第 16 节“LESSONS 里联机可能带回来的坑”第一行要求的 g5 携带场景在 150 ms + 5% 丢包下再跑一遍，工作包 9 没有做（`TestWorld` 只有锁步的联机模式，延迟下等待和 tick 数都要另定）；150 ms 的携带覆盖目前只有 `tests/net/e2e-own-*` 的场景（甲板、码头起跳、从甲板跳进水里、场景 31、32）。
