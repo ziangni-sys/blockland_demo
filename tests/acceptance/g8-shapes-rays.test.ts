@@ -1,6 +1,6 @@
 /**
  * Rays hit octants (docs/SHAPES.md 6.1), headless, whole simulation, in both modes: the player's
- * rays pass through the empty octants of a partial cell (DESIGN "材质 + 形状": the ray reaches what
+ * rays pass through the empty octants of a partial cell (DESIGN "材质与形状": the ray reaches what
  * lies behind the gap above a slab) and stop at the top of a lower slab, an inner face. No numbered
  * scenario of docs/ACCEPTANCE.md covers this; the file checks that the server's rays (direct mode)
  * and the client's rays on its replica (network mode) agree on the octant-level targets, through

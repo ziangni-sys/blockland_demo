@@ -22,7 +22,7 @@ export interface MeshInput {
   cells: Uint16Array;
   /**
    * Holes of each cell's first part, same layout as `cells` (docs/SHAPES.md 8.1). null = no cell
-   * of this box has holes. (Until the mesher reads it, partial cells mesh as full blocks.)
+   * of this box has holes.
    */
   holes: Uint8Array | null;
   /** Each cell's second part, same layout as `cells` (0 = none). null = no two-part cell in this box. */

@@ -13,9 +13,10 @@
  *
  * Bitwise reads of a packed cell see the first part (`packed & ID_MASK`, `(packed >>> 16) &
  * 0xff`, `packed & CELL_MULTI_BIT`), because bitwise operators take the low 32 bits.
- * A value with bit 24 set and no second part (in [2^24, 2^25)) is the TRIPWIRE: every function
- * that takes a packed cell throws RangeError on it, so code that copies `getCell` instead of
- * the whole packed cell fails on the first two-part cell instead of losing data.
+ * A value with bit 24 set and no second part (in [2^24, 2^25)) is the TRIPWIRE: setCell, the
+ * codec and the shape and contact predicates throw RangeError on it, so code that copies
+ * `getCell` instead of the whole packed cell fails on the first two-part cell instead of losing
+ * data. (Predicates that read only the block id do not look at the bit.)
  *
  * Block state: one block id per block TYPE; orientation, liquid level etc. live in the state
  * bits (docs/DESIGN.md: "方块 = id + 状态位。不要为每个朝向单独开一个 id").

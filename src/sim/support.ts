@@ -1,6 +1,7 @@
 /**
- * Support rules (docs/SHAPES.md section 9.2; docs/DESIGN.md "火把、花草、舵轮要求下方格子的顶面被
- * 完全盖住"): may a block with BlockDef.support stand on the cell below it?
+ * Support rules (docs/SHAPES.md section 9.2; docs/DESIGN.md 放置与挖掘 "支撑": the top face of the
+ * cell below must be fully covered by hard material): may a block with BlockDef.support stand on
+ * the cell below it?
  *
  *  - 'none'       always.
  *  - 'solid'      (torch, flowers, grass tuft, snow cover) the TOP FACE of the cell below is fully

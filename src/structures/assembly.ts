@@ -624,7 +624,7 @@ export interface DockOutcome {
  * (the caller has checked with planDock that none is blocked; should one have become blocked
  * since, that cell drops, one drop per part, like a rotor cell would). Cells that meet parts
  * without overlapping merge with them. Overwritten soft non-liquid blocks drop (if the world drops); liquids at the
- * destinations of the hull's dry air cells (hasDryOctant) are removed (DESIGN: 方块化时，清掉密封舱位置里的液体);
+ * destinations of the hull's dry air cells (hasDryOctant) are removed (DESIGN 水的处理: 停靠时，清掉船的干舱位置里的液体);
  * the ship's glue moves to the world like a rotor's on blockify: every face with a placed end,
  * re-keyed by the rotation, then the glue rules of settlePlacedGlue where it landed (no face
  * joins a ship cell to a world block the ship did not bring); faces with no placed end stay in
