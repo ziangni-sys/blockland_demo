@@ -6,6 +6,7 @@ import * as THREE from 'three/webgpu';
 import { uniform } from 'three/tsl';
 import { GLUE_BEAD_LIFT, GLUE_BEAD_WIDTH, GLUE_DECAL_LIFT, glueBeadGeometry, LIGHT_ATTRIBUTE, OverlayLayer } from '../../src/render/three/overlays';
 import { SharedUniforms } from '../../src/render/three/shading';
+import type { Dir } from '../../src/core/dirs';
 import type { OverlayFace, OverlayState } from '../../src/render/backend';
 
 const DIRS: readonly [number, number, number][] = [
@@ -18,7 +19,7 @@ const DIRS: readonly [number, number, number][] = [
 ];
 
 function state(partial: Partial<OverlayState>): OverlayState {
-  return { target: null, breakProgress: 0, preview: [], conflicts: [], glue: [], ...partial };
+  return { target: null, breakProgress: 0, breakFill: 0xff, preview: [], conflicts: [], glue: [], targetOctant: -1, placement: null, ...partial };
 }
 
 function layer(): { layer: OverlayLayer; tex: THREE.DataArrayTexture } {
@@ -47,9 +48,9 @@ describe('glued faces (review: glue between two blocks was invisible)', () => {
   it('an exposed glued face is a depth-tested decal on the face, on its open side; no bead or ghost', () => {
     const { layer: l, tex } = layer();
     const root = new THREE.Group();
-    const cell = { structureId: 0, x: 4, y: 2, z: -3 };
+    const cell = { structureId: 0, x: 4, y: 2, z: -3, fill: 0xff };
     for (let face = 0; face < 6; face++) {
-      l.update(state({ glue: [{ ...cell, face, covered: false, sky: 15, block: 0 }] }), () => root, face);
+      l.update(state({ glue: [{ ...cell, face: face as Dir, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 }] }), () => root, face);
       expect(instancesOf(root, 'overlay-glue')).toEqual([]);
       expect(instancesOf(root, 'overlay-glue-xray')).toEqual([]);
       const decals = instancesOf(root, 'overlay-glue-decal');
@@ -84,9 +85,9 @@ describe('glued faces (review: glue between two blocks was invisible)', () => {
     l.update(
       state({
         glue: [
-          { structureId: 0, x: 0, y: 0, z: 0, face: 0, covered: true, sky: 15, block: 0 },
-          { structureId: 0, x: 5, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0 },
-          { structureId: 0, x: 9, y: 0, z: 0, face: 4, covered: false, sky: 15, block: 0 },
+          { structureId: 0, x: 0, y: 0, z: 0, face: 0, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 },
+          { structureId: 0, x: 5, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 },
+          { structureId: 0, x: 9, y: 0, z: 0, face: 4, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 },
         ],
       }),
       () => root,
@@ -105,9 +106,9 @@ describe('glued faces (review: glue between two blocks was invisible)', () => {
   it('a covered face: the bead straddles the shared face and reaches the outer surfaces along all four edges', () => {
     const { layer: l, tex } = layer();
     const root = new THREE.Group();
-    const cell = { structureId: 0, x: 4, y: 2, z: -3 };
+    const cell = { structureId: 0, x: 4, y: 2, z: -3, fill: 0xff };
     for (let face = 0; face < 6; face++) {
-      l.update(state({ glue: [{ ...cell, face, covered: true, sky: 15, block: 0 }] }), () => root, face);
+      l.update(state({ glue: [{ ...cell, face: face as Dir, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 }] }), () => root, face);
       expect(instancesOf(root, 'overlay-glue-decal')).toEqual([]);
       const beads = instancesOf(root, 'overlay-glue');
       expect(beads.length).toBe(1);
@@ -185,8 +186,8 @@ describe('glue decal lighting (review: the decal glowed at full brightness at ni
   it('each decal carries the light of its open cell and its face, re-sent when only the light changes', () => {
     const { layer: l, tex } = layer();
     const root = new THREE.Group();
-    const a: OverlayFace = { structureId: 0, x: 1, y: 2, z: 3, face: 1, covered: false, sky: 3, block: 9 };
-    const b: OverlayFace = { structureId: 0, x: 4, y: 2, z: 3, face: 2, covered: false, sky: 15, block: 0 };
+    const a: OverlayFace = { structureId: 0, x: 1, y: 2, z: 3, face: 1, covered: false, sky: 3, block: 9, fill: 0xff, quads: 15 };
+    const b: OverlayFace = { structureId: 0, x: 4, y: 2, z: 3, face: 2, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 };
     l.update(state({ glue: [a, b] }), () => root, 1);
     const [m] = decalMeshes(root);
     expect(m!.geometry.getAttribute(LIGHT_ATTRIBUTE)).toBeInstanceOf(THREE.InstancedBufferAttribute);
@@ -207,7 +208,7 @@ describe('glue decal lighting (review: the decal glowed at full brightness at ni
     const ship = new THREE.Group();
     const shipLight = new THREE.Vector4(0.2, 0.4, 0, 0);
     ship.userData.bl = shipLight;
-    const face = { x: 0, y: 0, z: 0, face: 2, covered: false, sky: 15, block: 0 };
+    const face = { x: 0, y: 0, z: 0, face: 2 as Dir, covered: false, sky: 15, block: 0, fill: 0xff, quads: 15 };
     l.update(state({ glue: [{ structureId: 0, ...face }, { structureId: 7, ...face }] }), (id) => (id === 0 ? world : id === 7 ? ship : null), 1);
     expect(decalMeshes(ship)[0]!.userData.bl).toBe(shipLight);
     expect(decalMeshes(world)[0]!.userData.bl).toBeUndefined();
@@ -249,8 +250,8 @@ describe('overlay parenting', () => {
     group.matrix.makeRotationY(0.6).setPosition(100, 47.5, -20);
     scene.add(group);
     scene.updateMatrixWorld(); // the structure's pose is settled before the overlay appears
-    const face: OverlayFace = { structureId: 5, x: 2, y: 1, z: 2, face: 2, covered: true, sky: 15, block: 0 };
-    l.update(state({ glue: [face], preview: [{ structureId: 5, x: 1, y: 1, z: 1 }] }), (id) => (id === 5 ? group : id === 0 ? scene : null), 1);
+    const face: OverlayFace = { structureId: 5, x: 2, y: 1, z: 2, face: 2, covered: true, sky: 15, block: 0, fill: 0xff, quads: 15 };
+    l.update(state({ glue: [face], preview: [{ structureId: 5, x: 1, y: 1, z: 1, fill: 0xff }] }), (id) => (id === 5 ? group : id === 0 ? scene : null), 1);
     scene.updateMatrixWorld();
     let meshes = 0;
     group.traverse((o) => {
@@ -273,8 +274,8 @@ describe('overlay parenting', () => {
     const anchor = { x: 1048576, y: 0, z: -2097152 };
     l.update(
       state({
-        target: { structureId: 0, x: 1048580, y: 60, z: -2097150 },
-        preview: [{ structureId: 0, x: 1048590, y: 61, z: -2097140 }, { structureId: 9, x: 3, y: 1, z: 2 }],
+        target: { structureId: 0, x: 1048580, y: 60, z: -2097150, fill: 0xff },
+        preview: [{ structureId: 0, x: 1048590, y: 61, z: -2097140, fill: 0xff }, { structureId: 9, x: 3, y: 1, z: 2, fill: 0xff }],
       }),
       (id) => (id === 0 ? world : id === 9 ? ship : null),
       1,
@@ -291,7 +292,7 @@ describe('overlay parenting', () => {
     // Moving the anchor rewrites the matrices even though the cell list is unchanged.
     const moved = { x: 1048576 + 256, y: 0, z: -2097152 };
     l.update(
-      state({ preview: [{ structureId: 0, x: 1048590, y: 61, z: -2097140 }] }),
+      state({ preview: [{ structureId: 0, x: 1048590, y: 61, z: -2097140, fill: 0xff }] }),
       (id) => (id === 0 ? world : null),
       1,
       moved,

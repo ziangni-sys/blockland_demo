@@ -18,10 +18,23 @@
  * 'front' puts the camera on the look line in front of the face, turned around to look at
  * the player; it is pulled in by a single ray and keeps THIRD_PERSON_MARGIN along it.
  *
+ * Partial cells (docs/SHAPES.md 8.6): the camera keeps its clearance from the octants of the parts
+ * that block it, tested as the boxes of the shape table (BOXES, at most 4 per cell); a whole
+ * block is the unit cube as always. Under a ceiling of upper half slabs the camera therefore
+ * keeps CAMERA_CLEARANCE from the slabs' underside, not from the cell boundary above it.
+ *
+ * Stepping up (docs/SHAPES.md 5.7): a body that steps onto a half slab rises half a block within
+ * one tick. StepLag lowers the eyes by what the step has shown so far and lets that offset decay
+ * quickly, so the view glides up instead of jumping. It is only a picture: the simulation and the
+ * aim never see it.
+ *
  * Pure: the world queries are passed in, every result and all scratch go into caller-owned
  * objects (the CameraRig also holds the easing state of 'back').
  */
+import { CELL_MULTI_BIT, FULL_LIMIT, HOLES_SHIFT, PART_MASK } from '../blocks/cell';
+import { BOX_COUNT, BOXES } from '../blocks/shapes';
 import { qrotateInv, quat, vec3, type Quat, type Vec3 } from '../core/math';
+import { STEP_HEIGHT } from '../entities/constants';
 import type { VoxelGrid } from '../voxel/grid';
 import type { CellPredicate } from '../voxel/raycast';
 
@@ -104,6 +117,115 @@ export const SELF_BOX_TOP = 0.2;
  * is left out.
  */
 export const SELF_HIDE_CLEARANCE = 0.25;
+
+/** Time constant of the step offset's decay (seconds): stepLag *= exp(-dt / STEP_LAG_TIME) every frame. */
+export const STEP_LAG_TIME = 0.06;
+/** The step offset stays within [-STEP_LAG_MAX, 0] (blocks). */
+export const STEP_LAG_MAX = 0.6;
+/** A rise within one client tick counts as a step when it is above this ... */
+export const STEP_RISE_MIN = 0.05;
+/** ... and at most this (STEP_HEIGHT plus a hair for rounding). */
+export const STEP_RISE_MAX = STEP_HEIGHT + 0.01;
+
+/**
+ * The camera's step offset (docs/SHAPES.md 5.7), caller-owned. `value` (<= 0) is added to the eye
+ * height. Steps are found per client tick: the body rose dy relative to its carrier within one
+ * tick, STEP_RISE_MIN < dy <= STEP_RISE_MAX, on the ground before and after (not a jump). The
+ * picture shows a body between its last two client ticks, so a step at tick T is shown while the
+ * display moves from T - 1 to T: its rise is kept as `pending` and taken off the eyes as the
+ * display rises (taking it all at once would first push the eyes down by up to a step). The
+ * offset decays every frame (STEP_LAG_TIME) and is kept within [-STEP_LAG_MAX, 0].
+ */
+export interface StepLag {
+  value: number;
+  /** The last client tick seen (not finite = none), its carrier, the feet height in the carrier's frame then, on the ground then. */
+  tick: number;
+  carrierId: number;
+  tickY: number;
+  onGround: boolean;
+  /** Rise of steps not shown yet, and the tick of the last step that added to it. */
+  pending: number;
+  pendingTick: number;
+  /** The shown feet height in the shown carrier's frame last frame (NaN = none). */
+  shownY: number;
+  shownCarrier: number;
+  readonly scratch: Vec3;
+}
+
+export function stepLagState(): StepLag {
+  return {
+    value: 0,
+    tick: Number.NEGATIVE_INFINITY,
+    carrierId: 0,
+    tickY: 0,
+    onGround: false,
+    pending: 0,
+    pendingTick: Number.NEGATIVE_INFINITY,
+    shownY: Number.NaN,
+    shownCarrier: 0,
+    scratch: vec3(),
+  };
+}
+
+/**
+ * What the step offset reads of the player as shown (view.ts ShownPlayer): the body at its last
+ * client tick (that tick, not finite while there is none; its carrier, 0 = the world; its feet
+ * height in the carrier's frame then; on the ground then) and the feet as shown this frame (world).
+ */
+export interface StepSample {
+  readonly tick: number;
+  readonly carrierId: number;
+  readonly tickY: number;
+  readonly onGround: boolean;
+  readonly feet: Readonly<Vec3>;
+}
+
+/**
+ * One frame of the step offset; the offset to add to the eye height is then `s.value`. `carrier`
+ * is the grid of body.carrierId at the frame's display pose (null without a carrier, or when the
+ * replica does not hold it: the world's frame then), `dt` the frame time (seconds). Takes objects
+ * and returns nothing, so a frame boxes no number for it.
+ */
+export function updateStepLag(s: StepLag, body: StepSample, carrier: VoxelGrid | null, dt: number): void {
+  const tick = body.tick;
+  const carrierId = body.carrierId;
+  const tickY = body.tickY;
+  const onGround = body.onGround;
+  const shownY = carrier === null ? body.feet.y : carrier.toLocal(body.feet, s.scratch).y;
+  if (dt > 0) s.value *= Math.exp(-dt / STEP_LAG_TIME);
+  if (!Number.isFinite(tick)) {
+    s.tick = Number.NEGATIVE_INFINITY;
+    s.pending = 0;
+    s.shownY = Number.NaN;
+  } else {
+    if (tick !== s.tick) {
+      // A step shown over an earlier tick is done showing by now: what is left of it is dropped.
+      if (tick - s.pendingTick >= 2) s.pending = 0;
+      if (Number.isFinite(s.tick) && tick > s.tick && carrierId === s.carrierId && s.onGround && onGround) {
+        const dy = tickY - s.tickY;
+        if (dy > STEP_RISE_MIN && dy <= STEP_RISE_MAX) {
+          s.pending += dy;
+          s.pendingTick = tick;
+        }
+      } else if (carrierId !== s.carrierId) {
+        s.pending = 0;
+      }
+      s.tick = tick;
+      s.carrierId = carrierId;
+      s.tickY = tickY;
+      s.onGround = onGround;
+    }
+    if (s.pending > 0 && carrierId === s.shownCarrier && Number.isFinite(s.shownY)) {
+      const take = Math.min(s.pending, Math.max(0, shownY - s.shownY));
+      s.pending -= take;
+      s.value -= take;
+    }
+    s.shownY = shownY;
+    s.shownCarrier = carrierId;
+  }
+  if (s.value < -STEP_LAG_MAX) s.value = -STEP_LAG_MAX;
+  else if (!(s.value < 0)) s.value = 0;
+}
 
 export function nextViewMode(mode: ViewMode): ViewMode {
   const i = VIEW_MODES.indexOf(mode);
@@ -425,11 +547,38 @@ function frameLocal(f: CameraGridFrame, p: Vec3, out: Vec3): Vec3 {
 }
 
 /**
- * The CameraSweep (see there) over the first `count` grid frames, against the cells for which
- * `blocks` is true. Exact: every candidate cell's cube, grown by the half-size, is intersected
- * with the path in the grid's own axes (rotation keeps distances, so a structure turned any way
- * is handled like the world). Visits only the cells in the path's local bounding box (clipped
- * to a structure's cell bounds); allocation-free.
+ * The octants of a PARTIAL cell (getCell value c >= FULL_LIMIT) that block the camera: those of
+ * its parts `blocks` holds true for (docs/SHAPES.md 8.6: hard or opaque material). Reads the second
+ * part from the grid; never forms the packed value of a two-part cell.
+ */
+function partialBlocking(grid: VoxelGrid, blocks: CellPredicate, c: number, x: number, y: number, z: number): number {
+  const first = c & PART_MASK;
+  let fill = blocks(first) ? ~(first >>> HOLES_SHIFT) & 0xff : 0;
+  if ((c & CELL_MULTI_BIT) !== 0) {
+    const p2 = grid.getPart2(x, y, z);
+    if (blocks(p2)) fill |= ~(p2 >>> HOLES_SHIFT) & 0xff;
+  }
+  return fill;
+}
+
+/**
+ * The octants of cell (x, y, z) of `grid` that block the camera: those of the parts `blocks` holds
+ * true for. A whole cell (< FULL_LIMIT: a whole block, a model, a liquid, air) is 0xff or 0 as
+ * `blocks` says. (The sweeps below inline the whole-cell case: it is the common one.)
+ */
+export function blockingOctants(grid: VoxelGrid, blocks: CellPredicate, x: number, y: number, z: number): number {
+  const c = grid.getCell(x, y, z);
+  if (c < FULL_LIMIT) return blocks(c) ? 0xff : 0;
+  return partialBlocking(grid, blocks, c, x, y, z);
+}
+
+/**
+ * The CameraSweep (see there) over the first `count` grid frames, against the octants of the
+ * parts for which `blocks` is true (blockingOctants), as the boxes of BOXES (a whole cell: its
+ * unit cube). Exact: every candidate box, grown by the half-size, is intersected with the path in
+ * the grid's own axes (rotation keeps distances, so a structure turned any way is handled like
+ * the world). Visits only the cells in the path's local bounding box (clipped to a structure's
+ * cell bounds); allocation-free.
  */
 export function sweepGrids(
   frames: readonly CameraGridFrame[],
@@ -449,9 +598,10 @@ export function sweepGrids(
 }
 
 /**
- * Clearance of the point `p`: the distance to the nearest cell for which `blocks` is true,
- * measured along each grid's own axes (the largest per-axis gap, so a cube of that half-size
- * around `p` just touches it), or `range` when no such cell is nearer than `range`.
+ * Clearance of the point `p`: the distance to the nearest blocking box (the octants of the parts
+ * for which `blocks` is true, as in sweepGrids), measured along each grid's own axes (the largest
+ * per-axis gap, so a cube of that half-size around `p` just touches it), or `range` when no such
+ * box is nearer than `range`.
  */
 export function clearanceAt(
   frames: readonly CameraGridFrame[],
@@ -486,9 +636,27 @@ export function clearanceAt(
     for (let y = y0; y <= y1; y++) {
       for (let z = z0; z <= z1; z++) {
         for (let x = x0; x <= x1; x++) {
-          if (!blocks(grid.getCell(x, y, z))) continue;
-          const gap = Math.max(x - o.x, o.x - x - 1, y - o.y, o.y - y - 1, z - o.z, o.z - z - 1, 0);
-          if (gap < best) best = gap;
+          const c = grid.getCell(x, y, z);
+          if (c < FULL_LIMIT) {
+            if (!blocks(c)) continue;
+            const gap = Math.max(x - o.x, o.x - x - 1, y - o.y, o.y - y - 1, z - o.z, o.z - z - 1, 0);
+            if (gap < best) best = gap;
+            continue;
+          }
+          const fill = partialBlocking(grid, blocks, c, x, y, z);
+          // Each box of the shape (half units).
+          for (let k = 0, n = BOX_COUNT[fill]!, b = fill * 24; k < n; k++, b += 6) {
+            const gap = Math.max(
+              (2 * x + BOXES[b]!) * 0.5 - o.x,
+              o.x - (2 * x + BOXES[b + 3]!) * 0.5,
+              (2 * y + BOXES[b + 1]!) * 0.5 - o.y,
+              o.y - (2 * y + BOXES[b + 4]!) * 0.5,
+              (2 * z + BOXES[b + 2]!) * 0.5 - o.z,
+              o.z - (2 * z + BOXES[b + 5]!) * 0.5,
+              0,
+            );
+            if (gap < best) best = gap;
+          }
         }
       }
     }
@@ -536,40 +704,89 @@ function sweepCube(
     for (let y = y0; y <= y1; y++) {
       for (let z = z0; z <= z1; z++) {
         for (let x = x0; x <= x1; x++) {
-          if (!blocks(grid.getCell(x, y, z))) continue;
-          // Slab test of the path against the cell's cube grown by `half` (open box: touching is free).
-          let enter = -Infinity;
-          let exit = Infinity;
-          let miss = false;
-          for (let a = 0; a < 3 && !miss; a++) {
-            const oa = a === 0 ? o.x : a === 1 ? o.y : o.z;
-            const da = a === 0 ? d.x : a === 1 ? d.y : d.z;
-            const lo = (a === 0 ? x : a === 1 ? y : z) - half;
-            const hi = lo + 1 + 2 * half;
-            if (Math.abs(da) < 1e-12) {
-              if (oa <= lo || oa >= hi) miss = true;
-              continue;
+          const c = grid.getCell(x, y, z);
+          if (c < FULL_LIMIT) {
+            if (!blocks(c)) continue;
+            // Slab test of the path against the cell's cube grown by `half` (open box: touching is free).
+            let enter = -Infinity;
+            let exit = Infinity;
+            let miss = false;
+            for (let a = 0; a < 3 && !miss; a++) {
+              const oa = a === 0 ? o.x : a === 1 ? o.y : o.z;
+              const da = a === 0 ? d.x : a === 1 ? d.y : d.z;
+              const lo = (a === 0 ? x : a === 1 ? y : z) - half;
+              const hi = lo + 1 + 2 * half;
+              if (Math.abs(da) < 1e-12) {
+                if (oa <= lo || oa >= hi) miss = true;
+                continue;
+              }
+              let t1 = (lo - oa) / da;
+              let t2 = (hi - oa) / da;
+              if (t1 > t2) {
+                const t = t1;
+                t1 = t2;
+                t2 = t;
+              }
+              if (t1 > enter) enter = t1;
+              if (t2 < exit) exit = t2;
+              if (enter >= exit) miss = true;
             }
-            let t1 = (lo - oa) / da;
-            let t2 = (hi - oa) / da;
-            if (t1 > t2) {
-              const t = t1;
-              t1 = t2;
-              t2 = t;
-            }
-            if (t1 > enter) enter = t1;
-            if (t2 < exit) exit = t2;
-            if (enter >= exit) miss = true;
+            if (miss || exit <= 0 || enter >= best) continue;
+            // Already overlapping at the origin.
+            if (enter < 0) return -1;
+            best = enter;
+            continue;
           }
-          if (miss || exit <= 0 || enter >= best) continue;
-          // Already overlapping at the origin.
-          if (enter < 0) return -1;
-          best = enter;
+          // A partial cell: each box of the octants of its blocking parts (half units).
+          const fill = partialBlocking(grid, blocks, c, x, y, z);
+          for (let k = 0, n = BOX_COUNT[fill]!, b = fill * 24; k < n; k++, b += 6) {
+            const enter = boxEnter(o, d, 2 * x + BOXES[b]!, 2 * y + BOXES[b + 1]!, 2 * z + BOXES[b + 2]!, 2 * x + BOXES[b + 3]!, 2 * y + BOXES[b + 4]!, 2 * z + BOXES[b + 5]!, half, best);
+            if (enter === MISS) continue;
+            if (enter < 0) return -1;
+            best = enter;
+          }
         }
       }
     }
   }
   return best;
+}
+
+/** boxEnter's answer when the path does not reach the box before `best`. */
+const MISS = Number.POSITIVE_INFINITY;
+
+/**
+ * Slab test of the path o + t d (t > 0) against the box [hx0, hx1] x [hy0, hy1] x [hz0, hz1] (half
+ * units: integers, so the caller never boxes a fractional argument) grown by `half` (an open box:
+ * touching is free): the entry parameter (negative = already overlapping at the origin), or MISS
+ * when the path misses it, leaves it behind, or enters it at `best` or later. The boxes of partial
+ * cells only; a whole cell's unit cube is tested inline in sweepCube.
+ */
+function boxEnter(o: Vec3, d: Vec3, hx0: number, hy0: number, hz0: number, hx1: number, hy1: number, hz1: number, half: number, best: number): number {
+  let enter = -Infinity;
+  let exit = Infinity;
+  for (let a = 0; a < 3; a++) {
+    const oa = a === 0 ? o.x : a === 1 ? o.y : o.z;
+    const da = a === 0 ? d.x : a === 1 ? d.y : d.z;
+    const lo = (a === 0 ? hx0 : a === 1 ? hy0 : hz0) * 0.5 - half;
+    const hi = (a === 0 ? hx1 : a === 1 ? hy1 : hz1) * 0.5 + half;
+    if (Math.abs(da) < 1e-12) {
+      if (oa <= lo || oa >= hi) return MISS;
+      continue;
+    }
+    let t1 = (lo - oa) / da;
+    let t2 = (hi - oa) / da;
+    if (t1 > t2) {
+      const t = t1;
+      t1 = t2;
+      t2 = t;
+    }
+    if (t1 > enter) enter = t1;
+    if (t2 < exit) exit = t2;
+    if (enter >= exit) return MISS;
+  }
+  if (exit <= 0 || enter >= best) return MISS;
+  return enter;
 }
 
 /**
