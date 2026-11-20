@@ -24,7 +24,10 @@
  * between ticks); until reports of the new epoch arrive the server holds the player there (riding
  * its carrier). The pending correction is per-player state (PlayerControl.correction /
  * takeCorrection); a later package sends it. The client adopts a correction by taking its state
- * (no replay): the first report of a new epoch moved one client tick from it.
+ * (no replay): the first report of a new epoch moved one client tick from it. A correction never
+ * leaves the body deeper in a structure than a report may dip into one: the server pushes it out
+ * first, as every body is pushed (EntityManager.pushOutOfStructures), else the client's own push
+ * on its first step would be a move no check allows, refused back to the same place every tick.
  *
  * LAG. A report's `viewTick` is the server tick its client's copies of the ships showed when it
  * moved (the renderTick of that step); (server tick - viewTick) / TPS, clamped to
@@ -83,19 +86,26 @@
  *
  * LANDINGS. Every report counts the landings of the client's body so far (mod 256). A report
  * that counts more landings than the last applied one, beyond its own (the first on the ground
- * after airborne ones), shows a landing the server never saw (reports lost or dropped): the fall
- * tracked so far ends there, judged by what was tracked, and the next fall starts at this report
- * (EntityManager.updateClientDriven). Two short drops whose landing report was lost are not one
- * long fall. The landing needs ground within the reachable fall below the lower of the two
- * places, and the vertical envelope starts again on that ground, the take-off in any tick of the
- * gap: no higher than a jump from there (a client that counts landings in mid-air climbs nothing;
- * nor one beside a leaning mast: its face is no ground, ReportJudge.underLeaningWalls).
- * A report that claims its own landing (after an airborne one) where nothing holds up its end is
- * such a landing too: the body landed on a tread's edge and walked off it in the same tick (the
- * rim it left counts as that ground when it lies under the old place, within the report's own
- * drop). After such a landing, and after a report that truly stood, a report that claims to stand
- * where nothing holds it up keeps the latest take-off open for one more report: the client's
- * body stood on the edge when its tick began and may jump in the next one.
+ * after airborne ones), shows a landing the server never saw (reports lost or dropped). Two short
+ * drops whose landing report was lost are not one long fall. The landing needs ground the body can
+ * have reached in the gap (no higher than a jump and a step above the envelope's base) under
+ * either place, down to the reachable fall below the lower one (when the new place is the higher
+ * one, only if the old one has ground within the reachable fall below it, and under the new one
+ * only within its own); the
+ * vertical envelope starts again on the highest such ground, the take-off in any tick of the gap:
+ * no higher than a jump from there (a client that counts landings in mid-air climbs nothing; nor
+ * one beside a leaning mast: its face is no ground, ReportJudge.underLeaningWalls). The fall
+ * tracked so far ends on that ground, the drop from the last place down to it included, and the
+ * next fall starts there, less what the body may have walked down first (any height where a
+ * staircase leads from one place to the other; as far as the floor of the tilted structure that
+ * ground lies on descends between them), never below where the report ends
+ * (EntityManager.updateClientDriven): a report counting a landing pays for the descent of its own
+ * gap. A report that claims its own landing (after an airborne one) where nothing holds up its
+ * end is such a landing too: the body landed on a tread's edge and walked off it in the same tick
+ * (the rim it left, under the old place, is that ground). After such a landing, and after a report
+ * that truly stood, a report that claims to stand where nothing holds it up keeps the latest
+ * take-off open for one more report: the client's body stood on the edge when its tick began and
+ * may jump in the next one.
  *
  * SEAT. A seated player's body is the server's: it follows the seat and is pushed off it on the
  * server whatever the drive mode. From a seated client's reports only the stick axes (helm), the
@@ -553,6 +563,9 @@ function arcPeak(vy: number): number {
   return top;
 }
 
+/** The highest point of a jump (arcPeak of JUMP_SPEED): the most an arc that starts on the ground can rise. */
+const JUMP_PEAK = arcPeak(JUMP_SPEED);
+
 /**
  * The vertical envelope `ticks` ticks on, from (top, vy): the motion model's gravity step
  * (entities/motion.ts: average of the old and new speed, terminal speed), so the highest body
@@ -621,6 +634,8 @@ export class ReportJudge {
   private readonly wb: AABB = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
   /** Scratch of supported(): how a structure's walls lean (leanOf). */
   private readonly lean: Vec3 = vec3();
+  /** What held the box up in the last supported() call that found support: a structure, or undefined for the world. */
+  private supportBy: StructRec | undefined = undefined;
   // path test (pathClear): frame, body, depth limits, scratch
   private pathRec: StructRec | undefined = undefined;
   private pathBody: Player | null = null;
@@ -660,6 +675,18 @@ export class ReportJudge {
   envPaid = 0;
   /** The report showed a landing the server did not see (see LANDINGS), and ground near enough below for it. */
   landedUnseen = false;
+  /**
+   * ... the world height of that ground (feet held up on it; -Infinity without such a landing),
+   * the fall bookkeeping's split point (LANDINGS) ...
+   */
+  landedGround = -Infinity;
+  /**
+   * ... and how far below it the body may have walked down to before it left the ground again:
+   * Infinity where a staircase leads from one place to the other (the staircase path passes), else
+   * how far the floor of the tilted structure that ground lies on descends between the two places
+   * (0 on the world's ground).
+   */
+  landedWalk = 0;
   /** The report's lag (seconds, reportLag). */
   lag = REPORT_MAX_LAG;
 
@@ -741,6 +768,8 @@ export class ReportJudge {
     this.groundOk = false;
     this.heldEnd = false;
     this.landedUnseen = false;
+    this.landedGround = -Infinity;
+    this.landedWalk = 0;
     // Garbage.
     if (!finite3(rep.pos) || !finite3(rep.vel) || !Number.isFinite(rep.yaw) || !Number.isFinite(rep.pitch)) return 'garbage';
     if (Math.abs(rep.pos.x) > MAX_BOX_COORD || Math.abs(rep.pos.y) > MAX_BOX_COORD || Math.abs(rep.pos.z) > MAX_BOX_COORD) return 'garbage';
@@ -866,8 +895,10 @@ export class ReportJudge {
     // that climbs out of water by the water-exit lift (motion.ts WATER_EXIT_SPEED, jump held,
     // swimming into the wall) beside a ledge, or one hopping up steps with the jump key held. (The
     // hopper's client does count its touch-down on the lower tread, StepFacts.touchedDown, but the
-    // unseen landing's ground search below its end stops at the rim beside its feet, higher than
-    // the arcs reach, and finds no ground there.) But a body thrown
+    // ground of that landing is not always found: below the report's end the search stops at the
+    // rim beside its feet, higher than the arcs reach; the old place may not lie over that tread;
+    // and on a tilted staircase the riser beside the feet is a leaning wall, whose foot the
+    // strips of underLeaningWalls leave out.) But a body thrown
     // up past the top of a wall faster than a jump, or falling past the rim of a ledge, does not
     // land on it: the envelope would start again with a jump slower than the blast's arc it goes
     // on along, and the fall would be cut in two (less damage). The claimed speed is the client's
@@ -896,33 +927,59 @@ export class ReportJudge {
     let spanPeak = this.advanceArcs(d.envTop, d.envVy, d.envTopLate, d.envVyLate, d.envPeak, d.envHeld, ticks);
     let rise = d.envRise;
     let paid = d.envPaid;
-    // A landing no report showed (LANDINGS) needs ground the body can have reached in the gap
-    // below the lower of its two places (a client cannot end a fall early by counting landings).
-    // The envelope then starts again on the highest ground under either place that the body can
-    // have come down on (no higher than its arcs got in the gap, plus a step and what a staircase
-    // between the two places climbs; never the face of a leaning wall: underLeaningWalls), with a
-    // jump from there in any tick of the gap. (A body that
-    // climbed a staircase, landed on it unseen and ends not held up at the server's poses, the
-    // deck rolling under it, came down on a tread of that staircase.)
+    // A landing no report showed (LANDINGS) needs ground the body can have reached in the gap, no
+    // higher than its arcs got in the gap plus a step and what a staircase between the two places
+    // climbs (`highest`), never the face of a leaning wall (underLeaningWalls): under either place,
+    // down to the reachable fall below the lower one; when the new place is the higher one, only if
+    // the old one has ground within the reachable fall below it (the body rose from there), and
+    // under the new one only within its own reachable fall. The envelope then starts again on the
+    // highest such ground, with a jump from there in
+    // any tick of the gap, and the fall tracked so far ends on it, the drop down to it included
+    // (EntityManager.updateClientDriven): counting landings ends no fall early, and in mid-air it
+    // climbs nothing. Under the higher place too, when that is the old one: a body that came down a
+    // staircase to a wall leaning away from it, landed at its foot and jumped is a jump above the
+    // deck there, beside the wall, whose foot the leaning-wall strips leave out at that height; the
+    // tread it came from, under the old place, is ground it can have stood on. Not when the higher
+    // place is the new one and nothing is within reach below the old: then the body rose from
+    // mid-air, and a client counting landings as it rose beside a structure tilted 40 to 45 degrees
+    // landed on the ends of its short masts and on its ridge, up to three blocks above the face it
+    // stood on. (A body that climbed a staircase, landed on it
+    // unseen and ends not held up at the server's poses, the deck rolling under it, came down on a
+    // tread of that staircase; one that landed on a tread's edge and walked off it, an edge
+    // landing, came down on the rim under the old place.) Ground farther below the report's end
+    // than a jump from it reaches, with a step, the staircase's climb and what pushes, a carrier
+    // switch and the slack allow, is not searched for: the envelope starting again there would
+    // refuse the report all the same.
     if (unseen) {
       const ob = boxAt(p, p.pos.x, p.pos.y, p.pos.z, this.oldBox);
       const reach = (Math.max(0, -d.envVy) + GRAVITY * allow) * allow;
-      // The ground of an edge landing is the rim the body walked off: under the old place, at most
-      // as far down as the body came in this report (it moves vertically first, so from the old
-      // place it came down onto that rim and stopped there before it moved on). Below the lower
-      // (new) place the next tread may lie farther down than `reach` (the envelope's arcs fall
-      // slower than a body that walked off a ledge), which would leave the fall running on the
-      // server and charge a sprint down a staircase as one long fall.
-      const drop = ob.minY - nb.minY;
-      if (this.supported(ob.minY <= nb.minY ? ob : nb, rec, reach) || (edgeLanding && drop >= 0 && this.supported(ob, rec, drop))) {
-        const highest = p.pos.y - d.envRise + d.envPaid + spanPeak + STEP_HEIGHT + stairClimb + extra + switchSlack;
-        const ground = Math.max(this.groundUnder(ob, rec, reach, highest), this.groundUnder(nb, rec, reach, highest));
-        if (ground > -Infinity) {
-          this.landedUnseen = true;
-          rise = p.pos.y - ground;
-          paid = 0;
-          spanPeak = this.advanceArcs(0, JUMP_SPEED, 0, JUMP_SPEED, arcPeak(JUMP_SPEED), true, ticks);
-        }
+      const highest = p.pos.y - d.envRise + d.envPaid + spanPeak + STEP_HEIGHT + stairClimb + extra + switchSlack;
+      // The lowest ground searched: the reachable fall below the lower place, and no lower than the
+      // envelope could start again from and still pass the report.
+      const lowest = Math.max(Math.min(ob.minY, nb.minY) - reach, nb.minY - (JUMP_PEAK + STEP_HEIGHT + stairClimb + extra + switchSlack + d.slack));
+      let ground = -Infinity;
+      // What the landing's ground lies on (supported(): a structure, or undefined for the world).
+      let on: StructRec | undefined;
+      const climb = nb.minY > ob.minY;
+      if (!climb || this.supported(ob, rec, reach)) {
+        // (Risen above the old place, the new one has ground within the reachable fall below it only.)
+        const groundNew = this.groundUnder(nb, rec, climb ? Math.max(lowest, nb.minY - reach) : lowest, highest);
+        on = this.supportBy;
+        // (Under the old place only ground above that under the new one can matter.)
+        const groundOld = this.groundUnder(ob, rec, groundNew > lowest ? groundNew : lowest, highest);
+        if (groundOld > groundNew) on = this.supportBy;
+        ground = Math.max(groundOld, groundNew);
+      }
+      if (ground > -Infinity) {
+        this.landedUnseen = true;
+        this.landedGround = ground;
+        // Walking on from that ground, the body may have gone down a staircase between the two
+        // places, or down the floor of the tilted structure the ground lies on (a deck heeling
+        // away from where it landed): no fall either way.
+        this.landedWalk = h > 0 && this.stairPath(pathFrom, pathTo) ? Infinity : on === undefined ? 0 : this.floorDescent(on, w1.x - p.pos.x, w1.z - p.pos.z);
+        rise = p.pos.y - ground;
+        paid = 0;
+        spanPeak = this.advanceArcs(0, JUMP_SPEED, 0, JUMP_SPEED, JUMP_PEAK, true, ticks);
       }
     }
     // A report that claims to stand where nothing holds it up, right after a report that truly
@@ -1147,19 +1204,39 @@ export class ReportJudge {
   private supported(b: AABB, carrier: StructRec | undefined, deeper: number, wide = true): boolean {
     const gap = SUPPORT_GAP + REPORT_SUPPORT_REACH + deeper;
     const inset = wide ? -REPORT_SUPPORT_REACH : 0;
-    if (this.standsOn(this.world, b, gap, inset, 0, 0)) return true;
+    if (this.standsOn(this.world, b, gap, inset, 0, 0)) {
+      this.supportBy = undefined;
+      return true;
+    }
     if (carrier !== undefined) {
       const lean = leanOf(carrier, this.lean);
-      if (this.standsOn(carrier.grid, b, gap, inset, lean.x, lean.z)) return true;
+      if (this.standsOn(carrier.grid, b, gap, inset, lean.x, lean.z)) {
+        this.supportBy = carrier;
+        return true;
+      }
     }
     const near = this.body.structuresNear(b, gap, this.near);
     for (let k = 0; k < near.length; k++) {
       const r = near[k]!;
       if (r === carrier || b.minY - gap >= r.maxY || b.minY <= r.minY) continue;
       const lean = leanOf(r, this.lean);
-      if (this.standsOn(r.grid, b, gap, inset, lean.x, lean.z)) return true;
+      if (this.standsOn(r.grid, b, gap, inset, lean.x, lean.z)) {
+        this.supportBy = r;
+        return true;
+      }
     }
     return false;
+  }
+
+  /**
+   * How far the floor of structure `r` descends over the horizontal world displacement (dx, dz):
+   * its floors lie square to the grid axis nearest the vertical (leanOf), so going (dx, dz) along
+   * one changes the height by -(lean . (dx, dz)). 0 where it rises.
+   */
+  private floorDescent(r: StructRec, dx: number, dz: number): number {
+    const lean = leanOf(r, this.lean);
+    const down = lean.x * dx + lean.z * dz;
+    return down > 0 ? down : 0;
   }
 
   /**
@@ -1360,10 +1437,10 @@ export class ReportJudge {
    * The ground a body box came down on, for a landing nobody saw (check(), LANDINGS): the world
    * height its feet would be held up at (supportDepth below it; the surface itself lies up to the
    * standing probe's depth, SUPPORT_GAP + REPORT_SUPPORT_REACH, lower: a body that high above it
-   * stands), if no higher than `highest`; else -Infinity.
+   * stands), if that is between `lowest` and `highest`; else -Infinity.
    */
-  private groundUnder(b: AABB, carrier: StructRec | undefined, reach: number, highest: number): number {
-    const depth = this.supportDepth(b, carrier, reach);
+  private groundUnder(b: AABB, carrier: StructRec | undefined, lowest: number, highest: number): number {
+    const depth = this.supportDepth(b, carrier, b.minY - lowest);
     const y = b.minY - depth;
     return depth >= 0 && y <= highest ? y : -Infinity;
   }
@@ -1375,8 +1452,10 @@ export class ReportJudge {
    * underLeaningWalls.)
    */
   private supportDepth(b: AABB, carrier: StructRec | undefined, reach: number): number {
-    if (!(reach >= 0) || !this.supported(b, carrier, reach)) return -1;
+    // (The standing probe first: it asks no deep slabs, and it is the usual answer.)
+    if (!(reach >= 0)) return -1;
     if (this.supported(b, carrier, 0)) return 0;
+    if (!this.supported(b, carrier, reach)) return -1;
     let lo = 0;
     let hi = reach;
     while (hi - lo > 0.01) {
