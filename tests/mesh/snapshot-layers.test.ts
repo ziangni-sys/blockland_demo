@@ -2,8 +2,8 @@
  * The mesher's input carries the holes and second-part layers (docs/SHAPES.md 8.1): snapshots copy
  * them (margins across chunk borders included) and give null when the padded box has no non-zero
  * entry, so jobs without partial cells are exactly what they were; checkInput validates their
- * lengths; the worker transfer list carries them. Until the shape-aware mesher lands, a cell with
- * parts meshes as a full block of its first part's material (16.3), whatever the extra layers say.
+ * lengths; the worker transfer list carries them; the mesher reads them (a cell with parts is not
+ * drawn as a full block of its first part).
  */
 import { describe, expect, it } from 'vitest';
 import { makeCell } from '../../src/blocks/cell';
@@ -80,7 +80,7 @@ describe('mesh input contract', () => {
     expect(() => buildMesh({ ...base(), holes: new Uint8Array(27), part2: new Uint32Array(27) })).not.toThrow();
   });
 
-  it('the mesher reads the layers: a cell with parts is not drawn as a full block of its first part (P4 ends 16.3)', () => {
+  it('the mesher reads the layers: a cell with parts is not drawn as a full block of its first part', () => {
     const w = world();
     w.setCell(3, 21, 4, TWO);
     const layered = snapshotSection(w, 0, 1, 0);

@@ -59,7 +59,7 @@ export function partialRaft(sim: Simulation, x0: number, z0: number): { helm: [n
   for (let x = x0; x < x0 + 5; x++) for (let z = z0; z < z0 + 4; z++) w.setCell(x, GROUND - 1, z, makeCell(B.PLANKS_OAK));
   const helm: [number, number, number] = [x0 + 2, GROUND, z0];
   w.setCell(helm[0], helm[1], helm[2], makeCell(B.HELM, NZ));
-  // Partial cells of planks (they stick to the deck like planks while sticking still reads ids).
+  // Partial cells of planks: their faces overlap the deck's, so they auto-stick like planks.
   const zb = z0 + 3;
   w.setCell(x0, GROUND, zb, slab(B.PLANKS_OAK, LOWER));
   w.setCell(x0 + 1, GROUND, zb, canonCell(slab(B.PLANKS_OAK, WEST), slab(B.STONE, EAST)));

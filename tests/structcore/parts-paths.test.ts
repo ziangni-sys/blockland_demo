@@ -26,7 +26,7 @@ import { c, cellMap, facing, fill, MILL_BEARING, millShip, rotY, scene, SHIP_HEL
 const [HX, HY, HZ] = SHIP_HELM;
 const [BX, BY, BZ] = MILL_BEARING;
 
-/** Oak planks slab (on the oak deck it auto-sticks like a full plank while sticking still reads ids). */
+/** Oak planks slab: its faces overlap the oak deck's, so it auto-sticks like a full plank. */
 const SLAB = slab(B.PLANKS_OAK, LOWER);
 const TWO = canonCell(slab(B.PLANKS_OAK, WEST), slab(B.STONE, EAST));
 const FILLED = canonCell(slab(B.PLANKS_OAK, LOWER), slab(B.PLANKS_OAK, UPPER));

@@ -1,9 +1,10 @@
 /**
- * Acceptance scenario 43, the floating and draught part (docs/ACCEPTANCE.md "形状与凿子"; docs/SHAPES.md
- * 12.5, 16.4: package P9), headless, whole simulation, in both modes: a ship built of slabs and
- * stairs floats upright at the draught its volume predicts, sails, and settles again at that draught.
- * The assembly, docking and turning part of the scenario belongs to package P7 (g8-shapes-stick);
- * this file asserts only what the ship physics is responsible for.
+ * Acceptance scenario 43 at sea (docs/ACCEPTANCE.md "形状与凿子"; docs/SHAPES.md 11, 12.5, 16.4),
+ * headless, whole simulation, in both modes: a ship built of slabs and stairs floats upright at the
+ * draught its volume predicts, sails, and settles again at that draught; steered a quarter turn and
+ * docked on the sea, every shape lands turned, and assembled again it has the same cells and floats
+ * at the same draught. (Assembling and docking on land, merging into world cells:
+ * g8-shapes-stick.test.ts.)
  *
  * The scene is written on the server (w.sim): the tools that make partial blocks come in M2.4. The
  * player assembles the raft at its helm (two right-clicks), sails it with W, and lets go.
@@ -13,6 +14,11 @@ import { makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { BLOCKS } from '../../src/blocks/registry';
 import { NX, PX, PZ } from '../../src/core/dirs';
+import { vec3 } from '../../src/core/math';
+import { dockSnap, snapCell } from '../../src/structures/assembly';
+import { rotCell } from '../../src/structures/orient';
+import { getPacked } from '../../src/voxel/parts';
+import { faceToward, steerToYaw } from './g5-carry-helpers';
 import { HULL_MIXED, hullKindAt } from '../../src/structures/hull';
 import type { Ship } from '../../src/structures/structure';
 import { LOWER, slab, stairFill } from '../shapes';
@@ -113,5 +119,45 @@ describe('43. 用半砖和楼梯造的船能漂浮，吃水符合体积（船体
     w.tick(200);
     expect(Math.abs(draughtOf(ship) - DRAUGHT) / DRAUGHT).toBeLessThan(0.03);
     expect(tiltDeg(ship)).toBeLessThan(2);
+  });
+
+  it('转 90° 停靠后形状跟着转 (with P7): the player steers the floating slab raft a quarter turn and docks it on the sea; every cell lands turned (shapes and states); assembled again it has the same cells and floats at the same draught', () => {
+    const w = slabRaft();
+    const { sim, me } = w;
+    const ship = assemble(w);
+    const cells = new Map<string, number>();
+    ship.grid.forEachCell((x, y, z, p) => cells.set(`${x},${y},${z}`, p));
+    w.tick(40);
+    steerToYaw(w, ship, Math.PI / 2);
+    me.use(); // let go of the wheel; the player stands at the seat, south of the helm in the raft's frame
+    w.tick(20);
+    expect(tiltDeg(ship)).toBeLessThan(2);
+    const t = dockSnap(ship.grid);
+    expect(t.r).toEqual({ ax: 5, ay: 2, az: 0 }); // +X -> -Z: a quarter turn to the left
+    me.input.sneak = true;
+    expect(me.useOn(2, SEA_TOP, 4, PZ, ship.id)).toBe(true);
+    me.input.sneak = false;
+    expect(ship.removed).toBe(true);
+    const d = vec3();
+    for (const [k, p] of cells) {
+      const [x, y, z] = k.split(',').map(Number) as [number, number, number];
+      snapCell(t, x, y, z, d);
+      expect(getPacked(sim.world, d.x, d.y, d.z), k).toBe(rotCell(t.r, p));
+    }
+    // Assembled again at its helm (where it docked), from where the player stands.
+    const helm = snapCell(t, 2, SEA_TOP, 4);
+    const face = faceToward(w, helm.x, helm.z);
+    expect(me.useOn(helm.x, helm.y, helm.z, face)).toBe(true);
+    expect(me.useOn(helm.x, helm.y, helm.z, face)).toBe(true);
+    const again = onlyShip(sim);
+    expect(again.grid.count).toBe(31);
+    expect(again.mass).toBeCloseTo(MASS, 9);
+    me.use();
+    w.tick(200);
+    // The draught at the middle of the (turned) footprint.
+    const b = again.grid.cellBounds()!;
+    const mid = again.grid.toWorld({ x: (b.minX + b.maxX) / 2, y: DECK, z: (b.minZ + b.maxZ) / 2 });
+    expect(Math.abs(SURFACE - mid.y - DRAUGHT) / DRAUGHT).toBeLessThan(0.03);
+    expect(tiltDeg(again)).toBeLessThan(2);
   });
 });

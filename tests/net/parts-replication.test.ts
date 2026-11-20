@@ -1,12 +1,12 @@
 /**
- * Replication of partial blocks end to end (docs/SHAPES.md 4.5, 13, 14.1, 16.3):
+ * Replication of partial blocks end to end (docs/SHAPES.md 4.5, 13, 14.1):
  *  - Replicator on a real Simulation (rig.ts: digests over every layer compared after every tick):
  *    chunk deltas (one per holes-only and second-part-only change), snapshots of a loaded modified
  *    column and of a stashed one, structure spawn records and structure deltas;
  *  - the host command SetCell (section 14.1): written when it passes, refused with a toast and no
  *    change by each of its four checks;
  *  - the server takes a Target.cell that is layout-valid garbage without throwing;
- *  - mining parts through a real client (P8b, docs/SHAPES.md 6.2 and 6.3): the client aims at an
+ *  - mining parts through a real client (docs/SHAPES.md 6.2 and 6.3): the client aims at an
  *    octant (HeadlessClient.mine with an octant) and sends it as Target.sub; the server mines the
  *    part containing it, one part at a time, and blockBroken carries that part; replica and server
  *    stay equal.

@@ -165,6 +165,24 @@ export function isDryCell(h: HullInfo, x: number, y: number, z: number): boolean
 }
 
 /**
+ * Does the ship cell (x,y,z) have at least one dry octant (sealed, or bilge while the hull floats)?
+ * For a cell that is air in the ship this is the dry counterpart of hullCavityCells (no hard
+ * octant, at least one cavity octant), so every cell that took water when the ship was assembled
+ * is cleared again when it docks (assembly.ts commitDock; docs/SHAPES.md 11.3, 19.5). An air cell is dry only in part when
+ * the spill line runs through its middle (lower half bilge, upper half open): its water level is
+ * half a layer, which only a path through octants of cells with parts can give (docs/SHAPES.md
+ * 12.3). Liquids never enter cells with parts, so once docked the sea cannot reach such a cell
+ * from the side, and clearing it removes no water the sea could refill. isDryCell (all eight
+ * octants dry) would leave that water inside the docked hull, to drain into the hold.
+ */
+export function hasDryOctant(h: HullInfo, x: number, y: number, z: number): boolean {
+  for (let o = 0; o < 8; o++) {
+    if (isDryHalf(h, 2 * x + (o & 1), 2 * y + ((o >> 1) & 1), 2 * z + (o >> 2))) return true;
+  }
+  return false;
+}
+
+/**
  * Do all 8 octants of this local cell displace water (hard, or a dry air pocket)? Solid cells
  * always; cavities as in isDryCell.
  */

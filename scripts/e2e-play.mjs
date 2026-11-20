@@ -10,7 +10,9 @@
 // Without --build / --renderer it runs both builds (the normal static site, and the single-file
 // artifact wrapped like the publishing host does) with both renderers (#webgl2, and the default,
 // WebGPU on SwiftShader through a headed browser on Xvfb). Steps: new world; walk, jump, swim;
-// mine and place; glue a face and build onto it; off-hand glue; pick block; the example boat:
+// mine and place; glue a face and build onto it; off-hand glue; pick block; half slabs (debug.slab):
+// walk up onto them and down again, mine one part of a two-part cell (the other stays), a small
+// ship of half slabs assembled at its helm floats and docks again; the example boat:
 // start the windmill, assemble at the helm, sail, turn, third-person views while sailing, open the
 // inventory at the helm, take the wheel again, dock; pause for ten seconds (nothing moves); switch
 // to survival, take fall damage, die, respawn; save and quit; reload the page; load the world:
@@ -443,6 +445,220 @@ async function session(build, renderer) {
     }, groundId);
     log(`picked block ${groundId}`);
     await shot('picked');
+
+    // ---- partial blocks (docs/SHAPES.md 14.1: debug.slab and debug.setCell, the host's commands,
+    // stand in for the M2.4 chisel). A strip of cleared ground away from the blocks placed above:
+    // a row of six lower half slabs on it, walked up onto without a jump and down off again; a
+    // two-part cell (cobble below, planks above) of which the planks half is mined, the cobble half
+    // stays.
+    {
+      const sx = Math.floor(p0.x) + 10;
+      const sz = Math.floor(p0.z);
+      const gy = Math.floor(p0.y);
+      const COBBLE_CELL = B.COBBLE;
+      const cells = [];
+      for (let x = sx - 1; x <= sx + 14; x++) {
+        for (let z = sz - 1; z <= sz + 1; z++) {
+          cells.push([x, gy - 1, z, COBBLE_CELL]);
+          for (let y = gy; y <= gy + 3; y++) cells.push([x, y, z, 0]);
+        }
+      }
+      await G((cs) => {
+        for (const [x, y, z, c] of cs) window.__blocklands.game.debug.setCell(x, y, z, c);
+      }, cells);
+      await waitFor('the strip cleared', ([x, y, z]) => (window.__blocklands.game.debug.cell(x, y, z) & 1023) === 2 && window.__blocklands.game.debug.cell(x, y + 1, z) === 0, [sx + 14, gy - 1, sz + 1]);
+      // The slab row covers x in [ROW0, ROW1); a player (half width 0.3) whose x is within 0.3 of it
+      // stands on it.
+      const ROW0 = sx + 2;
+      const ROW1 = sx + 8;
+      for (let x = ROW0; x < ROW1; x++) check(await G(([x, y, z]) => window.__blocklands.game.debug.slab(x, y, z, 10, 3), [x, gy, sz]), `cannot put a half slab at ${x} ${gy} ${sz}`);
+      await waitFor('the half slabs', ([x0, x1, y, z]) => {
+        for (let x = x0; x < x1; x++) if ((window.__blocklands.game.debug.parts(x, y, z) ?? []).length !== 1) return false;
+        return true;
+      }, [ROW0, ROW1, gy, sz]);
+      await teleport(sx + 0.5, gy, sz + 0.5);
+      await G(() => window.__blocklands.game.debug.look(-Math.PI / 2, 0));
+      await frames(3);
+      await shot('half-slabs');
+      const EAST = -Math.PI / 2;
+      const WEST = Math.PI / 2;
+      /** Let go of every key, then wait until the player stands still on something. */
+      const standStill = async (what) => {
+        let last = null;
+        await until(async () => {
+          const pl = (await state()).player;
+          const still = pl.onGround && last !== null && Math.abs(pl.x - last.x) < 0.005 && Math.abs(pl.y - last.y) < 0.005;
+          last = pl;
+          return still;
+        }, what, 30_000);
+        return last;
+      };
+      // Walk onto the row without a jump, let go of W as soon as the player is on it, and check that
+      // it stands still on top of the half slabs. Nothing is sampled while moving: the check is made
+      // standing. Letting go late (a slow renderer, a slow page.evaluate) can carry the player past
+      // the far end; it then walks back onto the row from the other side, which checks the same rule.
+      let onRow = null;
+      for (let attempt = 0, dir = EAST; attempt < 4 && onRow === null; attempt++, dir = dir === EAST ? WEST : EAST) {
+        await G((yaw) => window.__blocklands.game.debug.look(yaw, 0), dir);
+        await frames(3);
+        await holdUntil(['KeyW'], async () => {
+          const x = (await state()).player.x;
+          return dir === EAST ? x > ROW0 + 0.5 : x < ROW1 - 0.5;
+        }, `walking ${dir === EAST ? 'east' : 'west'} onto the half slabs`, 30_000, 50);
+        const pl = await standStill('the player standing still after walking onto the half slabs');
+        if (pl.x > ROW0 - 0.3 && pl.x < ROW1 + 0.3) onRow = pl;
+        else log(`walking ${dir === EAST ? 'east' : 'west'} onto the half slabs carried the player past them (stopped at x ${(pl.x - sx).toFixed(2)}); walking back`);
+      }
+      check(onRow !== null, 'never stopped on the half slabs in four attempts');
+      log(`standing on the half slabs at x ${(onRow.x - sx).toFixed(2)} y ${(onRow.y - gy).toFixed(2)}`);
+      check(Math.abs(onRow.y - (gy + 0.5)) < 0.02, `not standing on top of the half slabs (walked up without a jump): y ${(onRow.y - gy).toFixed(3)} above the ground`);
+      // Walk on east and down off the far end of the row, back onto the ground.
+      await G((yaw) => window.__blocklands.game.debug.look(yaw, 0), EAST);
+      await frames(3);
+      await holdUntil(['KeyW'], async () => (await state()).player.x > ROW1 + 1.5, 'walking down off the half slabs', 30_000, 50);
+      const end = await standStill('the player standing still past the half slabs');
+      log(`down off the half slabs: standing at x ${(end.x - sx).toFixed(2)} y ${(end.y - gy).toFixed(2)}`);
+      check(Math.abs(end.y - gy) < 0.02 && end.x > ROW1 + 0.3, `not back down on the ground past the slabs (at ${end.x.toFixed(2)} ${end.y.toFixed(2)})`);
+      // A two-part cell ahead: cobble below, planks above; the planks half is mined (creative: one click).
+      // The player is put a few steps before it (walking may have carried it anywhere past the row).
+      const two = { x: sx + 13, y: gy, z: sz };
+      await teleport(sx + 10.5, gy, sz + 0.5);
+      check(await G(([c]) => window.__blocklands.game.debug.slab(c.x, c.y, c.z, 2, 3), [two]), 'cannot put the cobble half');
+      await waitFor('the cobble half', (c) => (window.__blocklands.game.debug.parts(c.x, c.y, c.z) ?? []).length === 1, two);
+      check(await G(([c]) => window.__blocklands.game.debug.slab(c.x, c.y, c.z, 10, 2), [two]), 'cannot put the planks half');
+      await waitFor('the two-part cell', (c) => (window.__blocklands.game.debug.parts(c.x, c.y, c.z) ?? []).length === 2, two);
+      await selectItem(B.PLANKS);
+      await G(() => window.__blocklands.game.debug.look(-Math.PI / 2, 0));
+      await frames(3);
+      // Aim at the upper half of the cell's west face.
+      await G((c) => {
+        const g = window.__blocklands.game;
+        const p = g.debug.state().player;
+        const dx = c.x + 0.02 - p.shownX;
+        const dy = c.y + 0.75 - (p.shownY + p.eyeHeight);
+        const dz = c.z + 0.5 - p.shownZ;
+        g.debug.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)));
+      }, two);
+      await frames(3);
+      const t = (await state()).target;
+      check(onTarget(t, two) && t.sub >= 2 && (t.sub & 2) !== 0, `not aiming at the upper half of the two-part cell: ${JSON.stringify(t)}`);
+      await shot('two-part-cell');
+      await click('left');
+      await waitFor('the planks half mined', (c) => {
+        const parts = window.__blocklands.game.debug.parts(c.x, c.y, c.z) ?? [];
+        return parts.length === 1 && parts[0].id === 2 && parts[0].fill === 0x33;
+      }, two);
+      log('mined the planks half of the two-part cell; the cobble half stays');
+      await shot('one-part-left');
+    }
+
+    // ---- a small ship of half slabs: on open water near the example boat, a 3 x 3 raft of lower
+    // planks half slabs around one full plank, with a helm on it; assembled at the helm, it floats,
+    // then it is docked again.
+    {
+      const site = await G(() => {
+        const d = window.__blocklands.game.debug;
+        const p = d.state().player;
+        const water = (x, z) => [45, 46, 47].every((y) => (d.cell(x, y, z) & 1023) === 30) && d.cell(x, 48, z) === 0;
+        let best = null;
+        for (let r = 6; r <= 60 && best === null; r++) {
+          for (let x = Math.floor(p.x) - r; x <= Math.floor(p.x) + r && best === null; x++) {
+            for (const z of [Math.floor(p.z) - r, Math.floor(p.z) + r]) {
+              let open = true;
+              for (let i = -3; i <= 3 && open; i++) for (let k = -3; k <= 3 && open; k++) if (!water(x + i, z + k)) open = false;
+              if (open) {
+                best = { x, z };
+                break;
+              }
+            }
+          }
+        }
+        return best;
+      });
+      check(site !== null, 'no open water for the slab raft');
+      const LOWER_PLANKS = 10 + 0xcc * 65536; // planks, holes = the upper half (docs/SHAPES.md 1.2)
+      const raftCells = [];
+      for (let i = -1; i <= 1; i++) for (let k = -1; k <= 1; k++) raftCells.push([site.x + i, 47, site.z + k, i === 0 && k === 0 ? B.PLANKS : LOWER_PLANKS]);
+      await G((cs) => {
+        for (const [x, y, z, c] of cs) window.__blocklands.game.debug.setCell(x, y, z, c);
+      }, raftCells);
+      await waitFor('the slab raft', (c) => (window.__blocklands.game.debug.cell(c.x, 47, c.z) & 1023) === 10 && (window.__blocklands.game.debug.parts(c.x + 1, 47, c.z + 1) ?? [])[0]?.fill === 0x33, site);
+      log(`slab raft built at ${site.x} 47 ${site.z}`);
+      // Stand on its south slab row; put a helm on the full plank in the middle (a functional block
+      // is placed by hand: SetCell refuses it), then preview and assemble at it.
+      await teleport(site.x + 0.5, 47.6, site.z + 1.5);
+      check(await G(() => window.__blocklands.game.debug.give(50, 1)), 'no helm given');
+      const centre = { x: site.x, y: 47, z: site.z };
+      check(onTarget(await aim(centre, PY), centre, PY), 'cannot aim at the top of the raft\'s middle plank');
+      await click('right');
+      const helmCell = { x: site.x, y: 48, z: site.z };
+      await waitFor('the helm on the slab raft', (c) => (window.__blocklands.game.debug.cell(c.x, c.y, c.z) & 1023) === 50, helmCell);
+      await selectItem(B.PLANKS);
+      check(await aimAny(helmCell), 'cannot aim at the slab raft\'s helm');
+      await click('right');
+      await page.waitForTimeout(500);
+      await click('right');
+      await waitFor('the slab raft assembled and steered', () => {
+        const s = window.__blocklands.game.debug.state();
+        return s.structures.some((x) => x.kind === 'ship') && s.player.steeringShipId !== 0;
+      });
+      const raft = (await state()).structures.find((x) => x.kind === 'ship');
+      check(raft.cells === 10, `the slab raft has ${raft.cells} cells, not 10`);
+      await shot('slab-raft');
+      // It floats: over a few seconds it neither sinks nor drifts up out of the water.
+      const ys = [];
+      for (let i = 0; i < 10; i++) {
+        await page.waitForTimeout(400);
+        ys.push((await state()).structures.find((x) => x.id === raft.id).y);
+      }
+      const lo = Math.min(...ys);
+      const hi = Math.max(...ys);
+      log(`slab raft #${raft.id} (${raft.cells} cells) floats: pivot y ${lo.toFixed(3)}..${hi.toFixed(3)}`);
+      // The pivot is the centre of mass. Mass 8 x 0.25 + 0.5 (planks) + 0.6 (helm) = 3.1 on a 9-cell
+      // waterplane: draught 0.344 below the surface at 47.875, centre of mass 0.532 above the bottom,
+      // so 48.063 (headless: 48.0628). The same raft of full planks would float at 47.926.
+      const FLOAT_Y = 48.063;
+      check(hi - lo < 0.05 && Math.abs(lo - FLOAT_Y) < 0.075 && Math.abs(hi - FLOAT_Y) < 0.075, `the slab raft does not float steadily at its draught (pivot y ${lo.toFixed(3)}..${hi.toFixed(3)}, expected ${FLOAT_Y})`);
+      // Dock it again (sneak + right-click while steering) so the example boat is the only ship below.
+      let docked = false;
+      for (let i = 0; i < 4 && !docked; i++) {
+        await page.keyboard.down('ShiftLeft');
+        await page.waitForTimeout(300);
+        await click('right');
+        try {
+          await waitFor('the slab raft docked', () => !window.__blocklands.game.debug.state().structures.some((s) => s.kind === 'ship'), undefined, 30_000);
+          docked = true;
+        } catch {
+          if ((await state()).player.steeringShipId === 0 && (await aimAny(helmCell, raft.id))) await click('right');
+        } finally {
+          await page.keyboard.up('ShiftLeft');
+        }
+      }
+      check(docked, 'the slab raft did not dock');
+      // The cells landed as they were: around the helm's plank, eight cells of one planks part with
+      // the lower half filled (a 3 x 3 square of lower slabs looks the same turned any way).
+      const landed = await G((c) => {
+        const d = window.__blocklands.game.debug;
+        for (let y = 45; y <= 49; y++) {
+          for (let x = c.x - 5; x <= c.x + 5; x++) {
+            for (let z = c.z - 5; z <= c.z + 5; z++) {
+              if ((d.cell(x, y + 1, z) & 1023) !== 50) continue;
+              const mid = d.parts(x, y, z) ?? [];
+              const ring = [];
+              for (let i = -1; i <= 1; i++) for (let k = -1; k <= 1; k++) if (i !== 0 || k !== 0) ring.push(d.parts(x + i, y, z + k) ?? []);
+              return { at: { x, y, z }, mid, ring };
+            }
+          }
+        }
+        return null;
+      }, site);
+      check(landed !== null, 'no helm found where the slab raft docked');
+      const slabOk = (ps) => ps.length === 1 && ps[0].id === 10 && ps[0].fill === 0x33;
+      check(landed.mid.length === 1 && landed.mid[0].id === 10 && landed.mid[0].fill === 0xff, `the docked raft's middle is not a full plank: ${JSON.stringify(landed.mid)}`);
+      check(landed.ring.every(slabOk), `the docked raft's ring is not eight lower planks half slabs: ${JSON.stringify(landed.ring)}`);
+      log(`the slab raft docked again at ${JSON.stringify(landed.at)}: a full plank under the helm, eight lower half slabs around it`);
+      await teleport(p0.x, p0.y, p0.z);
+    }
 
     // ---- the example boat: start the windmill
     const under = along(6);

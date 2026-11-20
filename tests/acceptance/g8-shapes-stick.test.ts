@@ -2,12 +2,17 @@
  * Acceptance scenarios 42 and 43 (docs/ACCEPTANCE.md "形状与凿子"; docs/SHAPES.md 10, 11, 16.4),
  * headless, whole simulation, in both modes (direct, and through the protocol):
  *  - 42: two cells only stick where both have material on the shared face: an upper slab and the
- *    upper slab in the cell above are not connected; chiselling away the material on a glued face
- *    removes the glue there.
- *  - 43, the part of package P7: a ship of slabs and stairs assembles with every part; docked back
+ *    upper slab in the cell above are not connected, nor an upper slab beside lower slabs (a line of
+ *    contact); chiselling away the material on a glued face removes the glue there. Asserted
+ *    through assembly: what leaves with the ship.
+ *  - 43, assembling and docking: a ship of slabs and stairs assembles with every part; docked back
  *    unrotated its shapes are unchanged, and re-assembling takes the same number of cells; docked
- *    after a quarter turn every shape (second parts included) is turned with it. (Floating and
- *    draft belong to P9: tests/acceptance/g8-shapes-ship.test.ts.)
+ *    after a quarter turn every shape (second parts included) is turned with it; a hull part lands
+ *    in a world cell holding a part it does not overlap and they merge (the merged cell then leaves
+ *    whole), a cell that already holds two parts refuses the dock (toast.dock.twoParts); docked in
+ *    the sea (at once where it was built, or after it floated), a hull with half-cell walls leaves
+ *    no water in its dry hold. (Floating, draught, and
+ *    a quarter turn steered at sea: tests/acceptance/g8-shapes-ship.test.ts.)
  *
  * Scenes are written on the server (w.sim): the tools that make partial blocks come in M2.4, and
  * "chiselling" is a direct cell write (docs/SHAPES.md 14.1, 16.4). The player assembles, glues,
@@ -17,17 +22,17 @@ import { describe, expect, it } from 'vitest';
 import { facingState, ID_MASK, makeCell } from '../../src/blocks/cell';
 import { B } from '../../src/blocks/defs';
 import { canonCell, withoutOctant } from '../../src/blocks/shapes';
-import { NX, NZ, PX, PZ, type Dir } from '../../src/core/dirs';
+import { NX, NZ, PX, PY, PZ, type Dir } from '../../src/core/dirs';
 import { qfromYaw, qrotate, vec3, vsub } from '../../src/core/math';
 import { I } from '../../src/blocks/items';
-import { dockSnap, snapCell } from '../../src/structures/assembly';
+import { dockSnap, snapCell, type SnapTransform } from '../../src/structures/assembly';
 import { HULL_MIXED, hullCavityCells, hullKindAt, isDryCell } from '../../src/structures/hull';
 import { rotCell } from '../../src/structures/orient';
 import type { Ship } from '../../src/structures/structure';
 import { getPacked } from '../../src/voxel/parts';
 import { EAST, LOWER, NORTH, slab, SOUTH, stairFill, UPPER, WEST } from '../shapes';
-import { assembleShipByHand, makeWorld, T } from './g1-stick-glue-helpers';
-import { onlyShip, SEA_TOP, seaWorld } from './g2-assemble-dock-helpers';
+import { assembleShipByHand, makeWorld, T, Toasts } from './g1-stick-glue-helpers';
+import { SEA_TOP, seaWorld } from './g2-assemble-dock-helpers';
 import { structureLabels, worldLabels } from './g8-shapes-helpers';
 import type { TestWorld } from './world';
 
@@ -49,7 +54,7 @@ function previewKeys(w: TestWorld): string[] {
 }
 
 describe('42. 两格只有在共享面上都有材质时才粘连：一格的上半砖和它上方那格的上半砖不相连。凿掉接触面上的材质后，那个面上的胶消失。', () => {
-  it('一格的上半砖和它上方那格的上半砖不相连: the ship takes the upper slab beside the deck, not the upper slab above it; a lower slab above it comes along', () => {
+  it('一格的上半砖和它上方那格的上半砖不相连: the ship takes the upper slab beside the deck, not the upper slab above it; a lower slab above it comes along; an upper slab beside lower slabs (a line of contact) stays', () => {
     const w = makeWorld();
     const { sim } = w;
     smallDeck(w);
@@ -59,16 +64,26 @@ describe('42. 两格只有在共享面上都有材质时才粘连：一格的上
     // Column B: the same, but a lower slab above (it rests on the upper slab's top face).
     sim.world.setCell(3, T, -3, slab(B.PLANKS_OAK, UPPER));
     sim.world.setCell(3, T + 1, -3, slab(B.PLANKS_OAK, LOWER));
+    // West of the deck: lower slabs beside the deck and beside each other (their faces overlap on
+    // the lower half: connected), and an upper slab beside two of them, which meets each only along
+    // a line (no common area: not connected, question 9 of section 17).
+    sim.world.setCell(-1, T, -3, slab(B.PLANKS_OAK, LOWER));
+    sim.world.setCell(-1, T, -4, slab(B.PLANKS_OAK, LOWER));
+    sim.world.setCell(-2, T, -4, slab(B.PLANKS_OAK, LOWER));
+    sim.world.setCell(-2, T, -3, slab(B.PLANKS_OAK, UPPER));
     const a = assembleShipByHand(w, 1, T + 1, -3);
     const deck: string[] = [];
     for (let x = 0; x <= 2; x++) for (let z = -4; z <= -3; z++) deck.push(`${x},${T},${z}`);
-    const want = [...deck, `1,${T + 1},-3`, `3,${T},-4`, `3,${T},-3`, `3,${T + 1},-3`].sort();
+    const west = [`-1,${T},-3`, `-1,${T},-4`, `-2,${T},-4`];
+    const want = [...deck, ...west, `1,${T + 1},-3`, `3,${T},-4`, `3,${T},-3`, `3,${T + 1},-3`].sort();
     expect(a.structure.grid.count).toBe(want.length);
     expect(structureLabels(a.structure).map((l) => l.split(':')[0]!).sort()).toEqual(want);
     expect(structureLabels(a.structure)).toContain(`3,${T + 1},-3:planks_oak[33]`);
     // The upper slab above column A stays in the world, unchanged.
     expect(worldLabels(sim, 3, T + 1, -4, 3, T + 1, -4)).toEqual([`3,${T + 1},-4:planks_oak[cc]`]);
     expect(getPacked(sim.world, 3, T, -4)).toBe(0);
+    // The upper slab beside the lower ones stays in the world.
+    expect(worldLabels(sim, -2, T, -3, -2, T, -3)).toEqual([`-2,${T},-3:planks_oak[cc]`]);
   });
 
   it('凿掉接触面上的材质后，那个面上的胶消失: glue the deck\'s face, place bricks against it (glued in); chisel the touching half: the glue is gone and the ship leaves the bricks', () => {
@@ -222,20 +237,66 @@ describe('43. 用半砖和楼梯造的船能组装；停靠后形状不变，再
     expect(again.grid.count).toBe(RAFT_CELLS);
   });
 
+  it('停靠时落下的部件和世界里的部件不重叠就合并 (SHAPES 11.3, question 2): a lower slab of the hull lands in a world cell holding an upper stone slab and they merge; the merged cell then leaves whole with the next assembly. A cell that already holds two parts refuses the dock with toast.dock.twoParts', () => {
+    const w = makeWorld();
+    const { sim } = w;
+    raft(w);
+    const ship = assemble(w);
+    // While the raft is away, an upper stone slab is put where its lower planks slab (-2, T + 1, -6) lands.
+    sim.world.setCell(-2, T + 1, -6, slab(B.STONE, UPPER));
+    // West of it a stone block, glued on its east face (the face the stone slab touches): that glue
+    // must go when the slab becomes part of a cell that landed (a dock makes no new connection,
+    // SHAPES 11.3 胶; question 2 of section 17).
+    sim.world.setCell(-3, T + 1, -6, makeCell(B.STONE));
+    sim.worldGlue.add(-3, T + 1, -6, PX);
+    const toasts = new Toasts(sim);
+    dock(w, ship);
+    expect(ship.removed).toBe(true);
+    expect(toasts.keys()).not.toContain('toast.dock.blocked');
+    expect(worldLabels(sim, -2, T + 1, -6, -2, T + 1, -6)).toEqual([`-2,${T + 1},-6:planks_oak[33]+stone[cc]`]);
+    expect(sim.worldGlue.has(-3, T + 1, -6, PX)).toBe(false);
+    // Assembling again takes the merged cell whole (the stone part with it), the same number of cells.
+    const again = assemble(w);
+    expect(again.grid.count).toBe(RAFT_CELLS);
+    expect(structureLabels(again)).toContain(`-2,${T + 1},-6:planks_oak[33]+stone[cc]`);
+    expect(getPacked(sim.world, -2, T + 1, -6)).toBe(0);
+    expect(getPacked(sim.world, -3, T + 1, -6)).toBe(makeCell(B.STONE));
+    // Where the single planks octant (2, T + 1, -6) lands, a cell of two other parts now: they do
+    // not overlap it, but a third part does not fit (a cell holds at most two).
+    const two = canonCell(slab(B.STONE, 0x02), slab(B.BRICKS, SOUTH));
+    sim.world.setCell(2, T + 1, -6, two);
+    toasts.clear();
+    dock(w, again);
+    expect(again.removed).toBe(false);
+    expect(toasts.keys()).toEqual(['toast.dock.twoParts']);
+    expect(getPacked(sim.world, 2, T + 1, -6)).toBe(two);
+    expect(sim.structures.ships()).toHaveLength(1);
+    // With that cell emptied, the dock goes through.
+    sim.world.setCell(2, T + 1, -6, 0);
+    toasts.clear();
+    dock(w, again);
+    expect(again.removed).toBe(true);
+    expect(getPacked(sim.world, 2, T + 1, -6)).toBe(slab(B.PLANKS_OAK, 0x01));
+  });
+
   // The hold of a boat in the sea, built dry, with its rim (the top water layer) made of LOWER
   // slabs: the cells inside the rim layer are half dry (their lower half is bilge, the spill line
   // runs through their middle). Assembling refills water under every cavity cell (hullCavityCells);
   // docking where it was built must take all of it out again, or the water enclosed by the slab
   // rim (a wall for liquids in the world) drains into the hold. A rim of full planks is the M1 case.
+  // The player does everything, standing on the boat's south rim: assembles at the helm, lets go of
+  // the wheel and docks it at once (sneak + right-click on the helm's top), before it has moved: it
+  // lands where it was built, its hold below the sea's surface. Then the same boat assembled again
+  // and left afloat: it rises (the hold is mostly air) and settles; docked where it floats, its
+  // hold is dry too.
   for (const [name, rim] of [
     ['full plank rim', makeCell(B.PLANKS_OAK)],
     ['lower slab rim', slab(B.PLANKS_OAK, LOWER)],
   ] as const) {
-    it(`停靠后船舱保持干燥 (${name}): assembled in the sea and docked where it was built, no water is left inside the hull, and none drains in later`, () => {
+    it(`停靠后船舱保持干燥 (${name}): the player assembles the boat in the sea and docks it where it was built, or after it floated: no water is left inside the hull, and none drains in later`, () => {
       const top = SEA_TOP - 1; // the top water layer
-      const w = seaWorld({ spawn: { x: 2.5, y: SEA_TOP + 1, z: 6.5 } });
-      const { sim } = w;
-      for (let x = 1; x <= 3; x++) sim.world.setCell(x, SEA_TOP, 6, makeCell(B.STONE)); // a pier
+      const w = seaWorld({ spawn: { x: 2.5, y: SEA_TOP, z: 4.5 } }); // on the south rim
+      const { sim, me } = w;
       for (let z = 0; z <= 4; z++) {
         for (let x = 0; x <= 4; x++) {
           const edge = x === 0 || x === 4 || z === 0 || z === 4;
@@ -246,20 +307,34 @@ describe('43. 用半砖和楼梯造的船能组装；停靠后形状不变，再
       }
       sim.world.setCell(2, top - 1, 3, HELM_N);
       w.tick(20);
-      const waterInside = (y: number): number => {
+      /** Water cells in the hold's two layers (ship-local y = top - 1 and top) of a hull lying at `t`. */
+      const waterInside = (t: SnapTransform | null = null): number => {
         let n = 0;
-        for (let z = 1; z <= 3; z++) for (let x = 1; x <= 3; x++) if ((sim.world.getCell(x, y, z) & ID_MASK) === B.WATER) n++;
+        const d = vec3();
+        for (const y of [top - 1, top]) {
+          for (let z = 1; z <= 3; z++) {
+            for (let x = 1; x <= 3; x++) {
+              if (t === null) d.x = x, d.y = y, d.z = z;
+              else snapCell(t, x, y, z, d);
+              if ((sim.world.getCell(d.x, d.y, d.z) & ID_MASK) === B.WATER) n++;
+            }
+          }
+        }
         return n;
       };
-      expect(waterInside(top - 1) + waterInside(top)).toBe(0);
-      const a = sim.structures.assembleShip(2, top - 1, 3);
-      expect(a.ok).toBe(true);
-      const ship = onlyShip(sim);
+      /** The player docks the ship (sneak + right-click on the top of its helm). */
+      const dockByHand = (ship: Ship): void => {
+        me.input.sneak = true;
+        expect(me.useOn(2, top - 1, 3, PY, ship.id), 'aim at the helm').toBe(true);
+        me.input.sneak = false;
+        expect(ship.removed).toBe(true);
+      };
+      expect(waterInside()).toBe(0);
+      const ship = assembleShipByHand(w, 2, top - 1, 3, PY).structure;
       const h = ship.hull!;
       expect(h.floats).toBe(true);
       // The sea closed over the footprint: sources under the hold and under the rim layer.
-      expect(waterInside(top - 1)).toBe(9);
-      expect(waterInside(top)).toBe(9);
+      expect(waterInside()).toBe(18);
       const cav = hullCavityCells(h);
       let cavRim = 0;
       for (let i = 0; i < cav.length; i += 3) if (cav[i + 1] === top) cavRim++;
@@ -269,13 +344,30 @@ describe('43. 用半砖和楼梯造的船能组装；停靠后形状不变，再
         expect(hullKindAt(h, 2, top, 2)).toBe(HULL_MIXED);
         expect(isDryCell(h, 2, top, 2)).toBe(false);
       }
-      const res = sim.structures.dockShip(ship); // at once: the ship has not moved
-      expect(res.ok).toBe(true);
-      expect(waterInside(top - 1)).toBe(0);
-      expect(waterInside(top)).toBe(0);
+      // Docked at once: it lands where it was built, and the water under the hold goes again.
+      me.use(); // let go of the wheel
+      w.tick();
+      expect(me.player.steeringShipId).toBe(0);
+      const here = snapCell(dockSnap(ship.grid), 2, top - 1, 3);
+      expect([here.x, here.y, here.z]).toEqual([2, top - 1, 3]);
+      dockByHand(ship);
+      expect(waterInside()).toBe(0);
       w.tick(200);
-      expect(waterInside(top - 1)).toBe(0);
-      expect(waterInside(top)).toBe(0);
+      expect(waterInside()).toBe(0);
+      // Assembled again and left afloat: it rises and settles; docked where it floats.
+      const again = assembleShipByHand(w, 2, top - 1, 3, PY).structure;
+      me.use();
+      w.tick(100);
+      expect(again.removed).toBe(false);
+      const t = dockSnap(again.grid);
+      expect(t.r).toEqual({ ax: 0, ay: 2, az: 4 }); // upright, not turned
+      const lands = snapCell(t, 2, top - 1, 3);
+      expect(lands.y, 'it rose before docking').toBeGreaterThan(top - 1);
+      dockByHand(again);
+      expect(getPacked(sim.world, lands.x, lands.y, lands.z)).toBe(HELM_N);
+      expect(waterInside(t)).toBe(0);
+      w.tick(200);
+      expect(waterInside(t)).toBe(0);
     });
   }
 });

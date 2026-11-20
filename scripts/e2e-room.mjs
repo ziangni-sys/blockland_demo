@@ -22,13 +22,15 @@
 //   opens the room from the pause menu's room screen (the link copied); a guest opens the link, is
 //   asked its name, and the loading screen shows the stages; the Tab list, the guest's room screen
 //   and its diagnostics text (copied), the host makes the guest a survivor; the guest plays for a
-//   minute (walk, place, mine) and the two replicas agree; the host removes the guest, who reads
+//   minute (walk, place, mine), the host puts half slabs and a two-part cell over its head
+//   (debug.slab), and the two replicas agree, partial cells included; the host removes the guest, who reads
 //   why; the join screen refuses nonsense; the same identity and an unknown room end in their
 //   messages with "Try again"; manual invitation codes copied between the pages; the host closing
 //   the world; the host's page dying (reconnecting with "Give up", then the end). Each screen is
 //   shot in English and Chinese (game-<step>-<lang>.png).
 // ship (package 14, the two-page smoke test): two pages of the built game. The host builds a raft
-//   (15 planks on the water by a beach) and a helm with clicks and keys, opens the room through the
+//   (15 planks on the water by a beach) and a helm with clicks and keys, puts half slabs and a
+//   two-part cell on its far row (debug.slab), opens the room through the
 //   room screen; the guest opens the invitation link, flies over to the beach, lands and walks onto
 //   the raft; the host assembles it and sails. While it sails, each page must see it move and draw
 //   the other player, with the right name, where the server has them in the raft's frame (the
@@ -608,6 +610,26 @@ async function runGame(browser) {
     log(`${((Date.now() - playStart) / 1000).toFixed(0)} s of play (${laps} laps): walked ${walked.toFixed(1)} blocks, placed ${placed}, broke ${mined}; guest ${after.stats.fps} fps, rtt ${Math.round(after.stats.rttMs)} ms`);
     check(walked > 3 && placed >= 3 && mined >= 3, 'the guest could not walk, place and break for a minute');
     await shot(guest, '03-guest-after-play');
+    // Partial cells (docs/SHAPES.md 14.1: the host's debug command stands in for the M2.4 tools)
+    // over the guest's head: a two-part cell (cobble below, planks above), a west half slab, an
+    // upper half slab. The guest's replica must hold them before the digests are compared, so the
+    // comparison covers both extra layers (holes, second parts).
+    const gp = (await st(guest)).player;
+    const px = Math.floor(gp.x);
+    const py = Math.floor(gp.y) + 3;
+    const pz = Math.floor(gp.z);
+    const partial = [
+      [px + 1, py, pz, 2, 3],
+      [px + 1, py, pz, 10, 2],
+      [px - 1, py, pz, 10, 1],
+      [px, py, pz + 1, 2, 2],
+    ];
+    for (const [x, y, z, id, dir] of partial) {
+      check(await host.evaluate(([x, y, z, id, dir]) => window.__blocklands.game.debug.slab(x, y, z, id, dir), [x, y, z, id, dir]), `the host cannot put a half slab at ${x} ${y} ${z}`);
+      await host.waitForFunction(([x, y, z, id]) => (window.__blocklands.game.debug.parts(x, y, z) ?? []).some((p) => p.id === id), [x, y, z, id], { timeout: 10_000, polling: 100 });
+    }
+    await guest.waitForFunction(([x, y, z]) => (window.__blocklands.game.debug.parts(x, y, z) ?? []).length === 2, [px + 1, py, pz], { timeout: 20_000, polling: 100 });
+    log(`the host put half slabs over the guest (a two-part cell at ${px + 1} ${py} ${pz}); the guest sees them`);
     // The two replicas agree around the guest (the host's own replica is the server's, checked by the headless tests).
     let diff = null;
     for (let i = 0; i < 10; i++) {
@@ -1123,9 +1145,17 @@ async function runShip(browser, signal) {
       helmed = await host.until(async () => (await host.cell(helm)) === ITEM.helm, 'the helm', 20_000, 150).then(() => true, () => false);
     }
     check(helmed, 'could not place the helm');
+    // Partial cells on the far row of the deck (docs/SHAPES.md 14.1: the host's debug command stands
+    // in for the M2.4 tools): lower planks half slabs, and a two-part cell (planks below, cobble
+    // above). They sail with the raft and dock back with it, so the final comparison of the two
+    // replicas with the server covers both extra layers.
+    for (const [c, id, dir] of [[at(5, 1, SEA_Y + 1), ITEM.planks, 3], [at(5, -1, SEA_Y + 1), ITEM.planks, 3], [at(5, 0, SEA_Y + 1), ITEM.planks, 3], [at(5, 0, SEA_Y + 1), 2, 2]]) {
+      check(await host.G(([c, id, dir]) => window.__blocklands.game.debug.slab(c.x, c.y, c.z, id, dir), [c, id, dir]), `the host cannot put a half slab at ${c.x} ${c.y} ${c.z}`);
+      await host.until(async () => (await host.G(([c, id]) => (window.__blocklands.game.debug.parts(c.x, c.y, c.z) ?? []).some((p) => p.id === id), [c, id])), `a half slab at ${c.x} ${c.y} ${c.z}`, 20_000, 150);
+    }
     await host.flight(false);
     await host.until(async () => (await host.own()).onGround, 'the host on the beach', 20_000);
-    log(`the host built the raft (15 planks) and the helm in ${((Date.now() - tb) / 1000).toFixed(0)} s`);
+    log(`the host built the raft (15 planks), the helm and 3 partial cells in ${((Date.now() - tb) / 1000).toFixed(0)} s`);
     await host.lookAtPoint(at(3, 0).x + 0.5, SEA_Y + 1.2, at(3, 0).z + 0.5);
     await shot(host, '01-raft-built');
 
@@ -1165,12 +1195,6 @@ async function runShip(browser, signal) {
     const hostId = (await host.own()).id;
     const guestId = (await guest.own()).id;
     await host.until(async () => (await host.state()).online.players.length === 2, "the guest in the host's list", 20_000);
-    // The guest flies over to the beach and lands there, then walks onto the raft.
-    await guest.flight(true);
-    const beach = { x: raft.x + 0.5, z: raft.z + 0.5 };
-    const g0 = await guest.own();
-    const cruise = Math.max(g0.y, SEA_Y + 1) + 14;
-    await guest.holdUntil(['Space'], async () => (await guest.own()).y >= cruise, 'the guest rising', 60_000);
     /**
      * Go to x, z holding W, in short presses timed from the distance left (`speed` blocks a second):
      * reading the page's state takes a few hundred ms on a page drawing a frame or two a second, so
@@ -1192,12 +1216,32 @@ async function runShip(browser, signal) {
       throw new StepError(`${what}: the guest stopped at ${g.x.toFixed(2)} ${g.z.toFixed(2)}, ${Math.hypot(g.x - x, g.z - z).toFixed(2)} from it`);
     };
     const flyTo = (x, z, what) => goTo(x, z, 10, 0.5, what);
-    await flyTo(beach.x, beach.z, 'the guest flying to the beach');
-    await guest.flight(false);
-    await guest.until(async () => {
+    // The guest flies over to the beach and lands there, then walks onto the raft. On a busy
+    // machine the last legs of the flight can leave it a little more than the tolerance off the
+    // beach, or let it come down beside the beach (on the grass, at another height): it then takes
+    // off again and makes another approach, three in all.
+    const beach = { x: raft.x + 0.5, z: raft.z + 0.5 };
+    let landed = false;
+    for (let attempt = 1; attempt <= 3 && !landed; attempt++) {
+      await guest.flight(true);
+      const g0 = await guest.own();
+      const cruise = Math.max(g0.y, SEA_Y + 1) + 14;
+      await guest.holdUntil(['Space'], async () => (await guest.own()).y >= cruise, 'the guest rising', 60_000);
+      try {
+        await flyTo(beach.x, beach.z, 'the guest flying to the beach');
+      } catch (e) {
+        if (!(e instanceof StepError) || attempt === 3) throw e;
+        log(`approach ${attempt}: ${e.message}; again`);
+        continue;
+      }
+      await guest.flight(false);
+      await guest.until(async () => (await guest.own()).onGround, 'the guest coming down', 60_000);
       const g = await guest.own();
-      return g.onGround && Math.abs(g.y - (SEA_Y + 1)) < 0.05;
-    }, 'the guest landing on the beach', 60_000);
+      const off = Math.hypot(g.x - beach.x, g.z - beach.z);
+      landed = Math.abs(g.y - (SEA_Y + 1)) < 0.05 && off < 0.8;
+      if (!landed) log(`approach ${attempt}: the guest came down at ${g.x.toFixed(2)} ${g.y.toFixed(2)} ${g.z.toFixed(2)}, ${off.toFixed(2)} from the beach; again`);
+    }
+    if (!landed) throw new StepError('the guest did not land on the beach in three approaches');
     // On the raft as a careful player does: sneaking (slow, and the sneak guard keeps a body from
     // walking off an edge; it also never sprints, which two presses of W close together would start).
     const walkTo = (c, what, tol = 0.45) => goTo(c.x, c.z, 1.3, tol, what, ['ShiftLeft', 'KeyW']);
