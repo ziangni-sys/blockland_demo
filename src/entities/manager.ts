@@ -975,7 +975,7 @@ export class EntityManager {
       // on a moving deck counts from where it began: both ends at the server's present poses).
       body.sampleFluids(p);
       sampled = true;
-      // Held up where the report put it (claimed to stand or not: drive.ts heldEnd): the envelope
+      // Landed where the report put it (claimed to stand or not: drive.ts heldEnd): the envelope
       // starts again there. Else it goes on (after an unseen landing, from the ground the body came
       // down on: drive.ts VERTICAL ENVELOPE).
       if (judge.heldEnd || p.wet > 0 || p.inLava || p.flying) d.resetEnvelope(JUMP_SPEED, true);
@@ -989,7 +989,16 @@ export class EntityManager {
         d.envHeld = judge.envHeld;
         d.envPaid = judge.envPaid;
       }
-      const total = trackFall(p, y0 > p.pos.y ? y0 - p.pos.y : 0, false);
+      let total = trackFall(p, y0 > p.pos.y ? y0 - p.pos.y : 0, false);
+      // Landed without saying it stands (drive.ts heldEnd): the fall ends there all the same, with
+      // the drop to what holds the body up (ReportJudge.landingFall). Else a client that never
+      // claimed to stand would never pay for a fall: it would end every report a hair above the
+      // ground, the envelope starting again at each, and wash the fall off in a puddle. (A dry
+      // body: in liquid or flying, trackFall has dropped the fall already.)
+      if (total < 0 && judge.heldEnd && p.fallDistance > 0) {
+        total = judge.landingFall(p, p.fallDistance);
+        p.fallDistance = 0;
+      }
       // Several reports can arrive in one tick (jitter, coalescing): the landing report may be
       // followed by standing ones, whose "landings" of 0 must not hide it. The largest counts.
       if (total > landed) {

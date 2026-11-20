@@ -13,6 +13,8 @@ export class Liar {
   landings = 0;
   /** Reports go in this carrier's frame (0: the world). */
   carrierId = 0;
+  /** Ticks the client's copies of the ships lag the server by, as its reports claim (viewTick): the lag the checks allow for (drive.ts LAG). */
+  viewLag = 2;
   private wasOnGround = true;
   readonly causes: string[] = [];
   constructor(readonly run: Run) {
@@ -47,7 +49,7 @@ export class Liar {
     r.pos.z = z;
     r.vel.y = vy;
     r.onGround = onGround;
-    r.viewTick = this.run.sim.ticks - 2;
+    r.viewTick = this.run.sim.ticks - this.viewLag;
     if (onGround && !this.wasOnGround) this.landings = (this.landings + 1) & 255;
     this.wasOnGround = onGround;
     r.landings = this.landings;

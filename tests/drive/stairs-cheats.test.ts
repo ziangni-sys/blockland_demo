@@ -7,12 +7,13 @@
  *     the two places (the staircase path of item 3 passes): it may end at most spanPeak +
  *     STEP_HEIGHT + sqrt(2) h above where something last held it up (plus the slack budget), h
  *     being its horizontal displacement. A wall or terraces in open air (where the vertical-first
- *     dog-leg passes the path check), also when the report ends on their rim, get only the bound
- *     without it; a report ending in the air above the probe's reach gets nothing; saying it is in
- *     the air where it would be believed standing gains nothing either.
+ *     dog-leg passes the path check), also when the report ends on their rim, also on the deck of a
+ *     raft under way, get only the bound without it; a report ending in the air above the probe's
+ *     reach gets nothing; saying it is in the air where it would be believed standing gains
+ *     nothing either: it has landed there all the same, and its fall ends there.
  *  3. the staircase path passes a climb of at most STEP_HEIGHT at a time; a wall under a ceiling
  *     (where no dog-leg passes) still fails the path check, and its last leg, straight up to the
- *     higher end, is a few risers at most (so the rim of a wall is no staircase). Round a corner
+ *     higher end, is 1.7 at most (so the rim of a wall is no staircase). Round a corner
  *     (an x riser and a z riser crossed at the same sample) it passes a step on each axis, one
  *     after the other: along the diagonal of a staircase of half steps a report gets what a line
  *     beside the diagonal already got, and stairs of whole steps or the corner of a block get
@@ -25,8 +26,10 @@
 import { describe, expect, it } from 'vitest';
 import { TICK_DT } from '../../src/core/constants';
 import { GRAVITY, JUMP_SPEED, STEP_HEIGHT } from '../../src/entities/constants';
-import { liar } from './liar';
-import { B, fill, hurts, LAND_TOP, type Run } from './scenes';
+import { NZ } from '../../src/core/dirs';
+import { vec3 } from '../../src/core/math';
+import { Liar, liar } from './liar';
+import { assemble, B, facingState, fill, hurts, LAND_TOP, makeCell, SEA_TOP, seaRun, type Run } from './scenes';
 import { addOctant } from './stairs-scenes';
 
 const T = LAND_TOP;
@@ -124,6 +127,52 @@ describe('5.8 item 1: sqrt(2) h only where a staircase lies between the two plac
     });
   }
 
+  it(`onto the rim of a wall two and a half blocks high (a lower slab on two blocks): refused, the last leg (2.5) being more than the path may climb straight up (1.7)`, () => {
+    // Higher than the bound without the allowance (a jump, a step and the slack: 2.35), lower than
+    // what a last leg of 2.3 risers and the depth limit would let through.
+    const wall = (run: Run) => {
+      fill(run.sim.world, 3, T, -3, 6, T + 1, 3, B.STONE);
+      for (let hx = 6; hx < 14; hx++) for (let hz = -6; hz < 8; hz++) addOctant(run.sim.world, hx, 2 * T + 4, hz, B.STONE);
+    };
+    expect(2.5).toBeGreaterThan(plain);
+    for (const endX of [2.61, 2.89]) {
+      const l = liar(-1.5, 0.5, wall);
+      l.wait(ticks);
+      l.send(endX, T + 2.5, 0.5, true, ticks);
+      expect(l.causes, `feet x ${endX}`).toEqual(['check:rise']);
+    }
+  });
+
+  it(`onto the rim of a wall on the deck of a raft under way, claiming two seconds of lag: no higher than at rest`, () => {
+    // The path's depth limit on a moving carrier holds the world's allowance (the raft's speed
+    // times the lag); a last leg bounded by it let this client hop onto a wall six blocks high.
+    const hop = (h: number): string[] => {
+      const run = seaRun('creative', vec3(5.5, SEA_TOP, 5.5), null);
+      const sim = run.sim;
+      fill(sim.world, -12, SEA_TOP - 1, -12, 23, SEA_TOP - 1, 23, B.PLANKS_OAK);
+      fill(sim.world, 3, SEA_TOP, -3, 6, SEA_TOP + h - 1, 3, B.PLANKS_OAK);
+      sim.world.setCell(-2, SEA_TOP, 12, makeCell(B.HELM, facingState(NZ)));
+      const ship = assemble(sim, vec3(-2, SEA_TOP, 12));
+      for (let t = 0; t < 60; t++) sim.tick();
+      ship.throttle = 1;
+      for (let t = 0; t < 120; t++) sim.tick();
+      const v = ship.grid.linearVelocity;
+      expect(Math.hypot(v.x, v.z), 'the raft is under way').toBeGreaterThan(2);
+      const w = ship.grid.toWorld(vec3(-1.5, SEA_TOP, 0.5));
+      sim.soloPlayer.teleport(w.x, w.y + 0.02, w.z);
+      for (let t = 0; t < 20; t++) sim.tick();
+      const l = new Liar(run);
+      expect(l.carrierId).toBe(ship.id);
+      l.send(-1.5, SEA_TOP, 0.5, true);
+      l.viewLag = 40;
+      l.wait(ticks);
+      l.send(2.61, SEA_TOP + h, 0.5, true, ticks);
+      return l.causes;
+    };
+    expect(hop(Math.floor(plain))).toEqual([]);
+    for (const h of [3, 6]) expect(hop(h), `a wall ${h} high`).toEqual(['check:rise']);
+  });
+
   it(`terraces 3 blocks high and 4 deep, one hop per ${ticks} ticks onto the rim of each: the first hop is refused`, () => {
     const l = liar(0.4, 0.5, (run) => {
       for (let k = 1; k <= 3; k++) fill(run.sim.world, 4 * k, T, -3, 4 * k + 12, T + 3 * k - 1, 3, B.STONE);
@@ -170,6 +219,20 @@ describe('5.8 item 1: a report that ends held up but says it is in the air is ju
     }
   });
 
+  it('rising past the rim of a step, 0.05 short of its face, saying it is in the air and rises no faster than a jump: the envelope starts again there', () => {
+    // A body hopping up steps with the jump key held touches a tread in a tick whose report is
+    // lost and jumps again at once (its client counts no landing): a delivered report finds it
+    // rising past the next step's rim, within the support probe's widening of it. The next report,
+    // a jump's height above that one, must pass (judged from the old ground, it would not).
+    const step = (run: Run) => fill(run.sim.world, 3, T, -3, 6, T, 3, B.STONE);
+    const l = liar(1.5, 0.5, step);
+    l.wait(8);
+    expect(l.send(2.65, T + 1.05, 0.5, false, 8, 7)).toBe(true);
+    l.wait(8);
+    l.send(2.65, T + 2.25, 0.5, false, 8, -1);
+    expect(l.causes).toEqual([]);
+  });
+
   it('a landing nobody saw, on a staircase: its ground may be a tread the staircase climbs to, the end a jump above it; on a wall no higher than without the staircase', () => {
     // (The report counts one landing more than it shows, as after lost reports: drive.ts LANDINGS.)
     const unseen = (build: (run: Run) => void, y: number): string[] => {
@@ -185,24 +248,80 @@ describe('5.8 item 1: a report that ends held up but says it is in the air is ju
     expect(unseen(wallOf(4), T + 4 + 1)).toEqual(['check:rise']);
   });
 
-  it('a 12-block fall that ends a hair above the ground, in the air by its own flag for three reports: judged as the whole fall', () => {
-    const l = liar(0.5, 0.5, () => undefined);
-    l.run.sim.soloPlayer.teleport(0.5, T + 12, 0.5);
+  /** A fall from T + 12 reported tick by tick down to `end` above the ground at feet (x, z), the last report claiming `stand`; then `after` more reports. */
+  function fallTo(build: (run: Run) => void, x: number, z: number, end: number, stand: boolean, after: (l: ReturnType<typeof liar>) => void): ReturnType<typeof liar> {
+    const l = liar(x, z, build);
+    l.run.sim.soloPlayer.teleport(x, T + 12, z);
     l.tick();
     let y = T + 12;
     let v = 0;
-    while (y > T + 0.05) {
+    while (y > T + end) {
       const v1 = v - GRAVITY * TICK_DT;
-      y = Math.max(T + 0.05, y + (v + v1) * 0.5 * TICK_DT);
+      y = Math.max(T + end, y + (v + v1) * 0.5 * TICK_DT);
       v = v1;
-      l.send(0.5, y, 0.5, false, 1, v);
+      const last = y === T + end;
+      l.send(x, y, z, last && stand, 1, last && stand ? 0 : v);
     }
-    // Held up (by the envelope) but not standing: the fall goes on until it says it stands.
-    for (let i = 0; i < 2; i++) l.send(0.5, T + 0.05, 0.5, false, 1, -1);
-    expect(l.damage).toBe(0);
-    l.send(0.5, T, 0.5, true);
-    l.wait(3);
-    expect(l.causes).toEqual(['teleport']); // (the scene's own, to the top of the fall)
+    after(l);
+    return l;
+  }
+
+  it('a 12-block fall that ends a hair above the ground, in the air by its own flag: the whole fall is judged at that report, as when it says it stands there', () => {
+    // (A client that never claims to stand must pay for its falls too: before, it walked on a hair
+    // above the ground with the fall pending for ever and washed it off in a puddle.)
+    for (const stand of [false, true]) {
+      let atLanding = -1;
+      const l = fallTo(
+        () => undefined,
+        0.5,
+        0.5,
+        0.05,
+        stand,
+        (r) => {
+          atLanding = r.damage;
+          // Walking on a hair above the ground, in the air by its own flag, then standing: nothing more.
+          for (let i = 1; i <= 20; i++) r.send(0.5 + 0.2 * i, T + 0.05, 0.5, false, 1, -1);
+          r.send(4.5, T, 0.5, true);
+          r.wait(3);
+        },
+      );
+      expect(atLanding, `stand ${stand}`).toBe(Math.ceil(12 - 3.5));
+      expect(l.damage, `stand ${stand}`).toBe(Math.ceil(12 - 3.5));
+      expect(l.causes, `stand ${stand}`).toEqual(['teleport']); // (the scene's own, to the top of the fall)
+    }
+  });
+
+  it('a fall whose last report but one ends 0.15 above the ground, in the air: the drop to the ground belongs to it (3.6 blocks hurt, 3.45 do not)', () => {
+    // More than FALL_SAFE_HEIGHT (3.5) hurts. Judged where the report ends, 3.6 blocks would be 3.45.
+    for (const [height, hurt] of [
+      [3.6, 1],
+      [3.45, 0],
+    ] as const) {
+      const l = liar(0.5, 0.5, () => undefined);
+      l.run.sim.soloPlayer.teleport(0.5, T + height, 0.5);
+      l.tick();
+      let y = T + height;
+      let v = 0;
+      while (y > T + 0.15) {
+        const v1 = v - GRAVITY * TICK_DT;
+        y = Math.max(T + 0.15, y + (v + v1) * 0.5 * TICK_DT);
+        v = v1;
+        l.send(0.5, y, 0.5, false, 1, v);
+      }
+      l.send(0.5, T, 0.5, true, 1, 0);
+      l.wait(3);
+      expect(l.causes, `${height} blocks`).toEqual(['teleport']);
+      expect(l.damage, `${height} blocks`).toBe(hurt);
+    }
+  });
+
+  it('a 12-block fall past the rim of a ledge, one report ending a hair above the rim and 0.05 beside it, in the air: the whole fall is judged on the ground, not cut at the rim', () => {
+    // The support probe is wider than the body for a report that says it stands (the rim rule),
+    // not for one that says it is in the air: the body falls past the ledge (one block high, its
+    // face at x = 1; feet x 0.65 put the body 0.05 short of it). Report 17 of the fall ends 0.16
+    // above the ledge's top. Cut there, the fall would hurt 8 + 0 instead of 9.
+    const l = fallTo((run) => fill(run.sim.world, 1, T, -3, 4, T, 3, B.STONE), 0.65, 0.5, 0, true, (r) => r.wait(3));
+    expect(l.causes).toEqual(['teleport']);
     expect(l.damage).toBe(Math.ceil(12 - 3.5));
   });
 });
@@ -237,6 +356,34 @@ describe('5.8 item 3: the staircase path passes stairs, not walls', () => {
     l.wait(16);
     l.send(5.5, T + 2, 0.5, true, 16);
     expect(l.causes).toEqual(['check:path']);
+  });
+
+  it('up a staircase with holes, 2.5 blocks up and 2 over in one report, a line a body can walk along: accepted (its path ends 1.5 below the higher end)', () => {
+    // Half-block columns of a fuzzed staircase (heights in half blocks; columns from x 3.5, rows from z 2.5).
+    // The line grazes the rims of holes it cannot step out of within a step, so its samples stay
+    // low and the last leg straight up to the end is 1.5 (drive.ts stairClear, STAIR_LAST_LEG).
+    const rows = [
+      [0, 1, 0, 0, 4],
+      [0, 1, 2, 3, 1],
+      [0, 1, 2, 3, 3],
+      [1, 2, 3, 2, 5],
+      [2, 3, 4, 5, 6],
+      [3, 4, 2, 6, 7],
+      [4, 5, 6, 7, 7],
+      [5, 6, 6, 8, 9],
+    ];
+    const terrain = (run: Run) => {
+      for (let j = 0; j < rows.length; j++)
+        for (let i = 0; i < 5; i++) for (let hy = 0; hy < rows[j]![i]!; hy++) addOctant(run.sim.world, 7 + i, 2 * T + hy, 5 + j, B.STONE);
+    };
+    const l = liar(0.5, 0.5, terrain);
+    l.run.sim.soloPlayer.teleport(4.4308, T + 1, 3.4407);
+    l.tick();
+    l.send(4.4308, T + 1, 3.4407, true);
+    l.wait(16);
+    l.send(4.8553, T + 3.5, 5.3831, true, 16);
+    expect(2.5).toBeGreaterThan(jumpPeak() + STEP_HEIGHT + 0.5);
+    expect(l.causes).toEqual(['teleport']);
   });
 });
 
