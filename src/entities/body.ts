@@ -93,8 +93,15 @@ export class StepFacts {
   liquidEntrySpeed = 0;
   /** Players: came down on the ground this step after falling this far (blocks); -1 = did not land. */
   landedFall = -1;
-  /** ... and was airborne before the step (not merely standing on). */
-  landedFromAir = false;
+  /**
+   * Players: a touch-down: on the ground at the end of this step and not at its start (seated
+   * included; in liquid too). No touch-down escapes it: the mover keeps the ground it met in any
+   * sub-step for the whole step, also when the body walks off the edge later in the same step, and
+   * a jump needs the ground at the START of a step, so a body never lands and takes off within
+   * one. The movement reports count these (OwnPlayer.landings); with landedFall >= 0 it is a
+   * landing from the air, not merely standing on.
+   */
+  touchedDown = false;
   /** A seated player was pushed farther than SEAT_LEAVE_DISTANCE from its seat. */
   pushedOffSeat = false;
   /** Id of the innermost structure whose floor the body landed on / stands on this step, 0 = none. */
@@ -108,7 +115,7 @@ export class StepFacts {
     this.pushBlocked = false;
     this.liquidEntrySpeed = 0;
     this.landedFall = -1;
-    this.landedFromAir = false;
+    this.touchedDown = false;
     this.pushedOffSeat = false;
     this.groundStructureId = 0;
   }
@@ -482,7 +489,8 @@ export class BodyMover {
   /**
    * A player's step from its input (sanitizeInput first; the caller consumed the jump presses):
    * look, flight toggle (double-tap jump, when `mayFly` and not seated), sneak / sprint, fluids,
-   * motion, collision, attach / detach, the seat check and the fall bookkeeping (facts.landedFall).
+   * motion, collision, attach / detach, the seat check and the fall bookkeeping (facts.touchedDown,
+   * facts.landedFall).
    * A seated player does not move by itself; structures may still push it.
    */
   stepPlayer(p: Player, jumpPresses: number, mayFly: boolean): void {
@@ -534,13 +542,11 @@ export class BodyMover {
         }
       }
     }
+    this.facts.touchedDown = p.onGround && !wasOnGround;
     // Falls and landing. A crush / unstuck relocation is a teleport, not a fall.
     const y1 = p.pos.y - this.facts.relocatedDy;
     const landed = trackFall(p, y1 < y0 ? y0 - y1 : 0, seatedAfter);
-    if (landed >= 0) {
-      this.facts.landedFall = landed;
-      this.facts.landedFromAir = !wasOnGround;
-    }
+    if (landed >= 0) this.facts.landedFall = landed;
   }
 
   /**

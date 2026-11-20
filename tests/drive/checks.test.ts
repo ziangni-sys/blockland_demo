@@ -8,7 +8,10 @@ import { describe, expect, it } from 'vitest';
 import { TICK_DT } from '../../src/core/constants';
 import { FALL_SAFE_HEIGHT, GRAVITY, JUMP_SPEED, PLAYER_MAX_HEALTH, REPORT_CREDIT_TICKS, REPORT_DEBT_TICKS, REPORT_STALL_TICKS, SPRINT_SPEED } from '../../src/entities/constants';
 import { emptyReport, type Correction, type MoveReport } from '../../src/entities/drive';
-import { B, LAND_TOP, fill, hurts, landRun, type Run } from './scenes';
+import { NZ } from '../../src/core/dirs';
+import { vec3 } from '../../src/core/math';
+import { Liar } from './liar';
+import { assemble, B, facingState, LAND_TOP, fill, hurts, landRun, makeCell, SEA_TOP, seaRun, type Run } from './scenes';
 
 const T = LAND_TOP;
 
@@ -506,4 +509,69 @@ describe("after a correction the server waits the report's lag before it takes o
     expect(stall(2)).toBe(REPORT_STALL_TICKS + REPORT_DEBT_TICKS + 1);
     expect(stall(12)).toBe(REPORT_STALL_TICKS + 13 + 1);
   });
+});
+
+// ====================================================================== a carrier switch
+
+describe("a carrier switch is allowed what the server's poses lead the client's copies by, no more", () => {
+  /**
+   * A report in another frame than the last accepted one is compared in the world at the server's
+   * poses, which lead the client's copies by the lag at both carriers' speeds: that much is
+   * allowed on top of the body's own motion, horizontally, vertically and above the vertical
+   * envelope (and not carried on). The client says which frame a report is in, and may switch at
+   * every report. A flat block more at every switch let a lying client beside a raft at rest climb
+   * 0.9 and move 1.2 a report, alternating the raft's frame and the world's: 4.8 blocks up (to the
+   * claimed carrier's reach) and 8.4 along in seven reports, unharmed.
+   */
+  function raftAtRest(): { l: Liar; ship: ReturnType<typeof assemble>; run: Run } {
+    const run = seaRun('survival', vec3(0.5, SEA_TOP, 0.5), null);
+    const sim = run.sim;
+    fill(sim.world, -6, SEA_TOP - 1, -6, 6, SEA_TOP - 1, 6, B.PLANKS_OAK);
+    sim.world.setCell(5, SEA_TOP, 5, makeCell(B.HELM, facingState(NZ)));
+    const ship = assemble(sim, vec3(5, SEA_TOP, 5));
+    for (let t = 0; t < 100; t++) sim.tick();
+    const l = new Liar(run);
+    expect(l.carrierId).toBe(ship.id);
+    const p = ship.grid.toLocal(l.player.pos);
+    l.send(p.x, p.y, p.z, true);
+    return { l, ship, run };
+  }
+
+  for (const [what, up, along] of [
+    ['0.9 up', 0.9, 0],
+    ['1.2 along', 0, 1.2],
+    ['0.5 up', 0.5, 0],
+    ['0.6 along', 0, 0.6],
+  ] as const)
+    it(`beside a raft at rest, ${what} a report in the air, the raft's frame and the world's by turns: no higher and no farther than in one frame`, () => {
+      const result = (switching: boolean): { top: number; far: number } => {
+        const { l, ship } = raftAtRest();
+        const g = ship.grid;
+        const sp = l.player;
+        const p0 = g.toLocal(sp.pos);
+        let top = 0;
+        let far = 0;
+        for (let t = 0; t < 40; t++) {
+          const cur = g.toLocal(sp.pos);
+          const target = vec3(cur.x - along, cur.y + up, cur.z);
+          if (!switching || t % 2 === 1) {
+            l.carrierId = ship.id;
+            l.send(target.x, target.y, target.z, false);
+          } else {
+            l.carrierId = 0;
+            const tw = g.toWorld(target);
+            l.send(tw.x, tw.y, tw.z, false);
+          }
+          const now = g.toLocal(sp.pos);
+          top = Math.max(top, now.y - p0.y);
+          far = Math.max(far, Math.hypot(now.x - p0.x, now.z - p0.z));
+        }
+        return { top, far };
+      };
+      const one = result(false);
+      const both = result(true);
+      expect(both.top).toBeLessThanOrEqual(one.top + 1e-6);
+      expect(both.far).toBeLessThanOrEqual(one.far + 1e-6);
+      expect(both.top).toBeLessThan(1.8);
+    });
 });

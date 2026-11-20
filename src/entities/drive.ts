@@ -88,7 +88,8 @@
  * (EntityManager.updateClientDriven). Two short drops whose landing report was lost are not one
  * long fall. The landing needs ground within the reachable fall below the lower of the two
  * places, and the vertical envelope starts again on that ground, the take-off in any tick of the
- * gap: no higher than a jump from there (a client that counts landings in mid-air climbs nothing).
+ * gap: no higher than a jump from there (a client that counts landings in mid-air climbs nothing;
+ * nor one beside a leaning mast: its face is no ground, ReportJudge.underLeaningWalls).
  * A report that claims its own landing (after an airborne one) where nothing holds up its end is
  * such a landing too: the body landed on a tread's edge and walked off it in the same tick (the
  * rim it left counts as that ground when it lies under the old place, within the report's own
@@ -241,6 +242,18 @@ export function reportLag(tick: number, viewTick: number): number {
 
 /** Footprint inset steps (blocks) of standsOn(): how finely a wall beside the body is cut off its support probe. */
 const SUPPORT_INSET_STEP = 0.05;
+
+/**
+ * How much thicker each slab of a support probe deeper than the standing one is than the depth
+ * above it, on a tilted grid (ReportJudge.underLeaningWalls): a slab leaves out at most this
+ * fraction more than a leaning wall's foot can reach at its top (or SUPPORT_INSET_STEP, if more).
+ */
+const LEAN_SLAB_GROWTH = 0.25;
+
+/** What a slab of the support probe on a tilted grid holds (ReportJudge.clearOfLeaningWalls): support, none, or none and none deeper. */
+const LEAN_SUPPORT = 0;
+const LEAN_NONE = 1;
+const LEAN_NEVER = 2;
 
 /**
  * Height (blocks) the staircase path may still have to climb straight up to the higher end when
@@ -790,11 +803,14 @@ export class ReportJudge {
       dz = w0.z;
     } else {
       // A carrier switch: compared in the world at the server's poses, which lead the client's
-      // copies by the lag at the carriers' speeds.
+      // copies by the lag at the carriers' speeds. Nothing more: the switch is the client's word,
+      // and a report may claim one every tick (a flat block on top of this, granted at every
+      // switch, let a client alternating the raft's frame and the world's climb 0.9 and move 1.2
+      // per report beside a raft at rest).
       dx = w1.x - p.pos.x;
       dy = w1.y - p.pos.y;
       dz = w1.z - p.pos.z;
-      switchSlack = (prevCarrierSpeed + newCarrierSpeed) * lag + 1;
+      switchSlack = (prevCarrierSpeed + newCarrierSpeed) * lag;
     }
     const nb = boxAt(p, w1.x, w1.y, w1.z, this.box);
     // What may move the body besides its own legs: another structure pushing it (as fast as one
@@ -845,10 +861,13 @@ export class ReportJudge {
     // stand pays for its falls as one that does. A claim to stand is held up by the support probe,
     // a little wider than the body (supported()). Saying it is in the air, the body is held up by
     // what lies under its footprint; by the probe's widening (a rim beside it) only while it says
-    // it rises, no faster than a jump. A body hopping up steps with the jump key held touches a
-    // tread in a tick whose report was lost and jumps again (its client counts no landing: the
-    // body is in the air at the end of every tick), and passes the next tread's rim on the way up:
-    // that report must start the envelope again (whose own arcs fall by then). But a body thrown
+    // it rises, no faster than a jump. A body rising past a rim in reports whose take-off the
+    // server did not see must start the envelope again there (its own arcs fall by then): one
+    // that climbs out of water by the water-exit lift (motion.ts WATER_EXIT_SPEED, jump held,
+    // swimming into the wall) beside a ledge, or one hopping up steps with the jump key held. (The
+    // hopper's client does count its touch-down on the lower tread, StepFacts.touchedDown, but the
+    // unseen landing's ground search below its end stops at the rim beside its feet, higher than
+    // the arcs reach, and finds no ground there.) But a body thrown
     // up past the top of a wall faster than a jump, or falling past the rim of a ledge, does not
     // land on it: the envelope would start again with a jump slower than the blast's arc it goes
     // on along, and the fall would be cut in two (less damage). The claimed speed is the client's
@@ -881,7 +900,8 @@ export class ReportJudge {
     // below the lower of its two places (a client cannot end a fall early by counting landings).
     // The envelope then starts again on the highest ground under either place that the body can
     // have come down on (no higher than its arcs got in the gap, plus a step and what a staircase
-    // between the two places climbs), with a jump from there in any tick of the gap. (A body that
+    // between the two places climbs; never the face of a leaning wall: underLeaningWalls), with a
+    // jump from there in any tick of the gap. (A body that
     // climbed a staircase, landed on it unseen and ends not held up at the server's poses, the
     // deck rolling under it, came down on a tread of that staircase.)
     if (unseen) {
@@ -1155,12 +1175,8 @@ export class ReportJudge {
    *
    * (`leanX`, `leanZ`): how the grid's walls lean (leanOf; 0, 0 for the world). A wall of a
    * tilted structure leans, and its foot may reach under the footprint although the wall stays
-   * clear of the body above the feet: clearOfLeaningWalls leaves out what such a foot can reach,
-   * on the sides the walls lean toward, the reach being the lean times the height from the
-   * probe's bottom to where the body's part starts (for a probe deeper than the standing one, the
-   * ground under a landing nobody saw, as for the standing probe: a reach that grew with the depth
-   * would leave nothing under a body on a heeled staircase). On the world and on upright
-   * structures walls are vertical: what clears the body clears the feet.
+   * clear of the body above the feet: underLeaningWalls leaves out what such a foot can reach. On
+   * the world and on upright structures walls are vertical: what clears the body clears the feet.
    */
   private standsOn(grid: VoxelGrid, b: AABB, gap: number, inset: number, leanX: number, leanZ: number): boolean {
     const a = this.ab;
@@ -1171,7 +1187,6 @@ export class ReportJudge {
     a.minY = a.maxY = b.maxY;
     // (The probe of hasSupportBelow is the box's footprint from its minY down by the depth.)
     const above = b.maxY - b.minY - REPORT_SUPPORT_REACH;
-    const h = Math.min(gap, SUPPORT_GAP + REPORT_SUPPORT_REACH) + REPORT_SUPPORT_REACH;
     const tilted = leanX !== 0 || leanZ !== 0;
     for (let k = 0; ; k++) {
       const i = inset + k * SUPPORT_INSET_STEP;
@@ -1179,35 +1194,87 @@ export class ReportJudge {
       // The probe only shrinks as the inset grows: nothing under this footprint, nothing under a smaller one.
       if (!hasSupportBelow(grid, b, gap, i)) return false;
       if (!(above > 0)) return true;
-      if (!hasSupportBelow(grid, a, above, i)) return !tilted || this.clearOfLeaningWalls(grid, b, gap, i, above, leanX * h, leanZ * h);
+      if (!hasSupportBelow(grid, a, above, i)) return !tilted || this.underLeaningWalls(grid, b, gap, i, above, leanX, leanZ);
     }
   }
 
   /**
    * standsOn on a tilted grid, once the footprint inset by `i` is clear of hard cells above the
-   * feet (from REPORT_SUPPORT_REACH up, `above` high): is there support under the part of that
-   * footprint that no leaning wall reaches into?
+   * feet (from REPORT_SUPPORT_REACH up, `above` high): is there support within `gap` below the
+   * feet under the part of that footprint that no leaning wall reaches into?
+   *
+   * A wall's foot reaches the farther under the feet the deeper below them it is: at depth d,
+   * by the lean times (d + REPORT_SUPPORT_REACH) at most (clearOfLeaningWalls). So the probe is
+   * cut into slabs, each with what a leaning wall reaches at its bottom left out: down to the
+   * standing probe's depth (SUPPORT_GAP + REPORT_SUPPORT_REACH) one slab, below it slabs over which
+   * that reach grows by SUPPORT_INSET_STEP or by LEAN_SLAB_GROWTH of itself, whichever is more.
+   * The slabs are the same whatever the probe's depth (the last one is cut off at it, with its
+   * whole reach left out), so what is left out at each depth is never less than a wall's foot can
+   * reach there and does not depend on how deep the probe goes: what holds at one depth holds at
+   * every deeper one, as the search for the ground of a landing nobody saw needs (supportDepth).
+   * Leaving out the reach at the probe's bottom at every depth instead, a deep probe left nothing
+   * under a body beside a leaning mast, the deck at its foot included; leaving out only the
+   * standing probe's reach, the face of a mast leaning away from the body was found a few tenths
+   * below the feet, and a client counting landings that never happened climbed it to its top, a
+   * block a report.
+   */
+  private underLeaningWalls(grid: VoxelGrid, b: AABB, gap: number, i: number, above: number, leanX: number, leanZ: number): boolean {
+    const stand = SUPPORT_GAP + REPORT_SUPPORT_REACH;
+    if (gap <= stand) {
+      const h = gap + REPORT_SUPPORT_REACH;
+      return this.clearOfLeaningWalls(grid, b, 0, gap, i, above, leanX * h, leanZ * h, true) === LEAN_SUPPORT;
+    }
+    const fine = SUPPORT_INSET_STEP / Math.max(Math.abs(leanX), Math.abs(leanZ));
+    // No hard cells above the feet within the reach of the slab the probe ends in: whatever lies
+    // under the footprint counts (standsOn found some).
+    let last = stand;
+    while (last < gap) last += Math.max(fine, LEAN_SLAB_GROWTH * (last + REPORT_SUPPORT_REACH));
+    if (!this.leaningWallNear(grid, b, i, above, leanX * (last + REPORT_SUPPORT_REACH), leanZ * (last + REPORT_SUPPORT_REACH))) return true;
+    let top = 0;
+    let bottom = stand;
+    for (;;) {
+      const h = bottom + REPORT_SUPPORT_REACH;
+      const s = this.clearOfLeaningWalls(grid, b, top, (bottom < gap ? bottom : gap) - top, i, above, leanX * h, leanZ * h, false);
+      if (s !== LEAN_NONE) return s === LEAN_SUPPORT;
+      if (bottom >= gap) return false;
+      top = bottom;
+      bottom += Math.max(fine, LEAN_SLAB_GROWTH * h);
+    }
+  }
+
+  /** Hard cells above the feet (from REPORT_SUPPORT_REACH up, `above` high) within the reach (dx, dz) beyond the sides of the footprint inset by `i` the walls lean toward? */
+  private leaningWallNear(grid: VoxelGrid, b: AABB, i: number, above: number, dx: number, dz: number): boolean {
+    return this.hardAbove(grid, b, above, b.minX + i - (dx < 0 ? 1e-6 - dx : 0), b.maxX - i + (dx > 0 ? dx + 1e-6 : 0), b.minZ + i - (dz < 0 ? 1e-6 - dz : 0), b.maxZ - i + (dz > 0 ? dz + 1e-6 : 0));
+  }
+
+  /**
+   * One slab of underLeaningWalls: from `top` to `top + depth` below the feet, the footprint inset
+   * by `i` clear of hard cells above the feet (from REPORT_SUPPORT_REACH up, `above` high). Is
+   * there support in it under the part of the footprint that no leaning wall reaches into?
+   * LEAN_SUPPORT, LEAN_NONE, or LEAN_NEVER: none, and nothing is left of the footprint in this or
+   * any deeper slab (a side's strip with a wall beyond covers it). `whole`: the slab is the whole
+   * probe, under whose footprint standsOn found support.
    *
    * The grid's solid material continues along the grid axis nearest the world's up (the walls'
    * axis), which leans from it: rising h, a line along that axis moves (`dx`, `dz`) * h / H
-   * horizontally, where (`dx`, `dz`) is the displacement over the whole height H from the probe's
-   * bottom to REPORT_SUPPORT_REACH above the feet (standsOn). A point of a column under the feet
-   * whose solid material goes on up past REPORT_SUPPORT_REACH above them (a wall, not a tread)
-   * meets that height displaced from where it was by at most (`dx`, `dz`), in that direction; it
-   * is not inside the footprint there (the footprint is clear above the feet), so it lies outside
-   * a side the walls lean toward, within the reach |dx| beyond the x side, |dz| beyond the z side.
-   * Hence: where hard cells above the feet lie within the reach beyond such a side, that side's
-   * strip as deep as the reach is left out; where they lie only beyond the corner between the two
-   * such sides, that corner's rectangle. Hard cells beyond the other sides cannot be the top of a
-   * column under the feet: a floor rising up the slope behind the body, or a wall leaning over it,
-   * whose foot lies farther away than its top. What lies under the rest is a tread or step whose
-   * top is below that height, however narrow the strip of it under the feet (a body that has just
-   * stepped up stands on a few thousandths of a tread, with the next riser at its corner; a body
-   * in the crease between a steep floor and a leaning mast stands on the floor). This holds for
-   * the footprint widened by the probe's reach too (a wall a little beyond the body leans into the
-   * widening).
+   * horizontally, where (`dx`, `dz`) is the displacement over the whole height H from the slab's
+   * bottom to REPORT_SUPPORT_REACH above the feet (underLeaningWalls). A point of a column under
+   * the feet within the slab whose solid material goes on up past REPORT_SUPPORT_REACH above them
+   * (a wall, not a tread) meets that height displaced from where it was by at most (`dx`, `dz`),
+   * in that direction; it is not inside the footprint there (the footprint is clear above the
+   * feet), so it lies outside a side the walls lean toward, within the reach |dx| beyond the x
+   * side, |dz| beyond the z side. Hence: where hard cells above the feet lie within the reach
+   * beyond such a side, that side's strip as deep as the reach is left out; where they lie only
+   * beyond the corner between the two such sides, that corner's rectangle. Hard cells beyond the
+   * other sides cannot be the top of a column under the feet: a floor rising up the slope behind
+   * the body, or a wall leaning over it, whose foot lies farther away than its top. What lies
+   * under the rest is a tread or step whose top is below that height, however narrow the strip
+   * of it under the feet (a body that has just stepped up stands on a few thousandths of a tread,
+   * with the next riser at its corner; a body in the crease between a steep floor and a leaning
+   * mast stands on the floor). This holds for the footprint widened by the probe's reach too (a
+   * wall a little beyond the body leans into the widening).
    */
-  private clearOfLeaningWalls(grid: VoxelGrid, b: AABB, gap: number, i: number, above: number, dx: number, dz: number): boolean {
+  private clearOfLeaningWalls(grid: VoxelGrid, b: AABB, top: number, depth: number, i: number, above: number, dx: number, dz: number, whole: boolean): number {
     const x0 = b.minX + i;
     const x1 = b.maxX - i;
     const z0 = b.minZ + i;
@@ -1218,10 +1285,10 @@ export class ReportJudge {
     const rx1 = dx > 0 ? dx + 1e-6 : 0;
     const rz0 = dz < 0 ? 1e-6 - dz : 0;
     const rz1 = dz > 0 ? dz + 1e-6 : 0;
-    if (!this.hardAbove(grid, b, above, x0 - rx0, x1 + rx1, z0 - rz0, z1 + rz1)) return true;
+    if (!this.hardAbove(grid, b, above, x0 - rx0, x1 + rx1, z0 - rz0, z1 + rz1)) return whole || this.hardUnder(grid, b, top, depth, x0, x1, z0, z1) ? LEAN_SUPPORT : LEAN_NONE;
     // Support under the footprint without the strips on those sides is support under any part of
     // it the sides and the corner below leave (the usual answer beside a wall: two queries, not six).
-    if (this.hardUnder(grid, b, gap, x0 + rx0, x1 - rx1, z0 + rz0, z1 - rz1)) return true;
+    if (this.hardUnder(grid, b, top, depth, x0 + rx0, x1 - rx1, z0 + rz0, z1 - rz1)) return LEAN_SUPPORT;
     const wx0 = rx0 > 0 && this.hardAbove(grid, b, above, x0 - rx0, x0, z0, z1);
     const wx1 = rx1 > 0 && this.hardAbove(grid, b, above, x1, x1 + rx1, z0, z1);
     const wz0 = rz0 > 0 && this.hardAbove(grid, b, above, x0, x1, z0 - rz0, z0);
@@ -1236,12 +1303,14 @@ export class ReportJudge {
     const sx1 = wx1 ? x1 - rx1 : x1;
     const sz0 = wz0 ? z0 + rz0 : z0;
     const sz1 = wz1 ? z1 - rz1 : z1;
+    // (The strips only widen in deeper slabs, and the walls beyond stay within their reach.)
+    if (!(sx0 < sx1) || !(sz0 < sz1)) return LEAN_NEVER;
     // Without the corner's rectangle: the union of two crossing rectangles.
     const cz0 = c00 || c10 ? rz0 : 0;
     const cz1 = c01 || c11 ? rz1 : 0;
     const cx0 = c00 || c01 ? rx0 : 0;
     const cx1 = c10 || c11 ? rx1 : 0;
-    return this.hardUnder(grid, b, gap, sx0, sx1, sz0 + cz0, sz1 - cz1) || this.hardUnder(grid, b, gap, sx0 + cx0, sx1 - cx1, sz0, sz1);
+    return this.hardUnder(grid, b, top, depth, sx0, sx1, sz0 + cz0, sz1 - cz1) || this.hardUnder(grid, b, top, depth, sx0 + cx0, sx1 - cx1, sz0, sz1) ? LEAN_SUPPORT : LEAN_NONE;
   }
 
   /** Hard cells of `grid` over x0..x1, z0..z1 from REPORT_SUPPORT_REACH above the feet of `b` up to its top (`above` high)? */
@@ -1255,16 +1324,16 @@ export class ReportJudge {
     return hasSupportBelow(grid, a, above, 0);
   }
 
-  /** Hard cells of `grid` over x0..x1, z0..z1 within `gap` below the feet of `b` (none when the area is empty)? */
-  private hardUnder(grid: VoxelGrid, b: AABB, gap: number, x0: number, x1: number, z0: number, z1: number): boolean {
+  /** Hard cells of `grid` over x0..x1, z0..z1 from `top` to `top + depth` below the feet of `b` (none when the area is empty)? */
+  private hardUnder(grid: VoxelGrid, b: AABB, top: number, depth: number, x0: number, x1: number, z0: number, z1: number): boolean {
     if (!(x0 < x1) || !(z0 < z1)) return false;
     const a = this.wb;
     a.minX = x0;
     a.maxX = x1;
     a.minZ = z0;
     a.maxZ = z1;
-    a.minY = a.maxY = b.minY;
-    return hasSupportBelow(grid, a, gap, 0);
+    a.minY = a.maxY = b.minY - top;
+    return hasSupportBelow(grid, a, depth, 0);
   }
 
   /**
@@ -1287,7 +1356,12 @@ export class ReportJudge {
     return rising(vyLate) && !rising(this.envVy) ? peak : Math.max(peakEarly, this.env.peak);
   }
 
-  /** World height of the first thing under a body box (within `reach`) that would hold it up, if no higher than `highest`; else -Infinity. */
+  /**
+   * The ground a body box came down on, for a landing nobody saw (check(), LANDINGS): the world
+   * height its feet would be held up at (supportDepth below it; the surface itself lies up to the
+   * standing probe's depth, SUPPORT_GAP + REPORT_SUPPORT_REACH, lower: a body that high above it
+   * stands), if no higher than `highest`; else -Infinity.
+   */
   private groundUnder(b: AABB, carrier: StructRec | undefined, reach: number, highest: number): number {
     const depth = this.supportDepth(b, carrier, reach);
     const y = b.minY - depth;
@@ -1297,6 +1371,8 @@ export class ReportJudge {
   /**
    * How far below a body box at the server's poses the first thing that would hold it up lies
    * (supported() with `deeper`, to within 0.01): -1 when nothing does within `reach` below it.
+   * (What holds at one depth holds at every deeper one, the face of a leaning wall at none:
+   * underLeaningWalls.)
    */
   private supportDepth(b: AABB, carrier: StructRec | undefined, reach: number): number {
     if (!(reach >= 0) || !this.supported(b, carrier, reach)) return -1;
